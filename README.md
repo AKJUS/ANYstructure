@@ -2,6 +2,8 @@
 ANYstructure is the ultimate steel structure design tool for plate fields and cylinders! 
 Weight optimization for all structures with machine learning capabilities. 
 Calculations are based on DNV standards and rules
+### What's new in 5.2.0 ###
+* Support for python 3.13
 ### What's new in 5.1.4 ###
 * Excel input option
 * Add load factor 1.1 for Machine Learning buckling (PULS based)
