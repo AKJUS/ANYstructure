@@ -4092,6 +4092,7 @@ class CylinderAndCurvedPlate():
 
         Lambda_ = 0 if fE == 0 else math.sqrt(fak/fE)
 
+
         fkc = (1-0-28*math.pow(Lambda_,2))*fak if Lambda_ <= 1.34 else fak/math.pow(Lambda_,2)
         gammaM = data['gammaM curved panel'] #self._mat_factor  # Check
 
@@ -4100,12 +4101,20 @@ class CylinderAndCurvedPlate():
 
         sa0sd = -sasd if sasd<0 else 0
 
-        if fakd*fkcd > 0:
-            stab_uf = sa0sd/fkcd + (abs(smsd) / (1-sa0sd/fE))/fakd
-            stab_chk = stab_uf <= 1
+        # if fakd*fkcd > 0:
+        #     stab_uf = sa0sd/fkcd + (abs(smsd) / (1-sa0sd/fE))/fakd
+        #     stab_chk = stab_uf <= 1
+        # else:
+        #     stab_uf = 10
+        #     stab_chk = True
+        # print('use_fac', use_fac, 'geometry', geometry,  'Lambda_', Lambda_, 'math.sqrt(', fak, '/', fE)
+        # print(sa0sd, '/', fkcd, '+', '(abs(', smsd, ') / (1 - ', sa0sd, ' / ', fE, ')) / ', fakd)
+        if fakd*fkcd == 0:
+            stab_uf = 0
+            stab_chk = False
         else:
-            stab_uf = 10
-            stab_chk = True
+            stab_uf = sa0sd / fkcd + (abs(smsd) / (1 - sa0sd / fE)) / fakd
+            stab_chk = stab_uf <= 1
 
         #print("Stability requirement satisfied") if stab_chk else print("Not acceptable")
         # Sec. 3.9   Torsional buckling:  moved to the top
@@ -4808,11 +4817,11 @@ def main():
     #
     #Structure(ex.obj_dict_cyl_ring)
     #Structure(ex.obj_dict_cyl_heavy_ring)
-    # my_cyl = CylinderAndCurvedPlate(main_dict = ex.shell_main_dict2, shell= Shell(ex.shell_dict),
-    #                                 long_stf= None,#Structure(ex.obj_dict_cyl_long2),
-    #                                 ring_stf = Structure(ex.obj_dict_cyl_ring2),
-    #                                 ring_frame= None)#Structure(ex.obj_dict_cyl_heavy_ring2))
-    # print(my_cyl.get_utilization_factors())
+    my_cyl = CylinderAndCurvedPlate(main_dict = ex.shell_main_dict2, shell= Shell(ex.shell_dict),
+                                    long_stf= None,#Structure(ex.obj_dict_cyl_long2),
+                                    ring_stf = Structure(ex.obj_dict_cyl_ring2),
+                                    ring_frame= None)#Structure(ex.obj_dict_cyl_heavy_ring2))
+    print(my_cyl.get_utilization_factors())
 
     # Prescriptive buckling UPDATED
     Plate = CalcScantlings(ex.obj_dict)
