@@ -4844,6 +4844,12 @@ class Application():
                                'Stiffener check': stiffener_check}
                 '''
                 cyl_obj = self._line_to_struc[self._active_line][5]
+                key_mapper = {'Unstiffened shell': 'Shell buckling',
+                               'Longitudinal stiffened shell': 'Panel Stiffener buckling',
+                               'Ring stiffened shell': 'Panel Ring Buckling',
+                               'Heavy ring frame': 'Heavy Ring Frame Buckling',
+                               'Column stability check': 'Column stability check',
+                               'Stiffener check': 'Stiffener check'}
 
                 text = 'Results for cylinders and curved plates/panels:'
                 self._result_canvas.create_text([x * 1, y * 1],
@@ -4865,8 +4871,9 @@ class Application():
                                     if results['Column stability UF'] is None:
                                         text_value = 'N/A'
                                     else:
-                                        text_value = ('Column buckling does not need to be checked\n- but UF = ' +
-                                                      str(round(results['Column stability UF'],2)))
+                                        text_value = ('Column buckling does not need to be checked'
+                                                      '\n- but UF = ' + str(round(results['Column stability UF'],2))
+                                                      )
                                     uf_col = 'green'
                                 else:
                                     if results['Column stability UF'] is None:
@@ -4887,8 +4894,8 @@ class Application():
 
 
                         self._result_canvas.create_text([x*1, y+dy*y_location],
-                                                       text=text_key,font=self._text_size[txt_type],anchor='nw',
-                                                    fill = self._color_text)
+                                                       text=key_mapper[text_key],font=self._text_size[txt_type],
+                                                        anchor='nw', fill = self._color_text)
                         self._result_canvas.create_text([dx*20, dy*y_location],
                                                        text=text_value,font=self._text_size[txt_type],anchor='nw',
                                                         fill=uf_col)
