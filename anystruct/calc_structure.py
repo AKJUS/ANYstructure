@@ -3797,7 +3797,8 @@ class CylinderAndCurvedPlate():
 
         num_stf = math.floor(2*math.pi*r/s)
 
-        e= (hw*tw*(hw/2) + b*tf*(hw+tf/2)) / (hw*tw+b*tw)
+        e_denom = hw * tw + b * tf
+        e = 0 if e_denom == 0 else (hw * tw * (hw / 2) + b * tf * (hw + tf / 2)) / e_denom
         Istf = h*math.pow(tw,3)/12 + tf*math.pow(b, 3)/12
 
         dist_stf = r - t / 2 - e
@@ -3915,8 +3916,13 @@ class CylinderAndCurvedPlate():
         if As != 0:
 
             num_stf = math.floor(2*math.pi*r/s)
-            e= (hw*tw*(hw/2) + b*tf*(hw+tf/2)) / (hw*tw+b*tw)
-            Istf = h*math.pow(tw,3)/12 + tf*math.pow(b, 3)/12
+            e= (hw*tw*(hw/2) + b*tf*(hw+tf/2)) / As
+            web_centroid = hw/2
+            flange_centroid = hw + tf/2
+            I_web = tw*math.pow(hw, 3)/12
+            I_flange = tf*math.pow(b, 3)/12
+            Istf = (I_web + hw*tw*math.pow(web_centroid - e, 2) +
+                    I_flange + b*tf*math.pow(flange_centroid - e, 2))
             dist_stf = r - t / 2 - e
             Istf_tot = 0
             angle = 0
@@ -4038,14 +4044,15 @@ class CylinderAndCurvedPlate():
         provide_data['fT_dict'] = fT_dict
 
         # Moment of inertia
-        As = A = hw*tw + b*tf  # checked
+        As = hw * tw + b * tf  # checked
 
-        num_stf = math.floor(2*math.pi*r/s)
+        num_stf = math.floor(2 * math.pi * r / s)
 
-        Atot = As*num_stf + 2*math.pi*r*t
+        Atot = As * num_stf + 2 * math.pi * r * t
 
-        e= (hw*tw*(hw/2) + b*tf*(hw+tf/2)) / (hw*tw+b*tw)
-        Istf = h*math.pow(tw,3)/12 + tf*math.pow(b, 3)/12
+        e_denom = hw * tw + b * tf
+        e = 0 if e_denom == 0 else (hw * tw * (hw / 2) + b * tf * (hw + tf / 2)) / e_denom
+        Istf = tw * math.pow(hw, 3) / 12 + tf * math.pow(b, 3) / 12
 
         dist_stf = r - t / 2 - e
         Istf_tot = 0
@@ -4087,12 +4094,12 @@ class CylinderAndCurvedPlate():
         else:
             fak = data['max axial stress - 3.3 Unstifffed curved panel']
 
-        i = Itot/Atot
-        fE = 0.0001 if Lc*k_factor == 0 else E*math.sqrt(math.pi*i  / (Lc * k_factor))
+        i = 0 if Atot == 0 else Itot / Atot
+        fE = 0 if Lc * k_factor == 0 else math.pow(math.pi, 2) * E * i / math.pow(Lc * k_factor, 2)
 
         Lambda_ = 0 if fE == 0 else math.sqrt(fak/fE)
 
-        fkc = (1-0-28*math.pow(Lambda_,2))*fak if Lambda_ <= 1.34 else fak/math.pow(Lambda_,2)
+        fkc = (1 - 0.28 * math.pow(Lambda_, 2)) * fak if Lambda_ <= 1.34 else fak / math.pow(Lambda_, 2)
         gammaM = data['gammaM curved panel'] #self._mat_factor  # Check
 
         fakd = fak/gammaM
