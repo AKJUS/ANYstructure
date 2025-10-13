@@ -3418,7 +3418,7 @@ class CylinderAndCurvedPlate():
                 fksd_iter = fks_iter / gammaM_iter
                 #print('sjsd', sjsd_iter, 'fksd', fksd_iter, 'fks', fks, 'gammaM', gammaM_iter, 'lambdas_iter', lambdas_iter)
                 this_val = sjsd_iter/fksd_iter
-                logger.append(0 if this_val > 1 else siga0sd_iter)
+                logger.append(siga0sd_iter)
                 if this_val > 1.0 or count == 1e6:
                     found = True
                 count += 1
@@ -3435,7 +3435,7 @@ class CylinderAndCurvedPlate():
 
                 #print(sasd_iter, this_val)
 
-            return 0 if len(logger) == 1 else max([logger[-2],0])
+            return 0 if len(logger) == 1 else max(max(logger[:-1]), 0)
 
         provide_data['max axial stress - 3.3 Unstifffed curved panel'] = iter_table_1()
 
@@ -3548,10 +3548,13 @@ class CylinderAndCurvedPlate():
                 gammaM_iter = 1  # As taken in the DNVGL sheets
                 fks_iter = fy / math.sqrt(1 + math.pow(lambdas_iter, 4))
                 fksd_iter = fks_iter / gammaM_iter
-                # print('sjsd', sjsd_iter, 'fksd', fksd_iter, 'fks', fks, 'gammaM', gammaM_iter, 'lambdas_iter', lambdas_iter)
+
 
                 this_val = sjsd_iter / fksd_iter
-                logger.append(sasd_iter)
+                # print('sjsd', sjsd_iter, 'fksd', fksd_iter, 'fks', fks, 'gammaM', gammaM_iter, 'lambdas_iter',
+                #       lambdas_iter, 'Count', count, 'UF', this_val)
+
+                logger.append(siga0sd_iter)
 
                 if this_val > 1.0 or count == 1e6:
                     found = True
@@ -3568,9 +3571,11 @@ class CylinderAndCurvedPlate():
                 else:
                     sasd_iter -= 20
 
-            return 0 if len(logger) == 1 else max(logger[-2],0)
+            return 0 if len(logger) == 1 else max(max(logger[:-1]),0)
+        from_table = iter_table_2()
 
-        provide_data['max axial stress - 3.4.2 Shell buckling'] = iter_table_2()
+        provide_data['max axial stress - 3.4.2 Shell buckling'] = from_table
+        print('From table', from_table)
         provide_data['shsd'] = shsd
         return provide_data
 
@@ -4077,6 +4082,15 @@ class CylinderAndCurvedPlate():
 
         use_fac = 1 if geometry < 3 else 2
 
+        # 1	Unstiffened shell (Force input)
+        # 2	Unstiffened panel (Stress input)
+        # 3	Longitudinal Stiffened shell  (Force input)
+        # 4	Longitudinal Stiffened panel (Stress input)
+        # 5	Ring Stiffened shell (Force input)
+        # 6	Ring Stiffened panel (Stress input)
+        # 7	Orthogonally Stiffened shell (Force input)
+        # 8	Orthogonally Stiffened panel (Stress input)
+
         if use_fac == 1:
             a = 1 + math.pow(fy, 2) / math.pow(fEa, 2)
             b = ((2 * math.pow(fy, 2) / (fEa * fEh)) - 1) * shsd
@@ -4087,8 +4101,10 @@ class CylinderAndCurvedPlate():
         else:
             fak = data['max axial stress - 3.3 Unstifffed curved panel']
 
-        i = Itot/Atot
-        fE = 0.0001 if Lc*k_factor == 0 else E*math.sqrt(math.pi*i  / (Lc * k_factor))
+        i = math.sqrt(Itot/Atot)
+        #fE = 0.0001 if Lc*k_factor == 0 else E*math.sqrt(math.pi*i  / (Lc * k_factor))
+        #fE = 0.0001 if Lc * k_factor == 0 else E * math.pow(math.pi * i / (Lc * k_factor),2)
+        fE = 0.0001 if Lc * k_factor == 0 else E*math.pow((math.pi*i/(Lc*k_factor)),2)
 
         Lambda_ = 0 if fE == 0 else math.sqrt(fak/fE)
 
@@ -4109,6 +4125,8 @@ class CylinderAndCurvedPlate():
         #     stab_chk = True
         # print('use_fac', use_fac, 'geometry', geometry,  'Lambda_', Lambda_, 'math.sqrt(', fak, '/', fE)
         # print(sa0sd, '/', fkcd, '+', '(abs(', smsd, ') / (1 - ', sa0sd, ' / ', fE, ')) / ', fakd)
+
+
         if fakd*fkcd == 0:
             stab_uf = 0
             stab_chk = False
@@ -4785,9 +4803,9 @@ def main():
 
     #my_test.get_total_damage(int_press=(0, 0, 0), ext_press=(0, 40000, 0))
 
-    for example in [CalcScantlings(ex.obj_dict)]:#, CalcScantlings(ex.obj_dict2), CalcScantlings(ex.obj_dict_L)]:
-
-        my_test = example
+    # for example in [CalcScantlings(ex.obj_dict)]:#, CalcScantlings(ex.obj_dict2), CalcScantlings(ex.obj_dict_L)]:
+    #
+    #     my_test = example
         # my_test = CalcFatigue(example, ex.fat_obj_dict2)
         # my_test.get_total_damage(int_press=(0, 0, 0), ext_press=(0, 40000, 0))
         # print('Total damage: ', my_test.get_total_damage(int_press=(0, 0, 0), ext_press=(0, 40000, 0)))
@@ -4824,16 +4842,16 @@ def main():
     print(my_cyl.get_utilization_factors())
 
     # Prescriptive buckling UPDATED
-    Plate = CalcScantlings(ex.obj_dict)
-    Stiffener = CalcScantlings(ex.obj_dict)
-    Girder = CalcScantlings(ex.obj_dict_heavy)
-    PreBuc = AllStructure(Plate = Plate, Stiffener = Stiffener, Girder = Girder,
-                                  main_dict=ex.prescriptive_main_dict)
+    # Plate = CalcScantlings(ex.obj_dict)
+    # Stiffener = CalcScantlings(ex.obj_dict)
+    # Girder = CalcScantlings(ex.obj_dict_heavy)
+    # PreBuc = AllStructure(Plate = Plate, Stiffener = Stiffener, Girder = Girder,
+    #                               main_dict=ex.prescriptive_main_dict)
 
 
-    print(PreBuc)
+    #print(PreBuc)
 
-    cylinder = CylinderAndCurvedPlate()
+    #cylinder = CylinderAndCurvedPlate()
     #print(Girder)
     #PreBuc.lat_press = 0.412197
     #print(Plate)
