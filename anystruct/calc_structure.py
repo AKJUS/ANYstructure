@@ -3575,7 +3575,7 @@ class CylinderAndCurvedPlate():
         from_table = iter_table_2()
 
         provide_data['max axial stress - 3.4.2 Shell buckling'] = from_table
-        print('From table', from_table)
+
         provide_data['shsd'] = shsd
         return provide_data
 
@@ -3594,7 +3594,7 @@ class CylinderAndCurvedPlate():
         LH = L
         sasd = self._sasd/1e6
         smsd = self._smsd/1e6
-        tsd = abs(self._tTsd/1e6 + self._tQsd/1e6) # MAYBE MAYBE NOT.
+        tsd = abs(self._tTsd/1e6 + self._tQsd/1e6)
         psd = self._psd/1e6
 
         data_shell_buckling = self.shell_buckling() if data_shell_buckling == None else data_shell_buckling
