@@ -3706,7 +3706,10 @@ class Application():
                             all_cyl_chks = list()
                             for key, val in cylinder_results.items():
                                 if key in ['Unstiffened shell', 'Longitudinal stiffened shell',
-                                           'Ring stiffened shell', 'Heavy ring frame']:
+                                           'Ring stiffened shell', 'Heavy ring frame', 'Column stability UF']:
+                                    if (key == 'Column stability UF' and
+                                            cylinder_results['Need to check column buckling'] is False):
+                                        continue
 
                                     all_cyl_chks.append(True if val is None else val < 1)
                                 elif key == 'Stiffener check' and val is not None:
@@ -4876,12 +4879,16 @@ class Application():
                                                       )
                                     uf_col = 'green'
                                 else:
+                                    uf_col = 'black'
                                     if results['Column stability UF'] is None:
                                         text_value = 'N/A'
                                     else:
                                         text_value = 'Column buckling need to be checked, UF = ' + str(
                                             round(results['Column stability UF'], 2))
-                                    uf_col = 'red'
+                                        if results['Column stability UF'] <= 1.0:
+                                            uf_col = 'green'
+                                        else:
+                                            uf_col = 'red'
                         else:
                             text_value = 'N/A' if value is None else str(round(value, 2))
 
@@ -6889,6 +6896,7 @@ class Application():
                         else Structure(imported_dict['Ring stf.']), ring_frame=None if imported_dict['Ring frame']
                                                                                        is None
                         else Structure(imported_dict['Ring frame']))
+
 
         # opening the loads
         variables = ['poly_third','poly_second', 'poly_first', 'poly_const', 'load_condition',

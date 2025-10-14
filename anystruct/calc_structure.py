@@ -3570,7 +3570,6 @@ class CylinderAndCurvedPlate():
                     sasd_iter -= 10
                 else:
                     sasd_iter -= 20
-
             return 0 if len(logger) == 1 else max(max(logger[:-1]),0)
         from_table = iter_table_2()
 
