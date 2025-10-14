@@ -4419,7 +4419,7 @@ class Application():
                              CylObj.ShellObj._dist_between_rings
             num_ring_stiff = int(num_ring_stiff)
 
-            for ring_stf in range(1, num_ring_stiff + 1, 1):
+            for ring_stf in range(1, num_ring_stiff+1, 1):
                 coord3 = coord1[0], coord1[1] + (height / (num_ring_stiff + 1)) * ring_stf, \
                          start_x_cyl + radius, coord1[3] + (height / (num_ring_stiff + 1)) * ring_stf,
                 arc_2 = canvas.create_arc(coord3, extent=180, start=180, style=tk.ARC, width=2,
