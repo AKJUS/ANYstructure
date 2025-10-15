@@ -562,8 +562,6 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
 if __name__ == '__main__':
     from tkinter import *
 
-
-
     class AllTkinterWidgets:
         def __init__(self, master):
             frame = Frame(master, width=500, height=400, bd=1)

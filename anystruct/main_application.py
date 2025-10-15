@@ -1064,6 +1064,8 @@ class Application():
 
         chk_deltax = 0.1
         chk_deltay = 0.025
+        (ttk.Label(self._tab_information, text='Labelling options. For non-cylinder structure only. ', font="Text 9")
+         .place(relx=0.02, rely=2*chk_deltay))
         self._information_gui_chk_structure = [
                                                ttk.Checkbutton(self._tab_information,
                                                               variable = self._new_label_color_coding,
@@ -1122,7 +1124,7 @@ class Application():
                                                    ttk.Label(self._tab_information, text='Structure type'),
                                                    ttk.Label(self._tab_information, text='Buckling - SP or UP'),
                                                    ttk.Label(self._tab_information, text='Buckling acceptance criteria')]
-        idx = 2
+        idx = 3
         for lab, ent in zip(self._information_gui_chk_structure, self._information_gui_lab_chk_structure):
             lab.place(relx=0.02, rely=idx*chk_deltay)
             ent.place(relx=0.02 + chk_deltax, rely=idx*chk_deltay)
