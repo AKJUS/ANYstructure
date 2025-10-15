@@ -18,6 +18,7 @@ include anystruct\images\img_stress_button.gif
 include anystruct\images\img_T_L_FB.gif
 include anystruct\images\img_title.gif
 include anystruct\images\img_transverse_stress.gif
+include anystruct\images\cylinder_opt.png
 include anystruct\images\ANYstructure_logo.jpg
 include anystruct\images\current_comps_NONE.png
 include anystruct\images\Buckling_Strength_of_Shells.png
