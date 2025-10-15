@@ -4091,8 +4091,8 @@ class CylinderAndCurvedPlate():
         else:
             fak = data['max axial stress - 3.3 Unstifffed curved panel']
 
-        i = Itot/Atot
-        fE = 0.0001 if Lc*k_factor == 0 else E*math.sqrt(math.pi*i  / (Lc * k_factor))
+        i = math.sqrt(Itot/Atot)
+        fE = 0.0001 if Lc*k_factor == 0 else E*math.pow(math.pi*i  / (Lc * k_factor), 2)
 
         Lambda_ = 0 if fE == 0 else math.sqrt(fak/fE)
 
