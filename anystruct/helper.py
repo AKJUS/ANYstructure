@@ -536,7 +536,7 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
         if not conical:
             sasd, smsd, tTsd, tQsd, shsd = stresses
             Nsd = (sasd * 2 * math.pi * shell_radius * eq_thk) / 1000
-            Msd = (smsd / (shell_radius * shell_t / 2)) * Itot / 1000000
+            Msd = (smsd * Itot) / ((shell_radius + shell_t / 2) * 1000000)
             Tsd = tTsd * 2 * math.pi * shell_t * math.pow(shell_radius, 2) / 1000000
             Qsd = tQsd * math.pi * shell_radius * shell_t / 1000
         else:
