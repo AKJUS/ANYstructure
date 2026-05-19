@@ -27,3 +27,11 @@ def test_api_uses_shared_cylinder_domain_helpers():
     assert "api_helpers.cylinder_domain_with_input_mode(calculation_domain)" in source
     assert "api_helpers.geometry_id_for_domain(self._calculation_domain)" in source
     assert "geomeries = {" not in source
+
+
+def test_api_uses_shared_unit_conversions():
+    api_source = Path(__file__).resolve().parents[1] / "anystruct" / "api.py"
+    source = api_source.read_text(encoding="utf-8")
+
+    assert source.count("api_helpers.mpa_to_pa") == 12
+    assert source.count("api_helpers.mm_to_m") == 8
