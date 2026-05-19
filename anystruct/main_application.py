@@ -34,6 +34,7 @@ try:
     import anystruct.stresses_window as stress
     import anystruct.fatigue_window as fatigue
     import anystruct.load_factor_window as load_factors
+    import anystruct.api_helpers as api_helpers
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
     import anystruct.excel_inteface as excel_interface
@@ -54,6 +55,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.stresses_window as stress
     import ANYstructure.anystruct.fatigue_window as fatigue
     import ANYstructure.anystruct.load_factor_window as load_factors
+    import ANYstructure.anystruct.api_helpers as api_helpers
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
     import ANYstructure.anystruct.excel_inteface as excel_interface
@@ -1470,8 +1472,12 @@ class Application():
         prop_vert_start = 0.01
         types_start = 0.005208333
 
-        options = list(CylinderAndCurvedPlate.geomeries.values()) # Shell geometry selection [string]
-        self._shell_geometries_map = CylinderAndCurvedPlate.geomeries_map  # Shell geometry selection string : int
+        options = ['Flat plate, stiffened', 'Flat plate, unstiffened', 'Flat plate, stiffened with girder'] + \
+                  list(api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT)
+        self._shell_geometries_map = {
+            **api_helpers.FLAT_GEOMETRY_IDS,
+            **api_helpers.CYLINDER_GEOMETRY_IDS,
+        }
         self._current_calculation_domain = 'Flat plate, stiffened'
         self._unit_informations_dimensions = list()
 
@@ -2185,7 +2191,7 @@ class Application():
     def calculation_domain_selected(self, event = None):
         '''
         ['Stiffened panel, flat', 'Unstiffened shell (Force input)', 'Unstiffened panel (Stress input)',
-        'Longitudinal Stiffened shell  (Force input)', 'Longitudinal Stiffened panel (Stress input)',
+        'Longitudinal Stiffened shell (Force input)', 'Longitudinal Stiffened panel (Stress input)',
         'Ring Stiffened shell (Force input)', 'Ring Stiffened panel (Stress input)',
         'Orthogonally Stiffened shell (Force input)', 'Orthogonally Stiffened panel (Stress input)']
         '''
@@ -2222,7 +2228,7 @@ class Application():
         '''
             geomeries = {1:'Unstiffened shell (Force input)', 
                     2:'Unstiffened panel (Stress input)',
-                    3:'Longitudinal Stiffened shell  (Force input)',
+                    3:'Longitudinal Stiffened shell (Force input)',
                     4:'Longitudinal Stiffened panel (Stress input)',
                     5:'Ring Stiffened shell (Force input)',
                     6:'Ring Stiffened panel (Stress input)',
@@ -2246,7 +2252,7 @@ class Application():
                                                     'Unstiffened panel (Stress input)']:
             self.gui_structural_properties(flat_unstf=False, flat_stf = False, flat_panel_stf_girder = False,
                                            shell=True, long_stf=False, ring_stf=False, ring_frame=False)
-        elif self._new_calculation_domain.get() in ['Longitudinal Stiffened shell  (Force input)',
+        elif self._new_calculation_domain.get() in ['Longitudinal Stiffened shell (Force input)',
                                                     'Longitudinal Stiffened panel (Stress input)']:
             self.gui_structural_properties(flat_unstf=False, flat_stf = False, flat_panel_stf_girder = False,
                                            shell=True, long_stf=True, ring_stf=False, ring_frame=False)
@@ -5295,7 +5301,7 @@ class Application():
                     '''
                     Shell structure.
                      0:'Stiffened panel, flat', 1:'Unstiffened shell (Force input)', 2:'Unstiffened panel (Stress input)',
-                     3:'Longitudinal Stiffened shell  (Force input)', 4:'Longitudinal Stiffened panel (Stress input)',
+                     3:'Longitudinal Stiffened shell (Force input)', 4:'Longitudinal Stiffened panel (Stress input)',
                      5:'Ring Stiffened shell (Force input)', 6:'Ring Stiffened panel (Stress input)',
                      7:'Orthogonally Stiffened shell (Force input)', 8:'Orthogonally Stiffened panel (Stress input)'
                     '''
