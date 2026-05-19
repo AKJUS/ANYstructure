@@ -382,9 +382,9 @@ class CylStru():
         '''
         super().__init__()
         api_helpers.assert_choice(calculation_domain, self.geotypes, 'calculation_domain')
-        self._load_type = 'Stress' if 'panel' in calculation_domain else 'Force'
+        self._load_type = api_helpers.cylinder_input_mode(calculation_domain)
 
-        self._calculation_domain = calculation_domain + ' (' + self._load_type + ' input)'
+        self._calculation_domain = api_helpers.cylinder_domain_with_input_mode(calculation_domain)
         self._CylinderMain = CylinderAndCurvedPlate()
         self._CylinderMain.geometry = CylinderAndCurvedPlate.geomeries_map_no_input_spec[calculation_domain]
         self._CylinderMain.ShellObj = Shell()
@@ -446,16 +446,7 @@ class CylStru():
 
         :return:
         '''
-        geomeries = {11: 'Flat plate, stiffened', 10: 'Flat plate, unstiffened',
-                     12: 'Flat plate, stiffened with girder',
-                     1: 'Unstiffened shell (Force input)', 2: 'Unstiffened panel (Stress input)',
-                     3: 'Longitudinal Stiffened shell  (Force input)', 4: 'Longitudinal Stiffened panel (Stress input)',
-                     5: 'Ring Stiffened shell (Force input)', 6: 'Ring Stiffened panel (Stress input)',
-                     7: 'Orthogonally Stiffened shell (Force input)', 8: 'Orthogonally Stiffened panel (Stress input)'}
-        geomeries_map = dict()
-        for key, value in geomeries.items():
-            geomeries_map[value] = key
-        geometry = geomeries_map[self._calculation_domain]
+        geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
         forces = [Nsd, Msd, Tsd, Qsd]
         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
             stresses=None, forces=forces, geometry=geometry, shell_t=self._CylinderMain.ShellObj.thk,
@@ -755,7 +746,6 @@ if __name__ == '__main__':
     #     print(key, val)
     #
     # print(my_flat.get_special_provisions_results())
-
 
 
 
