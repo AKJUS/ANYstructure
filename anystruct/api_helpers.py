@@ -67,6 +67,16 @@ def assert_choice(value, choices, label):
     assert value in choices, f"{label} must be one of: {list(choices)}"
 
 
+def cylinder_input_mode(calculation_domain):
+    assert_choice(calculation_domain, CYLINDER_STRUCTURE_DOMAINS, "calculation_domain")
+    return "Stress" if "panel" in calculation_domain else "Force"
+
+
+def cylinder_domain_with_input_mode(calculation_domain):
+    input_mode = cylinder_input_mode(calculation_domain)
+    return f"{calculation_domain} ({input_mode} input)"
+
+
 def geometry_id_for_domain(calculation_domain):
     return GEOMETRY_IDS[calculation_domain]
 
