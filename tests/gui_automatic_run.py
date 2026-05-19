@@ -2,6 +2,8 @@ from anystruct import main_application
 import multiprocessing, ctypes, os, pickle
 from pathlib import Path
 import tkinter as tk
+from tkinter import messagebox
+from matplotlib import pyplot as plt
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +29,30 @@ def resolve_ml_pickle(file_base):
     raise FileNotFoundError(f"Could not find {file_name.name} in: {searched}")
 
 
+def configure_noninteractive_dialogs():
+    tk.messagebox = messagebox
+    messagebox.askquestion = lambda *args, **kwargs: "no"
+    messagebox.showerror = lambda *args, **kwargs: "ok"
+    messagebox.showinfo = lambda *args, **kwargs: "ok"
+    messagebox.showwarning = lambda *args, **kwargs: "ok"
+
+
+def configure_noninteractive_plots():
+    plt.show = lambda *args, **kwargs: None
+
+
+def checkpoint(name):
+    print(f"gui_automatic_run: {name}", flush=True)
+
+
 multiprocessing.freeze_support()
+configure_noninteractive_dialogs()
+configure_noninteractive_plots()
 errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(2)
 root = tk.Tk()
+checkpoint("root created")
 my_app = main_application.Application(root)
+checkpoint("application created")
 my_dict = my_app.__dict__
 
 my_dict["_new_field_len"].set(4000)
@@ -117,35 +139,50 @@ for x,y in [[0,0],[3000,0],[6000,0],[8000,0],[0,2500],[3000,2500],[6000,2500],[8
     my_dict['_new_point_y'].set(y)
     my_app.new_point()
 
+checkpoint("points created")
 print(my_dict['_point_dict'])
 run_cc_chks()
+checkpoint("point color checks run")
 
 for p1, p2 in [[1,2],[2,3],[3,4],[5,6],[6,7],[7,8], [1,5], [2,6], [3,7], [4, 8], [9,10], [5,9], [8,10]]:
     my_dict['_new_line_p1'].set(p1)
     my_dict['_new_line_p2'].set(p2)
     my_app.new_line()
 
+checkpoint("lines created")
 print(my_dict['_line_dict'])
 run_cc_chks()
+checkpoint("line color checks run")
 
 for key in my_dict['_line_dict'].keys():
     my_dict['_active_line'] = key
     my_dict['_line_is_active'] = True
     my_app.new_structure()
 
+checkpoint("structures created")
 run_cc_chks()
+checkpoint("structure color checks run")
 my_dict['_active_line'] = 'line3'
 my_dict['_line_is_active'] = True
 my_app.delete_line(line='line3')
 my_dict['_new_line_p1'].set(3)
 my_dict['_new_line_p2'].set(4)
 
+checkpoint("line deleted")
 print(my_dict['_line_dict'])
 
 my_app.gui_load_combinations(None)
+checkpoint("load combinations opened")
 my_app.grid_find_tanks()
+checkpoint("tank search complete")
 my_app.grid_display_tanks()
+plt.close("all")
+checkpoint("tanks displayed")
 run_cc_chks()
 print(my_dict['_tank_dict'])
 my_app.on_show_loads()
+checkpoint("loads shown")
+root.update_idletasks()
+root.destroy()
+checkpoint("root destroyed")
 
