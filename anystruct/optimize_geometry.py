@@ -654,7 +654,7 @@ class CreateOptGeoWindow():
 
                 # Taking properites from the closest line.
                 closet_line = self.opt_find_closest_orig_line(to_find)
-                pressure_side = self._line_to_struc[closet_line].overpressure_side
+                pressure_side = self._line_to_struc[closet_line][0].overpressure_side
                 #print('Closest line', closet_line, p1, p2, to_find)
                 gotten_lat_press = self.app.get_highest_pressure(closet_line)
                 lateral_press.append(gotten_lat_press['normal'] / 1e6)
