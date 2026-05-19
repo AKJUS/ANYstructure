@@ -25,9 +25,38 @@ def test_geometry_id_for_cylinder_domain_with_input_mode():
     assert api_helpers.geometry_id_for_domain("Orthogonally Stiffened panel (Stress input)") == 8
 
 
+@pytest.mark.parametrize(
+    ("domain", "expected"),
+    [
+        ("Unstiffened shell", "Force"),
+        ("Longitudinal Stiffened shell", "Force"),
+        ("Unstiffened panel", "Stress"),
+        ("Orthogonally Stiffened panel", "Stress"),
+    ],
+)
+def test_cylinder_input_mode(domain, expected):
+    assert api_helpers.cylinder_input_mode(domain) == expected
+
+
+@pytest.mark.parametrize(
+    ("domain", "expected"),
+    [
+        ("Unstiffened shell", "Unstiffened shell (Force input)"),
+        ("Unstiffened panel", "Unstiffened panel (Stress input)"),
+    ],
+)
+def test_cylinder_domain_with_input_mode(domain, expected):
+    assert api_helpers.cylinder_domain_with_input_mode(domain) == expected
+
+
 def test_geometry_id_rejects_unknown_domain():
     with pytest.raises(KeyError):
         api_helpers.geometry_id_for_domain("Unknown geometry")
+
+
+def test_cylinder_input_mode_rejects_unknown_domain():
+    with pytest.raises(AssertionError, match="calculation_domain must be one of"):
+        api_helpers.cylinder_input_mode("Unknown geometry")
 
 
 def test_unit_conversions():
