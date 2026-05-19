@@ -386,7 +386,7 @@ class CylStru():
 
         self._calculation_domain = api_helpers.cylinder_domain_with_input_mode(calculation_domain)
         self._CylinderMain = CylinderAndCurvedPlate()
-        self._CylinderMain.geometry = CylinderAndCurvedPlate.geomeries_map_no_input_spec[calculation_domain]
+        self._CylinderMain.geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
         self._CylinderMain.ShellObj = Shell()
         if  calculation_domain in ['Unstiffened shell', 'Unstiffened panel']:
             self._CylinderMain.LongStfObj = None
@@ -746,7 +746,6 @@ if __name__ == '__main__':
     #     print(key, val)
     #
     # print(my_flat.get_special_provisions_results())
-
 
 
 
