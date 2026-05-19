@@ -2167,7 +2167,7 @@ class Application():
                                                    rely=end_y + delta_y*other_count, relwidth=geo_ent_width*1.9)
                 other_count += 1
 
-            if self._shell_geometries_map[self._new_calculation_domain.get()] in [1,5]:
+            if api_helpers.geometry_id_for_domain(self._new_calculation_domain.get()) in [1,5]:
                 self._lab_shell_en_cap_pressure.place(relx=hor_start,
                                                                 rely= end_y + delta_y*other_count)
                 self._ent_shell_end_cap_pressure_included.place(relx=3  * delta_x,
@@ -5306,7 +5306,7 @@ class Application():
                      7:'Orthogonally Stiffened shell (Force input)', 8:'Orthogonally Stiffened panel (Stress input)'
                     '''
                     domain_string = self._new_calculation_domain.get()
-                    domain_int = self._shell_geometries_map[domain_string]
+                    domain_int = api_helpers.geometry_id_for_domain(domain_string)
 
                     dummy_data = {'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
                                   'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
@@ -5370,7 +5370,7 @@ class Application():
                                        'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
                                        'panel or shell': ['shell', '']}
 
-                    geometry = self._shell_geometries_map[self._new_calculation_domain.get()]
+                    geometry = api_helpers.geometry_id_for_domain(self._new_calculation_domain.get())
 
                     if self._new_shell_stress_or_force.get() == 1:
                         forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(),
@@ -5406,7 +5406,7 @@ class Application():
                                  'tQsd': [api_helpers.mpa_to_pa(tQsd), 'Pa'],
                                  'psd': [api_helpers.mpa_to_pa(self._new_shell_psd.get()), 'Pa'],
                                  'shsd': [api_helpers.mpa_to_pa(shsd), 'Pa'],
-                                 'geometry': [self._shell_geometries_map[self._new_calculation_domain.get()], ''],
+                                 'geometry': [api_helpers.geometry_id_for_domain(self._new_calculation_domain.get()), ''],
                                  'material factor':  [self._new_shell_mat_factor.get(), ''],
                                  'delta0': [0.005, ''],
                                  'fab method ring stf':  [self._new_shell_ring_stf_fab_method.get(), ''],
@@ -5992,7 +5992,7 @@ class Application():
                 self._new_shell_psd.set(main_dict_cyl['psd'][0]/1e6)
                 self._new_shell_shsd.set(main_dict_cyl['shsd'][0]/1e6)
 
-                self._new_calculation_domain.set(CylinderAndCurvedPlate.geomeries[main_dict_cyl['geometry'][0]])
+                self._new_calculation_domain.set(api_helpers.domain_for_geometry_id(main_dict_cyl['geometry'][0]))
                 self._new_shell_mat_factor.set(main_dict_cyl['material factor'][0])
                 self._new_shell_ring_stf_fab_method.set(main_dict_cyl['fab method ring stf'][0])
                 self._new_shell_ring_frame_fab_method.set(main_dict_cyl['fab method ring girder'][0])

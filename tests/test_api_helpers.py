@@ -22,6 +22,11 @@ def test_geometry_id_for_cylinder_domain_with_input_mode(domain, expected):
     assert api_helpers.geometry_id_for_domain(domain) == expected
 
 
+@pytest.mark.parametrize(("domain", "geometry_id"), api_helpers.GEOMETRY_IDS.items())
+def test_domain_for_geometry_id_round_trips(domain, geometry_id):
+    assert api_helpers.domain_for_geometry_id(geometry_id) == domain
+
+
 @pytest.mark.parametrize(
     ("domain", "expected"),
     [
@@ -55,6 +60,11 @@ def test_cylinder_domains_with_input_are_canonical_labels():
 def test_geometry_id_rejects_unknown_domain():
     with pytest.raises(KeyError):
         api_helpers.geometry_id_for_domain("Unknown geometry")
+
+
+def test_domain_for_geometry_id_rejects_unknown_id():
+    with pytest.raises(KeyError):
+        api_helpers.domain_for_geometry_id(999)
 
 
 def test_cylinder_input_mode_rejects_unknown_domain():
