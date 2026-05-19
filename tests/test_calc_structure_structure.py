@@ -1,12 +1,21 @@
+from copy import deepcopy
+
 import pytest
 from anystruct import example_data as ex, calc_structure as calc
 
 
 # Testing the Structure class
 
+def _with_panel_default(obj_dict):
+    obj_dict = deepcopy(obj_dict)
+    obj_dict.setdefault('panel or shell', ['panel', ''])
+    return obj_dict
+
 @pytest.fixture
 def structure_cls():
-    return calc.Structure(ex.obj_dict), calc.Structure(ex.obj_dict2), calc.Structure(ex.obj_dict_L)
+    return (calc.Structure(_with_panel_default(ex.obj_dict)),
+            calc.Structure(_with_panel_default(ex.obj_dict2)),
+            calc.Structure(_with_panel_default(ex.obj_dict_L)))
 
 def test_section_modulus(structure_cls):
     sec_mod1 = structure_cls[0].get_section_modulus()
@@ -110,4 +119,3 @@ def test_input_properties(structure_cls):
                                                                    'non-wt': ['FRAME','GENERAL_INTERNAL_NONWT'],
                                                                    'vertical': ['BBS', 'SIDE_SHELL', 'SSS']},''],
                                               'zstar_optimization': [True, '']}
-
