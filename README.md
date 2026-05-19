@@ -58,6 +58,29 @@ For documnetation:
 
 https://anystructure.readthedocs.io/en/latest/
 
+## Development setup ##
+
+ANYstructure is currently maintained as a Python package named `anystruct`. The GUI can still be launched through the `ANYstructure` console command after an editable install.
+
+Recommended local setup:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+python -m pip install -e .
+python -m pytest
+```
+
+Launch the desktop app after installation:
+
+```powershell
+ANYstructure
+```
+
+Excel/PULS workflows require a local Excel installation and are not expected to run in basic automated tests.
+
 ## The following is calculated: ##
 * Minimum plate thickness (DNV-OS-C101)
 * Minimum section modulus of stiffener/plate (DNVGL-OS-C101)
