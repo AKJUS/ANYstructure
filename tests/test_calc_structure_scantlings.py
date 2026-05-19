@@ -1,12 +1,21 @@
+from copy import deepcopy
+
 import pytest
 from anystruct import example_data as ex, calc_structure as calc
 
 
 # Testing the Structure class
 
+def _with_panel_default(obj_dict):
+    obj_dict = deepcopy(obj_dict)
+    obj_dict.setdefault('panel or shell', ['panel', ''])
+    return obj_dict
+
 @pytest.fixture
 def scantling_cls():
-    return calc.CalcScantlings(ex.obj_dict), calc.CalcScantlings(ex.obj_dict2), calc.CalcScantlings(ex.obj_dict_L)
+    return (calc.CalcScantlings(_with_panel_default(ex.obj_dict)),
+            calc.CalcScantlings(_with_panel_default(ex.obj_dict2)),
+            calc.CalcScantlings(_with_panel_default(ex.obj_dict_L)))
 
 def test_eff_moment_of_intertia(scantling_cls):
     pressure = 200
