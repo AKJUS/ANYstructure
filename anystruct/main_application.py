@@ -5379,17 +5379,66 @@ class Application():
             if key not in ring_frame_dict.keys():
                 ring_frame_dict[key] = value
 
-        CylinderObj = CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
-                                             long_stf=None if geometry in [1,2,5,6]
-                                             else Structure(long_dict),
-                                              ring_stf=None if any([geometry in [1,2,3,4],
-                                                                    self._new_shell_exclude_ring_stf.get()])
-                                              else Structure(ring_stf_dict),
-                                              ring_frame=None if any([geometry in [1,2,3,4],
-                                                                      self._new_shell_exclude_ring_frame.get()])
-                                              else Structure(ring_frame_dict))
+        CylinderObj = self._create_cylinder_structure_from_properties(
+            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry)
 
         return CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry
+
+    def _structure_input_is_missing(self):
+        if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
+            return False
+        return any([self._new_stf_spacing.get() == 0, self._new_plate_thk.get() == 0,
+                    self._new_stf_web_h.get() == 0, self._new_stf_web_t.get() == 0])
+
+    @staticmethod
+    def _show_missing_structure_input_warning():
+        tk.messagebox.showwarning('No propertied defined', 'No properties is defined for the line!\n'
+                                  'Define spacing, web height, web thickness etc.\n'
+                                  'Either press button with stiffener or input manually.', type='ok')
+
+    def _create_all_structure_from_properties(self, prop_dict):
+        calculation_domain = self._new_calculation_domain.get()
+        return AllStructure(Plate=CalcScantlings(prop_dict['Plate']),
+                            Stiffener=None if calculation_domain == 'Flat plate, unstiffened'
+                            else CalcScantlings(prop_dict['Stiffener']),
+                            Girder=None if calculation_domain in ['Flat plate, unstiffened',
+                                                                  'Flat plate, stiffened']
+                            else CalcScantlings(prop_dict['Girder']),
+                            main_dict=prop_dict['main dict'])
+
+    def _create_cylinder_structure_from_properties(self, main_dict_cyl, shell_dict, long_dict, ring_stf_dict,
+                                                   ring_frame_dict, geometry):
+        return CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
+                                      long_stf=None if geometry in [1, 2, 5, 6]
+                                      else Structure(long_dict),
+                                      ring_stf=None if any([geometry in [1, 2, 3, 4],
+                                                            self._new_shell_exclude_ring_stf.get()])
+                                      else Structure(ring_stf_dict),
+                                      ring_frame=None if any([geometry in [1, 2, 3, 4],
+                                                              self._new_shell_exclude_ring_frame.get()])
+                                      else Structure(ring_frame_dict))
+
+    def _clear_tanks_and_grid(self):
+        self._tank_dict = {}
+        self._main_grid.clear()
+        self._compartments_listbox.delete(0, 'end')
+
+    def _refresh_after_structure_change(self, suspend_recalc):
+        if self._PULS_results != None:
+            self._PULS_results.result_changed(self._active_line)
+
+        if not suspend_recalc:
+            # when changing multiple parameters, recalculations are suspended.
+            for line, obj in self._line_to_struc.items():
+                obj[0].need_recalc = True
+            state = self.update_frame()
+            if state != None and self._line_is_active:
+                self._weight_logger['new structure']['COG'].append(self.get_color_and_calc_state()['COG'])
+                self._weight_logger['new structure']['weight'].append(self.get_color_and_calc_state()['Total weight'])
+                self._weight_logger['new structure']['time'].append(time.time())
+            self.cylinder_gui_mods()
+
+        self.get_unique_plates_and_beams()
 
     def new_structure(self, event = None, pasted_structure = None, multi_return = None, toggle_multi = None,
                       suspend_recalc = False, cylinder_return = None):
@@ -5410,17 +5459,8 @@ class Application():
             self.save_no_dialogue(backup=True) #keeping a backup
 
         if all([pasted_structure == None, multi_return == None]):
-            missing_input = False
-            if self._is_flat_calculation_domain(self._new_calculation_domain.get()):
-                if any([self._new_stf_spacing.get()==0, self._new_plate_thk.get()==0, self._new_stf_web_h.get()==0,
-                        self._new_stf_web_t.get()==0]): # TODO must account for calculation domain
-                    missing_input = True
-
-            if missing_input:
-                mess = tk.messagebox.showwarning('No propertied defined', 'No properties is defined for the line!\n'
-                                                                          'Define spacing, web height, web thickness etc.\n'
-                                                                          'Either press button with stiffener or input '
-                                                                          'manually.', type='ok')
+            if self._structure_input_is_missing():
+                self._show_missing_structure_input_warning()
                 return
 
         if self._line_is_active or multi_return != None:
@@ -5440,6 +5480,7 @@ class Application():
                 elif cylinder_return is not None:
                     main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
                         cylinder_return.get_all_properties()
+                    geometry = main_dict_cyl['geometry'][0]
             else:
                 prop_dict = pasted_structure.get_main_properties()
 
@@ -5448,33 +5489,18 @@ class Application():
                 self._line_to_struc[self._active_line] = [None, None, None, [None], {}, None]
                 # First entry
                 # Flat plate domains: 'Flat plate, stiffened with girder', 'Flat plate, stiffened', Flat plate, unstiffened'
-                cdom = self._new_calculation_domain.get()
-                All = AllStructure(Plate=CalcScantlings(prop_dict['Plate']),
-                                   Stiffener=None if cdom == 'Flat plate, unstiffened'
-                                   else CalcScantlings(prop_dict['Stiffener']),
-                                   Girder=None if cdom in ['Flat plate, unstiffened', 'Flat plate, stiffened']
-                                   else CalcScantlings(prop_dict['Girder']),
-                                   main_dict=prop_dict['main dict'])
+                All = self._create_all_structure_from_properties(prop_dict)
 
                 self._sections = add_new_section(self._sections, struc.Section(obj_dict_stf)) # TODO error when pasting
                 self._line_to_struc[self._active_line][0] = All
                 self._line_to_struc[self._active_line][5] = CylinderObj
                 if self._line_to_struc[self._active_line][0].Plate.get_structure_type() not in \
                         self._structure_types['non-wt']:
-                    self._tank_dict = {}
-                    self._main_grid.clear()
-                    self._compartments_listbox.delete(0, 'end')
+                    self._clear_tanks_and_grid()
                 if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
-                    CylinderObj = CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
-                                                         long_stf=None if geometry in [1,2,5,6]
-                                                         else Structure(long_dict),
-                                                          ring_stf=None if any([geometry in [1,2,3,4],
-                                                                                self._new_shell_exclude_ring_stf.get()])
-                                                          else Structure(ring_stf_dict),
-                                                          ring_frame=None if any([geometry in [1,2,3,4],
-                                                                                  self._new_shell_exclude_ring_frame.get()])
-                                                          else Structure(ring_frame_dict))
-
+                    if CylinderObj is None:
+                        CylinderObj = self._create_cylinder_structure_from_properties(
+                            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry)
                     self._line_to_struc[self._active_line][5] = CylinderObj
 
             else:
@@ -5515,9 +5541,7 @@ class Application():
                 if prev_type in self._structure_types['non-wt'] and prop_dict['Plate']['structure_type'][0] in \
                                         self._structure_types['internals'] + self._structure_types['horizontal'] + \
                                 self._structure_types['vertical']:
-                    self._tank_dict = {}
-                    self._main_grid.clear()
-                    self._compartments_listbox.delete(0, 'end')
+                    self._clear_tanks_and_grid()
 
                 if all([CylinderObj is None, cylinder_return is None,
                                   self._line_to_struc[self._active_line][5] is not None]):
@@ -5543,21 +5567,7 @@ class Application():
         else:
             pass
 
-        if self._PULS_results != None:
-            self._PULS_results.result_changed(self._active_line)
-
-        if not suspend_recalc:
-            # when changing multiple parameters, recalculations are suspended.
-            for line, obj in self._line_to_struc.items():
-                obj[0].need_recalc = True
-            state = self.update_frame()
-            if state != None and self._line_is_active:
-                self._weight_logger['new structure']['COG'].append(self.get_color_and_calc_state()['COG'])
-                self._weight_logger['new structure']['weight'].append(self.get_color_and_calc_state()['Total weight'])
-                self._weight_logger['new structure']['time'].append(time.time())
-            self.cylinder_gui_mods()
-
-        self.get_unique_plates_and_beams()
+        self._refresh_after_structure_change(suspend_recalc)
 
     def option_meny_structure_type_trace(self, event):
         ''' Updating of the values in the structure type option menu. '''

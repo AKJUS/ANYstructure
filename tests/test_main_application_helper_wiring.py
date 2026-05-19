@@ -53,5 +53,14 @@ def test_new_structure_delegates_property_building():
 
     assert "self._build_flat_structure_properties()" in new_structure
     assert "self._build_cylinder_structure_properties()" in new_structure
+    assert "self._structure_input_is_missing()" in new_structure
+    assert "self._create_all_structure_from_properties(prop_dict)" in new_structure
+    assert "self._create_cylinder_structure_from_properties(" in new_structure
+    assert "self._clear_tanks_and_grid()" in new_structure
+    assert "self._refresh_after_structure_change(suspend_recalc)" in new_structure
     assert "obj_dict = {" not in new_structure
     assert "shell_dict = {" not in new_structure
+    assert "AllStructure(" not in new_structure
+    assert "CylinderAndCurvedPlate(" not in new_structure
+    assert "self._tank_dict = {}" not in new_structure
+    assert "self.update_frame()" not in new_structure
