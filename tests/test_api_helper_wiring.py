@@ -17,3 +17,13 @@ def test_api_uses_shared_stiffener_normalizer():
     source = api_source.read_text(encoding="utf-8")
 
     assert source.count("api_helpers.normalize_bulb_stiffener_type") == 4
+
+
+def test_api_uses_shared_cylinder_domain_helpers():
+    api_source = Path(__file__).resolve().parents[1] / "anystruct" / "api.py"
+    source = api_source.read_text(encoding="utf-8")
+
+    assert "api_helpers.cylinder_input_mode(calculation_domain)" in source
+    assert "api_helpers.cylinder_domain_with_input_mode(calculation_domain)" in source
+    assert "api_helpers.geometry_id_for_domain(self._calculation_domain)" in source
+    assert "geomeries_map" not in source
