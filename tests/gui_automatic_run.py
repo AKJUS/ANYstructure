@@ -1,6 +1,30 @@
 from anystruct import main_application
 import multiprocessing, ctypes, os, pickle
+from pathlib import Path
 import tkinter as tk
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXTERNAL_ML_FILES = Path(r"C:\python_projects\ANYstructure\anystruct\ml_files")
+
+
+def get_ml_file_directories():
+    directories = []
+    env_dir = os.environ.get("ANYSTRUCTURE_ML_FILES")
+    if env_dir:
+        directories.append(Path(env_dir))
+    directories.extend([REPO_ROOT / "anystruct" / "ml_files", DEFAULT_EXTERNAL_ML_FILES])
+    return directories
+
+
+def resolve_ml_pickle(file_base):
+    file_name = Path(file_base.replace("ml_files\\", "").replace("ml_files/", "") + ".pickle")
+    for directory in get_ml_file_directories():
+        candidate = directory / file_name
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(directory) for directory in get_ml_file_directories())
+    raise FileNotFoundError(f"Could not find {file_name.name} in: {searched}")
 
 
 multiprocessing.freeze_support()
@@ -73,17 +97,8 @@ for mat_fac in [1.1, 1.15]:
         file_base = file_base.replace('XXX', mat_fac_str)
         my_dict['_ML_buckling'][mat_fac][name] = None
 
-        if os.path.isfile(file_base + '.pickle'):
-            file = open(file_base + '.pickle', 'rb')
+        with resolve_ml_pickle(file_base).open('rb') as file:
             my_dict['_ML_buckling'][mat_fac][name] = pickle.load(file)
-            file.close()
-        else:
-            # file = open(self._root_dir +'\\' + file_base + '.pickle', 'rb')
-
-            ml_file = os.path.join('C:\\Github\\ANYstructure\\anystruct\\'+file_base + '.pickle')
-            file = open(ml_file, 'rb')
-            my_dict['_ML_buckling'][mat_fac][name] = pickle.load(file)
-            file.close()
 
 
 my_dict['_ML_classes'] = {0: 'N/A',
