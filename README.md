@@ -79,6 +79,16 @@ Launch the desktop app after installation:
 ANYstructure
 ```
 
+Dependency groups are also available for focused installs:
+
+```powershell
+python -m pip install -r requirements-core.txt
+python -m pip install -r requirements-ml.txt
+python -m pip install -r requirements-excel.txt
+```
+
+Equivalent package extras are exposed as `core`, `ml`, `excel`, `dev`, and `all`. The default package install still includes Excel and ML dependencies for backwards compatibility.
+
 Excel/PULS workflows require a local Excel installation and are not expected to run in basic automated tests.
 
 ## The following is calculated: ##
