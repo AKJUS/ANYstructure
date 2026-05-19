@@ -40,9 +40,35 @@ LIMIT_STATE_TYPES = (
     "ALS",
 )
 
+FLAT_GEOMETRY_IDS = {
+    "Flat plate, unstiffened": 10,
+    "Flat plate, stiffened": 11,
+    "Flat plate, stiffened with girder": 12,
+}
+
+CYLINDER_GEOMETRY_IDS = {
+    "Unstiffened shell (Force input)": 1,
+    "Unstiffened panel (Stress input)": 2,
+    "Longitudinal Stiffened shell (Force input)": 3,
+    "Longitudinal Stiffened panel (Stress input)": 4,
+    "Ring Stiffened shell (Force input)": 5,
+    "Ring Stiffened panel (Stress input)": 6,
+    "Orthogonally Stiffened shell (Force input)": 7,
+    "Orthogonally Stiffened panel (Stress input)": 8,
+}
+
+GEOMETRY_IDS = {
+    **FLAT_GEOMETRY_IDS,
+    **CYLINDER_GEOMETRY_IDS,
+}
+
 
 def assert_choice(value, choices, label):
     assert value in choices, f"{label} must be one of: {list(choices)}"
+
+
+def geometry_id_for_domain(calculation_domain):
+    return GEOMETRY_IDS[calculation_domain]
 
 
 def mpa_to_pa(value):
