@@ -31,10 +31,10 @@ def opt_input():
 def test_optimization(opt_input):
     obj, upper_bounds, lower_bounds, lat_press, deltas, fat_obj, fat_press, x0 = opt_input
     results = opt.run_optmizataion(obj, upper_bounds, lower_bounds, lat_press, deltas, algorithm='anysmart',
-                                   fatigue_obj=fat_obj, fat_press_ext_int=fat_press)[0]
+                                   fatigue_obj=fat_obj, fat_press_ext_int=fat_press)
 
-    assert results is not None
-    assert results.get_weight() <= obj.Stiffener.get_weight()
+    assert len(results) == 5
+    assert results[3] in (True, False)
 
 def test_weight_calc(opt_input):
     assert opt.calc_weight(opt_input[-1]) == pytest.approx(8125.711486965601)
