@@ -5225,15 +5225,15 @@ class Application():
             elif pasted_structure is None:
                 calc_dom = self._new_calculation_domain.get()
 
-                obj_dict = {'mat_yield': [self._new_material.get()*1e6, 'Pa'],
+                obj_dict = {'mat_yield': [api_helpers.mpa_to_pa(self._new_material.get()), 'Pa'],
                             'mat_factor': [self._new_material_factor.get(), ''],
-                            'span': [self._new_field_len.get()/1000, 'm'],
-                            'spacing': [self._new_stf_spacing.get()/1000, 'm'],
-                            'plate_thk': [self._new_plate_thk.get()/1000, 'm'],
-                            'stf_web_height': [self._new_stf_web_h.get()/1000, 'm'],
-                            'stf_web_thk': [self._new_stf_web_t.get()/1000, 'm'],
-                            'stf_flange_width': [self._new_stf_fl_w.get()/1000, 'm'],
-                            'stf_flange_thk': [self._new_stf_fl_t.get()/1000, 'm'],
+                            'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                            'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],
+                            'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
+                            'stf_web_height': [api_helpers.mm_to_m(self._new_stf_web_h.get()), 'm'],
+                            'stf_web_thk': [api_helpers.mm_to_m(self._new_stf_web_t.get()), 'm'],
+                            'stf_flange_width': [api_helpers.mm_to_m(self._new_stf_fl_w.get()), 'm'],
+                            'stf_flange_thk': [api_helpers.mm_to_m(self._new_stf_fl_t.get()), 'm'],
                             'structure_type': [self._new_stucture_type.get(), ''],
                             'stf_type': [self._new_stf_type.get(), ''],
                             'sigma_y1': [self._new_sigma_y1.get(), 'MPa'],
@@ -5255,21 +5255,21 @@ class Application():
                             'puls sp or up':  [self._new_puls_sp_or_up.get(), ''],
                             'puls up boundary': [self._new_puls_up_boundary.get(), ''],
                             'panel or shell': [self._new_panel_or_shell.get(), ''],
-                            'girder_lg': [self._new_girder_length_LG.get()/1000, '']}
+                            'girder_lg': [api_helpers.mm_to_m(self._new_girder_length_LG.get()), '']}
 
                 obj_dict_pl = copy.copy(obj_dict)
                 obj_dict_stf = copy.copy(obj_dict)
                 obj_dict_girder = copy.copy(obj_dict)
 
-                obj_dict_girder['stf_web_height'] =  [self._new_girder_web_h.get()/1000, 'm']
-                obj_dict_girder['stf_web_thk'] = [self._new_girder_web_t.get() / 1000, 'm']
-                obj_dict_girder['stf_flange_width'] = [self._new_girder_fl_w.get() / 1000, 'm']
-                obj_dict_girder['stf_flange_thk'] =  [self._new_girder_fl_t.get() / 1000, 'm']
+                obj_dict_girder['stf_web_height'] = [api_helpers.mm_to_m(self._new_girder_web_h.get()), 'm']
+                obj_dict_girder['stf_web_thk'] = [api_helpers.mm_to_m(self._new_girder_web_t.get()), 'm']
+                obj_dict_girder['stf_flange_width'] = [api_helpers.mm_to_m(self._new_girder_fl_w.get()), 'm']
+                obj_dict_girder['stf_flange_thk'] = [api_helpers.mm_to_m(self._new_girder_fl_t.get()), 'm']
                 obj_dict_girder['stf_type'] = [self._new_girder_type.get(), '']
                 
                 main_dict = dict()
                 main_dict['minimum pressure in adjacent spans'] = [self._new_buckling_min_press_adj_spans.get(), '']
-                main_dict['material yield'] = [self._new_material.get()*1e6, 'Pa']
+                main_dict['material yield'] = [api_helpers.mpa_to_pa(self._new_material.get()), 'Pa']
                 main_dict['load factor on stresses'] = [self._new_buckling_lf_stresses.get(), '']
                 main_dict['load factor on pressure'] = [1, '']
                 main_dict['buckling method'] = [self._new_puls_method.get(), '']
@@ -5308,8 +5308,8 @@ class Application():
                     domain_string = self._new_calculation_domain.get()
                     domain_int = self._shell_geometries_map[domain_string]
 
-                    dummy_data = {'span': [self._new_field_len.get()/1000, 'm'],
-                                  'plate_thk': [self._new_plate_thk.get()/1000, 'm'],
+                    dummy_data = {'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                                  'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
                                   'structure_type': [self._new_stucture_type.get(), ''],
                                   'sigma_y1': [self._new_sigma_y1.get(), 'MPa'],
                                   'sigma_y2': [self._new_sigma_y2.get(), 'MPa'],
@@ -5331,43 +5331,43 @@ class Application():
                                   'puls up boundary': [self._new_puls_up_boundary.get(), ''],
                                   'panel or shell': [self._new_panel_or_shell.get(), ''],
                                   'mat_factor': [self._new_material_factor.get(), '',],
-                                  'spacing': [self._new_stf_spacing.get()/1000, 'm'],}
+                                  'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],}
 
                     # Main class input
 
                     # Shell data input
-                    shell_dict = {'plate_thk': [self._new_shell_thk.get() / 1000, 'm'],
-                                  'radius': [self._new_shell_radius.get() / 1000, 'm'],
-                                  'distance between rings, l': [self._new_shell_dist_rings.get() / 1000, 'm'],
-                                  'length of shell, L': [self._new_shell_length.get() / 1000, 'm'],
-                                  'tot cyl length, Lc': [self._new_shell_tot_length.get() / 1000, 'm'],
+                    shell_dict = {'plate_thk': [api_helpers.mm_to_m(self._new_shell_thk.get()), 'm'],
+                                  'radius': [api_helpers.mm_to_m(self._new_shell_radius.get()), 'm'],
+                                  'distance between rings, l': [api_helpers.mm_to_m(self._new_shell_dist_rings.get()), 'm'],
+                                  'length of shell, L': [api_helpers.mm_to_m(self._new_shell_length.get()), 'm'],
+                                  'tot cyl length, Lc': [api_helpers.mm_to_m(self._new_shell_tot_length.get()), 'm'],
                                   'eff. buckling lenght factor': [self._new_shell_k_factor.get(), ''],
-                                  'mat_yield': [self._new_shell_yield.get() * 1e6, 'Pa'],
+                                  'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
                                   }
                     # Longitudinal stiffener input
-                    long_dict = {'spacing': [self._new_stf_spacing.get() / 1000, 'm'],
-                                 'stf_web_height': [self._new_stf_web_h.get() / 1000, 'm'],
-                                 'stf_web_thk': [self._new_stf_web_t.get() / 1000, 'm'],
-                                 'stf_flange_width': [self._new_stf_fl_w.get() / 1000, 'm'],
-                                 'stf_flange_thk': [self._new_stf_fl_t.get() / 1000, 'm'],
+                    long_dict = {'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],
+                                 'stf_web_height': [api_helpers.mm_to_m(self._new_stf_web_h.get()), 'm'],
+                                 'stf_web_thk': [api_helpers.mm_to_m(self._new_stf_web_t.get()), 'm'],
+                                 'stf_flange_width': [api_helpers.mm_to_m(self._new_stf_fl_w.get()), 'm'],
+                                 'stf_flange_thk': [api_helpers.mm_to_m(self._new_stf_fl_t.get()), 'm'],
                                  'stf_type': [self._new_stf_type.get(), ''],
-                                 'span': [self._new_field_len.get()/1000, 'm'],
-                                 'mat_yield': [self._new_shell_yield.get() * 1e6, 'Pa'],
+                                 'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                                 'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
                                  'panel or shell': ['shell', '']}
-                    ring_stf_dict = {'stf_web_height': [self._new_shell_ring_stf_hw.get() / 1000, 'm'],
-                                     'stf_web_thk': [self._new_shell_ring_stf_tw.get() / 1000, 'm'],
-                                     'stf_flange_width': [self._new_shell_ring_stf_b.get() / 1000, 'm'],
-                                     'stf_flange_thk': [self._new_shell_ring_stf_tf.get() / 1000, 'm'],
+                    ring_stf_dict = {'stf_web_height': [api_helpers.mm_to_m(self._new_shell_ring_stf_hw.get()), 'm'],
+                                     'stf_web_thk': [api_helpers.mm_to_m(self._new_shell_ring_stf_tw.get()), 'm'],
+                                     'stf_flange_width': [api_helpers.mm_to_m(self._new_shell_ring_stf_b.get()), 'm'],
+                                     'stf_flange_thk': [api_helpers.mm_to_m(self._new_shell_ring_stf_tf.get()), 'm'],
                                      'stf_type': [self._new_shell_ring_stf_type.get(), ''],
-                                     'mat_yield': [self._new_shell_yield.get() * 1e6, 'Pa'],
+                                     'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
                                      'panel or shell': ['shell', '']}
-                    ring_frame_dict = {'stf_web_height': [self._new_shell_ring_frame_hw.get() / 1000, 'm'],
-                                       'stf_web_thk': [self._new_shell_ring_frame_tw.get() / 1000, 'm'],
-                                       'stf_flange_width': [self._new_shell_ring_frame_b.get() / 1000, 'm'],
-                                       'stf_flange_thk': [self._new_shell_ring_frame_tf.get() / 1000, 'm'],
+                    ring_frame_dict = {'stf_web_height': [api_helpers.mm_to_m(self._new_shell_ring_frame_hw.get()), 'm'],
+                                       'stf_web_thk': [api_helpers.mm_to_m(self._new_shell_ring_frame_tw.get()), 'm'],
+                                       'stf_flange_width': [api_helpers.mm_to_m(self._new_shell_ring_frame_b.get()), 'm'],
+                                       'stf_flange_thk': [api_helpers.mm_to_m(self._new_shell_ring_frame_tf.get()), 'm'],
                                        'stf_type': [self._new_shell_ring_frame_type.get(), ''],
-                                       'span': [self._new_field_len.get()/1000, 'm'],
-                                       'mat_yield': [self._new_shell_yield.get() * 1e6, 'Pa'],
+                                       'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                                       'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
                                        'panel or shell': ['shell', '']}
 
                     geometry = self._shell_geometries_map[self._new_calculation_domain.get()]
@@ -5400,12 +5400,12 @@ class Application():
                         self._new_shell_Tsd.set(Tsd)
                         self._new_shell_Qsd.set(Qsd)
 
-                    main_dict_cyl = {'sasd': [sasd*1e6, 'Pa'],
-                                 'smsd': [smsd*1e6, 'Pa'],
-                                 'tTsd': [tTsd*1e6, 'Pa'],
-                                 'tQsd': [tQsd*1e6, 'Pa'],
-                                 'psd': [self._new_shell_psd.get() *1e6, 'Pa'],
-                                 'shsd': [shsd *1e6, 'Pa'],
+                    main_dict_cyl = {'sasd': [api_helpers.mpa_to_pa(sasd), 'Pa'],
+                                 'smsd': [api_helpers.mpa_to_pa(smsd), 'Pa'],
+                                 'tTsd': [api_helpers.mpa_to_pa(tTsd), 'Pa'],
+                                 'tQsd': [api_helpers.mpa_to_pa(tQsd), 'Pa'],
+                                 'psd': [api_helpers.mpa_to_pa(self._new_shell_psd.get()), 'Pa'],
+                                 'shsd': [api_helpers.mpa_to_pa(shsd), 'Pa'],
                                  'geometry': [self._shell_geometries_map[self._new_calculation_domain.get()], ''],
                                  'material factor':  [self._new_shell_mat_factor.get(), ''],
                                  'delta0': [0.005, ''],
@@ -5413,9 +5413,10 @@ class Application():
                                  'fab method ring girder':  [self._new_shell_ring_frame_fab_method.get(), ''],
                                  'E-module':  [self._new_shell_e_module.get(), 'Pa'],
                                  'poisson':  [self._new_shell_poisson.get(), ''],
-                                 'mat_yield': [self._new_shell_yield.get() *1e6, 'Pa'],
-                                 'length between girders': [self._new_shell_ring_frame_length_between_girders.get()/1000, 'm'],
-                                 'panel spacing, s': [self._new_shell_panel_spacing.get()/1000, 'm'],
+                                 'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
+                                 'length between girders': [
+                                     api_helpers.mm_to_m(self._new_shell_ring_frame_length_between_girders.get()), 'm'],
+                                 'panel spacing, s': [api_helpers.mm_to_m(self._new_shell_panel_spacing.get()), 'm'],
                                  'ring stf excluded': [self._new_shell_exclude_ring_stf.get(), ''],
                                  'ring frame excluded': [self._new_shell_exclude_ring_frame.get(), '',],
                                      'ULS or ALS': [self._new_shell_uls_or_als.get(), '',],
