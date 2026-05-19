@@ -23,6 +23,11 @@ def readme():
     with open('README.rst') as file:
         return file.read()
 
+core_requires = ['matplotlib', 'numpy', 'Pillow', 'reportlab', 'scipy']
+excel_requires = ['xlwings']
+ml_requires = ['scikit-learn']
+dev_requires = ['build', 'pytest']
+
 setup(
     name='ANYstructure',  # Required
     url = 'https://github.com/audunarn/ANYstructure',
@@ -41,7 +46,14 @@ setup(
         'Topic :: Scientific/Engineering'],
     keywords='dnv-gl-os-c101 dnv-rp-c202 dnv-rp-c201 naval_architecture structural_engineering steel buckling fatigue local_scantlings optimization weight',
     include_package_data=True,
-    install_requires=['matplotlib', 'numpy', 'Pillow', 'reportlab', 'scikit-learn', 'scipy', 'xlwings'],
+    install_requires=core_requires + excel_requires + ml_requires,
+    extras_require={
+        'core': core_requires,
+        'excel': excel_requires,
+        'ml': ml_requires,
+        'dev': dev_requires,
+        'all': core_requires + excel_requires + ml_requires,
+    },
     packages=['anystruct'],
     py_modules = [],
 )
