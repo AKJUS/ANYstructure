@@ -50,17 +50,36 @@ def test_new_structure_delegates_property_building():
         source.index("def new_structure"):
         source.index("def option_meny_structure_type_trace")
     ]
+    resolver = source[
+        source.index("def _resolve_new_structure_properties"):
+        source.index("def _add_structure_to_active_line")
+    ]
+    add_structure = source[
+        source.index("def _add_structure_to_active_line"):
+        source.index("def _scale_existing_flat_structure_if_needed")
+    ]
+    update_structure = source[
+        source.index("def _update_existing_active_line_structure"):
+        source.index("def _calculate_load_combinations_after_structure_update")
+    ]
 
-    assert "self._build_flat_structure_properties()" in new_structure
-    assert "self._build_cylinder_structure_properties()" in new_structure
+    assert "self._build_flat_structure_properties()" in resolver
+    assert "self._build_cylinder_structure_properties()" in resolver
     assert "self._structure_input_is_missing()" in new_structure
-    assert "self._create_all_structure_from_properties(prop_dict)" in new_structure
-    assert "self._create_cylinder_structure_from_properties(" in new_structure
-    assert "self._clear_tanks_and_grid()" in new_structure
+    assert "self._create_all_structure_from_properties(prop_dict)" in add_structure
+    assert "self._create_cylinder_structure_from_properties(" in add_structure
+    assert "self._clear_tanks_and_grid()" in add_structure
+    assert "self._clear_tanks_and_grid()" in update_structure
     assert "self._refresh_after_structure_change(suspend_recalc)" in new_structure
+    assert "self._resolve_new_structure_properties(" in new_structure
+    assert "self._add_structure_to_active_line(" in new_structure
+    assert "self._update_existing_active_line_structure(" in new_structure
+    assert "self._calculate_load_combinations_after_structure_update()" in new_structure
     assert "obj_dict = {" not in new_structure
     assert "shell_dict = {" not in new_structure
     assert "AllStructure(" not in new_structure
     assert "CylinderAndCurvedPlate(" not in new_structure
     assert "self._tank_dict = {}" not in new_structure
     assert "self.update_frame()" not in new_structure
+    assert "set_main_properties(prop_dict)" not in new_structure
+    assert "calculate_all_load_combinations_for_line_all_lines()" not in new_structure
