@@ -105,15 +105,15 @@ class FlatStru():
         :return:
         :rtype:
         '''
-        self._FlatStructure.mat_yield = mat_yield*1e6
-        self._FlatStructure.E = emodule*1e6
+        self._FlatStructure.mat_yield = api_helpers.mpa_to_pa(mat_yield)
+        self._FlatStructure.E = api_helpers.mpa_to_pa(emodule)
         self._FlatStructure.v = poisson
         self._FlatStructure.mat_factor = material_factor
 
         for sub_cls in [self.Plate, self.Stiffeners, self.Girder]:
             if sub_cls is not None:
-                sub_cls.mat_yield = mat_yield * 1e6
-                sub_cls.E = emodule * 1e6
+                sub_cls.mat_yield = api_helpers.mpa_to_pa(mat_yield)
+                sub_cls.E = api_helpers.mpa_to_pa(emodule)
                 sub_cls.v = poisson
                 sub_cls.mat_factor = material_factor
 
@@ -178,7 +178,7 @@ class FlatStru():
 
         self._FlatStructure.Plate.t = thickness
         self._FlatStructure.Plate.spacing = spacing
-        self._FlatStructure.Plate.span = span/1000
+        self._FlatStructure.Plate.span = api_helpers.mm_to_m(span)
         self._FlatStructure.Plate.girder_lg = 10 # placeholder value
 
     
@@ -426,12 +426,12 @@ class CylStru():
         :rtype:
         '''
 
-        self._CylinderMain.sasd = sasd*1e6
-        self._CylinderMain.smsd = smsd*1e6
-        self._CylinderMain.tTsd = abs(tTsd*1e6)
-        self._CylinderMain.tQsd = abs(tQsd*1e6)
-        self._CylinderMain.psd = psd*1e6
-        self._CylinderMain.shsd = shsd*1e6
+        self._CylinderMain.sasd = api_helpers.mpa_to_pa(sasd)
+        self._CylinderMain.smsd = api_helpers.mpa_to_pa(smsd)
+        self._CylinderMain.tTsd = abs(api_helpers.mpa_to_pa(tTsd))
+        self._CylinderMain.tQsd = abs(api_helpers.mpa_to_pa(tQsd))
+        self._CylinderMain.psd = api_helpers.mpa_to_pa(psd)
+        self._CylinderMain.shsd = api_helpers.mpa_to_pa(shsd)
 
     def set_forces(self, Nsd: float = 0, Msd: float = 0, Tsd: float = 0, Qsd: float = 0, psd: float = 0):
         '''
@@ -481,8 +481,8 @@ class CylStru():
         :return:
         :rtype:
         '''
-        self._CylinderMain.mat_yield = mat_yield*1e6
-        self._CylinderMain.E = emodule*1e6
+        self._CylinderMain.mat_yield = api_helpers.mpa_to_pa(mat_yield)
+        self._CylinderMain.E = api_helpers.mpa_to_pa(emodule)
         self._CylinderMain.v = poisson
         self._CylinderMain.mat_factor = material_factor
     def set_imperfection(self, delta_0 = 0.005):
@@ -578,7 +578,7 @@ class CylStru():
         :return:
         :rtype:
         '''
-        self._CylinderMain.panel_spacing = val/1000
+        self._CylinderMain.panel_spacing = api_helpers.mm_to_m(val)
 
     def set_shell_geometry(self, radius: float = 0, thickness: float = 0,distance_between_rings: float = 0,
                            tot_length_of_shell: float = 0):
@@ -597,15 +597,15 @@ class CylStru():
         :rtype:
         '''
 
-        self._CylinderMain.ShellObj.radius = radius/1000
-        self._CylinderMain.ShellObj.thk = thickness/1000
-        self._CylinderMain.ShellObj.dist_between_rings = distance_between_rings/1000
+        self._CylinderMain.ShellObj.radius = api_helpers.mm_to_m(radius)
+        self._CylinderMain.ShellObj.thk = api_helpers.mm_to_m(thickness)
+        self._CylinderMain.ShellObj.dist_between_rings = api_helpers.mm_to_m(distance_between_rings)
         if tot_length_of_shell == 0:
             # Setting a default.
-            self._CylinderMain.ShellObj.length_of_shell = distance_between_rings * 10/1000
-            self._CylinderMain.ShellObj.tot_cyl_length = distance_between_rings * 10/1000
+            self._CylinderMain.ShellObj.length_of_shell = api_helpers.mm_to_m(distance_between_rings * 10)
+            self._CylinderMain.ShellObj.tot_cyl_length = api_helpers.mm_to_m(distance_between_rings * 10)
         else:
-            self._CylinderMain.ShellObj.tot_cyl_length = tot_length_of_shell/1000
+            self._CylinderMain.ShellObj.tot_cyl_length = api_helpers.mm_to_m(tot_length_of_shell)
 
     def set_shell_buckling_parmeters(self, eff_buckling_length_factor: float = 1.0):
         '''
@@ -746,7 +746,6 @@ if __name__ == '__main__':
     #     print(key, val)
     #
     # print(my_flat.get_special_provisions_results())
-
 
 
 
