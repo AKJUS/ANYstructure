@@ -5181,6 +5181,216 @@ class Application():
             messagebox.showinfo(title='Input error', message='Input must be a line number.')
         return current_name
 
+    def _is_flat_calculation_domain(self, calculation_domain):
+        return calculation_domain in api_helpers.FLAT_STRUCTURE_DOMAINS
+
+    def _build_flat_structure_properties(self):
+        calc_dom = self._new_calculation_domain.get()
+        obj_dict = {'mat_yield': [api_helpers.mpa_to_pa(self._new_material.get()), 'Pa'],
+                    'mat_factor': [self._new_material_factor.get(), ''],
+                    'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                    'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],
+                    'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
+                    'stf_web_height': [api_helpers.mm_to_m(self._new_stf_web_h.get()), 'm'],
+                    'stf_web_thk': [api_helpers.mm_to_m(self._new_stf_web_t.get()), 'm'],
+                    'stf_flange_width': [api_helpers.mm_to_m(self._new_stf_fl_w.get()), 'm'],
+                    'stf_flange_thk': [api_helpers.mm_to_m(self._new_stf_fl_t.get()), 'm'],
+                    'structure_type': [self._new_stucture_type.get(), ''],
+                    'stf_type': [self._new_stf_type.get(), ''],
+                    'sigma_y1': [self._new_sigma_y1.get(), 'MPa'],
+                    'sigma_y2': [self._new_sigma_y2.get(), 'MPa'],
+                    'sigma_x1': [self._new_sigma_x1.get(), 'MPa'],
+                    'sigma_x2': [self._new_sigma_x2.get(), 'MPa'],
+                    'tau_xy': [self._new_tauxy.get(), 'MPa'],
+                    'plate_kpp': [self._new_plate_kpp.get(), ''],
+                    'stf_kps': [self._new_stf_kps.get(), ''],
+                    'stf_km1': [self._new_stf_km1.get(), ''],
+                    'stf_km2': [self._new_stf_km2.get(), ''],
+                    'stf_km3': [self._new_stf_km3.get(), ''],
+                    'press_side': [self._new_pressure_side.get(), ''],
+                    'structure_types':[self._structure_types, ''],
+                    'zstar_optimization': [self._new_zstar_optimization.get(), ''],
+                    'puls buckling method': [self._new_puls_method.get(), ''],
+                    'puls boundary': [self._new_puls_panel_boundary.get(), ''],
+                    'puls stiffener end': [self._new_buckling_stf_end_support.get(), ''],
+                    'puls sp or up':  [self._new_puls_sp_or_up.get(), ''],
+                    'puls up boundary': [self._new_puls_up_boundary.get(), ''],
+                    'panel or shell': [self._new_panel_or_shell.get(), ''],
+                    'girder_lg': [api_helpers.mm_to_m(self._new_girder_length_LG.get()), '']}
+
+        obj_dict_pl = copy.copy(obj_dict)
+        obj_dict_stf = copy.copy(obj_dict)
+        obj_dict_girder = copy.copy(obj_dict)
+
+        obj_dict_girder['stf_web_height'] = [api_helpers.mm_to_m(self._new_girder_web_h.get()), 'm']
+        obj_dict_girder['stf_web_thk'] = [api_helpers.mm_to_m(self._new_girder_web_t.get()), 'm']
+        obj_dict_girder['stf_flange_width'] = [api_helpers.mm_to_m(self._new_girder_fl_w.get()), 'm']
+        obj_dict_girder['stf_flange_thk'] = [api_helpers.mm_to_m(self._new_girder_fl_t.get()), 'm']
+        obj_dict_girder['stf_type'] = [self._new_girder_type.get(), '']
+
+        main_dict = dict()
+        main_dict['minimum pressure in adjacent spans'] = [self._new_buckling_min_press_adj_spans.get(), '']
+        main_dict['material yield'] = [api_helpers.mpa_to_pa(self._new_material.get()), 'Pa']
+        main_dict['load factor on stresses'] = [self._new_buckling_lf_stresses.get(), '']
+        main_dict['load factor on pressure'] = [1, '']
+        main_dict['buckling method'] = [self._new_puls_method.get(), '']
+        main_dict['stiffener end support'] =[self._new_buckling_stf_end_support.get(), '']  # 'Continuous'
+        main_dict['girder end support'] = [self._new_buckling_girder_end_support.get(), '']  # 'Continuous'
+        main_dict['tension field'] = [self._new_buckling_tension_field.get(), '']  # 'not allowed'
+        main_dict['plate effective agains sigy'] = [self._new_buckling_effective_against_sigy.get(), '']  # True
+        main_dict['buckling length factor stf'] = [self._new_buckling_length_factor_stf.get(), '']
+        main_dict['buckling length factor girder'] = [self._new_buckling_length_factor_stf.get(), '']
+        main_dict['km3'] = [self._new_buckling_km3.get(), '']  # 12
+        main_dict['km2'] = [self._new_buckling_km2.get(), '']  # 24
+        main_dict['girder distance between lateral support'] = [self._new_buckling_girder_dist_bet_lat_supp.get(), '']
+        main_dict['stiffener distance between lateral support'] = [self._new_buckling_stf_dist_bet_lat_supp.get(), '']
+        main_dict['panel length, Lp'] = [self._new_panel_length_Lp.get(), '']
+        main_dict['pressure side'] = [self._new_pressure_side.get(), '']  # either 'stiffener', 'plate', 'both'
+        main_dict['fabrication method stiffener'] = [self._new_buckling_fab_method_stf.get(), '']
+        main_dict['fabrication method girder'] = [self._new_buckling_fab_method_girder.get(), '']
+        main_dict['calculation domain'] = [self._new_calculation_domain.get(), '']
+
+        prop_dict = {'main dict': main_dict,
+                     'Plate': obj_dict_pl,
+                     'Stiffener': None if calc_dom == 'Flat plate, unstiffened' else obj_dict_stf,
+                     'Girder': None if calc_dom in ['Flat plate, unstiffened', 'Flat plate, stiffened']
+                     else obj_dict_girder}
+
+        return prop_dict, obj_dict_stf
+
+    def _build_cylinder_structure_properties(self):
+        domain_string = self._new_calculation_domain.get()
+        geometry = api_helpers.geometry_id_for_domain(domain_string)
+
+        dummy_data = {'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                      'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
+                      'structure_type': [self._new_stucture_type.get(), ''],
+                      'sigma_y1': [self._new_sigma_y1.get(), 'MPa'],
+                      'sigma_y2': [self._new_sigma_y2.get(), 'MPa'],
+                      'sigma_x1': [self._new_sigma_x1.get(), 'MPa'],
+                      'sigma_x2': [self._new_sigma_x2.get(), 'MPa'],
+                      'tau_xy': [self._new_tauxy.get(), 'MPa'],
+                      'plate_kpp': [self._new_plate_kpp.get(), ''],
+                      'stf_kps': [self._new_stf_kps.get(), ''],
+                      'stf_km1': [self._new_stf_km1.get(), ''],
+                      'stf_km2': [self._new_stf_km2.get(), ''],
+                      'stf_km3': [self._new_stf_km3.get(), ''],
+                      'press_side': [self._new_pressure_side.get(), ''],
+                      'structure_types':[self._structure_types, ''],
+                      'zstar_optimization': [self._new_zstar_optimization.get(), ''],
+                      'puls buckling method': [self._new_puls_method.get(), ''],
+                      'puls boundary': [self._new_puls_panel_boundary.get(), ''],
+                      'puls stiffener end': [self._new_buckling_stf_end_support.get(), ''],
+                      'puls sp or up':  [self._new_puls_sp_or_up.get(), ''],
+                      'puls up boundary': [self._new_puls_up_boundary.get(), ''],
+                      'panel or shell': [self._new_panel_or_shell.get(), ''],
+                      'mat_factor': [self._new_material_factor.get(), '',],
+                      'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],}
+
+        shell_dict = {'plate_thk': [api_helpers.mm_to_m(self._new_shell_thk.get()), 'm'],
+                      'radius': [api_helpers.mm_to_m(self._new_shell_radius.get()), 'm'],
+                      'distance between rings, l': [api_helpers.mm_to_m(self._new_shell_dist_rings.get()), 'm'],
+                      'length of shell, L': [api_helpers.mm_to_m(self._new_shell_length.get()), 'm'],
+                      'tot cyl length, Lc': [api_helpers.mm_to_m(self._new_shell_tot_length.get()), 'm'],
+                      'eff. buckling lenght factor': [self._new_shell_k_factor.get(), ''],
+                      'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
+                      }
+
+        long_dict = {'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],
+                     'stf_web_height': [api_helpers.mm_to_m(self._new_stf_web_h.get()), 'm'],
+                     'stf_web_thk': [api_helpers.mm_to_m(self._new_stf_web_t.get()), 'm'],
+                     'stf_flange_width': [api_helpers.mm_to_m(self._new_stf_fl_w.get()), 'm'],
+                     'stf_flange_thk': [api_helpers.mm_to_m(self._new_stf_fl_t.get()), 'm'],
+                     'stf_type': [self._new_stf_type.get(), ''],
+                     'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                     'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
+                     'panel or shell': ['shell', '']}
+        ring_stf_dict = {'stf_web_height': [api_helpers.mm_to_m(self._new_shell_ring_stf_hw.get()), 'm'],
+                         'stf_web_thk': [api_helpers.mm_to_m(self._new_shell_ring_stf_tw.get()), 'm'],
+                         'stf_flange_width': [api_helpers.mm_to_m(self._new_shell_ring_stf_b.get()), 'm'],
+                         'stf_flange_thk': [api_helpers.mm_to_m(self._new_shell_ring_stf_tf.get()), 'm'],
+                         'stf_type': [self._new_shell_ring_stf_type.get(), ''],
+                         'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
+                         'panel or shell': ['shell', '']}
+        ring_frame_dict = {'stf_web_height': [api_helpers.mm_to_m(self._new_shell_ring_frame_hw.get()), 'm'],
+                           'stf_web_thk': [api_helpers.mm_to_m(self._new_shell_ring_frame_tw.get()), 'm'],
+                           'stf_flange_width': [api_helpers.mm_to_m(self._new_shell_ring_frame_b.get()), 'm'],
+                           'stf_flange_thk': [api_helpers.mm_to_m(self._new_shell_ring_frame_tf.get()), 'm'],
+                           'stf_type': [self._new_shell_ring_frame_type.get(), ''],
+                           'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
+                           'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
+                           'panel or shell': ['shell', '']}
+
+        if self._new_shell_stress_or_force.get() == 1:
+            forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(),
+                      self._new_shell_Tsd.get(), self._new_shell_Qsd.get()]
+            sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+                stresses=None, forces=forces,  geometry=geometry, shell_t=self._new_shell_thk.get(),
+                shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
+                hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
+                tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+            self._new_shell_sasd.set(sasd)
+            self._new_shell_smsd.set(smsd)
+            self._new_shell_tTsd.set(tTsd)
+            self._new_shell_tQsd.set(tQsd)
+        else:
+            stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(),
+                        abs(self._new_shell_tTsd.get()),
+                        self._new_shell_tQsd.get(), self._new_shell_shsd.get()]
+            sasd, smsd, tTsd, tQsd, shsd = stresses
+            Nsd, Msd, Tsd, Qsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+                stresses=stresses, geometry=geometry, shell_t=self._new_shell_thk.get(),
+                shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
+                hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
+                tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+            self._new_shell_Nsd.set(Nsd)
+            self._new_shell_Msd.set(Msd)
+            self._new_shell_Tsd.set(Tsd)
+            self._new_shell_Qsd.set(Qsd)
+
+        main_dict_cyl = {'sasd': [api_helpers.mpa_to_pa(sasd), 'Pa'],
+                     'smsd': [api_helpers.mpa_to_pa(smsd), 'Pa'],
+                     'tTsd': [api_helpers.mpa_to_pa(tTsd), 'Pa'],
+                     'tQsd': [api_helpers.mpa_to_pa(tQsd), 'Pa'],
+                     'psd': [api_helpers.mpa_to_pa(self._new_shell_psd.get()), 'Pa'],
+                     'shsd': [api_helpers.mpa_to_pa(shsd), 'Pa'],
+                     'geometry': [api_helpers.geometry_id_for_domain(self._new_calculation_domain.get()), ''],
+                     'material factor':  [self._new_shell_mat_factor.get(), ''],
+                     'delta0': [0.005, ''],
+                     'fab method ring stf':  [self._new_shell_ring_stf_fab_method.get(), ''],
+                     'fab method ring girder':  [self._new_shell_ring_frame_fab_method.get(), ''],
+                     'E-module':  [self._new_shell_e_module.get(), 'Pa'],
+                     'poisson':  [self._new_shell_poisson.get(), ''],
+                     'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
+                     'length between girders': [
+                         api_helpers.mm_to_m(self._new_shell_ring_frame_length_between_girders.get()), 'm'],
+                     'panel spacing, s': [api_helpers.mm_to_m(self._new_shell_panel_spacing.get()), 'm'],
+                     'ring stf excluded': [self._new_shell_exclude_ring_stf.get(), ''],
+                     'ring frame excluded': [self._new_shell_exclude_ring_frame.get(), '',],
+                         'ULS or ALS': [self._new_shell_uls_or_als.get(), '',],
+                         'end cap pressure': [self._new_shell_end_cap_pressure_included.get(), '']
+        }
+
+        for key, value in dummy_data.items():
+            if key not in long_dict.keys():
+                long_dict[key] = value
+            if key not in ring_stf_dict.keys():
+                ring_stf_dict[key] = value
+            if key not in ring_frame_dict.keys():
+                ring_frame_dict[key] = value
+
+        CylinderObj = CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
+                                             long_stf=None if geometry in [1,2,5,6]
+                                             else Structure(long_dict),
+                                              ring_stf=None if any([geometry in [1,2,3,4],
+                                                                    self._new_shell_exclude_ring_stf.get()])
+                                              else Structure(ring_stf_dict),
+                                              ring_frame=None if any([geometry in [1,2,3,4],
+                                                                      self._new_shell_exclude_ring_frame.get()])
+                                              else Structure(ring_frame_dict))
+
+        return CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry
+
     def new_structure(self, event = None, pasted_structure = None, multi_return = None, toggle_multi = None,
                       suspend_recalc = False, cylinder_return = None):
         '''
@@ -5201,8 +5411,7 @@ class Application():
 
         if all([pasted_structure == None, multi_return == None]):
             missing_input = False
-            if self._new_calculation_domain.get() in ['Flat plate, stiffened', 'Flat plate, unstiffened',
-                                                          'Flat plate, stiffened with girder']:
+            if self._is_flat_calculation_domain(self._new_calculation_domain.get()):
                 if any([self._new_stf_spacing.get()==0, self._new_plate_thk.get()==0, self._new_stf_web_h.get()==0,
                         self._new_stf_web_t.get()==0]): # TODO must account for calculation domain
                     missing_input = True
@@ -5223,223 +5432,11 @@ class Application():
             elif toggle_multi is not None:
                 prop_dict = toggle_multi
             elif pasted_structure is None:
-                calc_dom = self._new_calculation_domain.get()
+                prop_dict, obj_dict_stf = self._build_flat_structure_properties()
 
-                obj_dict = {'mat_yield': [api_helpers.mpa_to_pa(self._new_material.get()), 'Pa'],
-                            'mat_factor': [self._new_material_factor.get(), ''],
-                            'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
-                            'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],
-                            'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
-                            'stf_web_height': [api_helpers.mm_to_m(self._new_stf_web_h.get()), 'm'],
-                            'stf_web_thk': [api_helpers.mm_to_m(self._new_stf_web_t.get()), 'm'],
-                            'stf_flange_width': [api_helpers.mm_to_m(self._new_stf_fl_w.get()), 'm'],
-                            'stf_flange_thk': [api_helpers.mm_to_m(self._new_stf_fl_t.get()), 'm'],
-                            'structure_type': [self._new_stucture_type.get(), ''],
-                            'stf_type': [self._new_stf_type.get(), ''],
-                            'sigma_y1': [self._new_sigma_y1.get(), 'MPa'],
-                            'sigma_y2': [self._new_sigma_y2.get(), 'MPa'],
-                            'sigma_x1': [self._new_sigma_x1.get(), 'MPa'],
-                            'sigma_x2': [self._new_sigma_x2.get(), 'MPa'],
-                            'tau_xy': [self._new_tauxy.get(), 'MPa'],
-                            'plate_kpp': [self._new_plate_kpp.get(), ''],
-                            'stf_kps': [self._new_stf_kps.get(), ''],
-                            'stf_km1': [self._new_stf_km1.get(), ''],
-                            'stf_km2': [self._new_stf_km2.get(), ''],
-                            'stf_km3': [self._new_stf_km3.get(), ''],
-                            'press_side': [self._new_pressure_side.get(), ''],
-                            'structure_types':[self._structure_types, ''],
-                            'zstar_optimization': [self._new_zstar_optimization.get(), ''],
-                            'puls buckling method': [self._new_puls_method.get(), ''],
-                            'puls boundary': [self._new_puls_panel_boundary.get(), ''],
-                            'puls stiffener end': [self._new_buckling_stf_end_support.get(), ''],
-                            'puls sp or up':  [self._new_puls_sp_or_up.get(), ''],
-                            'puls up boundary': [self._new_puls_up_boundary.get(), ''],
-                            'panel or shell': [self._new_panel_or_shell.get(), ''],
-                            'girder_lg': [api_helpers.mm_to_m(self._new_girder_length_LG.get()), '']}
-
-                obj_dict_pl = copy.copy(obj_dict)
-                obj_dict_stf = copy.copy(obj_dict)
-                obj_dict_girder = copy.copy(obj_dict)
-
-                obj_dict_girder['stf_web_height'] = [api_helpers.mm_to_m(self._new_girder_web_h.get()), 'm']
-                obj_dict_girder['stf_web_thk'] = [api_helpers.mm_to_m(self._new_girder_web_t.get()), 'm']
-                obj_dict_girder['stf_flange_width'] = [api_helpers.mm_to_m(self._new_girder_fl_w.get()), 'm']
-                obj_dict_girder['stf_flange_thk'] = [api_helpers.mm_to_m(self._new_girder_fl_t.get()), 'm']
-                obj_dict_girder['stf_type'] = [self._new_girder_type.get(), '']
-                
-                main_dict = dict()
-                main_dict['minimum pressure in adjacent spans'] = [self._new_buckling_min_press_adj_spans.get(), '']
-                main_dict['material yield'] = [api_helpers.mpa_to_pa(self._new_material.get()), 'Pa']
-                main_dict['load factor on stresses'] = [self._new_buckling_lf_stresses.get(), '']
-                main_dict['load factor on pressure'] = [1, '']
-                main_dict['buckling method'] = [self._new_puls_method.get(), '']
-                main_dict['stiffener end support'] =[self._new_buckling_stf_end_support.get(), '']  # 'Continuous'
-                main_dict['girder end support'] = [self._new_buckling_girder_end_support.get(), '']  # 'Continuous'
-                main_dict['tension field'] = [self._new_buckling_tension_field.get(), '']  # 'not allowed'
-                main_dict['plate effective agains sigy'] = [self._new_buckling_effective_against_sigy.get(), '']  # True
-                main_dict['buckling length factor stf'] = [self._new_buckling_length_factor_stf.get(), '']
-                main_dict['buckling length factor girder'] = [self._new_buckling_length_factor_stf.get(), '']
-                main_dict['km3'] = [self._new_buckling_km3.get(), '']  # 12
-                main_dict['km2'] = [self._new_buckling_km2.get(), '']  # 24
-                main_dict['girder distance between lateral support'] = [self._new_buckling_girder_dist_bet_lat_supp.get(), '']
-                main_dict['stiffener distance between lateral support'] = [self._new_buckling_stf_dist_bet_lat_supp.get(), '']
-                main_dict['panel length, Lp'] = [self._new_panel_length_Lp.get(), '']
-                main_dict['pressure side'] = [self._new_pressure_side.get(), '']  # either 'stiffener', 'plate', 'both'
-                main_dict['fabrication method stiffener'] = [self._new_buckling_fab_method_stf.get(), '']
-                main_dict['fabrication method girder'] = [self._new_buckling_fab_method_girder.get(), '']
-                main_dict['calculation domain'] = [self._new_calculation_domain.get(), '']
-
-
-                prop_dict = {'main dict': main_dict,
-                             'Plate': obj_dict_pl,
-                             'Stiffener': None if calc_dom == 'Flat plate, unstiffened' else obj_dict_stf,
-                             'Girder': None if calc_dom in ['Flat plate, unstiffened', 'Flat plate, stiffened']
-                             else obj_dict_girder}
-
-                if self._new_calculation_domain.get() not in ['Flat plate, stiffened','Flat plate, unstiffened',
-                                                  'Flat plate, stiffened with girder'] and cylinder_return is None:
-                    '''
-                    Shell structure.
-                     0:'Stiffened panel, flat', 1:'Unstiffened shell (Force input)', 2:'Unstiffened panel (Stress input)',
-                     3:'Longitudinal Stiffened shell (Force input)', 4:'Longitudinal Stiffened panel (Stress input)',
-                     5:'Ring Stiffened shell (Force input)', 6:'Ring Stiffened panel (Stress input)',
-                     7:'Orthogonally Stiffened shell (Force input)', 8:'Orthogonally Stiffened panel (Stress input)'
-                    '''
-                    domain_string = self._new_calculation_domain.get()
-                    domain_int = api_helpers.geometry_id_for_domain(domain_string)
-
-                    dummy_data = {'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
-                                  'plate_thk': [api_helpers.mm_to_m(self._new_plate_thk.get()), 'm'],
-                                  'structure_type': [self._new_stucture_type.get(), ''],
-                                  'sigma_y1': [self._new_sigma_y1.get(), 'MPa'],
-                                  'sigma_y2': [self._new_sigma_y2.get(), 'MPa'],
-                                  'sigma_x1': [self._new_sigma_x1.get(), 'MPa'],
-                                  'sigma_x2': [self._new_sigma_x2.get(), 'MPa'],
-                                  'tau_xy': [self._new_tauxy.get(), 'MPa'],
-                                  'plate_kpp': [self._new_plate_kpp.get(), ''],
-                                  'stf_kps': [self._new_stf_kps.get(), ''],
-                                  'stf_km1': [self._new_stf_km1.get(), ''],
-                                  'stf_km2': [self._new_stf_km2.get(), ''],
-                                  'stf_km3': [self._new_stf_km3.get(), ''],
-                                  'press_side': [self._new_pressure_side.get(), ''],
-                                  'structure_types':[self._structure_types, ''],
-                                  'zstar_optimization': [self._new_zstar_optimization.get(), ''],
-                                  'puls buckling method': [self._new_puls_method.get(), ''],
-                                  'puls boundary': [self._new_puls_panel_boundary.get(), ''],
-                                  'puls stiffener end': [self._new_buckling_stf_end_support.get(), ''],
-                                  'puls sp or up':  [self._new_puls_sp_or_up.get(), ''],
-                                  'puls up boundary': [self._new_puls_up_boundary.get(), ''],
-                                  'panel or shell': [self._new_panel_or_shell.get(), ''],
-                                  'mat_factor': [self._new_material_factor.get(), '',],
-                                  'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],}
-
-                    # Main class input
-
-                    # Shell data input
-                    shell_dict = {'plate_thk': [api_helpers.mm_to_m(self._new_shell_thk.get()), 'm'],
-                                  'radius': [api_helpers.mm_to_m(self._new_shell_radius.get()), 'm'],
-                                  'distance between rings, l': [api_helpers.mm_to_m(self._new_shell_dist_rings.get()), 'm'],
-                                  'length of shell, L': [api_helpers.mm_to_m(self._new_shell_length.get()), 'm'],
-                                  'tot cyl length, Lc': [api_helpers.mm_to_m(self._new_shell_tot_length.get()), 'm'],
-                                  'eff. buckling lenght factor': [self._new_shell_k_factor.get(), ''],
-                                  'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
-                                  }
-                    # Longitudinal stiffener input
-                    long_dict = {'spacing': [api_helpers.mm_to_m(self._new_stf_spacing.get()), 'm'],
-                                 'stf_web_height': [api_helpers.mm_to_m(self._new_stf_web_h.get()), 'm'],
-                                 'stf_web_thk': [api_helpers.mm_to_m(self._new_stf_web_t.get()), 'm'],
-                                 'stf_flange_width': [api_helpers.mm_to_m(self._new_stf_fl_w.get()), 'm'],
-                                 'stf_flange_thk': [api_helpers.mm_to_m(self._new_stf_fl_t.get()), 'm'],
-                                 'stf_type': [self._new_stf_type.get(), ''],
-                                 'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
-                                 'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
-                                 'panel or shell': ['shell', '']}
-                    ring_stf_dict = {'stf_web_height': [api_helpers.mm_to_m(self._new_shell_ring_stf_hw.get()), 'm'],
-                                     'stf_web_thk': [api_helpers.mm_to_m(self._new_shell_ring_stf_tw.get()), 'm'],
-                                     'stf_flange_width': [api_helpers.mm_to_m(self._new_shell_ring_stf_b.get()), 'm'],
-                                     'stf_flange_thk': [api_helpers.mm_to_m(self._new_shell_ring_stf_tf.get()), 'm'],
-                                     'stf_type': [self._new_shell_ring_stf_type.get(), ''],
-                                     'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
-                                     'panel or shell': ['shell', '']}
-                    ring_frame_dict = {'stf_web_height': [api_helpers.mm_to_m(self._new_shell_ring_frame_hw.get()), 'm'],
-                                       'stf_web_thk': [api_helpers.mm_to_m(self._new_shell_ring_frame_tw.get()), 'm'],
-                                       'stf_flange_width': [api_helpers.mm_to_m(self._new_shell_ring_frame_b.get()), 'm'],
-                                       'stf_flange_thk': [api_helpers.mm_to_m(self._new_shell_ring_frame_tf.get()), 'm'],
-                                       'stf_type': [self._new_shell_ring_frame_type.get(), ''],
-                                       'span': [api_helpers.mm_to_m(self._new_field_len.get()), 'm'],
-                                       'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
-                                       'panel or shell': ['shell', '']}
-
-                    geometry = api_helpers.geometry_id_for_domain(self._new_calculation_domain.get())
-
-                    if self._new_shell_stress_or_force.get() == 1:
-                        forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(),
-                                  self._new_shell_Tsd.get(), self._new_shell_Qsd.get()]
-                        sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
-                            stresses=None, forces=forces,  geometry=geometry, shell_t=self._new_shell_thk.get(),
-                            shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
-                            hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
-                            tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
-                        self._new_shell_sasd.set(sasd)
-                        self._new_shell_smsd.set(smsd)
-                        self._new_shell_tTsd.set(tTsd)
-                        self._new_shell_tQsd.set(tQsd)
-                        #self._new_shell_shsd.set(0)
-                    else:
-                        stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(),
-                                    abs(self._new_shell_tTsd.get()),
-                                    self._new_shell_tQsd.get(), self._new_shell_shsd.get()]
-                        sasd, smsd, tTsd, tQsd, shsd = stresses
-                        Nsd, Msd, Tsd, Qsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
-                            stresses=stresses, geometry=geometry, shell_t=self._new_shell_thk.get(),
-                            shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
-                            hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
-                            tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
-                        self._new_shell_Nsd.set(Nsd)
-                        self._new_shell_Msd.set(Msd)
-                        self._new_shell_Tsd.set(Tsd)
-                        self._new_shell_Qsd.set(Qsd)
-
-                    main_dict_cyl = {'sasd': [api_helpers.mpa_to_pa(sasd), 'Pa'],
-                                 'smsd': [api_helpers.mpa_to_pa(smsd), 'Pa'],
-                                 'tTsd': [api_helpers.mpa_to_pa(tTsd), 'Pa'],
-                                 'tQsd': [api_helpers.mpa_to_pa(tQsd), 'Pa'],
-                                 'psd': [api_helpers.mpa_to_pa(self._new_shell_psd.get()), 'Pa'],
-                                 'shsd': [api_helpers.mpa_to_pa(shsd), 'Pa'],
-                                 'geometry': [api_helpers.geometry_id_for_domain(self._new_calculation_domain.get()), ''],
-                                 'material factor':  [self._new_shell_mat_factor.get(), ''],
-                                 'delta0': [0.005, ''],
-                                 'fab method ring stf':  [self._new_shell_ring_stf_fab_method.get(), ''],
-                                 'fab method ring girder':  [self._new_shell_ring_frame_fab_method.get(), ''],
-                                 'E-module':  [self._new_shell_e_module.get(), 'Pa'],
-                                 'poisson':  [self._new_shell_poisson.get(), ''],
-                                 'mat_yield': [api_helpers.mpa_to_pa(self._new_shell_yield.get()), 'Pa'],
-                                 'length between girders': [
-                                     api_helpers.mm_to_m(self._new_shell_ring_frame_length_between_girders.get()), 'm'],
-                                 'panel spacing, s': [api_helpers.mm_to_m(self._new_shell_panel_spacing.get()), 'm'],
-                                 'ring stf excluded': [self._new_shell_exclude_ring_stf.get(), ''],
-                                 'ring frame excluded': [self._new_shell_exclude_ring_frame.get(), '',],
-                                     'ULS or ALS': [self._new_shell_uls_or_als.get(), '',],
-                                     'end cap pressure': [self._new_shell_end_cap_pressure_included.get(), '']
-                    }
-
-                    for key, value in dummy_data.items():
-                        if key not in long_dict.keys():
-                            long_dict[key] = value
-                        if key not in ring_stf_dict.keys():
-                            ring_stf_dict[key] = value
-                        if key not in ring_frame_dict.keys():
-                            ring_frame_dict[key] = value
-
-                    CylinderObj = CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
-                                                         long_stf=None if geometry in [1,2,5,6]
-                                                         else Structure(long_dict),
-                                                          ring_stf=None if any([geometry in [1,2,3,4],
-                                                                                self._new_shell_exclude_ring_stf.get()])
-                                                          else Structure(ring_stf_dict),
-                                                          ring_frame=None if any([geometry in [1,2,3,4],
-                                                                                  self._new_shell_exclude_ring_frame.get()])
-                                                          else Structure(ring_frame_dict))
+                if not self._is_flat_calculation_domain(self._new_calculation_domain.get()) and cylinder_return is None:
+                    CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
+                        self._build_cylinder_structure_properties()
                 elif cylinder_return is not None:
                     main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
                         cylinder_return.get_all_properties()
@@ -5467,8 +5464,7 @@ class Application():
                     self._tank_dict = {}
                     self._main_grid.clear()
                     self._compartments_listbox.delete(0, 'end')
-                if self._new_calculation_domain.get() not in ['Flat plate, stiffened','Flat plate, unstiffened',
-                                                  'Flat plate, stiffened with girder']:
+                if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
                     CylinderObj = CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
                                                          long_stf=None if geometry in [1,2,5,6]
                                                          else Structure(long_dict),
