@@ -64,6 +64,8 @@ GEOMETRY_IDS = {
     **CYLINDER_GEOMETRY_IDS,
 }
 
+GEOMETRY_DOMAINS = {value: key for key, value in GEOMETRY_IDS.items()}
+
 
 def assert_choice(value, choices, label):
     assert value in choices, f"{label} must be one of: {list(choices)}"
@@ -81,6 +83,10 @@ def cylinder_domain_with_input_mode(calculation_domain):
 
 def geometry_id_for_domain(calculation_domain):
     return GEOMETRY_IDS[calculation_domain]
+
+
+def domain_for_geometry_id(geometry_id):
+    return GEOMETRY_DOMAINS[geometry_id]
 
 
 def mpa_to_pa(value):

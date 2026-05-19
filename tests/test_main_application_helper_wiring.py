@@ -14,6 +14,16 @@ def test_main_application_uses_shared_geometry_menu_helpers():
     assert "Longitudinal Stiffened shell  (Force input)" not in source
 
 
+def test_main_application_uses_geometry_helpers_for_active_lookups():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "api_helpers.geometry_id_for_domain(self._new_calculation_domain.get())" in source
+    assert "api_helpers.domain_for_geometry_id(main_dict_cyl['geometry'][0])" in source
+    assert "self._shell_geometries_map[self._new_calculation_domain.get()]" not in source
+    assert "CylinderAndCurvedPlate.geomeries[main_dict_cyl['geometry'][0]]" not in source
+
+
 def test_main_application_uses_helpers_for_structure_property_unit_conversions():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
