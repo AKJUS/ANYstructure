@@ -27,12 +27,31 @@ def test_main_application_uses_geometry_helpers_for_active_lookups():
 def test_main_application_uses_helpers_for_structure_property_unit_conversions():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
-    property_block = source[
-        source.index("elif pasted_structure is None:"):
-        source.index("for key, value in dummy_data.items():")
+    flat_builder = source[
+        source.index("def _build_flat_structure_properties"):
+        source.index("def _build_cylinder_structure_properties")
     ]
+    cylinder_builder = source[
+        source.index("def _build_cylinder_structure_properties"):
+        source.index("def new_structure")
+    ]
+    property_block = flat_builder + cylinder_builder
 
     assert "api_helpers.mpa_to_pa" in property_block
     assert "api_helpers.mm_to_m" in property_block
     assert not re.search(r"[\w.)\]]\s*\*\s*1e6", property_block)
     assert not re.search(r"[\w.)\]]\s*/\s*1000", property_block)
+
+
+def test_new_structure_delegates_property_building():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    new_structure = source[
+        source.index("def new_structure"):
+        source.index("def option_meny_structure_type_trace")
+    ]
+
+    assert "self._build_flat_structure_properties()" in new_structure
+    assert "self._build_cylinder_structure_properties()" in new_structure
+    assert "obj_dict = {" not in new_structure
+    assert "shell_dict = {" not in new_structure
