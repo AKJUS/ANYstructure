@@ -26,4 +26,4 @@ def test_api_uses_shared_cylinder_domain_helpers():
     assert "api_helpers.cylinder_input_mode(calculation_domain)" in source
     assert "api_helpers.cylinder_domain_with_input_mode(calculation_domain)" in source
     assert "api_helpers.geometry_id_for_domain(self._calculation_domain)" in source
-    assert "geomeries_map" not in source
+    assert "geomeries = {" not in source
