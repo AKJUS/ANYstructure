@@ -57,6 +57,8 @@ CYLINDER_GEOMETRY_IDS = {
     "Orthogonally Stiffened panel (Stress input)": 8,
 }
 
+CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT = tuple(CYLINDER_GEOMETRY_IDS.keys())
+
 GEOMETRY_IDS = {
     **FLAT_GEOMETRY_IDS,
     **CYLINDER_GEOMETRY_IDS,
