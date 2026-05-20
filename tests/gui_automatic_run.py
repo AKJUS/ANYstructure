@@ -1,4 +1,4 @@
-from anystruct import main_application
+from anystruct import calc_structure, example_data, main_application
 import multiprocessing, ctypes, os, pickle
 from pathlib import Path
 import tkinter as tk
@@ -43,6 +43,51 @@ def configure_noninteractive_plots():
 
 def checkpoint(name):
     print(f"gui_automatic_run: {name}", flush=True)
+
+
+def close_child_windows():
+    root.update_idletasks()
+    for child in list(root.winfo_children()):
+        if isinstance(child, tk.Toplevel):
+            child.destroy()
+    root.update_idletasks()
+    plt.close("all")
+
+
+def assert_window_opens(action, name):
+    before = len([child for child in root.winfo_children() if isinstance(child, tk.Toplevel)])
+    action()
+    root.update_idletasks()
+    after = len([child for child in root.winfo_children() if isinstance(child, tk.Toplevel)])
+    if after <= before:
+        raise RuntimeError(f"{name} did not open a Toplevel window")
+    checkpoint(f"{name} opened")
+    close_child_windows()
+
+
+def make_smoke_cylinder():
+    return calc_structure.CylinderAndCurvedPlate(
+        main_dict=example_data.shell_main_dict,
+        shell=calc_structure.Shell(example_data.shell_dict),
+        long_stf=calc_structure.Structure(example_data.obj_dict_cyl_long2),
+        ring_stf=None,
+        ring_frame=None)
+
+
+def exercise_optimizer_windows():
+    my_dict["_active_line"] = "line1"
+    my_dict["_line_is_active"] = True
+    assert_window_opens(my_app.on_optimize, "single optimizer")
+
+    my_dict["_active_line"] = "line2"
+    my_dict["_line_is_active"] = True
+    my_dict["_line_to_struc"]["line2"][5] = make_smoke_cylinder()
+    assert_window_opens(my_app.on_optimize_cylinder, "cylinder optimizer")
+    my_dict["_line_to_struc"]["line2"][5] = None
+
+    my_dict["_multiselect_lines"] = ["line1", "line2"]
+    assert_window_opens(my_app.on_optimize_multiple, "multiple optimizer")
+    assert_window_opens(my_app.on_geometry_optimize, "span optimizer")
 
 
 multiprocessing.freeze_support()
@@ -182,6 +227,8 @@ run_cc_chks()
 print(my_dict['_tank_dict'])
 my_app.on_show_loads()
 checkpoint("loads shown")
+exercise_optimizer_windows()
+checkpoint("optimizer windows exercised")
 root.update_idletasks()
 root.destroy()
 checkpoint("root destroyed")
