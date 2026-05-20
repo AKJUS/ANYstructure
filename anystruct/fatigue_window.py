@@ -3,9 +3,11 @@ import tkinter as tk
 
 try:
     import anystruct.example_data as test
+    import anystruct.line_structure as line_structure
     import anystruct.SN_curve_parameters as sn
 except ModuleNotFoundError:
     import ANYstructure.anystruct.example_data as test
+    import ANYstructure.anystruct.line_structure as line_structure
     import ANYstructure.anystruct.SN_curve_parameters as sn
 
 
@@ -27,21 +29,22 @@ class CreateFatigueWindow():
             self._initial_fatigue_obj = test.get_fatigue_object()
 
         else:
-            if app._line_to_struc[app._active_line][0] is None:
+            active_bundle = app._line_to_struc[app._active_line]
+            if line_structure.structure(active_bundle) is None:
                 return
-            elif app._line_to_struc[app._active_line][0].Stiffener is None:
+            elif not line_structure.has_stiffener(active_bundle):
                 return
             self.app = app
             self.active_line = app._active_line
             points = app._line_dict[self.active_line]
             coords = (app._point_dict['point'+str(points[0])], app._point_dict['point'+str(points[1])])
             self.pressure_coords = self.get_pressure_point_coord_from_two_points(coords[0], coords[1])
-            self._initial_structure_obj = app._line_to_struc[app._active_line][0].Stiffener
-            self.load_objects = app._line_to_struc[app._active_line][3]
+            self._initial_structure_obj = line_structure.stiffener(active_bundle)
+            self.load_objects = line_structure.loads(active_bundle)
 
             self.comp_objects = [app._tank_dict['comp'+str(comp_i)] for comp_i in
                                  app.get_compartments_for_line(app._active_line)]
-            self._initial_fatigue_obj = app._line_to_struc[self.active_line][2]
+            self._initial_fatigue_obj = line_structure.fatigue(active_bundle)
 
 
         self._frame = master

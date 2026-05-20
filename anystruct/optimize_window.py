@@ -12,12 +12,14 @@ try:
     import anystruct.example_data as test
     import anystruct.example_data as ex
     import anystruct.helper as hlp
+    import anystruct.line_structure as line_structure
     import anystruct.optimize as op
 except ModuleNotFoundError:
     from ANYstructure.anystruct.calc_structure import CalcScantlings, AllStructure
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.example_data as ex
     import ANYstructure.anystruct.helper as hlp
+    import ANYstructure.anystruct.line_structure as line_structure
     import ANYstructure.anystruct.optimize as op
 class CreateOptimizeWindow():
     '''
@@ -94,8 +96,9 @@ class CreateOptimizeWindow():
         else:
             self.app = app
 
-            self._initial_calc_obj = app._line_to_struc[app._active_line][0]
-            self._fatigue_object = app._line_to_struc[app._active_line][2]
+            active_bundle = app._line_to_struc[app._active_line]
+            self._initial_calc_obj = line_structure.structure(active_bundle)
+            self._fatigue_object = line_structure.fatigue(active_bundle)
             try:
                 self._fatigue_pressure = app.get_fatigue_pressures(app._active_line,
                                                                    self._fatigue_object.get_accelerations())

@@ -12,11 +12,13 @@ try:
     import anystruct.optimize as op
     import anystruct.example_data as test
     import anystruct.helper as hlp
+    import anystruct.line_structure as line_structure
 except ModuleNotFoundError:
     import ANYstructure.anystruct.main_application as main_application
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.helper as hlp
+    import ANYstructure.anystruct.line_structure as line_structure
 
 class CreateOptimizeCylinderWindow():
     '''
@@ -90,10 +92,11 @@ class CreateOptimizeCylinderWindow():
                                 9: 'UF below or equal 0.87', 10: 'UF between 0.87 and 1.0', 11: 'UF above 1.0'}
         else:
             self.app = app
-            self._initial_structure_obj = app._line_to_struc[app._active_line][0]
-            self._initial_calc_obj = app._line_to_struc[app._active_line][1]
-            self._initial_cylinder_obj = app._line_to_struc[app._active_line][5]
-            self._fatigue_object = app._line_to_struc[app._active_line][2]
+            active_bundle = app._line_to_struc[app._active_line]
+            self._initial_structure_obj = line_structure.structure(active_bundle)
+            self._initial_calc_obj = line_structure.structure(active_bundle)
+            self._initial_cylinder_obj = line_structure.cylinder(active_bundle)
+            self._fatigue_object = line_structure.fatigue(active_bundle)
             try:
                 self._fatigue_pressure = app.get_fatigue_pressures(app._active_line,
                                                                    self._fatigue_object.get_accelerations())
