@@ -2619,16 +2619,16 @@ class AllStructure():
 
     def get_one_line_string_mixed(self):
         ''' Returning a one line string. '''
-        return 'pl_'+str(round(self.Plate.s, 1))+'x'+str(round(self.Plate.t,1))+' stf_'+\
+        return 'pl_'+str(round(self.Plate.get_s(), 1))+'x'+str(round(self.Plate.get_pl_thk(),1))+' stf_'+\
                self.Stiffener.get_stiffener_type()+\
-               str(round(self.Stiffener.hw,1))+'x'+str(round(self.Stiffener.tw,1))+'+'\
-               +str(round(self.Stiffener.b,1))+'x'+\
-               str(round(self.Stiffener.tf,1))
+               str(round(self.Stiffener.get_web_h(),1))+'x'+str(round(self.Stiffener.get_web_thk(),1))+'+'\
+               +str(round(self.Stiffener.get_fl_w(),1))+'x'+\
+               str(round(self.Stiffener.get_fl_thk(),1))
 
     def get_extended_string_mixed(self):
         ''' Some more information returned. '''
-        return 'span: '+str(round(self.Plate.span,4))+' structure type: '+ self.Stiffener.get_structure_type() + ' stf. type: ' + \
-               self.Stiffener.get_stiffener_type() + ' pressure side: ' + self.Plate.overpressure_side
+        return 'span: '+str(round(self.Plate.get_span(),4))+' structure type: '+ self.Stiffener.get_structure_type() + ' stf. type: ' + \
+               self.Stiffener.get_stiffener_type() + ' pressure side: ' + self.overpressure_side
 
 class Shell():
     '''

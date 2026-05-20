@@ -67,3 +67,11 @@ def test_input_properties(structure_cls):
     assert props['spacing'] == ex.obj_dict['spacing']
     assert props['plate_thk'] == ex.obj_dict['plate_thk']
     assert props['panel or shell'] == ['panel', '']
+
+
+def test_all_structure_mixed_strings_use_calc_scantling_getters():
+    scantling = calc.CalcScantlings(_with_panel_default(ex.obj_dict))
+    all_structure = calc.AllStructure(Plate=scantling, Stiffener=scantling)
+
+    assert all_structure.get_one_line_string_mixed().startswith('pl_')
+    assert 'structure type:' in all_structure.get_extended_string_mixed()
