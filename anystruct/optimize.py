@@ -317,7 +317,7 @@ def any_smart_loop_geometric(min_var,max_var,deltas,initial_structure_obj,latera
                                                                             fat_obj, fat_press, slamming_press):
         #print(predefiened_stiffener_iter)
         if predefiened_stiffener_iter is not None:
-            this_predefiened_objects = hlp.helper_read_section_file(predefiened_stiffener_iter, struc_obj)
+            this_predefiened_objects = hlp.helper_read_section_file(predefiened_stiffener_iter, struc_obj.Stiffener)
         else:
             this_predefiened_objects = None
 
