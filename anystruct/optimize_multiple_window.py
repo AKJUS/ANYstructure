@@ -10,6 +10,7 @@ try:
     import anystruct.main_application
     import anystruct.optimize as op
     import anystruct.example_data as test
+    import anystruct.line_structure as line_structure
     from anystruct.calc_structure import *
     import anystruct.calc_structure as calc
     from anystruct.helper import *
@@ -18,6 +19,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.main_application
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
+    import ANYstructure.anystruct.line_structure as line_structure
     from ANYstructure.anystruct.calc_structure import *
     import ANYstructure.anystruct.calc_structure as calc
     from ANYstructure.anystruct.helper import *
@@ -553,7 +555,7 @@ class CreateOptimizeMultipleWindow():
         else:
             lateral_press = self.app.get_highest_pressure(line)['normal'] / 1e6
 
-            fat_obj = self.app._line_to_struc[line][2]
+            fat_obj = line_structure.fatigue(self.app._line_to_struc[line])
             if fat_obj is not None:
                 try:
                     fat_press = self.app.get_fatigue_pressures(line, fat_obj.get_accelerations())
@@ -605,7 +607,7 @@ class CreateOptimizeMultipleWindow():
         counter = 0
         found_files = self._filez
         for line in self._active_lines:
-            init_obj = self._line_to_struc[line][0]
+            init_obj = self._line_structure(line)
 
             if __name__ == '__main__':
                 lateral_press = 200 #for testing
@@ -820,28 +822,23 @@ class CreateOptimizeMultipleWindow():
 
         if lowest_area != float('inf'):
             for line in self._opt_results.keys():
+                line_structure_obj = self._line_structure(line)
                 if self._keep_spacing:
-                    this_x = [self._line_to_struc[line][0].Plate.get_s()] + list(lowest_x)[1:] + \
-                             [self._line_to_struc[line][0].Plate.span, self._line_to_struc[line][0].Plate.girder_lg]
+                    this_x = [line_structure_obj.Plate.get_s()] + list(lowest_x)[1:] + \
+                             [line_structure_obj.Plate.span, line_structure_obj.Plate.girder_lg]
                 else:
-                    this_x = list(lowest_x) + [self._line_to_struc[line][0].Plate.span,
-                                               self._line_to_struc[line][0].Plate.girder_lg]
+                    this_x = list(lowest_x) + [line_structure_obj.Plate.span,
+                                               line_structure_obj.Plate.girder_lg]
 
-                calc_object_stf = op.create_new_calc_obj(self._line_to_struc[line][0].Plate, this_x,
+                calc_object_stf = op.create_new_calc_obj(line_structure_obj.Plate, this_x,
                                                          fat_obj.get_fatigue_properties(), fdwn=fdwn, fup=fup)
-                calc_object_pl = op.create_new_calc_obj(self._line_to_struc[line][0].Stiffener, this_x,
+                calc_object_pl = op.create_new_calc_obj(line_structure_obj.Stiffener, this_x,
                                                          fat_obj.get_fatigue_properties(), fdwn=fdwn, fup=fup)
                 self._opt_results[line][0] = [calc.AllStructure(Plate=calc_object_pl[0], Stiffener=calc_object_stf[0], Girder=None,
                                                  main_dict=chk_calc_obj.get_main_properties()['main dict']),
                                calc_object_pl[1]]
 
-                if self._line_to_struc[line][2] != None:
-                    self._opt_results[line][2] = opt.create_new_calc_obj(init_obj= self._line_to_struc[line][1],
-                                                                         x = this_x,
-                                                                         fat_dict=self._line_to_struc[line]
-                                                                         [2].get_fatigue_properties())[1]
-                else:
-                    self._line_to_struc[line][2] = None
+                self._update_harmonized_fatigue_result(line, this_x)
             return True
         else:
             for line in self._opt_results.keys():
@@ -911,21 +908,16 @@ class CreateOptimizeMultipleWindow():
             harmonized_x_stf = self._opt_results[harmonized_line][0].Stiffener.get_tuple()
             harmonized_x = harmonized_x_pl[0:2] + harmonized_x_stf[2:]
             for line in self._opt_results.keys():
-                self._opt_results[line][0] = opt.create_new_structure_obj(self._line_to_struc[line][0], harmonized_x)
+                line_structure_obj = self._line_structure(line)
+                self._opt_results[line][0] = opt.create_new_structure_obj(line_structure_obj, harmonized_x)
 
-                calc_object_stf = op.create_new_calc_obj(self._line_to_struc[line][0].Plate, harmonized_x)
-                calc_object_pl = op.create_new_calc_obj(self._line_to_struc[line][0].Stiffener,harmonized_x)
+                calc_object_stf = op.create_new_calc_obj(line_structure_obj.Plate, harmonized_x)
+                calc_object_pl = op.create_new_calc_obj(line_structure_obj.Stiffener,harmonized_x)
                 self._opt_results[line][0] = [calc.AllStructure(Plate=calc_object_pl[0], Stiffener=calc_object_stf[0],
                                                                 Girder=None, main_dict=chk_calc_obj.get_main_properties()['main dict']),
                                calc_object_pl[1]]
 
-                if self._line_to_struc[line][2] != None:
-                    self._opt_results[line][2] = opt.create_new_calc_obj(init_obj= self._line_to_struc[line][1],
-                                                                         x = harmonized_x,
-                                                                         fat_dict=self._line_to_struc[line]
-                                                                         [2].get_fatigue_properties())[1]
-                else:
-                    self._line_to_struc[line][2] = None
+                self._update_harmonized_fatigue_result(line, harmonized_x)
             return True
         else:
             for line in self._opt_results.keys():
@@ -982,6 +974,31 @@ class CreateOptimizeMultipleWindow():
         if self._new_check_ml_buckling.get() == True:
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)
+
+    def _line_bundle(self, line):
+        return self._line_to_struc[line]
+
+    def _line_structure(self, line):
+        return line_structure.structure(self._line_bundle(line))
+
+    def _line_stiffener(self, line):
+        return line_structure.stiffener(self._line_bundle(line))
+
+    def _line_fatigue(self, line):
+        return line_structure.fatigue(self._line_bundle(line))
+
+    def _update_harmonized_fatigue_result(self, line, x):
+        fatigue_obj = self._line_fatigue(line)
+        if fatigue_obj is not None:
+            self._opt_results[line][2] = opt.create_new_calc_obj(
+                init_obj=self._line_stiffener(line),
+                x=x,
+                fat_dict=fatigue_obj.get_fatigue_properties())[1]
+        else:
+            self._clear_line_fatigue(line)
+
+    def _clear_line_fatigue(self, line):
+        self._line_bundle(line)[line_structure.FATIGUE] = None
 
     def get_upper_bounds(self,obj):
         '''
@@ -1393,11 +1410,11 @@ class CreateOptimizeMultipleWindow():
                         self._active_lines = []
                         self._active_lines.append(key)
                         if key in self._opt_results.keys() and self._opt_results[key]!=None:
-                            self.draw_properties(init_obj=self._line_to_struc[key][0],opt_obj=self._opt_results[key][0],
+                            self.draw_properties(init_obj=self._line_structure(key),opt_obj=self._opt_results[key][0],
                                                  line=key)
                             self._mid_click_line = key
                         else:
-                            self.draw_properties(init_obj=self._line_to_struc[key][0],line=key)
+                            self.draw_properties(init_obj=self._line_structure(key),line=key)
                             self._mid_click_line = None
                         break
                 self.draw_select_canvas()
