@@ -654,7 +654,7 @@ class CreateOptGeoWindow():
 
                 # Taking properites from the closest line.
                 closet_line = self.opt_find_closest_orig_line(to_find)
-                pressure_side = self._line_to_struc[closet_line][0].overpressure_side
+                pressure_side = self._line_overpressure_side(closet_line)
                 #print('Closest line', closet_line, p1, p2, to_find)
                 gotten_lat_press = self.app.get_highest_pressure(closet_line)
                 lateral_press.append(gotten_lat_press['normal'] / 1e6)
@@ -803,8 +803,7 @@ class CreateOptGeoWindow():
         point = [pt1[0]+vector[0]*0.5, pt1[1]+vector[1]*0.5]
         if self.opt_find_closest_orig_line(point) == None:
             return None
-        objects = [copy.deepcopy(x) if x != None else None for x in
-                   self._line_to_struc[self.opt_find_closest_orig_line(point)]]
+        objects = self._copy_line_structure_bundle(self.opt_find_closest_orig_line(point))
         objects[0].Plate.set_span(dist(pt1,pt2))
         objects[0].Stiffener.set_span(dist(pt1, pt2))
 
@@ -826,7 +825,7 @@ class CreateOptGeoWindow():
                 current[0] += (vector[0]/distance) * delta
                 current[1] += (vector[1]/distance) * delta
                 if dist(coord,current) <= 0.1:
-                    if self._line_to_struc[key][0].Plate.get_structure_type() not in ('GENERAL_INTERNAL_NONWT', 'FRAME'):
+                    if self._line_structure_type(key) not in ('GENERAL_INTERNAL_NONWT', 'FRAME'):
                         return key
                     else:
                         return None
@@ -1168,7 +1167,7 @@ class CreateOptGeoWindow():
                     coord2 = self.get_point_canvas_coord('point' + str(value[1]))
                     vector = [coord2[0] - coord1[0], coord2[1] - coord1[1]]
                     # drawing a bold line if it is selected
-                    if self._line_to_struc[line][0].Plate.get_structure_type() not in ('GENERAL_INTERNAL_NONWT','FRAME'):
+                    if self._line_structure_type(line) not in ('GENERAL_INTERNAL_NONWT','FRAME'):
 
                         if line in self._active_lines:
                             self._canvas_select.create_line(coord1, coord2, width=6, fill=color,stipple='gray50')
@@ -1272,7 +1271,7 @@ class CreateOptGeoWindow():
 
                 for data_idx, data in enumerate(values[1]):
                     for idx, stuc_info in enumerate(data):
-                        if type(stuc_info) == calc_structure.AllStructure:
+                        if isinstance(stuc_info, AllStructure):
 
                             if y_loc > 700:
                                 y_loc = 120
@@ -1389,6 +1388,21 @@ class CreateOptGeoWindow():
             return save_file, xplot, yplot
         else:
             return None, xplot, yplot
+
+    def _line_structure_bundle(self, line):
+        return self._line_to_struc[line]
+
+    def _line_structure(self, line):
+        return self._line_structure_bundle(line)[0]
+
+    def _line_structure_type(self, line):
+        return self._line_structure(line).Plate.get_structure_type()
+
+    def _line_overpressure_side(self, line):
+        return self._line_structure(line).overpressure_side
+
+    def _copy_line_structure_bundle(self, line):
+        return [copy.deepcopy(item) if item is not None else None for item in self._line_structure_bundle(line)]
 
     def algorithm_info(self):
         ''' When button is clicked, info is displayed.'''
@@ -1586,11 +1600,11 @@ class CreateOptGeoWindow():
                         self._active_lines = []
                         self._active_lines.append(key)
                         if key in self._opt_resutls.keys() and self._opt_resutls[key] != None:
-                            self.draw_properties(init_obj=self._line_to_struc[key][0],
+                            self.draw_properties(init_obj=self._line_structure(key),
                                                 opt_obj=self._opt_resutls[key][0],
                                                  line=key)
                         else:
-                            self.draw_properties(init_obj=self._line_to_struc[key][0], line=key)
+                            self.draw_properties(init_obj=self._line_structure(key), line=key)
                         break
                 self.draw_select_canvas()
         self.draw_select_canvas()
