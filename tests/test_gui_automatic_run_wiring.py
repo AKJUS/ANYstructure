@@ -29,3 +29,18 @@ def test_gui_automatic_run_suppresses_plot_windows():
     assert "configure_noninteractive_plots()" in source
     assert "plt.show = lambda *args, **kwargs: None" in source
     assert "plt.close(\"all\")" in source
+
+
+def test_gui_automatic_run_exercises_optimizer_windows_noninteractively():
+    gui_source = Path(__file__).resolve().parent / "gui_automatic_run.py"
+    source = gui_source.read_text(encoding="utf-8")
+
+    assert "def assert_window_opens(action, name):" in source
+    assert "def close_child_windows():" in source
+    assert "def exercise_optimizer_windows():" in source
+    assert "my_app.on_optimize" in source
+    assert "my_app.on_optimize_cylinder" in source
+    assert "my_app.on_optimize_multiple" in source
+    assert "my_app.on_geometry_optimize" in source
+    assert "make_smoke_cylinder()" in source
+    assert "exercise_optimizer_windows()" in source
