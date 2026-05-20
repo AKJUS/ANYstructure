@@ -13,6 +13,7 @@ try:
     import anystruct.main_application
     import anystruct.optimize as op
     import anystruct.example_data as test
+    import anystruct.line_structure as line_structure
     from anystruct.calc_structure import *
     import anystruct.calc_structure
     from anystruct.helper import *
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.main_application
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
+    import ANYstructure.anystruct.line_structure as line_structure
     from ANYstructure.anystruct.calc_structure import *
     import ANYstructure.anystruct.calc_structure
     from ANYstructure.anystruct.helper import *
@@ -1393,16 +1395,16 @@ class CreateOptGeoWindow():
         return self._line_to_struc[line]
 
     def _line_structure(self, line):
-        return self._line_structure_bundle(line)[0]
+        return line_structure.structure(self._line_structure_bundle(line))
 
     def _line_structure_type(self, line):
-        return self._line_structure(line).Plate.get_structure_type()
+        return line_structure.plate(self._line_structure_bundle(line)).get_structure_type()
 
     def _line_overpressure_side(self, line):
         return self._line_structure(line).overpressure_side
 
     def _copy_line_structure_bundle(self, line):
-        return [copy.deepcopy(item) if item is not None else None for item in self._line_structure_bundle(line)]
+        return line_structure.copy_bundle(self._line_structure_bundle(line))
 
     def algorithm_info(self):
         ''' When button is clicked, info is displayed.'''

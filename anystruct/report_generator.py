@@ -23,9 +23,11 @@ import tkinter as tk
 try:
     import anystruct.example_data as test
     import anystruct.helper as hlp
+    import anystruct.line_structure as line_structure
 except ModuleNotFoundError:
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.helper as hlp
+    import ANYstructure.anystruct.line_structure as line_structure
 
 
 
@@ -177,9 +179,10 @@ class LetterMaker(object):
             vpos -= delta
 
             if line in self.data._line_to_struc.keys():
-                if self.data._line_to_struc[line][5] is None:
-                    struc_obj = self.data._line_to_struc[line][0]
-                    fo = self.data._line_to_struc[line][2]
+                line_bundle = self.data._line_to_struc[line]
+                if not line_structure.has_cylinder(line_bundle):
+                    struc_obj = line_structure.structure(line_bundle)
+                    fo = line_structure.fatigue(line_bundle)
                     pressure = self.data.get_highest_pressure(line)['normal']/1000
                     textobject = self.c.beginText()
                     textobject.setTextOrigin(30,vpos)
@@ -277,7 +280,7 @@ class LetterMaker(object):
                                             str(round(max(buc_util),2))+' -> '+'NOT OK')
                     elif self.data._new_buckling_method.get() == 'DNV PULS':
                         if self.data._PULS_results is not None:
-                            puls_method = self.data._line_to_struc[line][0].Plate.get_puls_method()
+                            puls_method = line_structure.plate(line_bundle).get_puls_method()
                             textobject.textLine('PULS results using '+str(puls_method) + 'utilization with acceptance '+
                                                 str(self.data._PULS_results.puls_acceptance))
                             if line in self.data._PULS_results.get_run_results().keys():
@@ -295,7 +298,7 @@ class LetterMaker(object):
                                 textobject.setFillColor('black')
 
                     else:
-                        puls_method = self.data._line_to_struc[line][0].Plate.get_puls_method()
+                        puls_method = line_structure.plate(line_bundle).get_puls_method()
                         textobject.textLine('ML-CL results using '+str(puls_method) + 'utilization with acceptance 0.87')
                         if line in self.data._PULS_results.get_run_results().keys():
                             ml_buckling = self.data.get_color_and_calc_state()['ML buckling class'][line]['buckling']
@@ -337,7 +340,7 @@ class LetterMaker(object):
                     self.c.drawText(textobject)
                     vpos -= 10
                 else:
-                    cyl_obj = self.data._line_to_struc[line][5]
+                    cyl_obj = line_structure.cylinder(line_bundle)
                     textobject = self.c.beginText()
                     textobject.setTextOrigin(30, vpos)
                     textobject.setFont("Helvetica-Oblique", 10)
@@ -465,6 +468,9 @@ class LetterMaker(object):
         for line, pt in lines.items():
             if line not in list(self.data._line_to_struc.keys()):
                 continue
+            line_bundle = self.data._line_to_struc[line]
+            line_plate = line_structure.plate(line_bundle)
+            line_stiffener = line_structure.stiffener(line_bundle)
             if draw_type == 'UF':
                 if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                     try:
@@ -473,7 +479,7 @@ class LetterMaker(object):
                         self.c.setStrokeColor('black')
                 elif self.data._new_buckling_method.get() == 'DNV PULS':
                     try:
-                        method = self.data._line_to_struc[line][0].Plate.get_puls_method()
+                        method = line_plate.get_puls_method()
                         if self.data._PULS_results is not None:
                             util = self.data._PULS_results.get_utilization(line, method, self.data._new_puls_uf.get())
                             if util is not None:
@@ -482,12 +488,12 @@ class LetterMaker(object):
                         self.c.setStrokeColor('black')
                 else:
 
-                    method = self.data._line_to_struc[line][0].Plate.get_puls_method()
+                    method = line_plate.get_puls_method()
                     self.c.setStrokeColor(colors[line][method])
 
-            elif draw_type == 'section' and self.data._line_to_struc[line][0].Stiffener is not None:
+            elif draw_type == 'section' and line_stiffener is not None:
                 self.c.setStrokeColor(all_line_data['color code']['lines'][line]['section'])
-                if self.data._line_to_struc[line][0].Stiffener.get_beam_string() not in drawed_data:
+                if line_stiffener.get_beam_string() not in drawed_data:
                     textobject = self.c.beginText()
                     if 400 - 20 * idx > 20:
                         textobject.setTextOrigin(50, 400 - 20 * idx)
@@ -495,9 +501,9 @@ class LetterMaker(object):
                         textobject.setTextOrigin(300, 400 - 20 * idx)
                     textobject.setFillColor(all_line_data['color code']['lines'][line]['section'])
                     textobject.setFont("Helvetica-Oblique", 10)
-                    textobject.textLine(self.data._line_to_struc[line][0].Stiffener.get_beam_string())
+                    textobject.textLine(line_stiffener.get_beam_string())
                     self.c.drawText(textobject)
-                    drawed_data.append(self.data._line_to_struc[line][0].Stiffener.get_beam_string())
+                    drawed_data.append(line_stiffener.get_beam_string())
                     idx += 1
             elif draw_type == 'plate':
                 self.c.setStrokeColor(all_line_data['color code']['lines'][line]['plate'])
@@ -509,7 +515,7 @@ class LetterMaker(object):
                 elif self.data._new_buckling_method.get() == 'DNV PULS':
                     self.c.setStrokeColor(all_line_data['color code']['lines'][line]['PULS uf color'])
                 else:
-                    puls_method = self.data._line_to_struc[line][0].Plate.get_puls_method()
+                    puls_method = line_plate.get_puls_method()
                     self.c.setStrokeColor(matplotlib_colors.rgb2hex(all_line_data['ML buckling colors'][line][puls_method]))
 
             elif draw_type == 'sigma x':
@@ -781,7 +787,8 @@ class LetterMaker(object):
         cylindersy, flat_plates, idx = False, False,-1
         for line in sorted(self.data._line_dict.keys()):
             idx += 1
-            if self.data._line_to_struc[line][5] is None and cylinders is False:
+            line_bundle = self.data._line_to_struc[line]
+            if not line_structure.has_cylinder(line_bundle) and cylinders is False:
                 flat_plates = True
                 if idx == 0:
                     headers = ['Line', 'pl thk', 's', 'web h', 'web thk', 'fl. w', 'fl. thk', 'sig x1', 'sig x2', 'sig y1',
@@ -790,11 +797,11 @@ class LetterMaker(object):
                     table_all.append(headers)
                 if line not in list(self.data._line_to_struc.keys()):
                     continue
-                struc_obj = self.data._line_to_struc[line][0]
+                struc_obj = line_structure.structure(line_bundle)
                 pressure = round(self.data.get_highest_pressure(line)['normal'] / 1000,0)
 
                 if self.data._PULS_results is not None:
-                    puls_method = self.data._line_to_struc[line][0].Plate.get_puls_method()
+                    puls_method = line_structure.plate(line_bundle).get_puls_method()
                     if line in self.data._PULS_results.get_run_results().keys():
                         if puls_method == 'buckling':
                             buckling_uf = \
@@ -841,7 +848,7 @@ class LetterMaker(object):
                                'Hoop stress',
                                'UF shell', 'UF long. stf.', 'UF ring. stf.', 'UF girder']
                     table_all.append(headers)
-                cyl_obj = self.data._line_to_struc[line][5]
+                cyl_obj = line_structure.cylinder(line_bundle)
                 radius = round(cyl_obj.ShellObj.radius * 1000, 2)
                 thickness = round(cyl_obj.ShellObj.thk * 1000, 2)
                 long_str = cyl_obj.LongStfObj.get_beam_string()
