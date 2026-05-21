@@ -93,7 +93,8 @@ def exercise_optimizer_windows():
 multiprocessing.freeze_support()
 configure_noninteractive_dialogs()
 configure_noninteractive_plots()
-errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(2)
+if os.name == "nt":
+    errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(2)
 root = tk.Tk()
 checkpoint("root created")
 my_app = main_application.Application(root)

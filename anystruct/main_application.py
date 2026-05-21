@@ -35,6 +35,8 @@ try:
     import anystruct.fatigue_window as fatigue
     import anystruct.load_factor_window as load_factors
     import anystruct.api_helpers as api_helpers
+    import anystruct.project_io as project_io
+    from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
     import anystruct.excel_inteface as excel_interface
@@ -56,6 +58,8 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.fatigue_window as fatigue
     import ANYstructure.anystruct.load_factor_window as load_factors
     import ANYstructure.anystruct.api_helpers as api_helpers
+    import ANYstructure.anystruct.project_io as project_io
+    from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
     import ANYstructure.anystruct.excel_inteface as excel_interface
@@ -191,8 +195,6 @@ class Application():
         sub_sesam = tk.Menu(menu)
         menu.add_cascade(label = 'Interfaces', menu = sub_sesam)
         sub_sesam.add_command(label = 'Export geometry to SESAM GeniE JS', command = self.export_to_js)
-        sub_sesam.add_command(label='Run all PULS lines', command=self.puls_run_all_lines)
-        sub_sesam.add_command(label='Delete all PULS results', command=self.puls_delete_all)
         sub_sesam.add_command(label='Import excel file', command=self.open_excel_file)
 
         sub_help = tk.Menu(menu)
@@ -952,14 +954,13 @@ class Application():
                                 self._ent_structure_type]
 
         self._new_buckling_method = tk.StringVar()
-        options = ['DNV-RP-C201 - prescriptive','DNV PULS','ML-CL (PULS based)']
+        options = ['DNV-RP-C201 - prescriptive','ML-CL (PULS based)']
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
         self._buckling_method = ttk.OptionMenu(self._tab_prop, self._new_buckling_method, options[0], *options,
                                                command=self.update_frame)
 
-        # PULS interface
-        self._puls_run_all = ttk.Button(self._tab_prop, text='Run PULS -\nupdate results',
-                                     command=self.puls_run_all_lines)
+        # ML-CL keeps the historic PULS-derived panel input parameters below.
+        self._puls_run_all = ttk.Button(self._tab_prop)
         self._ent_puls_uf = ttk.Entry(self._tab_prop, textvariable=self._new_puls_uf, width=int(ent_width * 1))
         self._new_puls_uf.trace('w', self.trace_acceptance_change)
 
@@ -1769,15 +1770,10 @@ class Application():
         ttk.Button(self._main_fr, text='Load factors', command=self.on_open_load_factor_window,style = "Bold.TButton")\
            .place(relx=0.8225,rely=0.7, relwidth = 0.05)
 
-        # PULS result information
-        self._puls_information_button = ttk.Button(self._main_fr, text='PULS results for line',
-                                                  command=self.on_puls_results_for_line,style = "Bold.TButton")
-        self._puls_information_button.place(relx=0.875,rely=0.7, relwidth = 0.075)
-
         # Wight developement plot
         self._weight_button = ttk.Button(self._main_fr, text='Weights',
                                                   command=self.on_plot_cog_dev,style = "Bold.TButton")
-        self._weight_button.place(relx=0.9525,rely=0.7, relwidth = 0.038)
+        self._weight_button.place(relx=0.875,rely=0.7, relwidth = 0.038)
         self.gui_structural_properties()  # Initiating the flat panel structural properties
         self.set_colors('default')  # Setting colors theme
         # self._current_theme = 'default'
@@ -1971,8 +1967,6 @@ class Application():
                 buckling_lab.place(relx=hor_start, rely=vert_start + idx * delta_y)
                 buckling_ent.place(relx=hor_start + 5 * delta_x, rely=vert_start + idx * delta_y)
                 idx += 1
-
-            self._puls_run_all.place(relx=hor_start + 6 * delta_x, rely=vert_start + (idx-2) * delta_y)
 
             # optimize buttons
 
@@ -6764,16 +6758,13 @@ class Application():
 
         export_all['buckling method'] = self._new_buckling_method.get()
 
-        if self._PULS_results is not None:
-            export_all['PULS results'] = self._PULS_results.get_run_results()
-            export_all['PULS results']['sheet location'] = self._PULS_results.puls_sheet_location
         export_all['shifting'] = {'shifted checked': self._new_shifted_coords.get(),
                                   'shift hor': self._new_shift_viz_coord_hor.get(),
                                   'shift ver': self._new_shift_viz_coord_ver.get()}
 
         export_all['Weight and COG'] = self._weight_logger
 
-        json.dump(export_all, save_file)#, sort_keys=True, indent=4)
+        project_io.dump_project_state(ProjectState.from_legacy_mapping(export_all), save_file)
         save_file.close()
         if not backup:
             self._parent.wm_title('| ANYstructure |     ' + save_file.name)
@@ -6791,7 +6782,7 @@ class Application():
         else:
             imp_file = open(defined,'r')
 
-        imported = json.load(imp_file)
+        imported = project_io.load_project_state(imp_file).to_legacy_mapping()
 
         self.reset()
         if 'project information' in imported.keys():
@@ -7012,15 +7003,7 @@ class Application():
 
                 self.grid_operations(line_name, [point_coord_x,point_coord_y])
 
-        if 'PULS results' in list(imported.keys()):
-            self._PULS_results = PULSpanel()
-            if 'sheet location' in imported['PULS results'].keys():
-                self._PULS_results.puls_sheet_location = imported['PULS results']['sheet location']
-                imported['PULS results'].pop('sheet location')
-            self._PULS_results.set_run_results(imported['PULS results'])
-
         if 'buckling method' in list(imported.keys()):
-            #options = ['DNV-RP-C201 - prescriptive', 'DNV PULS', 'ML-CL (PULS based)']
             self._new_buckling_method.set(imported['buckling method'])
 
             # Setting the scale of the canvas

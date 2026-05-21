@@ -25,3 +25,14 @@ def test_line_structure_copy_bundle_preserves_shape_and_copies_objects():
     assert len(copied_bundle) == len(line_bundle)
     assert copied_bundle is not line_bundle
     assert line_structure.structure(copied_bundle) is not line_structure.structure(line_bundle)
+
+
+def test_typed_line_bundle_adapter_preserves_legacy_shape():
+    line_bundle = ex.get_line_to_struc()["line1"]
+
+    typed = line_structure.LineStructureBundle.from_legacy_bundle(line_bundle)
+
+    assert typed.line_structure is line_bundle[0]
+    assert typed.loads is line_bundle[3]
+    assert typed.load_combinations is line_bundle[4]
+    assert typed.to_legacy_bundle() == line_bundle

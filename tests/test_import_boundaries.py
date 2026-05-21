@@ -10,6 +10,8 @@ CORE_MODULES = [
     "anystruct.helper",
     "anystruct.make_grid_numpy",
     "anystruct.optimize",
+    "anystruct.project_io",
+    "anystruct.project_state",
 ]
 
 PUBLIC_MODULES = [

@@ -10,8 +10,12 @@ on:
 
 jobs:
   pytest:
-    name: Python tests on Windows
-    runs-on: windows-latest
+    name: Python tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
 
     steps:
       - name: Check out repository
@@ -34,3 +38,11 @@ jobs:
 
       - name: Run pytest
         run: python -m pytest
+
+      - name: Run GUI smoke on Windows
+        if: runner.os == 'Windows'
+        run: python -m tests.gui_automatic_run
+
+      - name: Run GUI smoke on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m tests.gui_automatic_run

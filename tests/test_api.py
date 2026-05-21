@@ -19,9 +19,19 @@ def test_flat_structure_api_returns_special_provisions():
     results = flat.get_special_provisions_results()
 
     assert set(results) == {"Plate thickness", "Stiffener section modulus", "Stiffener shear area"}
-    for check in results.values():
-        assert check["minimum"] > 0
-        assert check["actual"] > 0
+    assert results == {
+        "Plate thickness": {"minimum": pytest.approx(9.214115076089064), "actual": 18.0},
+        "Stiffener section modulus": {
+            "minimum": pytest.approx(842126.1216230252),
+            "actual": pytest.approx(1514995.9581737241),
+        },
+        "Stiffener shear area": {"minimum": pytest.approx(1593.0323568831573), "actual": 4776.0},
+    }
+
+    buckling = flat.get_buckling_results()
+
+    assert buckling["Plate"]["Plate buckling"] == pytest.approx(0.2819426684980083)
+    assert buckling["Stiffener"]["Overpressure plate side"] == pytest.approx(0.8627465560212727)
 
 
 def test_flat_structure_api_rejects_unknown_domain():
