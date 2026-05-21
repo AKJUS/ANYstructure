@@ -85,3 +85,41 @@ def test_new_structure_delegates_property_building():
     assert "self.update_frame()" not in new_structure
     assert "set_main_properties(prop_dict)" not in new_structure
     assert "calculate_all_load_combinations_for_line_all_lines()" not in new_structure
+
+
+def test_savefile_delegates_save_command_assembly_and_persistence():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    savefile = source[
+        source.index("def savefile"):
+        source.index("def _build_project_save_input")
+    ]
+    save_input_builder = source[
+        source.index("def _build_project_save_input"):
+        source.index("def openfile")
+    ]
+
+    assert "ProjectSaveService.save_path(" in savefile
+    assert "self._build_project_save_input()" in savefile
+    assert "ProjectSnapshotService.create_state(" not in savefile
+    assert "save_state_to_path(" not in savefile
+    assert "ProjectSaveInput(" in save_input_builder
+
+
+def test_line_pressure_calculation_delegates_to_project_service():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    calculation_block = source[
+        source.index("def calculate_all_load_combinations_for_line"):
+        source.index("def run_optimizer_for_line")
+    ]
+    pressure_block = source[
+        source.index("def get_highest_pressure"):
+        source.index("def get_fatigue_pressures")
+    ]
+
+    assert "LinePressureService.calculate_combinations(" in calculation_block
+    assert "LinePressureService.calculate_one(" in calculation_block
+    assert "LinePressureInput(" in calculation_block
+    assert not re.search(r"\bone_load_combination\(", calculation_block)
+    assert "LinePressureService.highest_pressure(" in pressure_block

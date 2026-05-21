@@ -35,7 +35,7 @@ try:
     import anystruct.fatigue_window as fatigue
     import anystruct.load_factor_window as load_factors
     import anystruct.api_helpers as api_helpers
-    import anystruct.project_io as project_io
+    import anystruct.project_application as project_application
     import anystruct.project_services as project_services
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
@@ -58,7 +58,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.fatigue_window as fatigue
     import ANYstructure.anystruct.load_factor_window as load_factors
     import ANYstructure.anystruct.api_helpers as api_helpers
-    import ANYstructure.anystruct.project_io as project_io
+    import ANYstructure.anystruct.project_application as project_application
     import ANYstructure.anystruct.project_services as project_services
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
@@ -5564,42 +5564,11 @@ class Application():
         self._load_conditions = ['loaded', 'ballast','tanktest']
         :return:
         '''
-        if limit_state == 'FLS':
-            return
-        results = {} #dict - dnva/dnvb/tanktest/manual
-        load_info = []
-        # calculating for DNV a and DNV b
-
-
-        for dnv_ab in ['dnva', 'dnvb']: #, load_factors in self._load_factors_dict.items():
-            results[dnv_ab] = []
-            for load_condition in self._load_conditions[0:2]:
-                returned = self.calculate_one_load_combination(line, dnv_ab, load_condition)
-                if returned != None:
-                    results[dnv_ab].append(returned[0])
-                    [load_info.append(val) for val in returned[1]]
-
-        # calculating for tank test condition
-        results['tanktest'] = []
-        res_val = self.calculate_one_load_combination(line, "tanktest", 'tanktest')
-        results['tanktest'].append(res_val[0])
-        [load_info.append(val) for val in res_val[1]]
-
-
-        # calculating for manual condition
-        results['manual'] = []
-        res_val = self.calculate_one_load_combination(line, 'manual', 'manual')
-        results['manual'].append(res_val[0])
-        [load_info.append(val) for val in res_val[1]]
-
-        results['slamming'] = []
-        res_val = self.calculate_one_load_combination(line, 'slamming', 'slamming')
-        results['slamming'].append(res_val[0])
-        [load_info.append(val) for val in res_val[1]]
-
-        if get_load_info:
-            return load_info
-        return results
+        return project_services.LinePressureService.calculate_combinations(
+            self._build_line_pressure_input(line),
+            limit_state=limit_state,
+            get_load_info=get_load_info,
+        )
 
     def calculate_one_load_combination(self, current_line, comb_name, load_condition):
         '''
@@ -5609,36 +5578,29 @@ class Application():
         #load combination dictionary (comb,line,load) : [stat - DoubleVar(), dyn - DoubleVar], on/off - IntVar()]
         :return:
         '''
+        return project_services.LinePressureService.calculate_one(
+            self._build_line_pressure_input(current_line),
+            comb_name,
+            load_condition,
+        )
 
-        defined_loads = []
-        for load_obj in self._line_to_struc[current_line][3]:
-            if load_obj is not None:
-                if load_obj.get_limit_state() != 'FLS':
-                    defined_loads.append(load_obj)
+    def _build_line_pressure_input(self, current_line):
         if self._tank_dict == {}:
-            defined_tanks =  []
+            defined_tanks = ()
         else:
-            defined_tanks = [['comp'+str(int(tank_num)), self._tank_dict['comp'+str(int(tank_num))]]
-                     for tank_num in self.get_compartments_for_line_duplicates(current_line)]
+            defined_tanks = tuple(
+                ('comp' + str(int(tank_num)), self._tank_dict['comp' + str(int(tank_num))])
+                for tank_num in self.get_compartments_for_line_duplicates(current_line)
+            )
 
-        coord = (self.get_line_radial_mid(current_line), self.get_line_low_elevation(current_line))
-
-        if load_condition not in ['tanktest','manual','slamming']:
-            acc = (self._accelerations_dict['static'], self._accelerations_dict['dyn_'+str(load_condition)])
-        else:
-            acc = (self._accelerations_dict['static'], 0)
-
-        load_factors_all = self._new_load_comb_dict
-
-        current_line_obj = [current_line, self._line_to_struc[current_line][0].Plate]
-
-        if self._line_to_struc[current_line][0].Plate.get_structure_type() in ['', 'FRAME','GENERAL_INTERNAL_NONWT']:
-            return [0, '']
-        else:
-            return_value = one_load_combination(current_line_obj, coord, defined_loads, load_condition,
-                                                defined_tanks, comb_name, acc, load_factors_all)
-
-            return return_value
+        return project_services.LinePressureInput(
+            line_name=current_line,
+            line_bundle=self._line_to_struc[current_line],
+            coordinate=(self.get_line_radial_mid(current_line), self.get_line_low_elevation(current_line)),
+            defined_tanks=defined_tanks,
+            accelerations=self._accelerations_dict,
+            load_factors=project_services.load_factor_records(self._new_load_comb_dict),
+        )
 
     def run_optimizer_for_line(self,line,goal,constrains):
         '''
@@ -5956,29 +5918,12 @@ class Application():
         Returning the highest pressure of a line.
         :return:
         '''
-        all_press = list()
-        if limit_state == 'ULS':
-            pressures = self.calculate_all_load_combinations_for_line(line)
-            slm_red, psl, slm_red_pl, slm_red_stf = 1, 0, 1, 1
-            for key, value in pressures.items():
-                if key != 'slamming':
-                    all_press.append(max(value))
-                else:
-                    if value is not None:
-                        for load in self._line_to_struc[line][3]:
-                            if load is not None:
-                                if load.get_load_condition() == 'slamming':
-                                    slm_red_pl = load.get_slamming_reduction_plate()
-                                    slm_red_stf = load.get_slamming_reduction_stf()
-                        psl = max(value)
-
-
-            return {'normal':max(all_press), 'slamming': psl, 'slamming plate reduction factor': slm_red_pl,
-                    'slamming stf reduction factor': slm_red_stf}
-        elif limit_state == 'FLS':
-            pass
-        else:
-            return {'normal':0, 'slamming': 0}
+        if limit_state == 'FLS':
+            return
+        return project_services.LinePressureService.highest_pressure(
+            self._build_line_pressure_input(line),
+            limit_state=limit_state,
+        )
 
     def get_fatigue_pressures(self, line, accelerations = (0, 0, 0)):
         ''' Retruning a dictionary of internal and external pressures. '''
@@ -6574,7 +6519,10 @@ class Application():
 
     def save_no_dialogue(self, event = None, backup = False):
         if backup:
-            self.savefile(filename=os.path.join(self._root_dir, '../backup.txt'), backup = backup)
+            self.savefile(
+                filename=project_application.ProjectPersistenceService.backup_path(self._root_dir),
+                backup=backup,
+            )
             return
         if self.__last_save_file is not None:
             self.savefile(filename=self.__last_save_file)
@@ -6587,22 +6535,31 @@ class Application():
         '''
 
         if filename is None:
-            save_file = filedialog.asksaveasfile(mode="w", defaultextension=".txt")
-            if save_file is None:  # ask saveasfile return `None` if dialog closed with "cancel".
+            filename = filedialog.asksaveasfilename(defaultextension=".txt")
+            if not filename:
                 return
             if not backup:
-                self.__last_save_file = save_file.name
-        else:
-            try:
-                save_file = open(filename, mode='w')
-            except FileNotFoundError:
-                save_file = open(filename.replace('',''), mode='w')
+                self.__last_save_file = filename
 
+        try:
+            save_result = project_application.ProjectSaveService.save_path(
+                filename,
+                self._build_project_save_input(),
+            )
+        except project_application.ProjectPersistenceError as error:
+            tk.messagebox.showerror('Save error', str(error))
+            return
+
+        if not backup:
+            self._parent.wm_title('| ANYstructure |     ' + str(save_result.path))
+        #self.update_frame()
+
+    def _build_project_save_input(self):
         load_combinations = [
-            project_services.LoadCombinationRecord(name, data[0].get(), data[1].get(), data[2].get())
+            project_application.LoadCombinationRecord(name, data[0].get(), data[1].get(), data[2].get())
             for name, data in self._new_load_comb_dict.items()
         ]
-        project_state = project_services.ProjectSnapshotService.create_state(
+        return project_application.ProjectSaveInput(
             project_information=self._project_information.get('1.0', tk.END),
             theme=self._current_theme,
             points=self._point_dict,
@@ -6621,60 +6578,57 @@ class Application():
             weight_and_cog=self._weight_logger,
         )
 
-        project_io.dump_project_state(project_state, save_file)
-        save_file.close()
-        if not backup:
-            self._parent.wm_title('| ANYstructure |     ' + save_file.name)
-        #self.update_frame()
-
     def openfile(self, defined = None, alone = False):
         '''
         Opens a file with data (JSON).
         '''
 
         if defined == None:
-            imp_file = filedialog.askopenfile(mode='r', defaultextension=".txt")
-            if imp_file is None:  # asksaveasfile return `None` if dialog closed with "cancel".
+            filename = filedialog.askopenfilename(defaultextension=".txt")
+            if not filename:
                 return
         else:
-            imp_file = open(defined,'r')
+            filename = defined
 
-        project_state = project_io.load_project_state(imp_file)
-        imported = project_state.to_legacy_mapping()
+        hydration_defaults = project_application.ProjectHydrationDefaults(
+            structure_types=self._structure_types,
+            zstar_optimization=self._new_zstar_optimization.get(),
+            puls_buckling_method=self._new_puls_method.get(),
+            puls_boundary=self._new_puls_panel_boundary.get(),
+            puls_stiffener_end=self._new_buckling_stf_end_support.get(),
+            puls_sp_or_up=self._new_puls_sp_or_up.get(),
+            puls_up_boundary=self._new_puls_up_boundary.get(),
+            material_factor=self._new_material_factor.get(),
+        )
+        try:
+            opened_project = project_application.ProjectOpenService.open_path(
+                filename,
+                hydration_defaults,
+            )
+        except project_application.ProjectPersistenceError as error:
+            tk.messagebox.showerror('Open error', str(error))
+            return
+
+        open_transfer = opened_project.transfer
+        hydration = opened_project.hydration
 
         self.reset()
-        if 'project information' in imported.keys():
+        if open_transfer.project_information:
             self._project_information.delete("1.0", tk.END)
-            self._project_information.insert(1.0, imported['project information'])
+            self._project_information.insert(1.0, open_transfer.project_information)
         else:
             self._project_information.delete("1.0", tk.END)
             self._project_information.insert(1.0, 'No information on project provided. Input here.')
 
-        if 'shifting' in imported.keys():
-            self._new_shifted_coords.set(imported['shifting']['shifted checked'])
-            self._new_shift_viz_coord_hor.set(imported['shifting']['shift hor'])
-            self._new_shift_viz_coord_ver.set(imported['shifting']['shift ver'])
-        else:
-            pass
+        if open_transfer.shifting:
+            self._new_shifted_coords.set(open_transfer.shifting.get('shifted checked', False))
+            self._new_shift_viz_coord_hor.set(open_transfer.shifting.get('shift hor', 0))
+            self._new_shift_viz_coord_ver.set(open_transfer.shifting.get('shift ver', 0))
 
-        if 'theme' in imported.keys():
-            self.set_colors(imported['theme'])
+        self.set_colors(open_transfer.theme)
 
-        self._point_dict = imported['point_dict']
-        self._line_dict = imported['line_dict']
-        hydration = project_services.ProjectHydrationService.hydrate_objects(
-            project_state,
-            project_services.ProjectHydrationDefaults(
-                structure_types=self._structure_types,
-                zstar_optimization=self._new_zstar_optimization.get(),
-                puls_buckling_method=self._new_puls_method.get(),
-                puls_boundary=self._new_puls_panel_boundary.get(),
-                puls_stiffener_end=self._new_buckling_stf_end_support.get(),
-                puls_sp_or_up=self._new_puls_sp_or_up.get(),
-                puls_up_boundary=self._new_puls_up_boundary.get(),
-                material_factor=self._new_material_factor.get(),
-            ),
-        )
+        self._point_dict = open_transfer.points
+        self._line_dict = open_transfer.lines
         self._line_to_struc = hydration.line_bundles
         self._load_dict = hydration.load_assignments
 
@@ -6686,49 +6640,36 @@ class Application():
         for section_properties in hydration.section_properties:
             self._sections = add_new_section(self._sections, struc.Section(section_properties))
 
-        try:
-            self._accelerations_dict = imported['accelerations_dict']
-        except IndexError:
-            self._accelerations_dict = {'static':9.81, 'dyn_loaded':0, 'dyn_ballast':0}
+        self._accelerations_dict = open_transfer.accelerations
 
         self._new_static_acc.set(self._accelerations_dict['static'])
         self._new_dyn_acc_loaded.set(self._accelerations_dict['dyn_loaded'])
         self._new_dyn_acc_ballast.set(self._accelerations_dict['dyn_ballast'])
 
-        try:
-            for data in imported['load_combinations'].values():
-                name = tuple(data[0])
+        for load_combination in open_transfer.load_combinations:
+            name = load_combination.name
+            if load_combination.has_include:
                 self._new_load_comb_dict[name] = [tk.DoubleVar(),tk.DoubleVar(),tk.IntVar()]
-                self._new_load_comb_dict[name][0].set(data[1]), self._new_load_comb_dict[name][1].set(data[2])
-                self._new_load_comb_dict[name][2].set(data[3])
-        except IndexError:
-            for data in imported['load_combinations'].values():
-                name = tuple(data[0])
+                self._new_load_comb_dict[name][0].set(load_combination.static_factor)
+                self._new_load_comb_dict[name][1].set(load_combination.dynamic_factor)
+                self._new_load_comb_dict[name][2].set(load_combination.include)
+            else:
                 self._new_load_comb_dict[name] = [tk.DoubleVar(),tk.IntVar()]
-                self._new_load_comb_dict[name][0].set(data[1]), self._new_load_comb_dict[name][1].set(data[2])
+                self._new_load_comb_dict[name][0].set(load_combination.static_factor)
+                self._new_load_comb_dict[name][1].set(load_combination.dynamic_factor)
 
         try:
-            self._main_grid.import_grid(imported['tank_properties']['grid'])
+            self._main_grid.import_grid(open_transfer.tank_grid)
             self._grid_calc = grid_window.CreateGridWindow(self._main_grid, self._canvas_dim,
                                                            self._pending_grid_draw, self._canvas_base_origo)
 
-            tank_inp = dict()
-            if 'search_data' in imported['tank_properties'].keys():
-                try:
-                    for key, value in imported['tank_properties']['search_data'].items():
-                        tank_inp[int(key)] = value
-                    self._main_grid.bfs_search_data = tank_inp
-                    self._grid_calc.bfs_search_data = tank_inp
-                except AttributeError:
-                    self._main_grid.bfs_search_data = None
-                    self._grid_calc.bfs_search_data = None
-            else:
-                self._main_grid.bfs_search_data = None
-                self._grid_calc.bfs_search_data = None
+            self._main_grid.bfs_search_data = open_transfer.tank_search_data
+            self._grid_calc.bfs_search_data = open_transfer.tank_search_data
 
             for comp_no in range(2, int(self._main_grid.get_highest_number_in_grid())+1):
                 self._compartments_listbox.insert('end',comp_no)
-                self._tank_dict['comp' + str(comp_no)] = Tanks(imported['tank_properties']['comp' + str(comp_no)])
+                tank_name = 'comp' + str(comp_no)
+                self._tank_dict[tank_name] = Tanks(open_transfer.tank_properties[tank_name])
         except IndexError:
             for line_name, point_no in self._line_dict.items():
                 point_coord_x = self._canvas_base_origo[0] + self._point_dict[point_no][0] * self._canvas_scale
@@ -6736,8 +6677,7 @@ class Application():
 
                 self.grid_operations(line_name, [point_coord_x,point_coord_y])
 
-        if 'buckling method' in list(imported.keys()):
-            self._new_buckling_method.set(imported['buckling method'])
+        self._new_buckling_method.set(open_transfer.buckling_method)
 
             # Setting the scale of the canvas
 
@@ -6755,17 +6695,17 @@ class Application():
         #     self._new_buckling_slider.set(imported['buckling type'])
         #     self._buckling_slider.set(imported['buckling type'])
 
-        if 'Weight and COG' in imported.keys():
-            self._weight_logger = imported['Weight and COG']
+        self._weight_logger = open_transfer.weight_and_cog
 
         self.get_cob()
-        imp_file.close()
-        self._parent.wm_title('| ANYstructure |     ' + imp_file.name)
+        self._parent.wm_title('| ANYstructure |     ' + str(filename))
         self.update_frame()
 
     def restore_previous(self):
-        if os.path.isfile(os.path.join(self._root_dir, '../backup.txt')):
-            self.openfile(defined=os.path.join(self._root_dir, '../backup.txt'))
+        if project_application.ProjectPersistenceService.backup_exists(self._root_dir):
+            self.openfile(
+                defined=project_application.ProjectPersistenceService.backup_path(self._root_dir)
+            )
 
     def open_example(self, file_name = 'ship_section_example.txt'):
         ''' Open the example file. To be used in help menu. '''
