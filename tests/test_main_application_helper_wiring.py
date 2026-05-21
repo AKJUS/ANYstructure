@@ -20,8 +20,10 @@ def test_main_application_uses_geometry_helpers_for_active_lookups():
 
     assert "api_helpers.geometry_id_for_domain(self._new_calculation_domain.get())" in source
     assert "api_helpers.domain_for_geometry_id(main_dict_cyl['geometry'][0])" in source
+    assert "api_helpers.domain_for_geometry_id(self._line_to_struc[self._active_line][5].geometry)" in source
     assert "self._shell_geometries_map[self._new_calculation_domain.get()]" not in source
     assert "CylinderAndCurvedPlate.geomeries[main_dict_cyl['geometry'][0]]" not in source
+    assert "CylinderAndCurvedPlate\n                                                 .geomeries[" not in source
 
 
 def test_main_application_uses_helpers_for_structure_property_unit_conversions():

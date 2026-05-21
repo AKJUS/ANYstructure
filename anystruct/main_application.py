@@ -6573,8 +6573,8 @@ class Application():
         if self._active_line in self._line_to_struc.keys():
 
             if self._line_to_struc[self._active_line][5] is not None:
-                self._new_calculation_domain.set(CylinderAndCurvedPlate
-                                                 .geomeries[self._line_to_struc[self._active_line][5].geometry])
+                self._new_calculation_domain.set(
+                    api_helpers.domain_for_geometry_id(self._line_to_struc[self._active_line][5].geometry))
                 self._new_shell_exclude_ring_stf.set(self._line_to_struc[self._active_line][5]._ring_stiffener_excluded)
                 self._new_shell_exclude_ring_frame.set(self._line_to_struc[self._active_line][5]._ring_frame_excluded)
                 self.calculation_domain_selected()
