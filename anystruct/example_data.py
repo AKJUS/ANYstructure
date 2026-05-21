@@ -519,7 +519,10 @@ def get_grid_coord_from_points_coords(point_coord):
 
 def get_section_list():
     ''' Returning a section list. '''
-    import pl_stf_window as plstf
+    try:
+        import anystruct.pl_stf_window as plstf
+    except ModuleNotFoundError:
+        import ANYstructure.anystruct.pl_stf_window as plstf
     return [plstf.Section(obj_dict), plstf.Section(obj_dict2), plstf.Section(obj_dict_L)]
 
 

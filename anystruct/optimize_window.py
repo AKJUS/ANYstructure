@@ -42,8 +42,6 @@ class CreateOptimizeWindow():
             self._fatigue_pressure = test.get_fatigue_pressures()
             self._slamming_pressure = test.get_slamming_pressure()
             image_dir = os.path.dirname(__file__)+'\\images\\'
-            self._PULS_object = None
-            self._puls_acceptance = 0.87
             self._initial_calc_obj.lat_press = self._lateral_pressure/1000
             self._ML_buckling = dict()  # Buckling machine learning algorithm
             self._root_dir = '/\\'
@@ -118,9 +116,6 @@ class CreateOptimizeWindow():
                 self._slamming_pressure = 0
             image_dir = app._root_dir +'\\images\\'
             self._root_dir = app._root_dir
-            self._PULS_object = app._PULS_results
-            self._puls_acceptance = self.app._new_puls_uf.get()
-
             self._ML_buckling = app._ML_buckling
 
         self._predefined_stiffener_iter = None
@@ -298,8 +293,7 @@ class CreateOptimizeWindow():
         tk.Label(self._frame, text='Flange width [mm]', font='Verdana 7 bold').place(x=start_x + 5.97 * dx, y=start_y-0.6*dy)
         tk.Label(self._frame, text='Flange thk. [mm]', font='Verdana 7 bold').place(x=start_x + 6.97 * dx, y=start_y-0.6*dy)
         tk.Label(self._frame, text='--------- Number of combinations to run --------->\n'
-                                   'PULS buckling is time consuming, about 0.2 sec. per comb.\n'
-                                   'RP-C203 is much faster and can run many more combinations, 1M+.\n'
+                                   'RP-C203 can run many combinations, 1M+.\n'
                                    'ML-CL is about as fast as RP-C203.',
                  font='Verdana 9 bold').place(x=start_x+0.1*dx, y=start_y + 2.8 * dy, anchor = tk.NW)
 
@@ -509,7 +503,7 @@ class CreateOptimizeWindow():
         self._new_algorithm.trace('w',self.update_running_time)
 
 
-        self.running_time_per_item = {'PULS':0.2489626556016598, 'RP': 1.009943181818182e-5}
+        self.running_time_per_item = {'RP': 1.009943181818182e-5}
         self.initial_weight = op.calc_weight([self._spacing,self._pl_thk,self._stf_web_h,self._stf_web_thk,
                                               self._fl_w,self._fl_thk,self._new_span.get(),self._new_width_lg.get()])
 
@@ -551,7 +545,6 @@ class CreateOptimizeWindow():
         self._new_check_min_pl_thk = tk.BooleanVar()
         self._new_check_shear_area = tk.BooleanVar()
         self._new_check_buckling = tk.BooleanVar()
-        self._new_check_buckling_puls = tk.BooleanVar()
         self._new_check_buckling_ml_cl = tk.BooleanVar()
         self._new_check_fatigue = tk.BooleanVar()
         self._new_check_slamming = tk.BooleanVar()
@@ -565,9 +558,7 @@ class CreateOptimizeWindow():
         self._new_check_slamming.set(False)
         self._new_check_local_buckling.set(True)
         self._new_use_weight_filter.set(True)
-        self._new_check_buckling_puls.set(False)
         self._new_check_buckling_ml_cl.set(False)
-        self._new_check_buckling_puls.trace('w', self.update_running_time)
         self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
 
 
@@ -580,8 +571,7 @@ class CreateOptimizeWindow():
         tk.Label(self._frame, text='Check for bow slamming').place(x=start_x + dx * 9.7, y=start_y + 9 * dy)
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
         tk.Label(self._frame, text='Use weight filter (for speed)').place(x=start_x + dx * 9.7, y=start_y + 11 * dy)
-        tk.Label(self._frame, text='Check for buckling (PULS)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 13 * dy)
+        tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
 
         tk.Checkbutton(self._frame,variable=self._new_check_sec_mod).place(x=start_x+dx*12,y=start_y+4*dy)
         tk.Checkbutton(self._frame, variable=self._new_check_min_pl_thk).place(x=start_x+dx*12,y=start_y+5*dy)
@@ -593,10 +583,8 @@ class CreateOptimizeWindow():
                                                                                    y=start_y + 10 * dy)
         tk.Checkbutton(self._frame, variable=self._new_use_weight_filter).place(x=start_x + dx * 12,
                                                                                    y=start_y + 11 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_puls).place(x=start_x + dx * 12,
-                                                                                   y=start_y + 12 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl).place(x=start_x + dx * 12,
-                                                                                   y=start_y + 13 * dy)
+                                                                                   y=start_y + 12 * dy)
 
         # Stress scaling
         self._new_fup = tk.DoubleVar()
@@ -704,24 +692,6 @@ class CreateOptimizeWindow():
         self._opt_actual_running_time.update()
         t_start = time.time()
         self._opt_results, self._opt_runned = (), False
-        if self._PULS_object is not None:
-            puls_sheet_location = self._PULS_object.puls_sheet_location
-            puls_acceptance = self._puls_acceptance
-            if self._new_check_buckling_puls.get() == True:
-                if puls_sheet_location is None or not os.path.isfile(
-                        puls_sheet_location):
-                    tk.messagebox.showerror('No PULS excel sheet located', 'Set location of PULS excel sheet.\n'
-                                                                           'Note that PULS excel may require 32 bit '
-                                                                           'office.\n\n'
-                                                                           'A sheet may be provided but does not exist'
-                                                                           ' in :\n'
-                                            + self._PULS_results.puls_sheet_location +
-                                            '\n\n Return to main window an run one or more lines in PULS.')
-        else:
-            puls_sheet_location = None
-            puls_acceptance =0.87
-
-
         self.pso_parameters = (self._new_swarm_size.get(),self._new_omega.get(),self._new_phip.get(),
                                self._new_phig.get(),
                                self._new_maxiter.get(),self._new_minstep.get(),self._new_minfunc.get())
@@ -729,7 +699,7 @@ class CreateOptimizeWindow():
         contraints = (self._new_check_sec_mod.get(),self._new_check_min_pl_thk.get(),
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                      self._new_check_local_buckling.get(), self._new_check_buckling_puls.get(),
+                      self._new_check_local_buckling.get(), False,
                       self._new_check_buckling_ml_cl.get(), False)
         self._initial_calc_obj.Plate.set_span(self._new_span.get())
 
@@ -753,9 +723,7 @@ class CreateOptimizeWindow():
                                                slamming_press = self._new_slamming_pressure.get(),
                                                predefined_stiffener_iter=self._predefined_stiffener_iter,
                                                processes=self._new_processes.get(),
-                                               use_weight_filter = False if self._new_check_buckling_puls.get()
-                                               else self._new_use_weight_filter.get(),
-                                               puls_sheet = puls_sheet_location, puls_acceptance = puls_acceptance,
+                                               use_weight_filter=self._new_use_weight_filter.get(),
                                                fdwn = self._new_fdwn.get(), fup = self._new_fdwn.get(),
                                                ml_algo= self._ML_buckling)
 
@@ -805,8 +773,7 @@ class CreateOptimizeWindow():
                                              predef_stiffeners=None if self._predefined_stiffener_iter is None else
                                              [item.get_tuple() for item in self._predefined_stiffener_iter])
             number_of_combinations = len([val for val in all_combs])
-            return int(number_of_combinations * self.running_time_per_item['PULS' if self._new_check_buckling_puls.get()
-            else 'RP']), number_of_combinations
+            return int(number_of_combinations * self.running_time_per_item['RP']), number_of_combinations
 
         elif self._new_algorithm.get() in ['pso','random','random_no_delta']:
             try:
@@ -817,14 +784,12 @@ class CreateOptimizeWindow():
                 max((self._new_web_thk_upper.get()-self._new_web_thk_lower.get())/self._new_delta_web_thk.get(),1)*\
                 max((self._new_fl_w_upper.get()-self._new_fl_w_lower.get())/self._new_delta_fl_w.get(),1)*\
                 max((self._new_fl_thk_upper.get()-self._new_fl_thk_lower.get())/self._new_delta_fl_thk.get(),1)
-                return int(number_of_combinations*self.running_time_per_item['PULS' if self._new_check_buckling_puls.get()
-            else 'RP']),number_of_combinations
+                return int(number_of_combinations*self.running_time_per_item['RP']),number_of_combinations
             except TclError:
                 return 0,0
         else:
             try:
-                return int(self._new_algorithm_random_trials.get() * self.running_time_per_item['PULS' if self._new_check_buckling_puls.get()
-            else 'RP']),\
+                return int(self._new_algorithm_random_trials.get() * self.running_time_per_item['RP']),\
                        self._new_algorithm_random_trials.get()
             except TclError:
                 return 0,0
@@ -846,30 +811,20 @@ class CreateOptimizeWindow():
 
         try:
             self._runnig_time_label.config(text=str(int(self.get_running_time()[1])) + ' (about '+
-                                                str(max(round(self.get_running_time()[1]*self.running_time_per_item['PULS'
-                                                if self._new_check_buckling_puls.get()
-            else 'RP']/60,2), 0.1))+ ' min.)')
+                                                str(max(round(self.get_running_time()[1] *
+                                                              self.running_time_per_item['RP']/60, 2), 0.1))+
+                                                ' min.)')
 
         except (ZeroDivisionError, TclError):
             pass# _tkinter.TclError: pass
 
-        if [self._new_check_buckling_ml_cl.get(),self._new_check_buckling_puls.get(),
-            self._new_check_buckling.get()].count(True) > 1:
+        if [self._new_check_buckling_ml_cl.get(), self._new_check_buckling.get()].count(True) > 1:
             tk.messagebox.showerror('You can only select one buckling type. Reselect.')
-            if self._new_check_buckling_puls.get():
-                self._new_check_buckling_puls.set(False)
             if self._new_check_buckling_ml_cl.get():
                 self._new_check_buckling_ml_cl.set(False)
             if self._new_check_buckling.get():
                 self._new_check_buckling.set(False)
                 self._new_check_local_buckling.set(False)
-
-
-        if self._new_check_buckling_puls.get():
-            if self._PULS_object is None or self._PULS_object.puls_sheet_location is None:
-                tk.messagebox.showerror('Missing PULS sheet', 'Go back to main window and set a PULS sheet location\n'
-                                                    'by running one or more lines.')
-                self._new_check_buckling_puls.set(False)
     
     def get_upper_bounds(self):
         '''

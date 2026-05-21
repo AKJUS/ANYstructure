@@ -38,3 +38,19 @@ def test_optimization(opt_input):
 
 def test_weight_calc(opt_input):
     assert opt.calc_weight(opt_input[-1]) == pytest.approx(8125.711486965601)
+
+
+def test_external_excel_puls_optimization_is_removed(opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, fat_obj, fat_press, _ = opt_input
+
+    with pytest.raises(NotImplementedError, match="External Excel-sheet PULS optimization was removed"):
+        opt.run_optmizataion(
+            obj,
+            upper_bounds,
+            lower_bounds,
+            lat_press,
+            deltas,
+            const_chk=(True, True, True, True, True, True, True, True, False, False),
+            fatigue_obj=fat_obj,
+            fat_press_ext_int=fat_press,
+        )

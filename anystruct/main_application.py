@@ -37,7 +37,6 @@ try:
     import anystruct.api_helpers as api_helpers
     import anystruct.project_io as project_io
     import anystruct.project_services as project_services
-    from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
     import anystruct.excel_inteface as excel_interface
@@ -61,7 +60,6 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.api_helpers as api_helpers
     import ANYstructure.anystruct.project_io as project_io
     import ANYstructure.anystruct.project_services as project_services
-    from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
     import ANYstructure.anystruct.excel_inteface as excel_interface
@@ -962,7 +960,6 @@ class Application():
                                                command=self.update_frame)
 
         # ML-CL keeps the historic PULS-derived panel input parameters below.
-        self._puls_run_all = ttk.Button(self._tab_prop)
         self._ent_puls_uf = ttk.Entry(self._tab_prop, textvariable=self._new_puls_uf, width=int(ent_width * 1))
         self._new_puls_uf.trace('w', self.trace_acceptance_change)
 
@@ -2192,7 +2189,7 @@ class Application():
         'Orthogonally Stiffened shell (Force input)', 'Orthogonally Stiffened panel (Stress input)']
         '''
 
-        to_process = [self._puls_run_all, self._lab_buckling_method,
+        to_process = [self._lab_buckling_method,
                       self._buckling_method, self._lab_yield,
                       self._lab_mat_fac,self._structure_types_label, self._button_str_type, self._ent_structure_type,
                       self._lab_structure_type, self._lab_kpp, self._lab_kps, self._lab_km1, self._lab_km2,
@@ -2296,69 +2293,6 @@ class Application():
         self._current_calculation_domain = self._new_calculation_domain.get()
         # Setting the correct optmization buttons
 
-    def puls_run_all_lines(self, line_given = None):
-        progress = ttk.Progressbar(self._tab_prop, mode='indeterminate')
-        progress.place(relx = 0.85, rely = 0.9, relwidth = 0.1)
-        progress.start()
-        if self._PULS_results is None:
-            self._PULS_results = PULSpanel()
-        if self._PULS_results.puls_sheet_location is None or not os.path.isfile(self._PULS_results.puls_sheet_location):
-            tk.messagebox.showerror('No PULS excel sheet located', 'Set location of PULS excel sheet.\n'
-                                                                            'Note that PULS excel may require 32 bit '
-                                                                            'office.\n\n'
-                                                                         'A sheet may be provided but does not exist'
-                                                                            ' in :\n'
-                                                                         + str(self._PULS_results.puls_sheet_location) +
-                                    '\n\n A file dialogue will pop up after this message.')
-            self._PULS_results.puls_sheet_location= \
-                tk.filedialog.askopenfilename(parent=self._main_fr,title='Set location of PULS excel sheet.')
-        if self._PULS_results.puls_sheet_location == '':
-            tk.messagebox.showerror('No valid PULS sheet', 'No excel sheet was provided. Cannot run PULS.\n'
-                                                           'Note that PULS excel may require 32 bit office.')
-            return
-
-        dict_to_run = {}
-        result_lines = list(self._PULS_results.get_run_results().keys())
-
-        if line_given == None:
-            current_button = self._puls_run_all
-            for line, data in self._line_to_struc.items():
-                if line not in result_lines:
-                    data[0].Plate.hw = 0 if data[0].Stiffener is None else data[0].Stiffener.hw
-                    data[0].Plate.tw = 0 if data[0].Stiffener is None else data[0].Stiffener.tw
-                    data[0].Plate.b = 0 if data[0].Stiffener is None else data[0].Stiffener.b
-                    data[0].Plate.tf = 0 if data[0].Stiffener is None else data[0].Stiffener.tf
-                    dict_to_run[line] = data[0].Plate.get_puls_input()
-                    dict_to_run[line]['Identification'] = line
-                    dict_to_run[line]['Pressure (fixed)'] = self.get_highest_pressure(line)['normal']/1e6
-        else:
-            current_button = self._puls_run_one
-            if line_given == '':
-                return
-            if line_given not in result_lines:
-                dict_to_run[line_given] = self._line_to_struc[line_given][0].Plate.get_puls_input()
-                dict_to_run[line_given]['Identification'] = line_given
-                dict_to_run[line_given]['Pressure (fixed)'] = self.get_highest_pressure(line_given)['normal'] / 1e6
-
-
-        if len(dict_to_run) > 0:
-
-            #current_button.config(relief = 'sunken')
-            self._PULS_results.set_all_to_run(dict_to_run)
-            self._PULS_results.run_all()
-            #current_button.config(relief='raised')
-            current_button.config(text='PULS run or\nupdate all lines' if line_given == None else 'PULS\nRun one line')
-            #current_button.config(bg=self._button_bg_color)
-            for key, value in self._line_to_struc.items():
-                value[0].need_recalc = True
-        else:
-            tk.messagebox.showinfo('Results avaliable', 'PULS results is already avaliable for this line or no '
-                                                        'lines need update.')
-
-        progress.stop()
-        progress.destroy()
-        self.update_frame()
-
     def stress_information_notebooks(self, info_type = 'shell'):
         ''' Shows stress information '''
         text_m = tk.Toplevel(self._parent, background=self._general_color)
@@ -2445,21 +2379,6 @@ class Application():
                                         relwidth=opt_width)
         else:
             self._ent_puls_up_boundary.place_forget()
-
-    def puls_run_one_line(self):
-        self.puls_run_all_lines(self._active_line)
-        self.update_frame()
-
-    def puls_delete_all(self):
-        '''
-        Deletes all existing PULS results
-        '''
-        if self._PULS_results is not None:
-            for key, val in self._line_to_struc.items():
-                self._PULS_results.result_changed(key)
-                val[0].need_recalc = True
-
-        self.update_frame()
 
     def resize(self, event):
         self.text_scale = 1#self._main_fr.winfo_width()/1920
@@ -2848,7 +2767,7 @@ class Application():
 
     def trace_update_load(self, *args):
         try:
-            self._line_to_struc[self._active_line][0].need_recalc = True
+            project_services.mark_line_for_recalculation(self._line_to_struc, self._active_line)
         except BaseException as error:
             pass
 
@@ -2861,8 +2780,7 @@ class Application():
     def trace_acceptance_change(self, *args):
         try:
             self.update_frame()
-            for key, val in self._line_to_struc.items():
-                val[0].need_recalc = True
+            project_services.mark_lines_for_recalculation(self._line_to_struc)
         except (TclError, ZeroDivisionError):
             pass
 
@@ -5442,71 +5360,69 @@ class Application():
 
     def _add_structure_to_active_line(self, prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict,
                                       long_dict, ring_stf_dict, ring_frame_dict, geometry):
-        self._line_to_struc[self._active_line] = [None, None, None, [None], {}, None]
         All = self._create_all_structure_from_properties(prop_dict)
+        line_structures = project_services.LineStructureService(self._line_to_struc)
+        line_structures.assign_structure(self._active_line, All, cylinder=CylinderObj)
 
         self._sections = add_new_section(self._sections, struc.Section(obj_dict_stf)) # TODO error when pasting
-        self._line_to_struc[self._active_line][0] = All
-        self._line_to_struc[self._active_line][5] = CylinderObj
-        if self._line_to_struc[self._active_line][0].Plate.get_structure_type() not in \
+        if line_structures.structure(self._active_line).Plate.get_structure_type() not in \
                 self._structure_types['non-wt']:
             self._clear_tanks_and_grid()
         if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
             if CylinderObj is None:
                 CylinderObj = self._create_cylinder_structure_from_properties(
                     main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry)
-            self._line_to_struc[self._active_line][5] = CylinderObj
+            line_structures.set_cylinder(self._active_line, CylinderObj)
 
     def _scale_existing_flat_structure_if_needed(self, prev_all_obj):
+        line_structures = project_services.LineStructureService(self._line_to_struc)
         if self._new_scale_stresses.get() and prev_all_obj.get_main_properties() != \
-                self._line_to_struc[self._active_line][0].get_main_properties():
+                line_structures.structure(self._active_line).get_main_properties():
             if prev_all_obj.Stiffener is not None:
-                plate = self._line_to_struc[self._active_line][0].Plate
-                stiffener = self._line_to_struc[self._active_line][0].Stiffener
-                girder = self._line_to_struc[self._active_line][0].Girder
+                plate = line_structures.structure(self._active_line).Plate
+                stiffener = line_structures.structure(self._active_line).Stiffener
+                girder = line_structures.structure(self._active_line).Girder
                 calc_tup = (plate.get_s(), plate.get_pl_thk(), stiffener.get_web_h(), stiffener.get_web_thk(),
                             stiffener.get_fl_w(),
                             stiffener.get_fl_thk(), plate.span, stiffener.girder_lg if girder is None else
                             girder.girder_lg, stiffener.stiffener_type)
             else:
-                calc_tup = self._line_to_struc[self._active_line][0].Plate.get_tuple()
-            self._line_to_struc[self._active_line][0] = op.create_new_calc_obj(prev_all_obj, calc_tup,
-                                                                               fup=self._new_fup.get(),
-                                                                               fdwn=self._new_fdwn.get())[0]
+                calc_tup = line_structures.structure(self._active_line).Plate.get_tuple()
+            line_structures.replace_structure(
+                self._active_line,
+                op.create_new_calc_obj(prev_all_obj, calc_tup, fup=self._new_fup.get(), fdwn=self._new_fdwn.get())[0],
+            )
 
     def _sync_fatigue_object_after_structure_update(self, prop_dict):
-        if self._line_to_struc[self._active_line][2] is not None:
-            calc_dom = self._line_to_struc[self._active_line][0].calculation_domain
-            if calc_dom == 'Flat plate, unstiffened':
-                self._line_to_struc[self._active_line][2] = None
-            else:
-                self._line_to_struc[self._active_line][2].set_main_properties(prop_dict['Stiffener'])
+        project_services.LineStructureService(self._line_to_struc).sync_fatigue_after_structure_update(
+            self._active_line, prop_dict)
 
     def _sync_cylinder_object_after_structure_update(self, CylinderObj, cylinder_return):
+        line_structures = project_services.LineStructureService(self._line_to_struc)
         if all([CylinderObj is None, cylinder_return is None,
-                          self._line_to_struc[self._active_line][5] is not None]):
-            self._line_to_struc[self._active_line][5] = None
+                          line_structures.cylinder(self._active_line) is not None]):
+            line_structures.set_cylinder(self._active_line, None)
         elif CylinderObj is not None:
-            if self._line_to_struc[self._active_line][5] is not None and self._new_scale_stresses.get():
-                NewCylinderObj = op.create_new_cylinder_obj(self._line_to_struc[self._active_line][5],
-                                                         CylinderObj.get_x_opt())
+            if line_structures.cylinder(self._active_line) is not None and self._new_scale_stresses.get():
+                NewCylinderObj = op.create_new_cylinder_obj(line_structures.cylinder(self._active_line),
+                                                            CylinderObj.get_x_opt())
                 NewCylinderObj.LongStfObj = None if CylinderObj.LongStfObj is None \
                     else NewCylinderObj.LongStfObj
                 NewCylinderObj.RingStfObj = None if CylinderObj.RingStfObj is None \
                     else NewCylinderObj.RingStfObj
                 NewCylinderObj.RingFrameObj = None if CylinderObj.RingFrameObj is None \
                     else NewCylinderObj.RingFrameObj
-            self._line_to_struc[self._active_line][5] = CylinderObj
+            line_structures.set_cylinder(self._active_line, CylinderObj)
         elif cylinder_return is not None:
-            self._line_to_struc[self._active_line][5] = cylinder_return
+            line_structures.set_cylinder(self._active_line, cylinder_return)
 
     def _update_existing_active_line_structure(self, prop_dict, CylinderObj, cylinder_return):
-        prev_type = self._line_to_struc[self._active_line][0].Plate.get_structure_type()
-        prev_all_obj = copy.deepcopy(self._line_to_struc[self._active_line][0])
-        self._line_to_struc[self._active_line][0].set_main_properties(prop_dict)
+        line_structures = project_services.LineStructureService(self._line_to_struc)
+        prev_type = line_structures.structure(self._active_line).Plate.get_structure_type()
+        prev_all_obj = copy.deepcopy(line_structures.structure(self._active_line))
+        line_structures.update_structure_properties(self._active_line, prop_dict)
 
         self._scale_existing_flat_structure_if_needed(prev_all_obj)
-        self._line_to_struc[self._active_line][0].need_recalc = True
         self._sync_fatigue_object_after_structure_update(prop_dict)
 
         if prev_type in self._structure_types['non-wt'] and prop_dict['Plate']['structure_type'][0] in \
@@ -6682,62 +6598,30 @@ class Application():
             except FileNotFoundError:
                 save_file = open(filename.replace('',''), mode='w')
 
-        structure_properties = {}
-        shell_structure_properties = {}
-        for key, value in self._line_to_struc.items():
-            structure_properties[key] = value[0].get_main_properties()
-            shell_structure_properties[key] = None if value[5] is None else value[5].get_all_properties()
+        load_combinations = [
+            project_services.LoadCombinationRecord(name, data[0].get(), data[1].get(), data[2].get())
+            for name, data in self._new_load_comb_dict.items()
+        ]
+        project_state = project_services.ProjectSnapshotService.create_state(
+            project_information=self._project_information.get('1.0', tk.END),
+            theme=self._current_theme,
+            points=self._point_dict,
+            lines=self._line_dict,
+            line_bundles=self._line_to_struc,
+            load_assignments=self._load_dict,
+            accelerations=self._accelerations_dict,
+            load_combinations=load_combinations,
+            tanks=self._tank_dict,
+            tank_grid=self._main_grid.export_grid(),
+            tank_search_data=self._main_grid.bfs_search_data,
+            buckling_method=self._new_buckling_method.get(),
+            shifting={'shifted checked': self._new_shifted_coords.get(),
+                      'shift hor': self._new_shift_viz_coord_hor.get(),
+                      'shift ver': self._new_shift_viz_coord_ver.get()},
+            weight_and_cog=self._weight_logger,
+        )
 
-        fatigue_properties = {}
-        for key, value in self._line_to_struc.items():
-            if value[2] != None:
-                try:
-                    fatigue_properties[key] = value[2].get_fatigue_properties()
-                except AttributeError:
-                    fatigue_properties[key] = None
-            else:
-                fatigue_properties[key] = None
-
-        load_properties = {}
-        for load, data in self._load_dict.items():
-            load_properties[load] = [data[0].get_load_parmeters(), data[1]]
-
-        tank_properties = {}
-        tank_properties['grid'] = self._main_grid.export_grid()
-        tank_properties['search_data'] = self._main_grid.bfs_search_data
-        for tank,data in self._tank_dict.items():
-            tank_properties[tank] = data.get_parameters()
-
-        load_combiantions = {}
-        counter = 0
-        for name, data in self._new_load_comb_dict.items():
-            load_combiantions[counter] = [name,data[0].get(),data[1].get(),data[2].get()]
-            counter+=1
-
-        export_all = {}
-
-        export_all['project information'] = self._project_information.get('1.0', tk.END)
-        export_all['theme'] = self._current_theme
-        export_all['point_dict'] = self._point_dict
-        export_all['line_dict'] = self._line_dict
-        export_all['structure_properties'] = structure_properties
-        export_all['shell structure properties'] = shell_structure_properties
-        export_all['load_properties'] = load_properties
-        export_all['accelerations_dict'] = self._accelerations_dict
-        export_all['load_combinations'] = load_combiantions
-        export_all['tank_properties'] = tank_properties
-        export_all['fatigue_properties'] = fatigue_properties
-        #export_all['buckling type'] = self._new_buckling_slider.get()
-
-        export_all['buckling method'] = self._new_buckling_method.get()
-
-        export_all['shifting'] = {'shifted checked': self._new_shifted_coords.get(),
-                                  'shift hor': self._new_shift_viz_coord_hor.get(),
-                                  'shift ver': self._new_shift_viz_coord_ver.get()}
-
-        export_all['Weight and COG'] = self._weight_logger
-
-        project_io.dump_project_state(ProjectState.from_legacy_mapping(export_all), save_file)
+        project_io.dump_project_state(project_state, save_file)
         save_file.close()
         if not backup:
             self._parent.wm_title('| ANYstructure |     ' + save_file.name)
@@ -6755,7 +6639,8 @@ class Application():
         else:
             imp_file = open(defined,'r')
 
-        imported = project_io.load_project_state(imp_file).to_legacy_mapping()
+        project_state = project_io.load_project_state(imp_file)
+        imported = project_state.to_legacy_mapping()
 
         self.reset()
         if 'project information' in imported.keys():
@@ -6777,154 +6662,29 @@ class Application():
 
         self._point_dict = imported['point_dict']
         self._line_dict = imported['line_dict']
-        struc_prop = imported['structure_properties']
-        old_save_file = False
+        hydration = project_services.ProjectHydrationService.hydrate_objects(
+            project_state,
+            project_services.ProjectHydrationDefaults(
+                structure_types=self._structure_types,
+                zstar_optimization=self._new_zstar_optimization.get(),
+                puls_buckling_method=self._new_puls_method.get(),
+                puls_boundary=self._new_puls_panel_boundary.get(),
+                puls_stiffener_end=self._new_buckling_stf_end_support.get(),
+                puls_sp_or_up=self._new_puls_sp_or_up.get(),
+                puls_up_boundary=self._new_puls_up_boundary.get(),
+                material_factor=self._new_material_factor.get(),
+            ),
+        )
+        self._line_to_struc = hydration.line_bundles
+        self._load_dict = hydration.load_assignments
 
-        for line, lines_prop in struc_prop.items():
-
-            if len(lines_prop) > 10:
-                # Loading a file (pre 3.4)
-                old_save_file = True
-
-            self._line_to_struc[line] = [None, None, None, [], {}, None]
+        for line in self._line_to_struc:
             self._line_point_to_point_string.append(
                 self.make_point_point_line_string(self._line_dict[line][0], self._line_dict[line][1])[0])
             self._line_point_to_point_string.append(
                 self.make_point_point_line_string(self._line_dict[line][0], self._line_dict[line][1])[1])
-
-            if 'structure_types' not in lines_prop.keys():
-                lines_prop['structure_types'] = [self._structure_types, ' ']
-            if 'zstar_optimization' not in lines_prop.keys():
-                lines_prop['zstar_optimization'] = [self._new_zstar_optimization.get(), '']
-            if 'puls buckling method' not in lines_prop.keys():
-                lines_prop['puls buckling method'] = [self._new_puls_method.get(), '']
-            if 'puls boundary' not in lines_prop.keys():
-                lines_prop['puls boundary'] = [self._new_puls_panel_boundary.get(), '']
-            if 'puls stiffener end' not in lines_prop.keys():
-                lines_prop['puls stiffener end'] = [self._new_buckling_stf_end_support.get(), '']
-            if 'puls sp or up' not in lines_prop.keys():
-                lines_prop['puls sp or up'] = [self._new_puls_sp_or_up.get(), '']
-            if 'puls up boundary' not in lines_prop.keys():
-                lines_prop['puls up boundary'] = [self._new_puls_up_boundary.get(), '']
-            if 'mat_factor' not in lines_prop.keys():
-                lines_prop['mat_factor'] = [self._new_material_factor.get(), '']
-
-            # Sigma x1/x2 is missing before 3.4
-            if 'sigma_x' in lines_prop.keys():
-                lines_prop['sigma_x1'] = lines_prop['sigma_x']
-                lines_prop['sigma_x2'] = lines_prop['sigma_x']
-                lines_prop.pop('sigma_x')
-
-            if old_save_file: #need to get some basic information
-                # Import issues
-                try:
-                    import example_data as ex
-                except ModuleNotFoundError:
-                    # This is due to pyinstaller issues.
-                    import anystruct.example_data as ex
-                    #import ANYstructure.anystruct.example_data as ex
-
-                main_dict = ex.prescriptive_main_dict
-                map_end = {'C': 'Continuous', 'S': 'Sniped'}
-                lines_prop['puls stiffener end'] = [map_end[lines_prop['puls stiffener end'][0]],
-                                                    lines_prop['puls stiffener end'][1]]
-                main_dict['material yield'] = [355e6, 'Pa']
-                main_dict['load factor on stresses'] = [1, '']
-                main_dict['load factor on pressure'] = [1, '']
-                main_dict['buckling method'] = [lines_prop['puls buckling method'], '']
-                main_dict['stiffener end support'] = lines_prop['puls stiffener end']  # 'Continuous'
-                main_dict['girder end support'] = ['Continuous', '']  # 'Continuous'
-                dom = 'Flat plate, stiffened' if lines_prop['puls sp or up'][0] == 'SP' else 'Flat plate, unstiffened'
-
-                main_dict['calculation domain'] = [dom, '']
-                map_side = {'p': 'plate side', 's': 'stiffener side'}
-                if 'press_side' in lines_prop.keys():
-                    lines_prop['press_side'] = [map_side[lines_prop['press_side'][0]], '']
-                else:
-                    lines_prop['press_side'] = 'both sides'
-                lines_prop['panel or shell'] = 'panel'
-                #lines_prop['tension field'] = 'allowed'
-                self._line_to_struc[line][0] = AllStructure(Plate=CalcScantlings(lines_prop),
-                                                            Stiffener=None if dom == 'Flat plate, unstiffened'
-                                                            else CalcScantlings(lines_prop),
-                                                            Girder=None, main_dict=main_dict)
-
-                if imported['fatigue_properties'][line] is not None:
-                    self._line_to_struc[line][2] = CalcFatigue(lines_prop,
-                                                               imported['fatigue_properties'][line])
-                else:
-                    self._line_to_struc[line][2] = None
-                #  Recording sections.
-                self._sections = add_new_section(self._sections, struc.Section(lines_prop))
-
-            else:
-                self._line_to_struc[line][0] = AllStructure(Plate=None if lines_prop['Plate'] is None
-                                                            else CalcScantlings(lines_prop['Plate']),
-                                                            Stiffener=None if lines_prop['Stiffener'] is None
-                                                            else CalcScantlings(lines_prop['Stiffener']),
-                                                            Girder=None if lines_prop['Girder'] is None
-                                                            else CalcScantlings(lines_prop['Girder']),
-                                                            main_dict=lines_prop['main dict'])
-
-                if imported['fatigue_properties'][line] is not None:
-                    self._line_to_struc[line][2] = CalcFatigue(lines_prop['Stiffener'],
-                                                               imported['fatigue_properties'][line])
-                else:
-                    self._line_to_struc[line][2] = None
-                #  Recording sections.
-                if self._line_to_struc[line][0].Stiffener is not None:
-                    self._sections = add_new_section(self._sections, struc.Section(lines_prop['Stiffener']))
-
-            if 'shell structure properties' in imported.keys():
-                if imported['shell structure properties'][line] is not None:
-                    # need to correct the calcuation domain.
-                    #self._new_calculation_domain.set(imported_dict['Main class'][CylinderAndCurvedPlate.geomeries])
-                    imported_dict = imported['shell structure properties'][line]
-                    '''
-                    all_data = {'Main class': self.get_main_properties(),
-                                'Shell': self._Shell.get_main_properties(),
-                                'Long. stf.': self._LongStf.get_structure_prop(),
-                                'Ring stf.': self.RingStfObj.get_structure_prop(),
-                                'Ring frame': self._RingFrame.get_structure_prop()}
-                    '''
-                    for stuc_type in ['Long. stf.', 'Ring stf.', 'Ring frame']:
-                        if imported_dict[stuc_type] is not None:
-                            if 'sigma_x' in imported_dict[stuc_type].keys():
-                                imported_dict[stuc_type]['sigma_x1'] = imported_dict[stuc_type]['sigma_x']
-                                imported_dict[stuc_type]['sigma_x2'] = imported_dict[stuc_type]['sigma_x']
-                                imported_dict[stuc_type].pop('sigma_x')
-                    self._line_to_struc[line][5] = \
-                        CylinderAndCurvedPlate(imported_dict['Main class'], shell=None if imported_dict['Shell'] is None
-                        else Shell(imported_dict['Shell']), long_stf=None if imported_dict['Long. stf.'] is None
-                        else Structure(imported_dict['Long. stf.']), ring_stf=None if imported_dict['Ring stf.'] is None
-                        else Structure(imported_dict['Ring stf.']), ring_frame=None if imported_dict['Ring frame']
-                                                                                       is None
-                        else Structure(imported_dict['Ring frame']))
-
-
-        # opening the loads
-        variables = ['poly_third','poly_second', 'poly_first', 'poly_const', 'load_condition',
-                     'structure_type', 'man_press', 'static_draft', 'name_of_load', 'limit_state',
-                     'slamming mult pl', 'slamming mult stf']
-
-        if len(imported['load_properties']) != 0:
-            for load, data in imported['load_properties'].items():
-                temp_dict = {}
-                count_i = 0
-                values = data[0]
-                if len(values) != len(variables):
-                    # Adding slamming multiplication factors
-                    values.append(1)
-                    values.append(1)
-                for value in values:
-                    temp_dict[variables[count_i]]= value
-                    count_i += 1
-                self._load_dict[load] = [Loads(temp_dict), data[1]]
-
-                if len(data[1]) != 0:
-                    for main_line in self._line_dict.keys():
-                        if main_line in data[1]:
-                            self._line_to_struc[main_line][3].append(self._load_dict[load][0])
+        for section_properties in hydration.section_properties:
+            self._sections = add_new_section(self._sections, struc.Section(section_properties))
 
         try:
             self._accelerations_dict = imported['accelerations_dict']
@@ -7326,43 +7086,6 @@ class Application():
         lf_tkinter = tk.Toplevel(self._parent, background=self._general_color)
         load_factors.CreateLoadFactorWindow(lf_tkinter, self)
 
-    def on_puls_results_for_line(self):
-        if not self._line_is_active:
-            return
-        if self._PULS_results is None:
-            return
-        elif self._PULS_results.get_puls_line_results(self._active_line) is None:
-            return
-        # if self._puls_information_button.config('relief')[-1] == 'sunken':
-        #     self.text_widget.forget()
-        #     self._puls_information_button.config(relief='raised')
-        this_result = self._PULS_results.get_puls_line_results(self._active_line)
-        this_string = ''
-        for key, value in this_result.items():
-            if type(value) == list:
-                this_string += key + ' : ' + str(value[0]) + ' ' + str(value[1]) + '\n'
-            elif type(value) == str:
-                this_string += key + ' : ' + value + '\n'
-            elif type(value) == dict:
-                this_string += key + '\n'
-                for subk, subv in value.items():
-                    this_string += '   ' + subk + ' : ' + str(subv[0]) + ' ' + str(subv[1] if subv[1] != None else '') + '\n'
-
-        text_m = tk.Toplevel(self._parent, background=self._general_color)
-        # Create the text widget
-        text_widget = tk.Text(text_m , height=60, width=100)
-        # Create a scrollbar
-        scroll_bar = ttk.Scrollbar(text_m)
-        # Pack the scroll bar
-        # Place it to the right side, using tk.RIGHT
-        scroll_bar.pack(side=tk.RIGHT)
-        # Pack it into our tkinter application
-        # Place the text widget to the left side
-        text_widget.pack(side=tk.LEFT)
-        long_text = this_string
-        # Insert text into the text widget
-        text_widget.insert(tk.END, long_text)
-
     def on_show_loads(self):
         '''
         User can open a new window to specify loads
@@ -7515,32 +7238,15 @@ class Application():
         self._new_load_comb_dict = load_comb_dict
         temp_load = self.__previous_load_data
         if len(returned_loads) != 0:
-            need_to_recalc_puls = {}
             for load, data in returned_loads.items():
                 #creating the loads objects dictionary
                 self._load_dict[load] = data
 
-            # adding values to the line dictionary. resetting first.
-            for key, value in self._line_to_struc.items():
-                self._line_to_struc[key][3] = []
-                self._line_to_struc[key][0].need_recalc = True  # All lines need recalculations.
-
-            for main_line in self._line_dict.keys():
-                for load_obj, load_line in self._load_dict.values():
-                    if main_line in self._line_to_struc.keys():
-                        if load_obj.get_name() in temp_load.keys():
-                            if any([load_obj.__str__() != temp_load[load_obj.get_name()][0].__str__() and main_line in \
-                                    load_line+temp_load[load_obj.get_name()][1],
-                                    main_line in list(set(temp_load[load_obj.get_name()][1]).symmetric_difference(set(load_line)))]) :
-                                # The load has changed for this line.
-                                if self._PULS_results is not None:
-                                    self._PULS_results.result_changed(main_line)
-                        elif main_line in load_line:
-                            # This is a new load for this line.
-                            if self._PULS_results is not None:
-                                self._PULS_results.result_changed(main_line)
-                    if main_line in load_line and main_line in self._line_to_struc.keys():
-                        self._line_to_struc[main_line][3].append(load_obj)
+            load_sync = project_services.LineLoadService(self._line_to_struc).rebuild_line_loads(
+                self._line_dict.keys(), self._load_dict, temp_load)
+            if self._PULS_results is not None:
+                for line in load_sync.changed_lines:
+                    self._PULS_results.result_changed(line)
 
         # Storing the the returned data to temporary variable.
         self.__returned_load_data = [returned_loads, counter, load_comb_dict]

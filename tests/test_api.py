@@ -58,6 +58,26 @@ def test_cylinder_api_sets_basic_unstiffened_shell_properties():
     assert props["psd"] == [100000.0, "Pa"]
 
 
+def test_cylinder_api_returns_unstiffened_shell_buckling_golden_result():
+    cyl = CylStru(calculation_domain="Unstiffened shell")
+    cyl.set_material(mat_yield=355, emodule=210000, material_factor=1.15, poisson=0.3)
+    cyl.set_imperfection(delta_0=0.005)
+    cyl.set_fabrication_method(stiffener="Fabricated", girder="Fabricated")
+    cyl.set_end_cap_pressure_included_in_stress(is_included=True)
+    cyl.set_uls_or_als(kind="ULS")
+    cyl.set_shell_geometry(radius=6500, thickness=20, distance_between_rings=3000, tot_length_of_shell=12000)
+    cyl.set_panel_spacing(700)
+    cyl.set_shell_buckling_parmeters(eff_buckling_length_factor=1.0)
+    cyl.set_stresses(sasd=-50, smsd=0, tTsd=0, tQsd=10, psd=0.1, shsd=0)
+
+    results = cyl.get_buckling_results()
+
+    assert results["Unstiffened shell"] == pytest.approx(0.8455659884505807)
+    assert results["Longitudinal stiffened shell"] is None
+    assert results["Ring stiffened shell"] is None
+    assert results["Column stability UF"] is None
+
+
 def test_cylinder_api_rejects_unknown_domain():
     with pytest.raises(AssertionError):
         CylStru(calculation_domain="not a domain")

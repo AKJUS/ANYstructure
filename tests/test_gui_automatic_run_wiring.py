@@ -44,3 +44,11 @@ def test_gui_automatic_run_exercises_optimizer_windows_noninteractively():
     assert "my_app.on_geometry_optimize" in source
     assert "make_smoke_cylinder()" in source
     assert "exercise_optimizer_windows()" in source
+
+
+def test_gui_automatic_run_opens_fixture_project_noninteractively():
+    gui_source = Path(__file__).resolve().parent / "gui_automatic_run.py"
+    source = gui_source.read_text(encoding="utf-8")
+
+    assert "my_app.open_example()" in source
+    assert 'checkpoint("example project opened")' in source

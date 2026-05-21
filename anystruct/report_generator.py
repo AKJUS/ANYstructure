@@ -89,9 +89,7 @@ def create_report(input_data):
     Story.append(Spacer(2, 3))
     ptext = '<font size=12>END OF RESULTS</font>'
     Story.append(Paragraph(ptext, styles["Justify"]))
-    my_canvas = canvas.Canvas(file_name)
-    my_canvas.line(0,0,200,200)
-    doc.build(Story, canvasmaker=my_canvas)
+    doc.build(Story)
 
 class LetterMaker(object):
     """"""

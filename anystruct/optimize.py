@@ -41,6 +41,11 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     :param pso_options:
     :return:
     '''
+    if puls_sheet is not None or const_chk[7]:
+        raise NotImplementedError(
+            "External Excel-sheet PULS optimization was removed. Use prescriptive or ML-CL buckling checks."
+        )
+
     init_filter_weight = float('inf')
 
     if is_geometric:
