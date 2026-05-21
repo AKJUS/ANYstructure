@@ -67,22 +67,40 @@ GEOMETRY_IDS = {
 GEOMETRY_DOMAINS = {value: key for key, value in GEOMETRY_IDS.items()}
 
 
+def normalize_domain_string(calculation_domain):
+    return " ".join(str(calculation_domain).split())
+
+
 def assert_choice(value, choices, label):
     assert value in choices, f"{label} must be one of: {list(choices)}"
 
 
 def cylinder_input_mode(calculation_domain):
+    calculation_domain = normalize_domain_string(calculation_domain)
     assert_choice(calculation_domain, CYLINDER_STRUCTURE_DOMAINS, "calculation_domain")
-    return "Stress" if "panel" in calculation_domain else "Force"
+    return "Stress" if "panel" in calculation_domain.lower() else "Force"
 
 
 def cylinder_domain_with_input_mode(calculation_domain):
+    calculation_domain = normalize_domain_string(calculation_domain)
     input_mode = cylinder_input_mode(calculation_domain)
     return f"{calculation_domain} ({input_mode} input)"
 
 
 def geometry_id_for_domain(calculation_domain):
-    return GEOMETRY_IDS[calculation_domain]
+    calculation_domain = normalize_domain_string(calculation_domain)
+
+    if calculation_domain in GEOMETRY_IDS:
+        return GEOMETRY_IDS[calculation_domain]
+
+    if calculation_domain in CYLINDER_STRUCTURE_DOMAINS:
+        calculation_domain = cylinder_domain_with_input_mode(calculation_domain)
+        return GEOMETRY_IDS[calculation_domain]
+
+    raise KeyError(
+        f"Unknown calculation domain: {calculation_domain!r}. "
+        f"Expected one of: {list(GEOMETRY_IDS)} or {list(CYLINDER_STRUCTURE_DOMAINS)}"
+    )
 
 
 def domain_for_geometry_id(geometry_id):
