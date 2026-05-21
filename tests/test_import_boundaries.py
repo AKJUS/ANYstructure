@@ -11,6 +11,7 @@ CORE_MODULES = [
     "anystruct.make_grid_numpy",
     "anystruct.optimize",
     "anystruct.project_io",
+    "anystruct.project_services",
     "anystruct.project_state",
 ]
 

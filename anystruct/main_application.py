@@ -36,6 +36,7 @@ try:
     import anystruct.load_factor_window as load_factors
     import anystruct.api_helpers as api_helpers
     import anystruct.project_io as project_io
+    import anystruct.project_services as project_services
     from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
@@ -59,6 +60,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.load_factor_window as load_factors
     import ANYstructure.anystruct.api_helpers as api_helpers
     import ANYstructure.anystruct.project_io as project_io
+    import ANYstructure.anystruct.project_services as project_services
     from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
@@ -5027,8 +5029,7 @@ class Application():
                 for tank, data in self._tank_dict.items():
                     data.set_acceleration(self._accelerations_dict)
 
-            for line, obj in self._line_to_struc.items():
-                obj[0].need_recalc = True
+            project_services.mark_lines_for_recalculation(self._line_to_struc)
         except TclError:
             messagebox.showinfo(title='Input error', message='Input must be a number. Dots used not comma.')
 
@@ -5049,29 +5050,19 @@ class Application():
                 x_coord = (self._new_point_x.get() / 1000)
                 y_coord = (self._new_point_y.get() / 1000)
 
+            project_editor = project_services.ProjectEditService(self._point_dict, self._line_dict)
             # Finding name of the new point
-            current_point = ''
             if move:
                 current_point, current_coords = self._active_point, self._point_dict[self._active_point]
             else:
-                found_name = False
-                if len(self._point_dict) == 0:
-                    current_point = 'point1'
-                    found_name = True
-                else:
-                    counter = 1
-                    while not found_name:
-                        current_point = 'point'+str(counter)
-                        if current_point not in self._point_dict.keys():
-                            found_name = True
-                        else:
-                            counter += 1
+                current_point = project_editor.next_point_name()
             self._new_line_p1.set(get_num(current_point))
             # Creating the point
             # No point is created if another point is already there
 
-            if [x_coord,y_coord] not in self._point_dict.values():
-                self._point_dict[current_point] = [x_coord, y_coord]
+            point_record = project_editor.move_point(current_point, (x_coord, y_coord)) if move else \
+                project_editor.add_point(current_point, (x_coord, y_coord))
+            if point_record is not None:
                 self._active_point = current_point
                 if move:
                     self.logger(point=current_point, move_coords=(current_coords,[x_coord, y_coord]))
@@ -5101,24 +5092,24 @@ class Application():
         '''
         if self._point_is_active:
             self.new_point(move=True, redo=redo) # doing the actual moving
-            for line,data in self._line_dict.items():
+            project_editor = project_services.ProjectEditService(self._point_dict, self._line_dict)
+            for line in project_editor.connected_line_names(self._active_point):
+                data = self._line_dict[line]
                 # updating the span and deleting compartments (if not WT)
-                if get_num(self._active_point) in data:
-                    coord1 = self._point_dict['point'+str(data[0])]
-                    coord2 = self._point_dict['point'+str(data[1])]
-                    if line in self._line_to_struc.keys():
-                        self._line_to_struc[line][0].Plate.set_span(dist(coord1,coord2))
-                        self._line_to_struc[line][0].Plate.set_span(dist(coord1, coord2))
-                        if self._PULS_results is not None:
-                            self._PULS_results.result_changed(line)
-                        if self._line_to_struc[line][0].Plate.get_structure_type() not in ['GENERAL_INTERNAL_NONWT',
-                                                                                                'FRAME']:
-                            self._tank_dict = {}
-                            self._main_grid.clear()
-                            self._compartments_listbox.delete(0, 'end')
+                coord1 = self._point_dict['point'+str(data[0])]
+                coord2 = self._point_dict['point'+str(data[1])]
+                if line in self._line_to_struc.keys():
+                    self._line_to_struc[line][0].Plate.set_span(dist(coord1,coord2))
+                    self._line_to_struc[line][0].Plate.set_span(dist(coord1, coord2))
+                    if self._PULS_results is not None:
+                        self._PULS_results.result_changed(line)
+                    if self._line_to_struc[line][0].Plate.get_structure_type() not in ['GENERAL_INTERNAL_NONWT',
+                                                                                            'FRAME']:
+                        self._tank_dict = {}
+                        self._main_grid.clear()
+                        self._compartments_listbox.delete(0, 'end')
 
-            for line, obj in self._line_to_struc.items():
-                obj[0].need_recalc = True
+            project_services.mark_lines_for_recalculation(self._line_to_struc)
             self.update_frame()
         else:
             messagebox.showinfo(title='Input error', message='A point must be selected (right click).')
@@ -5138,6 +5129,7 @@ class Application():
         Adds line to line dictionary. Type is 'line1' = [p1,p2]
         '''
 
+        current_name = None
         try:
             # if's ensure that the new line does not exist already and that the point input is not an invalid point.
             if redo is None:
@@ -5145,32 +5137,18 @@ class Application():
                                             'point' + str(self._new_line_p2.get())
             else:
                 first_point, second_point = redo
-            first_point_num, second_point_num = get_num(first_point), get_num(second_point)
+            project_editor = project_services.ProjectEditService(self._point_dict, self._line_dict)
+            line_record = project_editor.add_line(first_point, second_point)
 
-            if first_point in self._point_dict.keys() and second_point in self._point_dict.keys() \
-                    and first_point != second_point:
-                line_str, line_str_rev  = self.make_point_point_line_string(first_point_num, second_point_num)
+            if line_record is not None:
+                current_name = line_record.name
+                self.update_frame()
+                self.logger(line=[current_name, redo])
 
-                if line_str and line_str_rev not in self._line_point_to_point_string:
-                    name = False
-                    counter = 1
-                    while not name:
-                        current_name = 'line' + str(counter)
-                        if current_name not in self._line_dict.keys():
-                            name = True
-                        counter += 1
-
-                    self._line_dict[current_name] = [first_point_num, second_point_num]
-
-                    self.update_frame()
-                    self.logger(line=[current_name, redo])
-
-                    # making stings from two points difining the lines, e.g. for line 1 string could be 'p1p2' and 'p2p1'
-                    self._line_point_to_point_string.append(line_str)
-                    self._line_point_to_point_string.append(line_str_rev)
-                    self.add_to_combinations_dict(current_name)
-            for line, obj in self._line_to_struc.items():
-                obj[0].need_recalc = True
+                # Keep the legacy point-to-point index synchronized while the GUI still reads it.
+                self._line_point_to_point_string.extend(line_record.endpoint_keys)
+                self.add_to_combinations_dict(current_name)
+            project_services.mark_lines_for_recalculation(self._line_to_struc)
         except TclError:
             messagebox.showinfo(title='Input error', message='Input must be a line number.')
         return current_name
@@ -5423,8 +5401,7 @@ class Application():
 
         if not suspend_recalc:
             # when changing multiple parameters, recalculations are suspended.
-            for line, obj in self._line_to_struc.items():
-                obj[0].need_recalc = True
+            project_services.mark_lines_for_recalculation(self._line_to_struc)
             state = self.update_frame()
             if state != None and self._line_is_active:
                 self._weight_logger['new structure']['COG'].append(self.get_color_and_calc_state()['COG'])
@@ -5769,8 +5746,8 @@ class Application():
         current_tank.set_content(self._new_content_type.get())
         current_tank.set_acceleration(self._accelerations_dict)
         current_tank.set_density(self._new_density.get())
-        for line, obj in self._line_to_struc.items():
-            obj[0].need_recalc = True
+        project_services.mark_lines_for_recalculation(self._line_to_struc)
+        for line in self._line_to_struc:
             if  self._compartments_listbox.get('active') in self.get_compartments_for_line(line):
                 self._PULS_results.result_changed(line)
 
@@ -5787,19 +5764,19 @@ class Application():
 
             if line in self._line_dict.keys() or undo is not None:
                 line = line if undo is None else undo
-                point_str = 'p' + str(self._line_dict[line][0]) + 'p' + str(self._line_dict[line][1])
-                point_str_rev = 'p' + str(self._line_dict[line][1]) + 'p' + str(self._line_dict[line][0])
+                project_editor = project_services.ProjectEditService(self._point_dict, self._line_dict)
+                line_record = project_editor.line(line)
 
                 if line in self._line_dict.keys():
                     if line in self._line_to_struc.keys():
                         if self._line_to_struc[line][0].Plate.get_structure_type() not in self._structure_types['non-wt']:
                             self.delete_properties_pressed()
                             self.delete_all_tanks()
-                    self._line_dict.pop(line)
+                    project_editor.remove_line(line)
                     if line in self._line_to_struc.keys():
                         self._line_to_struc.pop(line)
-                    self._line_point_to_point_string.pop(self._line_point_to_point_string.index(point_str))
-                    self._line_point_to_point_string.pop(self._line_point_to_point_string.index(point_str_rev))
+                    for endpoint_key in line_record.endpoint_keys:
+                        self._line_point_to_point_string.pop(self._line_point_to_point_string.index(endpoint_key))
                     self._active_line = ''
 
                     # Removing from load dict
@@ -5828,11 +5805,8 @@ class Application():
                 point = 'point' + str(self._ent_delete_point.get()) if undo is None else undo
 
             if point in self._point_dict.keys():
-                line_to_delete = []
-                # finding the lines that needs to be deleted
-                for line, points in self._line_dict.items():
-                    if int(self._ent_delete_point.get()) in points:
-                        line_to_delete.append(line)
+                project_editor = project_services.ProjectEditService(self._point_dict, self._line_dict)
+                line_to_delete = project_editor.connected_line_names(point)
                 # deleting the lines and the connected properties. also deleting point to point string list items.
                 for line in list(line_to_delete):
                     self.delete_line(line = line)
@@ -5845,7 +5819,7 @@ class Application():
                     # if line in self._line_to_struc.keys():
                     #     self._line_to_struc.pop(line)
                 # at the en, the points is deleted from the point dict.
-                self._point_dict.pop(point)
+                project_editor.remove_point(point)
                 self._active_point = ''
             else:
                 messagebox.showinfo(title='No point.', message='Input point does not exist.')
@@ -5901,8 +5875,7 @@ class Application():
             action_taken = True
 
         if action_taken:
-            for line, obj in self._line_to_struc.items():
-                obj[0].need_recalc = True
+            project_services.mark_lines_for_recalculation(self._line_to_struc)
             self.update_frame()
 
     def delete_all_tanks(self):
