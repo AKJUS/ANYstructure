@@ -276,46 +276,26 @@ class LetterMaker(object):
                                             ' -> '+'OK' if max(buc_util) < 1 else
                                             'Highest buckling utilization DNV-RP-C203: '+
                                             str(round(max(buc_util),2))+' -> '+'NOT OK')
-                    elif self.data._new_buckling_method.get() == 'DNV PULS':
-                        if self.data._PULS_results is not None:
-                            puls_method = line_structure.plate(line_bundle).get_puls_method()
-                            textobject.textLine('PULS results using '+str(puls_method) + 'utilization with acceptance '+
-                                                str(self.data._PULS_results.puls_acceptance))
-                            if line in self.data._PULS_results.get_run_results().keys():
-                                puls_buckling = self.data._PULS_results.get_run_results()[line]['Buckling strength']['Actual usage Factor'][0]
-                                puls_ultimate = self.data._PULS_results.get_run_results()[line]['Ultimate capacity']['Actual usage Factor'][0]
-                                if  puls_buckling is not None:
-                                    if puls_method == 'buckling' and puls_buckling/self.data._PULS_results.puls_acceptance > 1:
-                                        textobject.setFillColor('red')
-                                textobject.textLine('PULS buckling utilization = ' + str(puls_buckling))
-                                textobject.setFillColor('black')
-                                if puls_ultimate is not None:
-                                    if puls_method == 'ultimate'  and puls_ultimate/self.data._PULS_results.puls_acceptance > 1:
-                                        textobject.setFillColor('red')
-                                textobject.textLine('PULS ultimate utilization = ' + str(puls_ultimate))
-                                textobject.setFillColor('black')
-
                     else:
                         puls_method = line_structure.plate(line_bundle).get_puls_method()
                         textobject.textLine('ML-CL results using '+str(puls_method) + 'utilization with acceptance 0.87')
-                        if line in self.data._PULS_results.get_run_results().keys():
-                            ml_buckling = self.data.get_color_and_calc_state()['ML buckling class'][line]['buckling']
-                            ml_ultimate = self.data.get_color_and_calc_state()['ML buckling class'][line]['ultimate']
-                            color_ml_buc = self.data.get_color_and_calc_state()['ML buckling colors'][line]['buckling']
-                            color_ml_ult = self.data.get_color_and_calc_state()['ML buckling colors'][line]['ultimate']
-                            color_csr = self.data.get_color_and_calc_state()['ML buckling colors'][line]['CSR requirement']
+                        ml_buckling = self.data.get_color_and_calc_state()['ML buckling class'][line]['buckling']
+                        ml_ultimate = self.data.get_color_and_calc_state()['ML buckling class'][line]['ultimate']
+                        color_ml_buc = self.data.get_color_and_calc_state()['ML buckling colors'][line]['buckling']
+                        color_ml_ult = self.data.get_color_and_calc_state()['ML buckling colors'][line]['ultimate']
+                        color_csr = self.data.get_color_and_calc_state()['ML buckling colors'][line]['CSR requirement']
 
-                            if puls_method == 'buckling':
-                                textobject.setFillColor('red' if color_ml_buc == 'red' else 'black')
-                            textobject.textLine('Buckling ML-CL results: ' + self.data._ML_classes[ml_buckling])
-                            textobject.setFillColor('black')
-                            if puls_method == 'ultimate':
-                                textobject.setFillColor('red' if color_ml_ult == 'red' else 'black')
-                            textobject.textLine('Ultimate ML-CL result: ' + self.data._ML_classes[ml_ultimate])
-                            textobject.setFillColor('red' if color_csr == 'red' else 'black')
-                            textobject.textLine('CSR tank requirement (stiffener): ' + 'OK' if color_csr == 'green'
-                                                else 'red')
-                            textobject.setFillColor('black')
+                        if puls_method == 'buckling':
+                            textobject.setFillColor('red' if color_ml_buc == 'red' else 'black')
+                        textobject.textLine('Buckling ML-CL results: ' + self.data._ML_classes[ml_buckling])
+                        textobject.setFillColor('black')
+                        if puls_method == 'ultimate':
+                            textobject.setFillColor('red' if color_ml_ult == 'red' else 'black')
+                        textobject.textLine('Ultimate ML-CL result: ' + self.data._ML_classes[ml_ultimate])
+                        textobject.setFillColor('red' if color_csr == 'red' else 'black')
+                        textobject.textLine('CSR tank requirement (stiffener): ' + 'OK' if color_csr == 'green'
+                                            else 'red')
+                        textobject.setFillColor('black')
 
                     textobject.setFillColor('black')
                     textobject.setFillColor('red') if self.data.get_color_and_calc_state()['colors'][line]['fatigue'] == 'red' \
@@ -439,8 +419,6 @@ class LetterMaker(object):
         lines = self.data._line_dict
         if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
             colors = self.data.get_color_and_calc_state()['colors']
-        elif self.data._new_buckling_method.get() == 'DNV PULS':
-            colors = self.data.get_color_and_calc_state()['PULS colors']
         else:
             colors = self.data.get_color_and_calc_state()['ML buckling colors']
 
@@ -475,15 +453,6 @@ class LetterMaker(object):
                         self.c.setStrokeColor('red' if 'red' in colors[line].values() else 'green')
                     except KeyError:
                         self.c.setStrokeColor('black')
-                elif self.data._new_buckling_method.get() == 'DNV PULS':
-                    try:
-                        method = line_plate.get_puls_method()
-                        if self.data._PULS_results is not None:
-                            util = self.data._PULS_results.get_utilization(line, method, self.data._new_puls_uf.get())
-                            if util is not None:
-                                self.c.setStrokeColor('red' if util > 1 else 'green')
-                    except KeyError:
-                        self.c.setStrokeColor('black')
                 else:
 
                     method = line_plate.get_puls_method()
@@ -510,8 +479,6 @@ class LetterMaker(object):
             elif draw_type == 'utilization':
                 if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                     self.c.setStrokeColor(all_line_data['color code']['lines'][line]['rp uf color'])
-                elif self.data._new_buckling_method.get() == 'DNV PULS':
-                    self.c.setStrokeColor(all_line_data['color code']['lines'][line]['PULS uf color'])
                 else:
                     puls_method = line_plate.get_puls_method()
                     self.c.setStrokeColor(matplotlib_colors.rgb2hex(all_line_data['ML buckling colors'][line][puls_method]))
@@ -612,8 +579,6 @@ class LetterMaker(object):
             textobject.setFont("Helvetica-Oblique", 12)
             if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                 this_text = 'DNV-RP-C201 Buckling Strength of Plated Structures'
-            elif self.data._new_buckling_method.get() == 'DNV PULS':
-                this_text = 'Utilization factors (max of all checks) - PULS (Panel Ultimate Limit State)'
             else:
                 this_text = 'ML-CL utilization factors not avaliable. ML-CLassifier only shows ok or not ok.'
 
@@ -622,8 +587,6 @@ class LetterMaker(object):
 
             if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                 all_utils = all_line_data['color code']['utilization map']
-            elif self.data._new_buckling_method.get() == 'DNV PULS':
-                all_utils = all_line_data['color code']['PULS utilization map']
             else:
                 all_utils = list()
 
@@ -798,20 +761,10 @@ class LetterMaker(object):
                 struc_obj = line_structure.structure(line_bundle)
                 pressure = round(self.data.get_highest_pressure(line)['normal'] / 1000,0)
 
-                if self.data._PULS_results is not None:
-                    puls_method = line_structure.plate(line_bundle).get_puls_method()
-                    if line in self.data._PULS_results.get_run_results().keys():
-                        if puls_method == 'buckling':
-                            buckling_uf = \
-                            self.data._PULS_results.get_run_results()[line]['Buckling strength']['Actual usage Factor'][0]
-                        else:
-                            buckling_uf = \
-                            self.data._PULS_results.get_run_results()[line]['Ultimate capacity']['Actual usage Factor'][0]
-                else:
-                    try:
-                        buckling_uf = str(round(max(self.data.get_color_and_calc_state()['buckling'][line]), 2))
-                    except TypeError:
-                        buckling_uf = None
+                try:
+                    buckling_uf = str(round(max(self.data.get_color_and_calc_state()['buckling'][line]), 2))
+                except TypeError:
+                    buckling_uf = None
 
                 if self.data.get_color_and_calc_state()['fatigue'][line]['damage'] is not None:
                     fat_uf = self.data.get_color_and_calc_state()['fatigue'][line]['damage']

@@ -38,7 +38,6 @@ try:
     import anystruct.project_application as project_application
     import anystruct.project_services as project_services
     from anystruct.report_generator import LetterMaker
-    import anystruct.sesam_interface as sesam
     import anystruct.excel_inteface as excel_interface
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
@@ -61,7 +60,6 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.project_application as project_application
     import ANYstructure.anystruct.project_services as project_services
     from ANYstructure.anystruct.report_generator import LetterMaker
-    import ANYstructure.anystruct.sesam_interface as sesam
     import ANYstructure.anystruct.excel_inteface as excel_interface
 
 class Application():
@@ -331,7 +329,6 @@ class Application():
         self.__previous_load_data = None # Used to compare loads before and after.
         self.__copied_line_prop = None  # Used to copy line properties to another.
 
-        self._PULS_results = None # If a puls run is avaliable, it is stored here.
         self._center_of_buoyancy = dict()   # Center of buoyancy for all and for carious static drafts
                                             # Example {8: (5,20), 22: (12,20), 'all': (16,20)}
 
@@ -2352,10 +2349,6 @@ class Application():
             pass
         text_widget.image_create('current', image=photo)
 
-    def trace_puls_uf(self, *args):
-        if self._PULS_results is not None:
-            pass
-
     def trace_material_factor(self, *args):
         try:
             self._new_puls_uf.set(1/self._new_material_factor.get())
@@ -2800,7 +2793,7 @@ class Application():
         return_dict = {'colors': {}, 'section_modulus': {}, 'thickness': {}, 'shear_area': {}, 'buckling': {},
                        'fatigue': {}, 'pressure_uls': {}, 'pressure_fls': {},
                        'all_obj': {}, 'scant_calc_obj': {}, 'fatigue_obj': {}, 'utilization': {}, 'slamming': {},
-                       'color code': {}, 'PULS colors': {}, 'ML buckling colors' : {}, 'ML buckling class' : {},
+                       'color code': {}, 'ML buckling colors' : {}, 'ML buckling class' : {},
                        'weights': {}, 'cylinder': {}}
 
         return_dict['slamming'][current_line] = {}
@@ -2965,52 +2958,6 @@ class Application():
                 '''
                 if self._line_to_struc[current_line][5] is not None:
                     return_dict['cylinder'][current_line] = cyl_results
-
-
-                '''
-                PULS calculations
-                '''
-                if self._PULS_results != None:
-                    res = self._PULS_results.get_puls_line_results(current_line)
-                    if res is not None:
-                        geo_problem = False
-                        if type(res['Ultimate capacity']['Actual usage Factor'][0]) != str:
-                            ufnum = res['Ultimate capacity']['Actual usage Factor'][0] / self._new_puls_uf.get()
-                            rec_for_color[current_line]['PULS ultimate']=ufnum
-                            col_ult = 'green' if ufnum < 1 else 'red'
-                        else:
-                            geo_problem = True
-                            col_ult = 'red'
-                        if res['Buckling strength']['Actual usage Factor'][0] is not None:
-                            bnum = res['Buckling strength']['Actual usage Factor'][0] / self._new_puls_uf.get()
-                            rec_for_color[current_line]['PULS buckling'] = bnum
-                            col_buc = 'green' if bnum < 1 else 'red'
-                        else:
-                            col_buc = 'red'
-                        if geo_problem:
-                            loc_geom = 'red'
-                        else:
-                            if obj_scnt_calc_stf is None:
-                                loc_label = 'Geom. Req (PULS validity limits)'
-                            else:
-                                loc_label = 'Local geom req (PULS validity limits)' if \
-                                    obj_scnt_calc_stf.get_puls_sp_or_up() == 'SP' else 'Geom. Req (PULS validity limits)'
-                            loc_geom = 'green' if all([val[0] == 'Ok' for val in res[loc_label].values()]) else 'red'
-                        if obj_scnt_calc_stf is None:
-                            csr_label = 'CSR-Tank req'
-                        else:
-                            csr_label = 'CSR-Tank requirements (primary stiffeners)' if \
-                                obj_scnt_calc_stf.get_puls_sp_or_up() == 'SP' else'CSR-Tank req'
-
-                        csr_geom = 'green' if all([val[0] in ['Ok', '-'] for val in res[csr_label].values()]) else 'red'
-                        return_dict['PULS colors'][current_line] = {'ultimate': col_ult, 'buckling': col_buc,
-                                                                    'local geometry': loc_geom, 'csr': csr_geom}
-                    else:
-                        return_dict['PULS colors'][current_line] = {'ultimate': 'black', 'buckling': 'black',
-                                                                    'local geometry': 'black', 'csr': 'black'}
-                else:
-                    return_dict['PULS colors'][current_line] = {'ultimate': 'black', 'buckling': 'black',
-                                                                'local geometry': 'black', 'csr': 'black'}
 
                 '''
                 Machine learning buckling 
@@ -3249,16 +3196,6 @@ class Application():
             else:
                 util_map = all_utils
 
-            if self._PULS_results is not None:
-                #puls_util_map = self._PULS_results.all_uf
-                puls_util_map = list()
-                for key, val in self._line_to_struc.items():
-                    puls_util_map.append(self._PULS_results.get_utilization(key, val[0].Plate.get_puls_method(),
-                                                                            acceptance = self._new_puls_uf.get()))
-                puls_util_map  = np.arange(0, 1.1, 0.1)
-            else:
-                puls_util_map = None
-
             sig_x = np.unique([self._line_to_struc[line][0].Plate.sigma_x1 for line in
                                self._line_to_struc.keys()]).tolist()
             if len(sig_x) > 1: # TODO color coding when using sig_x1 and sig_x2 (23.12.2021)
@@ -3305,7 +3242,6 @@ class Application():
                                          'highest pressure': highest_pressure, 'lowest pressure': lowest_pressure,
                                          'pressure map': press_map, 'all pressures':all_pressures,
                                          'all utilizations': all_utils, 'utilization map': util_map,
-                                         'PULS utilization map': puls_util_map,
                                          'max sigma x': max(sig_x), 'min sigma x': min(sig_x), 'sigma x map': sig_x_map,
                                          'max sigma y1': max(sig_y1), 'min sigma y1': min(sig_y1),
                                          'sigma y1 map': sig_y1_map,
@@ -3318,26 +3254,15 @@ class Application():
                                          'recorded sections': recorded_sections,
                                          'recorded cylinder long sections' : recorded_cyl_sections,
                                          'spacings': spacing, 'max spacing': max(spacing), 'min spacing': min(spacing)}
-            line_color_coding, puls_method_map, puls_sp_or_up_map = \
-                {}, {None: 0, 'buckling': 0.5, 'ultimate': 1}, {None:0, 'SP': 0.5, 'UP': 1}
+            line_color_coding = {}
             cmap_sections = plt.get_cmap('jet')
             thk_sort_unique = return_dict['color code']['all thicknesses']
             spacing_sort_unique = return_dict['color code']['spacings']
             structure_type_unique = return_dict['color code']['structure types map']
             tot_weight, weight_mult_dist_x, weight_mult_dist_y = 0, 0,0
             for line, line_data in self._line_to_struc.items():
-                if self._PULS_results is None:
-                    puls_color, buc_uf, puls_uf, puls_method, puls_sp_or_up = 'black', 0, 0, None, None
-                elif self._PULS_results.get_utilization(line, self._line_to_struc[line][0].Plate.get_puls_method(),
-                                                        self._new_puls_uf.get()) == None:
-                    puls_color, buc_uf, puls_uf, puls_method, puls_sp_or_up = 'black', 0,0, None, None
-                else:
-                    puls_method = self._line_to_struc[line][0].Plate.get_puls_method()
-                    puls_uf = self._PULS_results.get_utilization(
-                                                   line, puls_method,
-                                                   self._new_puls_uf.get())
-                    puls_color = matplotlib.colors.rgb2hex(cmap_sections(puls_uf))
-                    puls_sp_or_up = self._line_to_struc[line][0].Plate.get_puls_sp_or_up()
+                puls_method = line_data[0].Plate.get_puls_method()
+                puls_sp_or_up = line_data[0].Plate.get_puls_sp_or_up()
 
                 # Cylinders
                 if self._line_to_struc[line][5] is not None:
@@ -3377,9 +3302,6 @@ class Application():
                 rp_uf = rec_for_color[line]['rp buckling']
 
                 tot_uf_rp = max([rec_for_color[line]['fatigue'], rp_uf,
-                                 rec_for_color[line]['section modulus'], rec_for_color[line]['shear'],
-                                 rec_for_color[line]['plate thickness']])
-                tot_uf_puls = max([rec_for_color[line]['fatigue'], puls_uf,
                                  rec_for_color[line]['section modulus'], rec_for_color[line]['shear'],
                                  rec_for_color[line]['plate thickness']])
                 try:
@@ -3438,11 +3360,6 @@ class Application():
                                            'Total uf color rp' : matplotlib.colors.rgb2hex(
                                                cmap_sections(tot_uf_rp)),
                                            'Total uf rp': tot_uf_rp,
-                                           'Total uf color puls': matplotlib.colors.rgb2hex(
-                                               cmap_sections(tot_uf_puls)),
-                                           'Total uf puls': tot_uf_puls,
-                                           'PULS uf': round(puls_uf,2),
-                                           'PULS uf color': puls_color,
                                            'fatigue uf' : rec_for_color[line]['fatigue'],
                                            'section uf' : rec_for_color[line]['section modulus'],
                                            'sigma x': matplotlib.colors.rgb2hex(cmap_sections(sig_x_uf)),
@@ -3640,22 +3557,6 @@ class Application():
                                             all_cyl_chks.append(stf_val)
                             color = 'green' if all(all_cyl_chks) else 'red'
 
-                        elif self._new_buckling_method.get() == 'DNV PULS':
-                            if 'black' in state['PULS colors'][line].values():
-                                color = 'black'
-                            else:
-                                col1, col2 = state['PULS colors'][line]['buckling'], \
-                                             state['PULS colors'][line]['ultimate']
-
-                                if self._line_to_struc[line][0].Plate.get_puls_method() == 'buckling':
-                                    color = 'red' if any([col1 == 'red', col2 == 'red']) else 'green'
-                                else:
-                                    color = col2
-
-                                if color == 'green':
-                                    color = 'green' if all([state['colors'][line][key] == 'green' for key in
-                                                            ['fatigue', 'section', 'shear','thickness']]) else 'red'
-
                         elif self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                             color = 'red' if 'red' in state['colors'][line].values() else 'green'
                         elif self._new_buckling_method.get() == 'ML-CL (PULS based)':
@@ -3810,21 +3711,8 @@ class Application():
                                               fill=matplotlib.colors.rgb2hex(cmap_sections(0 if highest_pressure == 0
                                                                                            else press/highest_pressure)),
                                               anchor="nw")
-        elif all([self._new_colorcode_utilization.get() == True,
-                  self._line_to_struc != {}, self._new_buckling_method.get() != 'DNV PULS']):
+        elif self._new_colorcode_utilization.get() == True and self._line_to_struc != {}:
             all_utils = cc_state['utilization map']
-            for idx, uf in enumerate(cc_state['utilization map']):
-                self._main_canvas.create_text(11, start_text_shift + 20 * idx, text=str('UF = ' +str(round(uf,1))),
-                                              font=self._text_size["Text 10 bold"],
-                                              fill='black',
-                                              anchor="nw")
-                self._main_canvas.create_text(10, start_text + 20 * idx, text=str('UF = ' +str(round(uf,1))),
-                                              font=self._text_size["Text 10 bold"],
-                                              fill=matplotlib.colors.rgb2hex(cmap_sections(uf/max(all_utils))),
-                                              anchor="nw")
-        elif all([self._new_colorcode_utilization.get() == True,
-                  self._line_to_struc != {}, self._new_buckling_method == 'DNV PULS']):
-            all_utils = cc_state['PULS utilization map']
             for idx, uf in enumerate(cc_state['utilization map']):
                 self._main_canvas.create_text(11, start_text_shift + 20 * idx, text=str('UF = ' +str(round(uf,1))),
                                               font=self._text_size["Text 10 bold"],
@@ -4027,17 +3915,6 @@ class Application():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=round(state['color code']['lines'][line]['rp uf'],2))
 
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'DNV PULS':
-            if self._line_to_struc[line][5] is not None:
-                color = 'grey'
-                this_text = 'N/A'
-            else:
-                color = state['color code']['lines'][line]['PULS uf color']
-                this_text = round(state['color code']['lines'][line]['PULS uf'],2)
-            if self._new_label_color_coding.get():
-                self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                              text=this_text)
-
         elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-CL (PULS based)':
             color = 'black'
             if self._new_label_color_coding.get():
@@ -4145,11 +4022,6 @@ class Application():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=this_text)
 
-            elif self._new_buckling_method.get() == 'DNV PULS':
-                color = state['color code']['lines'][line]['Total uf color puls']
-                if self._new_label_color_coding.get():
-                    self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                                  text=round(state['color code']['lines'][line]['Total uf puls'],2))
             elif self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                 color = state['color code']['lines'][line]['Total uf color rp']
                 if self._new_label_color_coding.get():
@@ -4508,71 +4380,7 @@ class Application():
 
                 # buckling results
                 start_y, y = 5, 10
-                if self._PULS_results != None and self._new_buckling_method.get() == 'DNV PULS':
-                    line_results = state['PULS colors'][self._active_line]
-                    puls_res = self._PULS_results.get_puls_line_results(self._active_line)
-                    if puls_res != None:
-                        geo_problem = False
-                        if type(puls_res['Ultimate capacity']['Actual usage Factor'][0]) != str:
-                            ult_text = 'Ultimate capacity usage factor:  ' + str(puls_res['Ultimate capacity']
-                                                                                 ['Actual usage Factor'][
-                                                                                     0] / self._new_puls_uf.get())
-                        else:
-                            geo_problem = True
-                            ult_text = puls_res['Ultimate capacity']['Actual usage Factor'][0]
-                        if puls_res['Buckling strength']['Actual usage Factor'][0] != None:
-                            buc_text = 'Buckling capacity usage factor:  ' + str(puls_res['Buckling strength']
-                                                                                 ['Actual usage Factor'][
-                                                                                     0] / self._new_puls_uf.get())
-                        else:
-                            buc_text = 'Buckling capacity usage factor:  None - geometric issue'
-
-                        loc_label = 'Local geom req (PULS validity limits)' if \
-                            obj_scnt_calc_pl.get_puls_sp_or_up() == 'SP' else 'Geom. Req (PULS validity limits)'
-                        csr_label = 'CSR-Tank requirements (primary stiffeners)' if \
-                            obj_scnt_calc_pl.get_puls_sp_or_up() == 'SP' else 'CSR-Tank req'
-                        if geo_problem:
-                            loc_geom = 'Not ok: '
-                            for key, value in puls_res[loc_label].items():
-                                if value[0] == 'Not ok':
-                                    loc_geom += key + ' '
-                        else:
-                            loc_geom = 'Ok' if all(
-                                [val[0] == 'Ok' for val in puls_res[loc_label]
-                                .values()]) else 'Not ok'
-                        csr_geom = 'Ok' if all(
-                            [val[0] in ['Ok', '-'] for val in puls_res[csr_label]
-                            .values()]) else 'Not ok'
-                        loc_geom = loc_label + ':   ' + loc_geom
-                        csr_geom = csr_label+':   ' + csr_geom
-                        self._result_canvas.create_text([x * 1, y + (start_y+0) * dy], text='PULS results',
-                                                        font=self._text_size['Text 9 bold'],
-                                                        anchor='nw',
-                                                        fill = self._color_text)
-                        self._result_canvas.create_text([x * 1, y + (start_y+1) * dy], text=buc_text,
-                                                        font=self._text_size['Text 9 bold'],
-                                                        anchor='nw',
-                                                        fill=line_results['buckling'])
-                        self._result_canvas.create_text([x * 1, y + (start_y+2) * dy], text=ult_text,
-                                                        font=self._text_size['Text 9 bold'],
-                                                        anchor='nw',
-                                                        fill=line_results['ultimate'])
-                        self._result_canvas.create_text([x * 1, y + (start_y+3) * dy], text=loc_geom,
-                                                        font=self._text_size['Text 9 bold'],
-                                                        anchor='nw',
-                                                        fill=line_results['local geometry'])
-                        self._result_canvas.create_text([x * 1, y + (start_y+4) * dy], text=csr_geom,
-                                                        font=self._text_size['Text 9 bold'],
-                                                        anchor='nw',
-                                                        fill=line_results['csr'])
-                    else:
-                        self._result_canvas.create_text([x * 1, y + (start_y+0) * dy],
-                                                        text='PULS results not avaliable for this line.\n'
-                                                             'Run or update lines.',
-                                                        font=self._text_size['Text 9 bold'],
-                                                        anchor='nw',
-                                                        fill='Orange')
-                elif self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
+                if self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                     '''
                             return {'Plate': {'Plate buckling': up_buckling}, 'Stiffener': {'Overpressure plate side': stf_buckling_pl_side,
                                                     'Overpressure stiffener side': stf_buckling_stf_side, 
@@ -4894,9 +4702,10 @@ class Application():
         else:
             self.grid_display_tanks(save=True)
 
-        doc = LetterMaker(filename, "Section results", 10, self)
-        doc.createDocument()
-        doc.savePDF()
+        project_services.ReportRequestService.create_pdf(
+            project_services.ReportRequest(filename, "Section results", 10, self),
+            LetterMaker,
+        )
         try:
             os.startfile(filename)
         except FileNotFoundError:
@@ -4920,10 +4729,11 @@ class Application():
             tk.messagebox.showerror('No lines', 'No lines defined. Cannot make report.')
             return
 
-        doc_dat = LetterMaker(filename, "Section results", 10, self)
-        doc = SimpleDocTemplate(filename, pagesize=landscape(letter))
-        elements = doc_dat.createTable()
-        doc.build(elements)
+        project_services.ReportRequestService.create_table(
+            project_services.ReportRequest(filename, "Section results", 10, self),
+            LetterMaker,
+            lambda table_filename: SimpleDocTemplate(table_filename, pagesize=landscape(letter)),
+        )
         try:
             os.startfile(filename)
         except FileNotFoundError:
@@ -5019,8 +4829,6 @@ class Application():
                 if line in self._line_to_struc.keys():
                     self._line_to_struc[line][0].Plate.set_span(dist(coord1,coord2))
                     self._line_to_struc[line][0].Plate.set_span(dist(coord1, coord2))
-                    if self._PULS_results is not None:
-                        self._PULS_results.result_changed(line)
                     if self._line_to_struc[line][0].Plate.get_structure_type() not in ['GENERAL_INTERNAL_NONWT',
                                                                                             'FRAME']:
                         self._tank_dict = {}
@@ -5314,9 +5122,6 @@ class Application():
         self._compartments_listbox.delete(0, 'end')
 
     def _refresh_after_structure_change(self, suspend_recalc):
-        if self._PULS_results != None:
-            self._PULS_results.result_changed(self._active_line)
-
         if not suspend_recalc:
             # when changing multiple parameters, recalculations are suspended.
             project_services.mark_lines_for_recalculation(self._line_to_struc)
@@ -5625,9 +5430,6 @@ class Application():
         current_tank.set_acceleration(self._accelerations_dict)
         current_tank.set_density(self._new_density.get())
         project_services.mark_lines_for_recalculation(self._line_to_struc)
-        for line in self._line_to_struc:
-            if  self._compartments_listbox.get('active') in self.get_compartments_for_line(line):
-                self._PULS_results.result_changed(line)
 
     def delete_line(self, event = None, undo = None, line = None):
         '''
@@ -5663,10 +5465,6 @@ class Application():
                         for load in loads:
                             if line in self._load_dict[load][1]:
                                 self._load_dict[load][1].pop(self._load_dict[load][1].index(line))
-                    # Removing from puls results
-                    if self._PULS_results is not None:
-                        self._PULS_results.result_changed(line)
-
                 self.update_frame()
             else:
                 messagebox.showinfo(title='No line.', message='Input line does noe exist.')
@@ -6190,7 +5988,6 @@ class Application():
         self._line_point_to_point_string = [] # This one ensures that a line is not created on top of a line
         self._accelerations_dict = {'static':9.81, 'dyn_loaded':0, 'dyn_ballast':0}
         self._multiselect_lines = []
-        self._PULS_results = None
         self.update_frame()
 
         # Initsializing the calculation grid used for tank definition
@@ -7182,11 +6979,8 @@ class Application():
                 #creating the loads objects dictionary
                 self._load_dict[load] = data
 
-            load_sync = project_services.LineLoadService(self._line_to_struc).rebuild_line_loads(
+            project_services.LineLoadService(self._line_to_struc).rebuild_line_loads(
                 self._line_dict.keys(), self._load_dict, temp_load)
-            if self._PULS_results is not None:
-                for line in load_sync.changed_lines:
-                    self._PULS_results.result_changed(line)
 
         # Storing the the returned data to temporary variable.
         self.__returned_load_data = [returned_loads, counter, load_comb_dict]
@@ -7487,15 +7281,15 @@ class Application():
         save_file = filedialog.asksaveasfile(mode="w", defaultextension=".js")
         if save_file is None:  # ask saveasfile return `None` if dialog closed with "cancel".
             return
-        # Setting up interface class.
-        JS = sesam.JSfile(self._point_dict, self._line_dict, self._sections, self._line_to_struc)
-
-        JS.write_points()
-        JS.write_lines()
-        JS.write_sections()
-        JS.write_beams()
-
-        save_file.writelines(JS.output_lines)
+        js_lines = project_services.SesamExportService.build_js_lines(
+            project_services.SesamExportRequest(
+                points=self._point_dict,
+                lines=self._line_dict,
+                sections=self._sections,
+                line_bundles=self._line_to_struc,
+            )
+        )
+        save_file.writelines(js_lines)
         save_file.close()
 
 if __name__ == '__main__':

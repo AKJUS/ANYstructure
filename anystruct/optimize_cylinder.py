@@ -36,9 +36,6 @@ class CreateOptimizeCylinderWindow():
             self._fatigue_pressure = test.get_fatigue_pressures()
             self._slamming_pressure = test.get_slamming_pressure()
             image_dir = os.path.dirname(__file__)+'\\images\\'
-            self._PULS_object = None
-            self._puls_acceptance = 0.87
-
             self._initial_cylinder_obj = calc.CylinderAndCurvedPlate(main_dict=test.shell_main_dict,
                                                                      shell=calc.Shell(test.shell_dict),
                                             long_stf=calc.Structure(test.obj_dict_cyl_long2),
@@ -116,9 +113,6 @@ class CreateOptimizeCylinderWindow():
                 self._slamming_pressure = 0
             image_dir = app._root_dir +'\\images\\'
             self._root_dir = app._root_dir
-            self._PULS_object = app._PULS_results
-            self._puls_acceptance = self.app._new_puls_uf.get()
-
             self._ML_buckling = app._ML_buckling
 
 

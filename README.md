@@ -89,15 +89,15 @@ python -m pip install -r requirements-excel.txt
 
 Equivalent package extras are exposed as `core`, `ml`, `excel`, `dev`, and `all`. The default package install still includes Excel and ML dependencies for backwards compatibility.
 
-Excel/PULS workflows require a local Excel installation and are not expected to run in basic automated tests.
+Excel project import requires a local Excel installation and is not expected to run in basic automated tests.
+The external Excel-sheet DNV PULS calculation workflow has been removed from this release; ML-CL remains available.
 
 ## The following is calculated: ##
 * Minimum plate thickness (DNV-OS-C101)
 * Minimum section modulus of stiffener/plate (DNVGL-OS-C101)
 * Minimum shear area (DNVGL-OS-C101)
-* Buckling (DNVGL-RP-C201)or PULS (licenced DNV software)
+* Buckling (DNVGL-RP-C201)
 * Buckling strength of shells DNV-RP-C202
-* PULS buckling (DNV license needed)
 * Machine learning buckling, PULS based
 * Fatigue for plate/stiffener connection (DNVGL-RP-C203)
 

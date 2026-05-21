@@ -123,3 +123,22 @@ def test_line_pressure_calculation_delegates_to_project_service():
     assert "LinePressureInput(" in calculation_block
     assert not re.search(r"\bone_load_combination\(", calculation_block)
     assert "LinePressureService.highest_pressure(" in pressure_block
+
+
+def test_report_and_sesam_callbacks_delegate_request_orchestration():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    report_block = source[
+        source.index("def report_generate"):
+        source.index("def create_accelerations")
+    ]
+    export_block = source[
+        source.index("def export_to_js"):
+        source.index("if __name__ == '__main__':")
+    ]
+
+    assert "ReportRequestService.create_pdf(" in report_block
+    assert "ReportRequestService.create_table(" in report_block
+    assert "LetterMaker(filename" not in report_block
+    assert "SesamExportService.build_js_lines(" in export_block
+    assert "sesam.JSfile(" not in export_block
