@@ -66,4 +66,4 @@ def test_excel_import_and_ml_cl_buckling_option_remain_available():
 
     assert "sub_sesam.add_command(label='Import excel file', command=self.open_excel_file)" in source
     assert "sub_menu.add_command(label='Open excel input', command=self.open_excel_file)" in source
-    assert "options = ['DNV-RP-C201 - prescriptive','ML-CL (PULS based)']" in source
+    assert "options = ['DNV-RP-C201 - prescriptive','ML-CL (PULS based)', 'ML-Numeric (PULS based)']" in source

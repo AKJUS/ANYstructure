@@ -1869,7 +1869,7 @@ class Application():
                 idx += 1
             self._flat_btn_load_info.place(relx=hor_start + 5 * delta_x,
                                             rely=vert_start + (idx+1) * delta_y)
-            self._flat_btn_fixation_info.place(relx=hor_start + 5 * delta_x,
+            self._flat_btn_fixation_info.place(relx=hor_start + 6 * delta_x,
                                             rely=vert_start+ (idx-7.5) * delta_y)
             self._button_str_type.place(relx=hor_start + 5 * delta_x,
                                             rely=vert_start + (idx+3) * delta_y)
