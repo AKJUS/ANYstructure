@@ -9,16 +9,17 @@ CORE_MODULES = [
     "anystruct.calc_structure",
     "anystruct.helper",
     "anystruct.make_grid_numpy",
+    "anystruct.ml_models",
     "anystruct.optimize",
     "anystruct.project_application",
     "anystruct.project_io",
     "anystruct.project_services",
     "anystruct.project_state",
+    "anystruct.report_generator",
 ]
 
 PUBLIC_MODULES = [
     "anystruct.api",
-    "anystruct.report_generator",
 ]
 
 

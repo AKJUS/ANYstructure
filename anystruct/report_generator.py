@@ -18,7 +18,6 @@ cmap_sections = plt.get_cmap('jet')
 from reportlab.platypus import SimpleDocTemplate, TableStyle
 from reportlab.lib import colors
 from matplotlib import colors as matplotlib_colors
-import tkinter as tk
 
 try:
     import anystruct.example_data as test
@@ -28,7 +27,6 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.helper as hlp
     import ANYstructure.anystruct.line_structure as line_structure
-
 
 
 def create_report(input_data):
@@ -114,7 +112,7 @@ class LetterMaker(object):
         address = """<font size="12"><strong> ANYstructure report generator<br/></strong></font>""" + '<br/>' + \
                   """<font size="12"> User: </font>""" + '<font size="12">' + user + '</font>' + '<br/>' + '<br/>' + \
                   """<font size="12"> Time : </font>""" + '<font size="12">' + time_now + '</font>' + '<br/>'+ \
-                  '<br/>'+'<font size="12">' + self.data._project_information.get('1.0', tk.END) + '</font>'
+                  '<br/>'+'<font size="12">' + self.data.project_information + '</font>'
         p = Paragraph(address, self.styles["Normal"])
         # add a logo and size it
         img_file_name = 'ANYstructure_logo.jpg'
@@ -137,8 +135,8 @@ class LetterMaker(object):
         self.createParagraph(ptext, 10, voffset + 85)
         delta = 0
         h_start = 130
-        if self.data._tank_dict != {}:
-            for name, obj in self.data._tank_dict.items():
+        if self.data.tanks != {}:
+            for name, obj in self.data.tanks.items():
 
                 ptext = '<font size="7" color = "black">' + 'Name: '+ name + ', content: ' \
                         + obj.get_content() + '</font>'
@@ -170,18 +168,19 @@ class LetterMaker(object):
         ptext = '<font size="12" color = "blue"><strong>' + "Results for defined structure: " + '</strong></font>'
         self.createParagraph(ptext, 10, 0)
 
-        delta = 140 if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive' else 180
+        result_state = self.data.result_state
+        delta = 140 if self.data.buckling_method == 'DNV-RP-C201 - prescriptive' else 180
         vpos = 950
 
-        for line in sorted(self.data._line_dict.keys()):
+        for line in sorted(self.data.lines.keys()):
             vpos -= delta
 
-            if line in self.data._line_to_struc.keys():
-                line_bundle = self.data._line_to_struc[line]
+            if line in self.data.line_bundles.keys():
+                line_bundle = self.data.line_bundles[line]
                 if not line_structure.has_cylinder(line_bundle):
                     struc_obj = line_structure.structure(line_bundle)
                     fo = line_structure.fatigue(line_bundle)
-                    pressure = self.data.get_highest_pressure(line)['normal']/1000
+                    pressure = self.data.highest_pressures[line]['normal']/1000
                     textobject = self.c.beginText()
                     textobject.setTextOrigin(30,vpos)
                     textobject.setFont("Helvetica-Oblique", 10)
@@ -213,57 +212,57 @@ class LetterMaker(object):
 
                     if fo is not None:
                         textobject.textLine('Fatigue pressure [Pa]: '+' p_int:'+' loaded/ballast/part = '
-                                            + str(round(self.data.get_color_and_calc_state()['pressure_fls'][line]['p_int']['loaded'],0))
-                                            +'/'+str(round(self.data.get_color_and_calc_state()['pressure_fls'][line]['p_int']['ballast'],0))
-                                            +'/'+str(round(self.data.get_color_and_calc_state()['pressure_fls'][line]['p_int']['part'],0))
+                                            + str(round(result_state['pressure_fls'][line]['p_int']['loaded'],0))
+                                            +'/'+str(round(result_state['pressure_fls'][line]['p_int']['ballast'],0))
+                                            +'/'+str(round(result_state['pressure_fls'][line]['p_int']['part'],0))
                                             + ' p_ext:'+' loaded/ballast/part = '+
-                                            str(round(self.data.get_color_and_calc_state()['pressure_fls'][line]['p_ext']['loaded'],0))
-                                            +'/'+str(round(self.data.get_color_and_calc_state()['pressure_fls'][line]['p_ext']['ballast'],0))
-                                            +'/'+str(round(self.data.get_color_and_calc_state()['pressure_fls'][line]['p_ext']['part'],0)))
+                                            str(round(result_state['pressure_fls'][line]['p_ext']['loaded'],0))
+                                            +'/'+str(round(result_state['pressure_fls'][line]['p_ext']['ballast'],0))
+                                            +'/'+str(round(result_state['pressure_fls'][line]['p_ext']['part'],0)))
                     else:
                         textobject.textLine(' Fatigue pressure: No pressures defined')
 
-                    textobject.setFillColor('red') if self.data.get_color_and_calc_state()['colors'][line]['section'] == 'red' \
+                    textobject.setFillColor('red') if result_state['colors'][line]['section'] == 'red' \
                         else textobject.setFillColor('black')
 
-                    textobject.textLine('Section modulus: '+str(int(min(self.data.get_color_and_calc_state()['section_modulus'][line]['sec_mod'])
+                    textobject.textLine('Section modulus: '+str(int(min(result_state['section_modulus'][line]['sec_mod'])
                                                                     *1000**3))+ ' [mm3]'+'  Min. section modulus: '+
-                                        str(int(self.data.get_color_and_calc_state()['section_modulus'][line]['min_sec_mod']*1000**3))+' [mm3]'+
-                                        ' -> ' + 'OK' if int(min(self.data.get_color_and_calc_state()['section_modulus'][line]['sec_mod'])*1000**3) >=
-                                                         int(self.data.get_color_and_calc_state()['section_modulus'][line]['min_sec_mod']*1000**3)
-                                        else 'Section modulus: '+str(int(min(self.data.get_color_and_calc_state()['section_modulus'][line]['sec_mod'])
+                                        str(int(result_state['section_modulus'][line]['min_sec_mod']*1000**3))+' [mm3]'+
+                                        ' -> ' + 'OK' if int(min(result_state['section_modulus'][line]['sec_mod'])*1000**3) >=
+                                                         int(result_state['section_modulus'][line]['min_sec_mod']*1000**3)
+                                        else 'Section modulus: '+str(int(min(result_state['section_modulus'][line]['sec_mod'])
                                                                          *1000**3))+ ' [mm3]'+ '  Min. section modulus: '+
-                                        str(int(self.data.get_color_and_calc_state()['section_modulus'][line]['min_sec_mod']*1000**3))+' [mm3]'+
+                                        str(int(result_state['section_modulus'][line]['min_sec_mod']*1000**3))+' [mm3]'+
                                         ' -> ' + 'NOT OK')
                     textobject.setFillColor('black')
-                    textobject.setFillColor('red') if self.data.get_color_and_calc_state()['colors'][line]['thickness'] == 'red' \
+                    textobject.setFillColor('red') if result_state['colors'][line]['thickness'] == 'red' \
                         else textobject.setFillColor('black')
                     textobject.textLine('Min plate thickness:  '+
-                                        str(round(self.data.get_color_and_calc_state()['thickness'][line]['min_thk'],2)) + ' [mm] '
+                                        str(round(result_state['thickness'][line]['min_thk'],2)) + ' [mm] '
                                         ' -> ' +
                                         'OK' if struc_obj.Plate.get_pl_thk()*1000 >=
-                                                self.data.get_color_and_calc_state()['thickness'][line]['min_thk'] else
+                                                result_state['thickness'][line]['min_thk'] else
                                         'Min plate thickness:  '+ str(round(
-                                            self.data.get_color_and_calc_state()['thickness'][line]['min_thk'],2)) + ' [mm] '
+                                            result_state['thickness'][line]['min_thk'],2)) + ' [mm] '
                                         ' -> '+'NOT OK')
                     textobject.setFillColor('black')
-                    textobject.setFillColor('red') if self.data.get_color_and_calc_state()['colors'][line]['shear'] == 'red' \
+                    textobject.setFillColor('red') if result_state['colors'][line]['shear'] == 'red' \
                         else textobject.setFillColor('black')
-                    textobject.textLine('Shear area: '+str(int(self.data.get_color_and_calc_state()['shear_area'][line]['shear_area']*1000**2))+' [mm2] '+
-                                        '   Min shear area: '+str(int(self.data.get_color_and_calc_state()['shear_area'][line]['min_shear_area']*1000**2))
+                    textobject.textLine('Shear area: '+str(int(result_state['shear_area'][line]['shear_area']*1000**2))+' [mm2] '+
+                                        '   Min shear area: '+str(int(result_state['shear_area'][line]['min_shear_area']*1000**2))
                                         + ' [mm2] ' +
-                                        ' -> ' + 'OK' if self.data.get_color_and_calc_state()['shear_area'][line]['shear_area'] >=
-                                                         self.data.get_color_and_calc_state()['shear_area'][line]['min_shear_area']
-                                        else 'Shear area: '+str(int(self.data.get_color_and_calc_state()['shear_area'][line]['shear_area']*1000**2))+
+                                        ' -> ' + 'OK' if result_state['shear_area'][line]['shear_area'] >=
+                                                         result_state['shear_area'][line]['min_shear_area']
+                                        else 'Shear area: '+str(int(result_state['shear_area'][line]['shear_area']*1000**2))+
                                              ' [mm2] ' +
-                                             '   Min shear area: '+str(int(self.data.get_color_and_calc_state()['shear_area'][line]['min_shear_area']*1000**2))
+                                             '   Min shear area: '+str(int(result_state['shear_area'][line]['min_shear_area']*1000**2))
                                              + ' [mm2] ' + ' -> ' + 'NOT OK')
                     textobject.setFillColor('black')
-                    if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
-                        textobject.setFillColor('red') if self.data.get_color_and_calc_state()['colors'][line]['buckling'] == 'red' \
+                    if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
+                        textobject.setFillColor('red') if result_state['colors'][line]['buckling'] == 'red' \
                             else textobject.setFillColor('black')
                         buc_util = list()
-                        for key, val in self.data.get_color_and_calc_state()['buckling'][line].items():
+                        for key, val in result_state['buckling'][line].items():
                             for uf in val.values():
                                 if type(uf) == list:
                                     buc_util.append(uf[0])
@@ -279,40 +278,37 @@ class LetterMaker(object):
                     else:
                         puls_method = line_structure.plate(line_bundle).get_puls_method()
                         textobject.textLine('ML-CL results using '+str(puls_method) + 'utilization with acceptance 0.87')
-                        ml_buckling = self.data.get_color_and_calc_state()['ML buckling class'][line]['buckling']
-                        ml_ultimate = self.data.get_color_and_calc_state()['ML buckling class'][line]['ultimate']
-                        color_ml_buc = self.data.get_color_and_calc_state()['ML buckling colors'][line]['buckling']
-                        color_ml_ult = self.data.get_color_and_calc_state()['ML buckling colors'][line]['ultimate']
-                        color_csr = self.data.get_color_and_calc_state()['ML buckling colors'][line]['CSR requirement']
+                        ml_buckling = result_state['ML buckling class'][line]['buckling']
+                        ml_ultimate = result_state['ML buckling class'][line]['ultimate']
+                        color_ml_buc = result_state['ML buckling colors'][line]['buckling']
+                        color_ml_ult = result_state['ML buckling colors'][line]['ultimate']
+                        color_csr = result_state['ML buckling colors'][line]['CSR requirement']
 
                         if puls_method == 'buckling':
                             textobject.setFillColor('red' if color_ml_buc == 'red' else 'black')
-                        textobject.textLine('Buckling ML-CL results: ' + self.data._ML_classes[ml_buckling])
+                        textobject.textLine('Buckling ML-CL results: ' + self.data.ml_classes[ml_buckling])
                         textobject.setFillColor('black')
                         if puls_method == 'ultimate':
                             textobject.setFillColor('red' if color_ml_ult == 'red' else 'black')
-                        textobject.textLine('Ultimate ML-CL result: ' + self.data._ML_classes[ml_ultimate])
+                        textobject.textLine('Ultimate ML-CL result: ' + self.data.ml_classes[ml_ultimate])
                         textobject.setFillColor('red' if color_csr == 'red' else 'black')
                         textobject.textLine('CSR tank requirement (stiffener): ' + 'OK' if color_csr == 'green'
                                             else 'red')
                         textobject.setFillColor('black')
 
                     textobject.setFillColor('black')
-                    textobject.setFillColor('red') if self.data.get_color_and_calc_state()['colors'][line]['fatigue'] == 'red' \
+                    textobject.setFillColor('red') if result_state['colors'][line]['fatigue'] == 'red' \
                         else textobject.setFillColor('black')
-                    if self.data.get_color_and_calc_state()['fatigue'][line]['damage'] is not None:
+                    if result_state['fatigue'][line]['damage'] is not None:
                         textobject.textLine('Fatigue (plate/stiffeners) utilization: '+
-                                            str(round(self.data.get_color_and_calc_state()['fatigue'][line]['damage'],2))+ ' * DFF('+
-                                            str(self.data.get_color_and_calc_state()['fatigue'][line]['dff']) + ') = ' +
-                                            str(round(self.data.get_color_and_calc_state()['fatigue'][line]['damage']*
-                                                      self.data.get_color_and_calc_state()['fatigue'][line]['dff'],2)) + ' (SN-curve = '+
-                                            self.data.get_color_and_calc_state()['fatigue'][line]['curve']+')')
+                                            str(round(result_state['fatigue'][line]['damage'],2))+ ' * DFF('+
+                                            str(result_state['fatigue'][line]['dff']) + ') = ' +
+                                            str(round(result_state['fatigue'][line]['damage']*
+                                                      result_state['fatigue'][line]['dff'],2)) + ' (SN-curve = '+
+                                            result_state['fatigue'][line]['curve']+')')
 
                     else:
                         textobject.textLine('No fatigue results')
-
-                    # textobject.textLine('Utilization percentage (highest calculated): '+
-                    #                     str(int(max(self.data.get_color_and_calc_state()['utilization'][line].values())*100))+ '%')
 
                     textobject.setFillColor('black')
                     self.c.drawText(textobject)
@@ -402,7 +398,7 @@ class LetterMaker(object):
         self.c.showPage()
 
         idx, new = 0, False
-        for load_name in self.data._load_dict.keys():
+        for load_name in self.data.loads.keys():
             self.draw_lines(draw_type=None, load_idx_name = [idx % 3, load_name])
             if idx % 3 == 2:
                 self.c.showPage()
@@ -415,12 +411,12 @@ class LetterMaker(object):
         :return:
         '''
 
-        points = self.data._point_dict
-        lines = self.data._line_dict
-        if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
-            colors = self.data.get_color_and_calc_state()['colors']
+        points = self.data.points
+        lines = self.data.lines
+        if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
+            colors = self.data.result_state['colors']
         else:
-            colors = self.data.get_color_and_calc_state()['ML buckling colors']
+            colors = self.data.result_state['ML buckling colors']
 
         highest_y = max([coord[1] for coord in points.values()])
         highest_x = max([coord[0] for coord in points.values()])
@@ -440,15 +436,15 @@ class LetterMaker(object):
         self.c.setLineWidth(2)
         self.c.setStrokeColor('red')
         idx, drawed_data = 0, list()
-        all_line_data = self.data.get_color_and_calc_state()
+        all_line_data = self.data.result_state
         for line, pt in lines.items():
-            if line not in list(self.data._line_to_struc.keys()):
+            if line not in list(self.data.line_bundles.keys()):
                 continue
-            line_bundle = self.data._line_to_struc[line]
+            line_bundle = self.data.line_bundles[line]
             line_plate = line_structure.plate(line_bundle)
             line_stiffener = line_structure.stiffener(line_bundle)
             if draw_type == 'UF':
-                if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
+                if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                     try:
                         self.c.setStrokeColor('red' if 'red' in colors[line].values() else 'green')
                     except KeyError:
@@ -477,7 +473,7 @@ class LetterMaker(object):
             elif draw_type == 'pressure':
                 self.c.setStrokeColor(all_line_data['color code']['lines'][line]['pressure color'])
             elif draw_type == 'utilization':
-                if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
+                if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                     self.c.setStrokeColor(all_line_data['color code']['lines'][line]['rp uf color'])
                 else:
                     puls_method = line_plate.get_puls_method()
@@ -494,7 +490,7 @@ class LetterMaker(object):
             elif draw_type == 'structure type':
                 self.c.setStrokeColor(all_line_data['color code']['lines'][line]['structure type'])
             elif load_idx_name is not None:
-                points = self.data._point_dict
+                points = self.data.points
                 highest_y = max([coord[1] for coord in points.values()])
                 highest_x = max([coord[0] for coord in points.values()])
 
@@ -502,7 +498,7 @@ class LetterMaker(object):
                     scale = 10
                 else:
                     scale = min(180 / highest_y, 300 / highest_x, 10)
-                if line in self.data._load_dict[load_idx_name[1]][1]:
+                if line in self.data.loads[load_idx_name[1]][1]:
                     self.c.setStrokeColor('orange')
                 else:
                     self.c.setStrokeColor('black')
@@ -535,7 +531,7 @@ class LetterMaker(object):
             textobject.setFont("Helvetica-Oblique", 15)
             textobject.textLine('Model plate thicknesses')
             self.c.drawText(textobject)
-            all_thicknesses =self.data.get_color_and_calc_state()['color code']['all thicknesses']
+            all_thicknesses = self.data.result_state['color code']['all thicknesses']
             for idx, thk in enumerate(all_thicknesses):
                 textobject = self.c.beginText()
                 if 400 - 20 * idx > 20:
@@ -557,7 +553,7 @@ class LetterMaker(object):
             self.c.drawText(textobject)
             idx = 0
 
-            pressure_map =self.data.get_color_and_calc_state()['color code']['pressure map']
+            pressure_map = self.data.result_state['color code']['pressure map']
             for press in pressure_map:
                 textobject = self.c.beginText()
                 if 400 - 20 * idx > 20:
@@ -577,7 +573,7 @@ class LetterMaker(object):
             textobject.setTextOrigin(50, 800)
             textobject.setFillColor('black')
             textobject.setFont("Helvetica-Oblique", 12)
-            if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
+            if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                 this_text = 'DNV-RP-C201 Buckling Strength of Plated Structures'
             else:
                 this_text = 'ML-CL utilization factors not avaliable. ML-CLassifier only shows ok or not ok.'
@@ -585,7 +581,7 @@ class LetterMaker(object):
             textobject.textLine(this_text)
             self.c.drawText(textobject)
 
-            if self.data._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
+            if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                 all_utils = all_line_data['color code']['utilization map']
             else:
                 all_utils = list()
@@ -706,7 +702,7 @@ class LetterMaker(object):
                 self.c.drawText(textobject)
                 drawed_data.append(value)
         elif load_idx_name is not None:
-            for lidx, loadtext in enumerate(reversed(self.data._load_dict[load_idx_name[1]][0].get_report_string())):
+            for lidx, loadtext in enumerate(reversed(self.data.loads[load_idx_name[1]][0].get_report_string())):
                 textobject = self.c.beginText()
                 textobject.setTextOrigin(370 , origo[1]+50+ 11*lidx)
                 textobject.setFont("Helvetica-Oblique", 11)
@@ -745,10 +741,11 @@ class LetterMaker(object):
         '''
 
         table_all = []
+        result_state = self.data.result_state
         cylindersy, flat_plates, idx = False, False,-1
-        for line in sorted(self.data._line_dict.keys()):
+        for line in sorted(self.data.lines.keys()):
             idx += 1
-            line_bundle = self.data._line_to_struc[line]
+            line_bundle = self.data.line_bundles[line]
             if not line_structure.has_cylinder(line_bundle) and cylinders is False:
                 flat_plates = True
                 if idx == 0:
@@ -756,21 +753,21 @@ class LetterMaker(object):
                                'sig y2', 'tau xy', 'max press.', 'sec. mod', 'min sec.', 'min plt',
                                'shr area', 'min shr A', 'fat uf', 'buc uf']
                     table_all.append(headers)
-                if line not in list(self.data._line_to_struc.keys()):
+                if line not in list(self.data.line_bundles.keys()):
                     continue
                 struc_obj = line_structure.structure(line_bundle)
-                pressure = round(self.data.get_highest_pressure(line)['normal'] / 1000,0)
+                pressure = round(self.data.highest_pressures[line]['normal'] / 1000,0)
 
                 try:
-                    buckling_uf = str(round(max(self.data.get_color_and_calc_state()['buckling'][line]), 2))
+                    buckling_uf = str(round(max(result_state['buckling'][line]), 2))
                 except TypeError:
                     buckling_uf = None
 
-                if self.data.get_color_and_calc_state()['fatigue'][line]['damage'] is not None:
-                    fat_uf = self.data.get_color_and_calc_state()['fatigue'][line]['damage']
+                if result_state['fatigue'][line]['damage'] is not None:
+                    fat_uf = result_state['fatigue'][line]['damage']
                     fat_uf = round(fat_uf, 3)
                 else:
-                    fat_uf = self.data.get_color_and_calc_state()['fatigue'][line]['damage']
+                    fat_uf = result_state['fatigue'][line]['damage']
 
 
                 data = [line,str(struc_obj.Plate.get_pl_thk() * 1000), str(struc_obj.Plate.get_s() * 1000),
@@ -782,11 +779,11 @@ class LetterMaker(object):
                         str(round(struc_obj.Plate.sigma_y1, 0)),
                         str(round(struc_obj.Plate.sigma_y2, 0)),
                         str(round(struc_obj.Plate.tau_xy, 0)), str(round(pressure, 2) * 1000),
-                        str(int(min(self.data.get_color_and_calc_state()['section_modulus'][line]['sec_mod']) * 1000 ** 3)),
-                        str(int(self.data.get_color_and_calc_state()['section_modulus'][line]['min_sec_mod'] * 1000 ** 3)),
-                        str(round(self.data.get_color_and_calc_state()['thickness'][line]['min_thk'], 2)),
-                        str(int(self.data.get_color_and_calc_state()['shear_area'][line]['shear_area'] * 1000 ** 2)),
-                        str(int(self.data.get_color_and_calc_state()['shear_area'][line]['min_shear_area'] * 1000 ** 2)),
+                        str(int(min(result_state['section_modulus'][line]['sec_mod']) * 1000 ** 3)),
+                        str(int(result_state['section_modulus'][line]['min_sec_mod'] * 1000 ** 3)),
+                        str(round(result_state['thickness'][line]['min_thk'], 2)),
+                        str(int(result_state['shear_area'][line]['shear_area'] * 1000 ** 2)),
+                        str(int(result_state['shear_area'][line]['min_shear_area'] * 1000 ** 2)),
                         fat_uf, buckling_uf]
 
                 table_all.append(data)

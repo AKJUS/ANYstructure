@@ -1,5 +1,5 @@
-from anystruct import calc_structure, example_data, main_application
-import multiprocessing, ctypes, os, pickle
+from anystruct import calc_structure, example_data, main_application, ml_models
+import multiprocessing, ctypes, os
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox
@@ -17,16 +17,6 @@ def get_ml_file_directories():
         directories.append(Path(env_dir))
     directories.extend([REPO_ROOT / "anystruct" / "ml_files", DEFAULT_EXTERNAL_ML_FILES])
     return directories
-
-
-def resolve_ml_pickle(file_base):
-    file_name = Path(file_base.replace("ml_files\\", "").replace("ml_files/", "") + ".pickle")
-    for directory in get_ml_file_directories():
-        candidate = directory / file_name
-        if candidate.is_file():
-            return candidate
-    searched = ", ".join(str(directory) for directory in get_ml_file_directories())
-    raise FileNotFoundError(f"Could not find {file_name.name} in: {searched}")
 
 
 def configure_noninteractive_dialogs():
@@ -126,47 +116,7 @@ def run_cc_chks():
         my_dict[chks].set(False)
 
 
-my_dict['_ML_buckling'] = {1.1: dict(), 1.15: dict()}
-
-for mat_fac in [1.1, 1.15]:
-    for name, file_base in zip(['cl SP buc int predictor', 'cl SP buc int scaler',
-                                'cl SP ult int predictor', 'cl SP ult int scaler',
-                                'cl SP buc GLGT predictor', 'cl SP buc GLGT scaler',
-                                'cl SP ult GLGT predictor', 'cl SP ult GLGT scaler',
-                                'cl UP buc int predictor', 'cl UP buc int scaler',
-                                'cl UP ult int predictor', 'cl UP ult int scaler',
-                                'cl UP buc GLGT predictor', 'cl UP buc GLGT scaler',
-                                'cl UP ult GLGT predictor', 'cl UP ult GLGT scaler',
-                                'CSR predictor UP', 'CSR scaler UP',
-                                'CSR predictor SP', 'CSR scaler SP'
-                                ],
-                               ["ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_CSR-Tank_req_cl_predictor",
-                                "ml_files\\CL_CSR-Tank_req_cl_scaler",
-                                "ml_files\\CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor",
-                                "ml_files\\CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler"]):
-
-        mat_fac_str = [str(round(mat_fac, 2)).replace('.', '') + '0'][0][0:3]
-        file_base = file_base.replace('XXX', mat_fac_str)
-        my_dict['_ML_buckling'][mat_fac][name] = None
-
-        with resolve_ml_pickle(file_base).open('rb') as file:
-            my_dict['_ML_buckling'][mat_fac][name] = pickle.load(file)
+my_dict['_ML_buckling'] = ml_models.load_buckling_models(get_ml_file_directories())
 
 
 my_dict['_ML_classes'] = {0: 'N/A',

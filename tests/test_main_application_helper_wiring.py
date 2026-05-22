@@ -45,6 +45,18 @@ def test_main_application_uses_helpers_for_structure_property_unit_conversions()
     assert not re.search(r"[\w.)\]]\s*/\s*1000", property_block)
 
 
+def test_main_application_uses_shared_ml_model_loader():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    ml_loader_block = source[
+        source.index("self._ML_buckling ="):
+        source.index("# Used to select parameter")
+    ]
+
+    assert "ml_models.load_buckling_models((self._root_dir,))" in ml_loader_block
+    assert "pickle.load(" not in ml_loader_block
+
+
 def test_new_structure_delegates_property_building():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -129,7 +141,7 @@ def test_report_and_sesam_callbacks_delegate_request_orchestration():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
     report_block = source[
-        source.index("def report_generate"):
+        source.index("def _build_report_data_snapshot"):
         source.index("def create_accelerations")
     ]
     export_block = source[
@@ -139,6 +151,33 @@ def test_report_and_sesam_callbacks_delegate_request_orchestration():
 
     assert "ReportRequestService.create_pdf(" in report_block
     assert "ReportRequestService.create_table(" in report_block
-    assert "LetterMaker(filename" not in report_block
+    assert "def _build_report_data_snapshot" in report_block
+    assert "ReportDataSnapshot(" in report_block
+    assert "self._build_report_data_snapshot()" in report_block
+    assert 'ReportRequest(filename, "Section results", 10, self)' not in report_block
+    assert "LetterMaker" not in source
+    assert "SimpleDocTemplate" not in source
+    assert "reportlab" not in source
     assert "SesamExportService.build_js_lines(" in export_block
     assert "sesam.JSfile(" not in export_block
+
+
+def test_excel_callbacks_delegate_workbook_adapter_access():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    excel_block = source[
+        source.index("def open_example_excel_file"):
+        source.index("def on_open_structure_window")
+    ]
+
+    assert "ExcelProjectImportService.open_example_path(" in excel_block
+    assert "ExcelProjectImportService.read_path(" in excel_block
+    assert "ExcelProjectGeometryImportService.add_records(" in excel_block
+    assert "def _sync_excel_import_geometry" in excel_block
+    assert "flat_plate_records" in excel_block
+    assert "cylinder_records" in excel_block
+    assert "row_data[" not in excel_block
+    assert "self.new_point()" not in excel_block
+    assert "this_line = self.new_line()" not in excel_block
+    assert "ExcelInterface(" not in source
+    assert "excel_inteface" not in source

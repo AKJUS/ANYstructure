@@ -8,7 +8,7 @@ def test_gui_automatic_run_resolves_ml_files_without_github_path():
     assert "ANYSTRUCTURE_ML_FILES" in source
     assert r"C:\python_projects\ANYstructure\anystruct\ml_files" in source
     assert "REPO_ROOT / \"anystruct\" / \"ml_files\"" in source
-    assert "resolve_ml_pickle(file_base)" in source
+    assert "ml_models.load_buckling_models(get_ml_file_directories())" in source
     assert r"C:\Github\ANYstructure" not in source
 
 

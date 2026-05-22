@@ -5,14 +5,12 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import filedialog
 from tkinter import messagebox
-import decimal, pickle
+import decimal
 from _tkinter import TclError
 import multiprocessing
 import ctypes
 from matplotlib import pyplot as plt
 import matplotlib
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.platypus import SimpleDocTemplate
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics._pairwise_distances_reduction import _datasets_pair,_middle_term_computer
@@ -35,10 +33,9 @@ try:
     import anystruct.fatigue_window as fatigue
     import anystruct.load_factor_window as load_factors
     import anystruct.api_helpers as api_helpers
+    import anystruct.ml_models as ml_models
     import anystruct.project_application as project_application
     import anystruct.project_services as project_services
-    from anystruct.report_generator import LetterMaker
-    import anystruct.excel_inteface as excel_interface
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -57,10 +54,9 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.fatigue_window as fatigue
     import ANYstructure.anystruct.load_factor_window as load_factors
     import ANYstructure.anystruct.api_helpers as api_helpers
+    import ANYstructure.anystruct.ml_models as ml_models
     import ANYstructure.anystruct.project_application as project_application
     import ANYstructure.anystruct.project_services as project_services
-    from ANYstructure.anystruct.report_generator import LetterMaker
-    import ANYstructure.anystruct.excel_inteface as excel_interface
 
 class Application():
     '''
@@ -332,54 +328,7 @@ class Application():
         self._center_of_buoyancy = dict()   # Center of buoyancy for all and for carious static drafts
                                             # Example {8: (5,20), 22: (12,20), 'all': (16,20)}
 
-        self._ML_buckling = {1.1 : dict(), 1.15: dict()}# Buckling machine learning algorithm
-        for mat_fac in [1.1, 1.15]:
-            for name, file_base in zip(['cl SP buc int predictor', 'cl SP buc int scaler',
-                                        'cl SP ult int predictor', 'cl SP ult int scaler',
-                                        'cl SP buc GLGT predictor', 'cl SP buc GLGT scaler',
-                                        'cl SP ult GLGT predictor', 'cl SP ult GLGT scaler',
-                                        'cl UP buc int predictor', 'cl UP buc int scaler',
-                                        'cl UP ult int predictor', 'cl UP ult int scaler',
-                                        'cl UP buc GLGT predictor', 'cl UP buc GLGT scaler',
-                                        'cl UP ult GLGT predictor', 'cl UP ult GLGT scaler',
-                                        'CSR predictor UP', 'CSR scaler UP',
-                                        'CSR predictor SP', 'CSR scaler SP'
-                                        ],
-                                       ["ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_SP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_SP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_SP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_SP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_UP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_UP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_UP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_UP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CL_CSR-Tank_req_cl_predictor",
-                                        "ml_files\\CL_CSR-Tank_req_cl_scaler",
-                                        "ml_files\\CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor",
-                                        "ml_files\\CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler"]):
-
-                mat_fac_str = [str(round(mat_fac,2)).replace('.','')+'0'][0][0:3]
-                self._ML_buckling[mat_fac][name] = None
-                file_base = file_base.replace('XXX', mat_fac_str)
-                if os.path.isfile(file_base + '.pickle'):
-                    file = open(file_base + '.pickle', 'rb')
-                    self._ML_buckling[mat_fac][name] = pickle.load(file)
-                    file.close()
-                else:
-                    #file = open(self._root_dir +'\\' + file_base + '.pickle', 'rb')
-
-                    ml_file = os.path.join(self._root_dir, file_base + '.pickle')
-                    file = open(ml_file, 'rb')
-                    self._ML_buckling[mat_fac][name] = pickle.load(file)
-                    file.close()
+        self._ML_buckling = ml_models.load_buckling_models((self._root_dir,))
 
         # Used to select parameter
         self._stuctural_definition = ['mat_yield','mat_factor', 'span', 'spacing', 'plate_thk', 'stf_web_height',
@@ -4678,6 +4627,23 @@ class Application():
 
                     y_location += 1
 
+    def _build_report_data_snapshot(self):
+        return project_services.ReportDataSnapshot(
+            project_information=self._project_information.get('1.0', tk.END),
+            buckling_method=self._new_buckling_method.get(),
+            points=self._point_dict,
+            lines=self._line_dict,
+            line_bundles=self._line_to_struc,
+            tanks=self._tank_dict,
+            loads=self._load_dict,
+            result_state=self.get_color_and_calc_state(),
+            highest_pressures={
+                line_name: self.get_highest_pressure(line_name)
+                for line_name in self._line_to_struc
+            },
+            ml_classes=self._ML_classes,
+        )
+
     def report_generate(self, autosave = False):
         '''
         Button is pressed to generate a report of the current structure.
@@ -4703,8 +4669,7 @@ class Application():
             self.grid_display_tanks(save=True)
 
         project_services.ReportRequestService.create_pdf(
-            project_services.ReportRequest(filename, "Section results", 10, self),
-            LetterMaker,
+            project_services.ReportRequest(filename, "Section results", 10, self._build_report_data_snapshot()),
         )
         try:
             os.startfile(filename)
@@ -4730,9 +4695,7 @@ class Application():
             return
 
         project_services.ReportRequestService.create_table(
-            project_services.ReportRequest(filename, "Section results", 10, self),
-            LetterMaker,
-            lambda table_filename: SimpleDocTemplate(table_filename, pagesize=landscape(letter)),
+            project_services.ReportRequest(filename, "Section results", 10, self._build_report_data_snapshot()),
         )
         try:
             os.startfile(filename)
@@ -6515,209 +6478,177 @@ class Application():
         file_name = 'excel_input_example.xlsx'
 
         if os.path.isfile(file_name) :
-            XLB = excel_interface.ExcelInterface(file_name, visible=True, read_only=True)
+            project_services.ExcelProjectImportService.open_example_path(file_name)
         else:
-            XLB = excel_interface.ExcelInterface(self._root_dir + '/' + file_name, visible=True, read_only=True)
+            project_services.ExcelProjectImportService.open_example_path(self._root_dir + '/' + file_name)
+
+    def _sync_excel_import_geometry(self, geometry_import):
+        for point in geometry_import.created_points:
+            self._active_point = point.name
+            self.logger(point=point.name, move_coords=None)
+
+        for imported_line in geometry_import.imported_lines:
+            self._line_point_to_point_string.extend(imported_line.line.endpoint_keys)
+            self.add_to_combinations_dict(imported_line.line.name)
+            self.logger(line=[imported_line.line.name, None])
 
     def open_excel_file(self):
         ''' Open an excel file with data to read into ANYstructure '''
 
-        imp_file = filedialog.askopenfile(mode='r', defaultextension=".xlsx")
-        if imp_file is None:  # asksaveasfile return `None` if dialog closed with "cancel".
+        imp_file = filedialog.askopenfilename(defaultextension=".xlsx")
+        if not imp_file:
             return
 
-        data_wb = excel_interface.ExcelInterface(imp_file.name, visible=False, read_only=True)
-        # if os.path.isfile(imp_file) : #kj
-        #     data_wb = excel_interface.ExcelInterface(imp_file, visible=False, read_only=True)
-        # else:
-        #     return
-        data_flat = data_wb.get_sheet_data('flat_plate')
-        data_cyl = data_wb.get_sheet_data('cylinder')
-        data_wb.close_book()
+        import_data = project_services.ExcelProjectImportService.read_path(imp_file)
+        flat_plate_records = import_data.flat_plate_records
+        cylinder_records = import_data.cylinder_records
+
+        flat_geometry = project_services.ExcelProjectGeometryImportService.add_records(
+            self._point_dict,
+            self._line_dict,
+            flat_plate_records,
+        )
+        cylinder_geometry = project_services.ExcelProjectGeometryImportService.add_records(
+            self._point_dict,
+            self._line_dict,
+            cylinder_records,
+        )
+        self._sync_excel_import_geometry(flat_geometry)
+        self._sync_excel_import_geometry(cylinder_geometry)
+        self.update_frame()
 
         # Flat
         #--------------------------------------------------------------------------------------------------------------
-        for row_data in data_flat[1:]:
-            l1x, l1y, l2x, l2y = row_data[1:5]
-            self._new_point_x.set(l1x)
-            self._new_point_y.set(l1y)
-            self.new_point()
-            self._new_point_x.set(l2x)
-            self._new_point_y.set(l2y)
-            self.new_point()
-        for row_data in data_cyl[1:]:
-            l1x, l1y, l2x, l2y = row_data[1:5]
-            self._new_point_x.set(l1x)
-            self._new_point_y.set(l1y)
-            self.new_point()
-            self._new_point_x.set(l2x)
-            self._new_point_y.set(l2y)
-            self.new_point()
-        # Creating lines
-        all_points = self.get_points()
-        for row_data in data_flat[1:]:
-            l1x, l1y, l2x, l2y = row_data[1:5]
-            p1_found = False
-            p2_found = False
-            for key, value in all_points.items():
-                if l1x/1000 == value[0] and l1y/1000 == value[1]:
-                    p1 = get_num(key)
-                    p1_found = True
-                if l2x/1000 == value[0] and l2y/1000 == value[1]:
-                    p2 = get_num(key)
-                    p2_found = True
-            if p1_found and p2_found:
-                self._new_line_p1.set(p1)
-                self._new_line_p2.set(p2)
-                this_line = self.new_line()
-                self._active_line = this_line
-                self._line_is_active = True
-                self._new_calculation_domain.set(row_data[0])
-                self._new_field_len.set(hlp.dist((l1x, l1y), (l2x, l2y)))
-                self._new_plate_thk.set(row_data[5])
-                self._new_stf_spacing.set(row_data[6])
-                self._new_stf_web_h.set(row_data[7])
-                self._new_stf_web_t.set(row_data[8])
-                self._new_stf_fl_w.set(row_data[9])
-                self._new_stf_fl_t.set(row_data[10])
-                sig_start = 12
-                self._new_sigma_x1.set(row_data[sig_start])
-                self._new_sigma_x2.set(row_data[sig_start+1])
-                self._new_sigma_y1.set(row_data[sig_start+2])
-                self._new_sigma_y2.set(row_data[sig_start+3])
-                self._new_tauxy.set(row_data[sig_start+4])
-                gird_start = 18
-                if row_data[0] == 'Flat plate, stiffened with girder':
-                    self._new_girder_length_LG.set(row_data[gird_start+0])
-                    self._new_girder_web_h.set(row_data[gird_start+1])
-                    self._new_girder_web_t.set(row_data[gird_start + 2])
-                    self._new_girder_fl_w.set(row_data[gird_start + 3])
-                    self._new_girder_fl_t.set(row_data[gird_start + 4])
-                    self._new_girder_type.set(row_data[gird_start + 5])
+        for imported_line in flat_geometry.imported_lines:
+            import_record = imported_line.record
+            this_line = imported_line.line.name
+            l1x, l1y = import_record.first_point
+            l2x, l2y = import_record.second_point
+            self._active_line = this_line
+            self._line_is_active = True
+            self._new_calculation_domain.set(import_record.calculation_domain)
+            self._new_field_len.set(hlp.dist((l1x, l1y), (l2x, l2y)))
+            plate_thk, spacing, web_h, web_t, flange_w, flange_t = import_record.plate_values
+            self._new_plate_thk.set(plate_thk)
+            self._new_stf_spacing.set(spacing)
+            self._new_stf_web_h.set(web_h)
+            self._new_stf_web_t.set(web_t)
+            self._new_stf_fl_w.set(flange_w)
+            self._new_stf_fl_t.set(flange_t)
+            sigma_x1, sigma_x2, sigma_y1, sigma_y2, tau_xy = import_record.stress_values
+            self._new_sigma_x1.set(sigma_x1)
+            self._new_sigma_x2.set(sigma_x2)
+            self._new_sigma_y1.set(sigma_y1)
+            self._new_sigma_y2.set(sigma_y2)
+            self._new_tauxy.set(tau_xy)
+            if import_record.calculation_domain == 'Flat plate, stiffened with girder':
+                girder_length, girder_web_h, girder_web_t, girder_fl_w, girder_fl_t, girder_type = \
+                    import_record.girder_values
+                self._new_girder_length_LG.set(girder_length)
+                self._new_girder_web_h.set(girder_web_h)
+                self._new_girder_web_t.set(girder_web_t)
+                self._new_girder_fl_w.set(girder_fl_w)
+                self._new_girder_fl_t.set(girder_fl_t)
+                self._new_girder_type.set(girder_type)
 
-                end_data_start = 24
-                for idx, var in enumerate([self._new_overpresure,self._new_stucture_type, self._new_buckling_stf_end_support,
-                            self._new_buckling_girder_end_support, self._new_buckling_fab_method_stf,
-                            self._new_buckling_fab_method_girder, self._new_buckling_length_factor_stf,
-                            self._new_buckling_length_factor_girder, self._new_buckling_stf_dist_bet_lat_supp,
-                            self._new_buckling_girder_dist_bet_lat_supp, self._new_buckling_tension_field,
-                            self._new_buckling_effective_against_sigy]):
-                    if row_data[end_data_start + idx] is not None:
-                        var.set(row_data[end_data_start + idx])
+            for value, var in zip(import_record.buckling_values,
+                                  [self._new_overpresure,self._new_stucture_type, self._new_buckling_stf_end_support,
+                        self._new_buckling_girder_end_support, self._new_buckling_fab_method_stf,
+                        self._new_buckling_fab_method_girder, self._new_buckling_length_factor_stf,
+                        self._new_buckling_length_factor_girder, self._new_buckling_stf_dist_bet_lat_supp,
+                        self._new_buckling_girder_dist_bet_lat_supp, self._new_buckling_tension_field,
+                        self._new_buckling_effective_against_sigy]):
+                if value is not None:
+                    var.set(value)
 
-
-
-                # self._new_overpresure.set(row_data[end_data_start + 0])
-                # self._new_stucture_type.set(row_data[end_data_start + 1])
-                # self._new_buckling_stf_end_support.set(row_data[end_data_start + 2])
-                # self._new_buckling_girder_end_support.set(row_data[end_data_start + 3])
-                # self._new_buckling_fab_method_stf.set(row_data[end_data_start + 4])
-                # self._new_buckling_fab_method_girder.set(row_data[end_data_start + 5])
-                # self._new_buckling_length_factor_stf.set(row_data[end_data_start + 6])
-                # self._new_buckling_length_factor_girder.set(row_data[end_data_start + 7])
-                # self._new_buckling_stf_dist_bet_lat_supp.set(row_data[end_data_start + 8])
-                # self._new_buckling_girder_dist_bet_lat_supp.set(row_data[end_data_start + 9])
-                # self._new_buckling_tension_field.set(row_data[end_data_start + 10])
-                # self._new_buckling_effective_against_sigy.set(row_data[end_data_start + 11])
-
-                self.new_structure()
-                self._new_load_comb_dict[('manual', this_line, 'manual')][0].set(row_data[16])
-                self._new_load_comb_dict[('manual', this_line, 'manual')][1].set(1)
-                self._new_load_comb_dict[('manual', this_line, 'manual')][2].set(1)
-                self._line_to_struc[this_line][0].need_recalc = True
+            self.new_structure()
+            self._new_load_comb_dict[('manual', this_line, 'manual')][0].set(import_record.manual_pressure)
+            self._new_load_comb_dict[('manual', this_line, 'manual')][1].set(1)
+            self._new_load_comb_dict[('manual', this_line, 'manual')][2].set(1)
+            self._line_to_struc[this_line][0].need_recalc = True
 
         # Cylinders
         # ------------------------------------------------------------------------------------------------------------
-        for row_data in data_cyl[1:]:
+        for imported_line in cylinder_geometry.imported_lines:
+            import_record = imported_line.record
+            this_line = imported_line.line.name
+            l1x, l1y = import_record.first_point
+            l2x, l2y = import_record.second_point
+            self._active_line = this_line
+            self._line_is_active = True
+            self._new_calculation_domain.set(import_record.calculation_domain)
+            shell_thk, shell_radius, dist_rings, shell_length, shell_tot_length, shell_k, shell_mat = \
+                import_record.shell_values
+            self._new_shell_thk.set(shell_thk)
+            self._new_shell_radius.set(shell_radius)
+            self._new_shell_dist_rings.set(dist_rings)
+            self._new_shell_length.set(shell_length)
+            self._new_shell_tot_length.set(shell_tot_length)
+            self._new_shell_k_factor.set(shell_k)
+            self._new_shell_mat_factor.set(shell_mat)
 
-            l1x, l1y, l2x, l2y = row_data[1:5]
-            p1_found = False
-            p2_found = False
-            for key, value in all_points.items():
-                if l1x/1000 == value[0] and l1y/1000 == value[1]:
-                    p1 = get_num(key)
-                    p1_found = True
-                if l2x/1000 == value[0] and l2y/1000 == value[1]:
-                    p2 = get_num(key)
-                    p2_found = True
+            long_web_h, long_web_t, long_fl_w, long_fl_t, panel_spacing, long_type = \
+                import_record.longitudinal_values
+            self._new_stf_web_h.set(long_web_h)
+            self._new_stf_web_t.set(long_web_t)
+            self._new_stf_fl_w.set(long_fl_w)
+            self._new_stf_fl_t.set(long_fl_t)
+            self._new_shell_panel_spacing.set(panel_spacing)
+            self._new_stf_type.set(long_type)
 
-            if p1_found and p2_found:
-                self._new_line_p1.set(p1)
-                self._new_line_p2.set(p2)
-                this_line = self.new_line()
-                self._active_line = this_line
-                self._line_is_active = True
-                self._new_calculation_domain.set(row_data[0])
-                main_start = 5
-                self._new_shell_thk.set(row_data[main_start + 0])
-                self._new_shell_radius.set(row_data[main_start + 1])
-                self._new_shell_dist_rings.set(row_data[main_start + 2])
-                self._new_shell_length.set(row_data[main_start + 3])
-                self._new_shell_tot_length.set(row_data[main_start + 4])
-                self._new_shell_k_factor.set(row_data[main_start + 5])
-                self._new_shell_mat_factor.set(row_data[main_start + 6])
+            if import_record.ring_stiffener_values[0] is None:
+                self._new_shell_exclude_ring_stf.set(True)
+            else:
+                self._new_shell_exclude_ring_stf.set(False)
+                ring_hw, ring_tw, ring_b, ring_tf, ring_type = import_record.ring_stiffener_values
+                self._new_shell_ring_stf_hw.set(ring_hw)
+                self._new_shell_ring_stf_tw.set(ring_tw)
+                self._new_shell_ring_stf_b.set(ring_b)
+                self._new_shell_ring_stf_tf.set(ring_tf)
+                self._new_shell_ring_stf_type.set(ring_type)
 
-                long_start = 12
-                self._new_stf_web_h.set(row_data[long_start + 0])
-                self._new_stf_web_t.set(row_data[long_start + 1])
-                self._new_stf_fl_w.set(row_data[long_start + 2])
-                self._new_stf_fl_t.set(row_data[long_start + 3])
-                self._new_shell_panel_spacing.set(row_data[long_start + 4])
-                self._new_stf_type.set(row_data[long_start + 5])
+            if import_record.ring_frame_values[0] is None:
+                self._new_shell_exclude_ring_frame.set(True)
+            else:
+                self._new_shell_exclude_ring_frame.set(False)
+                frame_hw, frame_tw, frame_b, frame_tf, frame_length, frame_type = import_record.ring_frame_values
+                self._new_shell_ring_frame_hw.set(frame_hw)
+                self._new_shell_ring_frame_tw.set(frame_tw)
+                self._new_shell_ring_frame_b.set(frame_b)
+                self._new_shell_ring_frame_tf.set(frame_tf)
+                self._new_shell_ring_frame_length_between_girders.set(frame_length)
+                self._new_shell_ring_frame_type.set(frame_type)
 
-                ring_stf_start = 18
-                if row_data[ring_stf_start] is None:
-                    self._new_shell_exclude_ring_stf.set(True)
-                else:
-                    self._new_shell_exclude_ring_stf.set(False)
-                    self._new_shell_ring_stf_hw.set(row_data[ring_stf_start + 0])
-                    self._new_shell_ring_stf_tw.set(row_data[ring_stf_start + 1])
-                    self._new_shell_ring_stf_b.set(row_data[ring_stf_start + 2])
-                    self._new_shell_ring_stf_tf.set(row_data[ring_stf_start + 3])
-                    self._new_shell_ring_stf_type.set(row_data[ring_stf_start + 4])
+            if import_record.stress_values[0] is None:
+                pass
+            else:
+                #mapper ={1: 'Force', 2: 'Stress'}
+                sasd, smsd, tTsd, tQsd, psd, shsd = import_record.stress_values
+                self._new_shell_stress_or_force.set(2)
+                self._new_shell_sasd.set(sasd)
+                self._new_shell_smsd.set(smsd)
+                self._new_shell_tTsd.set(tTsd)
+                self._new_shell_tQsd.set(tQsd)
+                self._new_shell_psd.set(psd)
+                self._new_shell_shsd.set(shsd)
 
-                ring_frame = 23
-                if row_data[ring_frame] is None:
-                    self._new_shell_exclude_ring_frame.set(True)
-                else:
-                    self._new_shell_exclude_ring_frame.set(False)
-                    self._new_shell_ring_frame_hw.set(row_data[ring_frame + 0])
-                    self._new_shell_ring_frame_tw.set(row_data[ring_frame + 1])
-                    self._new_shell_ring_frame_b.set(row_data[ring_frame + 2])
-                    self._new_shell_ring_frame_tf.set(row_data[ring_frame + 3])
-                    self._new_shell_ring_frame_length_between_girders.set(row_data[ring_frame + 4])
-                    self._new_shell_ring_frame_type.set(row_data[ring_frame + 5])
-
-                stress_start = 29
-                if row_data[stress_start] is None:
-                    pass
-                else:
-                    #mapper ={1: 'Force', 2: 'Stress'}
-                    self._new_shell_stress_or_force.set(2)
-                    self._new_shell_sasd.set(row_data[stress_start + 0])
-                    self._new_shell_smsd.set(row_data[stress_start + 1])
-                    self._new_shell_tTsd.set(row_data[stress_start + 2])
-                    self._new_shell_tQsd.set(row_data[stress_start + 3])
-                    self._new_shell_psd.set(row_data[stress_start + 4])
-                    self._new_shell_shsd.set(row_data[stress_start + 5])
-
-                force_start = 35
-                if row_data[force_start] is None:
-                    pass
-                else:
-                    self._new_shell_stress_or_force.set(1)
-                    self._new_shell_Nsd.set(row_data[force_start + 0])
-                    self._new_shell_Msd.set(row_data[force_start + 1])
-                    self._new_shell_Tsd.set(row_data[force_start + 2])
-                    self._new_shell_Qsd.set(row_data[force_start + 3])
-                    self._new_shell_psd.set(row_data[stress_start + 4])
-                end_data_start = 39
-                self._new_shell_uls_or_als.set(row_data[end_data_start + 0])
-                self._new_shell_yield.set(row_data[end_data_start + 1])
-                self._new_shell_end_cap_pressure_included.set(row_data[end_data_start + 1])
-                self._new_shell_fab_ring_stf.set(row_data[end_data_start + 2])
-                self._new_shell_fab_ring_frame.set(row_data[end_data_start + 3])
-                self.new_structure()
+            if import_record.force_values[0] is None:
+                pass
+            else:
+                nsd, msd, tsd, qsd = import_record.force_values
+                self._new_shell_stress_or_force.set(1)
+                self._new_shell_Nsd.set(nsd)
+                self._new_shell_Msd.set(msd)
+                self._new_shell_Tsd.set(tsd)
+                self._new_shell_Qsd.set(qsd)
+                self._new_shell_psd.set(import_record.stress_values[4])
+            uls_or_als, shell_yield, ring_stf_fab, ring_frame_fab = import_record.end_values
+            self._new_shell_uls_or_als.set(uls_or_als)
+            self._new_shell_yield.set(shell_yield)
+            self._new_shell_end_cap_pressure_included.set(shell_yield)
+            self._new_shell_fab_ring_stf.set(ring_stf_fab)
+            self._new_shell_fab_ring_frame.set(ring_frame_fab)
+            self.new_structure()
 
     def button_load_info_click(self, event = None):
         ''' Get the load information for one line.'''
