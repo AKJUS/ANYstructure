@@ -2745,35 +2745,19 @@ class Application():
 
     def _predict_numeric_uf_pipeline(self, mat_fac, sp_or_up, boundary_type, buckling_ml_input):
         """
-        Predict numeric buckling/ultimate UF using the numeric UF pipeline.
+        Predict raw numeric buckling/ultimate UF using the numeric UF pipeline.
 
-        Returns
-        -------
-        dict
-            {
-                'available': bool,
-                'valid_prediction': int or None,
-                'valid_label': str,
-                'buckling_uf': float or inf,
-                'ultimate_uf': float or inf,
-                'error': str,
-            }
+        Important:
+            The numeric model is trained on Buckling/Ultimate UF at material factor = 1.0.
+            Material factor scaling is applied later in get_color_and_calc_state().
         """
-
         if sp_or_up == 'SP':
-            if boundary_type == 'Int':
-                prefix = 'num SP int'
-            else:
-                prefix = 'num SP GLGT'
+            prefix = 'num SP int' if boundary_type == 'Int' else 'num SP GLGT'
         else:
-            if boundary_type == 'Int':
-                prefix = 'num UP int'
-            else:
-                prefix = 'num UP GLGT'
+            prefix = 'num UP int' if boundary_type == 'Int' else 'num UP GLGT'
 
         valid_predictor_key = f'{prefix} validity predictor'
         valid_xscaler_key = f'{prefix} validity xscaler'
-
         reg_predictor_key = f'{prefix} UF reg predictor'
         reg_xscaler_key = f'{prefix} UF reg xscaler'
         reg_yscaler_key = f'{prefix} UF reg yscaler'
@@ -2786,11 +2770,7 @@ class Application():
             reg_yscaler_key,
         ]
 
-        missing = [
-            key for key in required_keys
-            if not self._ml_model_exists(mat_fac, key)
-        ]
-
+        missing = [key for key in required_keys if not self._ml_model_exists(mat_fac, key)]
         if missing:
             return {
                 'available': False,
@@ -2798,21 +2778,19 @@ class Application():
                 'valid_label': 'numeric ML unavailable',
                 'buckling_uf': float('inf'),
                 'ultimate_uf': float('inf'),
+                'buckling_uf_raw': float('inf'),
+                'ultimate_uf_raw': float('inf'),
+                'material_factor': mat_fac,
                 'error': 'Missing numeric ML model(s): ' + ', '.join(missing),
             }
 
         try:
-            # ---------------------------------------------------------------------
-            # Step 1: predict whether numeric UF is valid
-            # ---------------------------------------------------------------------
             x_valid = self._ML_buckling[mat_fac][valid_xscaler_key].transform(
                 buckling_ml_input
             )
-
             valid_pred = self._ML_buckling[mat_fac][valid_predictor_key].predict(
                 x_valid
             )[0]
-
             valid_pred_int = int(valid_pred)
 
             if valid_pred_int != 1:
@@ -2822,33 +2800,34 @@ class Application():
                     'valid_label': 'invalid/NaN UF predicted',
                     'buckling_uf': float('inf'),
                     'ultimate_uf': float('inf'),
+                    'buckling_uf_raw': float('inf'),
+                    'ultimate_uf_raw': float('inf'),
+                    'material_factor': mat_fac,
                     'error': '',
                 }
 
-            # ---------------------------------------------------------------------
-            # Step 2: predict numeric buckling/ultimate UF
-            # ---------------------------------------------------------------------
             x_reg = self._ML_buckling[mat_fac][reg_xscaler_key].transform(
                 buckling_ml_input
             )
-
             y_scaled = self._ML_buckling[mat_fac][reg_predictor_key].predict(
                 x_reg
             )
-
             y_numeric = self._ML_buckling[mat_fac][reg_yscaler_key].inverse_transform(
                 y_scaled
             )[0]
 
-            buckling_uf = float(y_numeric[0])
-            ultimate_uf = float(y_numeric[1])
+            buckling_uf_raw = float(y_numeric[0])
+            ultimate_uf_raw = float(y_numeric[1])
 
             return {
                 'available': True,
                 'valid_prediction': valid_pred_int,
                 'valid_label': 'valid numeric UF predicted',
-                'buckling_uf': buckling_uf,
-                'ultimate_uf': ultimate_uf,
+                'buckling_uf': buckling_uf_raw,
+                'ultimate_uf': ultimate_uf_raw,
+                'buckling_uf_raw': buckling_uf_raw,
+                'ultimate_uf_raw': ultimate_uf_raw,
+                'material_factor': mat_fac,
                 'error': '',
             }
 
@@ -2859,23 +2838,19 @@ class Application():
                 'valid_label': 'numeric ML error',
                 'buckling_uf': float('inf'),
                 'ultimate_uf': float('inf'),
+                'buckling_uf_raw': float('inf'),
+                'ultimate_uf_raw': float('inf'),
+                'material_factor': mat_fac,
                 'error': str(e),
             }
 
-    def _numeric_uf_color(self, uf, mat_fac):
+    def _numeric_uf_color(self, uf, mat_fac=None):
         """
-        Color based on numeric UF.
-
-        Assumption:
-            lower/equal to acceptance threshold is green.
+        Numeric UF is material-factored in get_color_and_calc_state().
+        Therefore the acceptance limit is 1.0.
         """
-        if mat_fac == 1.1:
-            limit = 0.91
-        else:
-            limit = 0.87
-
         try:
-            return 'green' if float(uf) <= limit else 'red'
+            return 'green' if float(uf) <= 1.0 else 'red'
         except Exception:
             return 'red'
 
@@ -2949,7 +2924,32 @@ class Application():
                 return_dict['all_obj'][current_line] = all_obj
 
                 if all_obj.need_recalc is False:
-                    return self._state_logger[current_line]
+                    # Cached state may be stale when the selected ML material factor changes.
+                    # Reuse cache only when the cached numeric ML material factor matches
+                    # the current GUI-selected material factor.
+                    cached_state = self._state_logger.get(current_line, None)
+                    try:
+                        selected_mat_fac = float(self._new_material_factor.get())
+                    except Exception:
+                        selected_mat_fac = obj_scnt_calc_pl.mat_factor
+
+                    cached_mat_fac = None
+                    if cached_state is not None:
+                        cached_mat_fac = (
+                            cached_state
+                            .get('ML buckling numeric', {})
+                            .get(current_line, {})
+                            .get('material factor', None)
+                        )
+
+                    try:
+                        cached_mat_fac = None if cached_mat_fac is None else float(cached_mat_fac)
+                    except Exception:
+                        cached_mat_fac = None
+
+                    if cached_state is not None and cached_mat_fac == selected_mat_fac:
+                        return cached_state
+                    # Otherwise continue and recalculate this line so numeric UF is updated.
                 try:
                     norm_and_slam = self.get_highest_pressure(current_line)
                     design_pressure = norm_and_slam['normal'] / 1000
@@ -3078,8 +3078,38 @@ class Application():
                     'valid_label': 'numeric ML not available',
                     'buckling_uf': float('inf'),
                     'ultimate_uf': float('inf'),
+                    'buckling_uf_raw': float('inf'),
+                    'ultimate_uf_raw': float('inf'),
+                    'material_factor': None,
                     'error': '',
                 }
+
+                def _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac):
+                    """
+                    Numeric UF model predicts UF at material factor = 1.0.
+
+                    The displayed/check UF shall be:
+                        UF = predicted_UF * material_factor
+                    """
+
+                    numeric_pred = numeric_pred.copy()
+
+                    if numeric_pred.get('valid_prediction', None) == 1:
+                        buckling_uf_raw = float(numeric_pred.get('buckling_uf', float('inf')))
+                        ultimate_uf_raw = float(numeric_pred.get('ultimate_uf', float('inf')))
+
+                        numeric_pred['buckling_uf_raw'] = buckling_uf_raw
+                        numeric_pred['ultimate_uf_raw'] = ultimate_uf_raw
+
+                        numeric_pred['buckling_uf'] = buckling_uf_raw * mat_fac
+                        numeric_pred['ultimate_uf'] = ultimate_uf_raw * mat_fac
+                        numeric_pred['material_factor'] = mat_fac
+                    else:
+                        numeric_pred['buckling_uf_raw'] = float('inf')
+                        numeric_pred['ultimate_uf_raw'] = float('inf')
+                        numeric_pred['material_factor'] = mat_fac
+
+                    return numeric_pred
 
                 if obj_scnt_calc_pl.get_puls_sp_or_up() == 'UP':
                     # =========================================================================
@@ -3089,7 +3119,10 @@ class Application():
                         design_lat_press=design_pressure
                     )
 
-                    mat_fac = obj_scnt_calc_pl.mat_factor
+                    try:
+                        mat_fac = float(self._new_material_factor.get())
+                    except Exception:
+                        mat_fac = obj_scnt_calc_pl.mat_factor
                     mat_fac_error = ''
 
                     if mat_fac not in [1.1, 1.15]:
@@ -3158,6 +3191,8 @@ class Application():
                         numeric_pred['valid_label'] = 'numeric ML error'
                         numeric_pred['error'] = str(e)
 
+                    numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
+
                     # -------------------------------------------------------------------------
                     # CSR prediction
                     # -------------------------------------------------------------------------
@@ -3171,7 +3206,7 @@ class Application():
                     except Exception:
                         csr_pl = 0
 
-                    if self._new_material_factor.get() == 1.1:
+                    if mat_fac == 1.1:
                         accept = 'below or equal 0.91'
                     else:
                         accept = 'below or equal 0.87'
@@ -3207,6 +3242,9 @@ class Application():
                     return_dict['ML buckling numeric'][current_line] = {
                         'buckling UF': numeric_pred['buckling_uf'],
                         'ultimate UF': numeric_pred['ultimate_uf'],
+                        'buckling UF raw': numeric_pred.get('buckling_uf_raw', float('inf')),
+                        'ultimate UF raw': numeric_pred.get('ultimate_uf_raw', float('inf')),
+                        'material factor': numeric_pred.get('material_factor', mat_fac),
                         'error': numeric_pred['error'],
                     }
 
@@ -3228,7 +3266,10 @@ class Application():
 
                     # Defensive guard: SP ML requires a stiffener object.
                     if obj_scnt_calc_stf is None:
-                        mat_fac = obj_scnt_calc_pl.mat_factor
+                        try:
+                            mat_fac = float(self._new_material_factor.get())
+                        except Exception:
+                            mat_fac = obj_scnt_calc_pl.mat_factor
 
                         if mat_fac not in [1.1, 1.15]:
                             mat_fac_error = ' MATERIAL FACTOR MUST BE 1.1 or 1.15 -> using 1.15'
@@ -3251,6 +3292,9 @@ class Application():
                         return_dict['ML buckling numeric'][current_line] = {
                             'buckling UF': float('inf'),
                             'ultimate UF': float('inf'),
+                            'buckling UF raw': float('inf'),
+                            'ultimate UF raw': float('inf'),
+                            'material factor': mat_fac,
                             'error': 'No stiffener - numeric ML SP not available',
                         }
 
@@ -3270,7 +3314,10 @@ class Application():
                             design_lat_press=design_pressure
                         )
 
-                        mat_fac = obj_scnt_calc_pl.mat_factor
+                        try:
+                            mat_fac = float(self._new_material_factor.get())
+                        except Exception:
+                            mat_fac = obj_scnt_calc_pl.mat_factor
                         mat_fac_error = ''
 
                         if mat_fac not in [1.1, 1.15]:
@@ -3339,6 +3386,8 @@ class Application():
                             numeric_pred['valid_label'] = 'numeric ML error'
                             numeric_pred['error'] = str(e)
 
+                        numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
+
                         # ---------------------------------------------------------------------
                         # CSR prediction
                         # ---------------------------------------------------------------------
@@ -3355,7 +3404,7 @@ class Application():
                         except Exception:
                             csr_pl, csr_web, csr_web_fl, csr_fl = 0, 0, 0, 0
 
-                        if obj_scnt_calc_pl.mat_factor == 1.1:
+                        if mat_fac == 1.1:
                             accept = 'below or equal 0.91'
                         else:
                             accept = 'below or equal 0.87'
@@ -3393,6 +3442,9 @@ class Application():
                         return_dict['ML buckling numeric'][current_line] = {
                             'buckling UF': numeric_pred['buckling_uf'],
                             'ultimate UF': numeric_pred['ultimate_uf'],
+                            'buckling UF raw': numeric_pred.get('buckling_uf_raw', float('inf')),
+                            'ultimate UF raw': numeric_pred.get('ultimate_uf_raw', float('inf')),
+                            'material factor': numeric_pred.get('material_factor', mat_fac),
                             'error': numeric_pred['error'],
                         }
 
@@ -4475,6 +4527,591 @@ class Application():
 
         return color
 
+    def draw_results(self, state = None):
+        '''
+        The properties canvas is created here.
+                state =     {'colors': {}, 'section_modulus': {}, 'thickness': {}, 'shear_area': {}, 'buckling': {},
+                            'fatigue': {}, 'pressure_uls': {}, 'pressure_fls': {},
+                            'all_obj': {}, 'scant_calc_obj': {}, 'fatigue_obj': {}}
+        :return:
+        '''
+
+        self._result_canvas.delete('all')
+
+        if state is None or self._active_line not in state['all_obj'].keys():
+            return
+
+        if self._line_is_active:
+            x, y, dx, dy = 0, 5, 15, 17
+
+            if self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is None:
+
+                m3_to_mm3 = float(math.pow(1000,3))
+                m2_to_mm2 = float(math.pow(1000, 2))
+
+                current_line = self._active_line
+
+                obj_scnt_calc_pl = state['all_obj'][current_line].Plate
+                obj_scnt_calc_stf = state['all_obj'][current_line].Stiffener
+                obj_scnt_calc_girder = state['all_obj'][current_line].Girder
+                sec_mod = [round(state['section_modulus'][current_line]['sec_mod'][0], 5),
+                           round(state['section_modulus'][current_line]['sec_mod'][1], 5)]
+                shear_area = state['shear_area'][current_line]['shear_area']
+                min_shear = state['shear_area'][current_line]['min_shear_area']
+                min_sec_mod = state['section_modulus'][current_line]['min_sec_mod']
+                min_thk = state['thickness'][current_line]['min_thk']
+                buckling = state['buckling'][current_line]
+
+                if state['slamming'][current_line]['state']:
+                    slamming = True
+                    slm_zpl = state['slamming'][current_line]['zpl']
+                    slm_zpl_req = state['slamming'][current_line]['zpl_req']
+                    slm_min_pl_thk = state['slamming'][current_line]['min_plate_thk']
+                    slm_min_web_thk = state['slamming'][current_line]['min_web_thk']
+
+                    slm_text_pl_thk = 'Minimum plate thickness (BOW SLAMMING): '+str(round(slm_min_pl_thk,1))+' [mm]' \
+                        if obj_scnt_calc_stf.get_pl_thk() * 1000 < slm_min_pl_thk else None
+
+                    slm_text_min_web_thk = 'Minimum web thickness (BOW SLAMMING): '+str(round(slm_min_web_thk,1))+' [mm]' \
+                        if obj_scnt_calc_stf.get_web_thk()*1000 < slm_min_web_thk else None
+                    if slm_zpl_req is not None:
+                        slm_text_min_zpl = 'Minimum section modulus (BOW SLAMMING): '+str(round(slm_zpl_req,1))+' [cm^3]' \
+                            if slm_zpl < slm_zpl_req else None
+                    else:
+                        slm_text_min_zpl = False
+                else:
+                    slamming, slm_text_pl_thk, slm_text_min_web_thk, slm_text_min_zpl = [False for di in range(4)]
+
+                color_fatigue = state['colors'][current_line]['fatigue']
+                color_sec = state['colors'][current_line]['section']
+                color_shear = state['colors'][current_line]['shear']
+                color_thk = state['colors'][current_line]['thickness']
+                color_buckling = state['colors'][current_line]['buckling']
+
+
+                #printing the minimum section modulus
+                x1, x2, x3 = 15,25,35
+
+                self._result_canvas.create_text([x+0*dx, (y+0*dy)*1],
+                                                text= 'Special provisions - DNV-OS-C101 - checks for section, '
+                                                      'web thickness and plate thickness.',
+                                                font=self._text_size["Text 9 bold"],anchor='nw', fill=self._color_text)
+                self._result_canvas.create_text([x+0*dx, (y+2*dy)*1],
+                                                text= 'Section modulus check',
+                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
+                self._result_canvas.create_text([x+0*dx, (y+3*dy)*1],
+                                                text= 'Shear area check',
+                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
+                self._result_canvas.create_text([x+0*dx, (y+4*dy)*1],
+                                                text= 'Plate thickness check',
+                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
+                self._result_canvas.create_text([x + x1*dx, (y+1*dy)*1],
+                                                text= 'Minimum value',
+                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
+                self._result_canvas.create_text([x+ x2*dx, (y+1*dy)*1],
+                                                text= 'Actual value',
+                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
+                self._result_canvas.create_text([x+ x3*dx, (y+1*dy)*1],
+                                                text= 'Accepted?',
+                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
+
+                if state['slamming'][current_line]['state'] and slm_text_min_zpl is False:
+                    text = '(shear issue, change thickness or web height)'
+                else:
+                    text =  str('%.4E' % decimal.Decimal(min_sec_mod * m3_to_mm3)) +\
+                            ' [mm^3] ' if not slm_text_min_zpl else slm_text_min_zpl
+                self._result_canvas.create_text([x + x1*dx, (y+2*dy)*1], text= text,
+                                                font=self._text_size["Text 9 bold"],anchor='nw', fill=self._color_text)
+
+                # printing the calculated sectiton modulus
+                if state['slamming'][current_line]['state'] and slm_text_min_zpl is False:
+                    text = ''
+                else:
+                    text = str('%.4E' % decimal.Decimal(min(sec_mod[1], sec_mod[0])*m3_to_mm3))+ ' [mm^3]' \
+                        if not slm_text_min_zpl else str(slm_zpl)+'- zpl [cm^3]'
+                self._result_canvas.create_text([x + x2*dx, (y+2*dy)*1],
+                                               text=text,font=self._text_size['Text 9 bold'],anchor='nw',
+                                                fill = color_sec)
+                if not state['slamming'][current_line]['state']:
+                    self._result_canvas.create_text([x + x3*dx, (y+2*dy)*1],
+                                                   text='Ok' if min(sec_mod[1], sec_mod[0])*m3_to_mm3 >=
+                                                                min_sec_mod * m3_to_mm3 else 'Not ok',
+                                                    font=self._text_size['Text 9 bold'],anchor='nw',
+                                                    fill=color_sec)
+                #minimum shear area
+                text = str('%.4E' % decimal.Decimal(min_shear * m2_to_mm2))+' [mm^2] ' \
+                    if not slm_text_min_web_thk else str(round(slm_min_web_thk,1))+' [mm]'
+                self._result_canvas.create_text([x + x1*dx, (y+3*dy)*1],
+                                               text = text,
+                                               font=self._text_size["Text 9 bold"],anchor='nw',fill=self._color_text)
+                text = str('%.4E' % decimal.Decimal(shear_area * m2_to_mm2 ))+' [mm^2]' \
+                    if not slm_text_min_web_thk else str(obj_scnt_calc_stf.get_web_thk()*1000)+' [mm]'
+                self._result_canvas.create_text([x + x2*dx, (y+3*dy)*1],
+                                               text= text,
+                                               font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
+                if not state['slamming'][current_line]['state']:
+                    self._result_canvas.create_text([x + x3*dx, (y+3*dy)*1],
+                                                   text= 'Ok' if shear_area * m2_to_mm2 >= min_shear * m2_to_mm2 else
+                                                   'Not ok',
+                                                   font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
+
+                #minimum thickness for plate
+                text = str(round(min_thk,1)) + ' [mm]' if not state['slamming'][current_line]['state'] else \
+                    'Slamming minimum thickness: '+str(round(slm_min_pl_thk,2))+' [mm]'
+                self._result_canvas.create_text([x + x1*dx, (y+4*dy)*1],
+                                               text=text,
+                                               font=self._text_size["Text 9 bold"],anchor='nw', fill=self._color_text)
+
+                if not state['slamming'][current_line]['state']:
+                    self._result_canvas.create_text([x + x2*dx, (y+4*dy)*1],
+                                                   text=str(obj_scnt_calc_pl.get_pl_thk()*1000)+' [mm] ',
+                                                   font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
+
+                    self._result_canvas.create_text([x + x3*dx, (y+4*dy)*1],
+                                                   text='Ok' if obj_scnt_calc_pl.get_pl_thk()*1000 > min_thk
+                                                   else 'Not ok',
+                                                   font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
+
+
+                # buckling results
+                start_y, y = 5, 10
+                fatigue_start_offset = 8
+                if self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
+                    '''
+                            return {'Plate': {'Plate buckling': up_buckling}, 'Stiffener': {'Overpressure plate side': stf_buckling_pl_side,
+                                                    'Overpressure stiffener side': stf_buckling_stf_side, 
+                                                    'Resistance between stiffeners': stf_plate_resistance,
+                                                    'Shear capacity': stf_shear_capacity},
+                'Girder': {'Overpressure plate side': girder_buckling_pl_side,
+                           'Overpressure girder side': girder_buckling_girder_side,
+                           'Shear capacity': girder_shear_capacity},
+                'Local buckling': local_buckling}
+                    '''
+
+                    self._result_canvas.create_text([x * 1, (y+(start_y+0)*dy) * 1],
+                                                   text='Buckling results DNV-RP-C201 - prescriptive - (plate, stiffener, girder):',
+                                                   font=self._text_size["Text 9 bold"], anchor='nw',
+                                                    fill = self._color_text)
+
+                    self._result_canvas.create_text([x + dx*0, (y+(start_y+2)*dy) * 1],
+                                               text='Overpressure plate side',font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*0, (y+(start_y+3)*dy) * 1],
+                                               text='Overpressure stiffener side',font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*0, (y+(start_y+4)*dy) * 1],
+                                               text='Resistance between stiffeners',font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*0, (y+(start_y+5)*dy) * 1],
+                                               text='Shear capacity',font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*0, (y+(start_y+6)*dy) * 1],
+                                               text='Maximum web height [mm]',
+                                                    font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*0, (y+(start_y+7)*dy) * 1],
+                                               text='Maximum flange width [mm]',
+                                                    font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text)
+
+                    #'Local buckling'
+                    x1, x2, x3 = 15,25,35
+                    self._result_canvas.create_text([x + dx*15, (y+(start_y+1)*dy) * 1],
+                                               text='Plate',font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*25, (y+(start_y+1)*dy) * 1],
+                                               text='Stiffener',font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=self._color_text)
+                    self._result_canvas.create_text([x + dx*35, (y+(start_y+1)*dy) * 1],
+                                               text='Girder',font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=self._color_text)
+                    x_mult = x1
+                    self._result_canvas.create_text([x + dx*x_mult , (y+(start_y+2)*dy) * 1],
+                                               text=str(round(buckling['Plate']['Plate buckling'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=color_buckling)
+                    x_mult = x2
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+2)*dy) * 1],
+                                               text=str(round(buckling['Stiffener']['Overpressure plate side'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=color_buckling)
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+3)*dy) * 1],
+                                               text=str(round(buckling['Stiffener']['Overpressure stiffener side'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=color_buckling)
+
+                    stfweb = round(buckling['Local buckling']['Stiffener'][0],3)*1000
+                    stffl = round(buckling['Local buckling']['Stiffener'][1],3)*1000
+
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+4)*dy) * 1],
+                                               text=str(round(buckling['Stiffener']['Resistance between stiffeners'],3))
+                                                    ,font=self._text_size["Text 9 bold"],
+                                               anchor='nw',
+                                                    fill= color_buckling)
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+5)*dy) * 1],
+                                               text=str(round(buckling['Stiffener']['Shear capacity'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',
+                                                    fill=color_buckling)
+
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+6)*dy) * 1],
+                                               text=str(stfweb),
+                                                    font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text if obj_scnt_calc_stf is None else 'red'
+                                                    if obj_scnt_calc_stf.hw > stfweb else 'green')
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+7)*dy) * 1],
+                                               text=str(stffl),
+                                                    font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text if obj_scnt_calc_stf is None else 'red'
+                                                    if obj_scnt_calc_stf.b > stffl else 'green')
+                    x_mult = x3
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+2)*dy) * 1],
+                                               text=str(round(buckling['Girder']['Overpressure plate side'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=color_buckling)
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+3)*dy) * 1],
+                                               text=str(round(buckling['Girder']['Overpressure girder side'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=color_buckling)
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+5)*dy) * 1],
+                                               text=str(round(buckling['Girder']['Shear capacity'],3)),
+                                                    font=self._text_size["Text 9 bold"],
+                                               anchor='nw',fill=color_buckling)
+
+                    gweb = round(buckling['Local buckling']['Girder'][0],3)*1000
+                    gfl = round(buckling['Local buckling']['Girder'][1],3)*1000
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+6)*dy) * 1],
+                                               text=str(gweb),
+                                                    font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text if obj_scnt_calc_girder is None else
+                        'red' if obj_scnt_calc_girder.hw > gweb else 'green')
+                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+7)*dy) * 1],
+                                               text=str(gfl),
+                                                    font=self._text_size["Text 9"],
+                                               anchor='nw',fill=self._color_text if obj_scnt_calc_girder is None else
+                        'red' if obj_scnt_calc_girder.b > gfl else 'green')
+
+                    #
+                    # self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+7)*dy) * 1],
+                    #                            text=str(round(buckling['Local buckling']['Girder'][1],3)),
+                    #                                 font=self._text_size["Text 9"],
+                    #                            anchor='nw',fill=color_buckling)
+
+
+                elif self._new_buckling_method.get() in ['ML-CL (PULS based)', 'ML-Numeric (PULS based)']:
+
+                    print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
+                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
+
+                    self._result_canvas.create_text(
+                        [x * 1, (y + (start_y + 0) * dy) * 1],
+                        text='Buckling results ANYstructure ML algorithm:',
+                        font=self._text_size["Text 9 bold"],
+                        anchor='nw',
+                        fill=self._color_text,
+                    )
+
+                    line_offset = 1
+
+                    # -------------------------------------------------------------------------
+                    # Classification pipeline result
+                    # -------------------------------------------------------------------------
+                    if print_class_results:
+                        ml_class = state.get('ML buckling class', {}).get(current_line, {})
+                        ml_colors = state.get('ML buckling colors', {}).get(current_line, {})
+
+                        self._result_canvas.create_text(
+                            [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                            text='Buckling class: ' + str(ml_class.get('buckling', 'N/A')),
+                            font=self._text_size["Text 9 bold"],
+                            anchor='nw',
+                            fill=ml_colors.get('buckling', 'red'),
+                        )
+                        line_offset += 1
+
+                        self._result_canvas.create_text(
+                            [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                            text='Ultimate class: ' + str(ml_class.get('ultimate', 'N/A')),
+                            font=self._text_size["Text 9 bold"],
+                            anchor='nw',
+                            fill=ml_colors.get('ultimate', 'red'),
+                        )
+                        line_offset += 1
+
+                    # -------------------------------------------------------------------------
+                    # Numeric UF pipeline result
+                    #
+                    # The numeric UF values stored in state are already material-factored
+                    # in get_color_and_calc_state(). The raw values are the model output
+                    # for material factor = 1.0.
+                    # -------------------------------------------------------------------------
+                    if print_numeric_results:
+                        numeric = state.get('ML buckling numeric', {}).get(current_line, None)
+                        numeric_valid = state.get('ML buckling numeric valid', {}).get(current_line, {})
+                        numeric_colors = state.get('ML buckling numeric colors', {}).get(current_line, {})
+
+                        if numeric is not None:
+                            numeric_is_valid = numeric_valid.get('valid prediction', None) == 1
+
+                            if numeric_is_valid:
+                                buckling_uf = numeric.get('buckling UF', float('inf'))
+                                ultimate_uf = numeric.get('ultimate UF', float('inf'))
+
+                                buckling_uf_raw = numeric.get('buckling UF raw', None)
+                                ultimate_uf_raw = numeric.get('ultimate UF raw', None)
+
+                                # Use the currently selected GUI material factor for display.
+                                # The value in state['ML buckling numeric'] should already be
+                                # multiplied by the material factor in get_color_and_calc_state().
+                                numeric_mat_fac = self._new_material_factor.get()
+                                buckling_uf_txt = f"{buckling_uf:.3f}"
+                                ultimate_uf_txt = f"{ultimate_uf:.3f}"
+
+                                if buckling_uf_raw is not None:
+                                    buckling_uf_txt += f"  ({buckling_uf_raw:.3f} × {numeric_mat_fac:.2f})"
+
+                                if ultimate_uf_raw is not None:
+                                    ultimate_uf_txt += f"  ({ultimate_uf_raw:.3f} × {numeric_mat_fac:.2f})"
+
+                            else:
+                                buckling_uf_txt = 'invalid/NaN'
+                                ultimate_uf_txt = 'invalid/NaN'
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Buckling UF numeric: ' + buckling_uf_txt,
+                                font=self._text_size["Text 9 bold"],
+                                anchor='nw',
+                                fill=numeric_colors.get('buckling', 'red'),
+                            )
+                            line_offset += 1
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Ultimate UF numeric: ' + ultimate_uf_txt,
+                                font=self._text_size["Text 9 bold"],
+                                anchor='nw',
+                                fill=numeric_colors.get('ultimate', 'red'),
+                            )
+                            line_offset += 1
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Numeric UF acceptance limit: <= 1.00',
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text,
+                            )
+                            line_offset += 1
+
+                            numeric_status = numeric_valid.get('valid label', '')
+                            if numeric.get('error', ''):
+                                numeric_status += ' | ' + numeric.get('error', '')
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Numeric UF status: ' + numeric_status,
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text if numeric_is_valid else 'red',
+                            )
+                            line_offset += 1
+
+                        else:
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Numeric UF: not available',
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text,
+                            )
+                            line_offset += 1
+
+                    # -------------------------------------------------------------------------
+                    # CSR requirement result, shown for both ML classification and numeric modes
+                    # -------------------------------------------------------------------------
+                    ml_class = state.get('ML buckling class', {}).get(current_line, {})
+                    ml_colors = state.get('ML buckling colors', {}).get(current_line, {})
+                    csr = ml_class.get('CSR', None)
+
+                    if csr is not None:
+                        if obj_scnt_calc_pl.get_puls_sp_or_up() == 'SP':
+                            csr_str = [
+                                'Ok' if csr[0] == 1 else 'Not ok',
+                                'Ok' if csr[1] == 1 else 'Not ok',
+                                'Ok' if csr[2] == 1 else 'Not ok',
+                                'Ok' if csr[3] == 1 else 'Not ok',
+                            ]
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text=(
+                                    'CSR requirements (stiffener):  plate-' + csr_str[0] +
+                                    ' web-' + csr_str[1] +
+                                    ' web/flange ratio-' + csr_str[2] +
+                                    ' flange-' + csr_str[3]
+                                ),
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=ml_colors.get('CSR requirement', 'red'),
+                            )
+                            line_offset += 1
+
+                        else:
+                            csr_str = 'Ok' if csr[0] == 1 else 'Not ok'
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='CSR requirements (plate):  Plate slenderness - ' + csr_str,
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=ml_colors.get('CSR requirement', 'red'),
+                            )
+                            line_offset += 1
+
+                    # Keep fatigue below the ML result block, with the old default as a minimum.
+                    fatigue_start_offset = max(8, line_offset + 1)
+
+                # fatigue results
+
+                self._result_canvas.create_text([x * 1, (y+(start_y+fatigue_start_offset)*dy) * 1],
+                                                text='Fatigue results (DNVGL-RP-C203): ',
+                                                font=self._text_size["Text 9 bold"], anchor='nw', fill = self._color_text)
+
+                if self._line_to_struc[current_line][2] != None:
+                    if state['fatigue'][current_line]['damage'] is not None:
+                        damage = state['fatigue'][current_line]['damage']
+                        dff = state['fatigue'][current_line]['dff']
+                        self._result_canvas.create_text([x * 1, (y + (start_y+fatigue_start_offset+1) * dy) * 1],
+                                                        text='Total damage (DFF not included): '+str(round(damage,3)) +
+                                                             '  |  With DFF = '+str(dff)+' --> Damage: '+
+                                                             str(round(damage*dff,3)),
+                                                        font=self._text_size["Text 9 bold"], anchor='nw',
+                                                        fill=color_fatigue)
+                    else:
+                        self._result_canvas.create_text([x * 1, (y + (start_y+fatigue_start_offset+1) * dy) * 1],
+                                                        text='Total damage: NO RESULTS ',
+                                                        font=self._text_size["Text 9 bold"],
+                                                        anchor='nw', fill = self._color_text)
+                else:
+                    self._result_canvas.create_text([x * 1, (y + (start_y+fatigue_start_offset+1) * dy) * 1],
+                                                    text='Total damage: NO RESULTS ',
+                                                    font=self._text_size["Text 9 bold"],
+                                                    anchor='nw', fill = self._color_text)
+
+            elif self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is not None:
+
+                '''
+                Cylinder calculations
+                    'cylinder' = {'Unstiffened shell': uf_unstf_shell,
+                               'Longitudinal stiffened shell': uf_long_stf,
+                               'Ring stiffened shell': uf_ring_stf,
+                               'Heavy ring frame': uf_ring_frame,
+                               'Column stability check': column_stability,
+                               'Stiffener check': stiffener_check}
+                '''
+                cyl_obj = self._line_to_struc[self._active_line][5]
+                key_mapper = {'Unstiffened shell': 'Shell buckling',
+                               'Longitudinal stiffened shell': 'Panel Stiffener buckling',
+                               'Ring stiffened shell': 'Panel Ring Buckling',
+                               'Heavy ring frame': 'Heavy Ring Frame Buckling',
+                               'Column stability check': 'Column stability check',
+                               'Stiffener check': 'Stiffener check'}
+
+                text = 'Results for cylinders and curved plates/panels:'
+                self._result_canvas.create_text([x * 1, y * 1],
+                                                text=text, font=self._text_size['Text 12 bold'], anchor='nw',
+                                                fill = self._color_text)
+                y_location = 3
+                results = cyl_obj.get_utilization_factors()
+
+                for key, value in results.items():
+                    if key in ['Weight', 'Need to check column buckling', 'Column stability UF']:
+                        continue
+
+                    if all([key != 'Stiffener check', key != 'Stiffener check detailed']):
+                        text_key = key
+                        if key == 'Column stability check':
+                            if 'Need to check column buckling' in results.keys():
+                                txt_type = 'Text 10'
+                                if results['Need to check column buckling'] == False:
+                                    if results['Column stability UF'] is None:
+                                        text_value = 'N/A'
+                                    else:
+                                        text_value = ('Column buckling does not need to be checked'
+                                                      '\n- but UF = ' + str(round(results['Column stability UF'],2))
+                                                      )
+                                    uf_col = 'green'
+                                else:
+                                    uf_col = 'black'
+                                    if results['Column stability UF'] is None:
+                                        text_value = 'N/A'
+                                    else:
+                                        text_value = 'Column buckling need to be checked, UF = ' + str(
+                                            round(results['Column stability UF'], 2))
+                                        if results['Column stability UF'] <= 1.0:
+                                            uf_col = 'green'
+                                        else:
+                                            uf_col = 'red'
+                        else:
+                            text_value = 'N/A' if value is None else str(round(value, 2))
+
+                        if key != 'Column stability check':
+                            txt_type = 'Text 10 bold'
+                            if value is None:
+                                uf_col = 'grey'
+                            else:
+                                uf_col = 'red' if any([value > 1, value == False]) else 'green'
+
+
+                        self._result_canvas.create_text([x*1, y+dy*y_location],
+                                                       text=key_mapper[text_key],font=self._text_size[txt_type],
+                                                        anchor='nw', fill = self._color_text)
+                        self._result_canvas.create_text([dx*20, dy*y_location],
+                                                       text=text_value,font=self._text_size[txt_type],anchor='nw',
+                                                        fill=uf_col)
+                    elif key == 'Stiffener check':
+
+                        if value is not None:
+                            y_location +=1
+                            self._result_canvas.create_text([x, dy*y_location],
+                                                            text='Stiffener requirement checks:',
+                                                            font=self._text_size['Text 10 bold'],
+                                                            anchor='nw',
+                                                            fill = self._color_text)
+                            y_location += 1
+                            idx_y, idx_x = 0, 0
+
+                            for stf_type, chk_bool in value.items():
+                                stf_text = stf_type
+                                if stf_type == 'ring frame':
+                                    continue
+
+                                chk_text = 'OK' if chk_bool == True else 'failed' if chk_bool == False else 'N/A'
+
+                                self._result_canvas.create_text([15*dx*idx_x, dy*y_location],
+                                                                text=stf_text, font=self._text_size['Text 10 bold'],
+                                                                anchor='nw',
+                                                                fill=self._color_text if not value else 'black')
+
+                                self._result_canvas.create_text([15*dx*idx_x, y + (y_location+1)*dy],
+                                                                text=chk_text, font=self._text_size['Text 10 bold'],
+                                                                anchor='nw',
+                                                                fill='green' if chk_bool == True else 'red' if
+                                                                chk_bool == False else self._color_text)
+
+                                self._result_canvas.create_text([15*dx*idx_x, y + (y_location+2)*dy],
+                                                                text=results['Stiffener check detailed'][stf_type],
+                                                                font=self._text_size['Text 10'],
+                                                                anchor='nw',
+                                                                fill='green' if chk_bool == True else 'red' if
+                                                                chk_bool == False else self._color_text)
+                                idx_y += 1
+                                idx_x += 1
+
+
+                    y_location += 1
+
     def draw_prop(self, event = None):
         '''
         Prints the properties of the selected line to the bottom canvas.
@@ -4653,506 +5290,6 @@ class Application():
                 arc_2 = canvas.create_arc(coord3, extent=180, start=180, style=tk.ARC, width=4,
                                                      fill='grey', outline='grey')
 
-    def draw_results(self, state = None):
-        '''
-        The properties canvas is created here.
-                state =     {'colors': {}, 'section_modulus': {}, 'thickness': {}, 'shear_area': {}, 'buckling': {},
-                            'fatigue': {}, 'pressure_uls': {}, 'pressure_fls': {},
-                            'all_obj': {}, 'scant_calc_obj': {}, 'fatigue_obj': {}}
-        :return:
-        '''
-
-        self._result_canvas.delete('all')
-
-        if state is None or self._active_line not in state['all_obj'].keys():
-            return
-
-        if self._line_is_active:
-            x, y, dx, dy = 0, 5, 15, 17
-
-            if self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is None:
-
-                m3_to_mm3 = float(math.pow(1000,3))
-                m2_to_mm2 = float(math.pow(1000, 2))
-
-                current_line = self._active_line
-
-                obj_scnt_calc_pl = state['all_obj'][current_line].Plate
-                obj_scnt_calc_stf = state['all_obj'][current_line].Stiffener
-                obj_scnt_calc_girder = state['all_obj'][current_line].Girder
-                sec_mod = [round(state['section_modulus'][current_line]['sec_mod'][0], 5),
-                           round(state['section_modulus'][current_line]['sec_mod'][1], 5)]
-                shear_area = state['shear_area'][current_line]['shear_area']
-                min_shear = state['shear_area'][current_line]['min_shear_area']
-                min_sec_mod = state['section_modulus'][current_line]['min_sec_mod']
-                min_thk = state['thickness'][current_line]['min_thk']
-                buckling = state['buckling'][current_line]
-
-                if state['slamming'][current_line]['state']:
-                    slamming = True
-                    slm_zpl = state['slamming'][current_line]['zpl']
-                    slm_zpl_req = state['slamming'][current_line]['zpl_req']
-                    slm_min_pl_thk = state['slamming'][current_line]['min_plate_thk']
-                    slm_min_web_thk = state['slamming'][current_line]['min_web_thk']
-
-                    slm_text_pl_thk = 'Minimum plate thickness (BOW SLAMMING): '+str(round(slm_min_pl_thk,1))+' [mm]' \
-                        if obj_scnt_calc_stf.get_pl_thk() * 1000 < slm_min_pl_thk else None
-
-                    slm_text_min_web_thk = 'Minimum web thickness (BOW SLAMMING): '+str(round(slm_min_web_thk,1))+' [mm]' \
-                        if obj_scnt_calc_stf.get_web_thk()*1000 < slm_min_web_thk else None
-                    if slm_zpl_req is not None:
-                        slm_text_min_zpl = 'Minimum section modulus (BOW SLAMMING): '+str(round(slm_zpl_req,1))+' [cm^3]' \
-                            if slm_zpl < slm_zpl_req else None
-                    else:
-                        slm_text_min_zpl = False
-                else:
-                    slamming, slm_text_pl_thk, slm_text_min_web_thk, slm_text_min_zpl = [False for di in range(4)]
-
-                color_fatigue = state['colors'][current_line]['fatigue']
-                color_sec = state['colors'][current_line]['section']
-                color_shear = state['colors'][current_line]['shear']
-                color_thk = state['colors'][current_line]['thickness']
-                color_buckling = state['colors'][current_line]['buckling']
-
-
-                #printing the minimum section modulus
-                x1, x2, x3 = 15,25,35
-
-                self._result_canvas.create_text([x+0*dx, (y+0*dy)*1],
-                                                text= 'Special provisions - DNV-OS-C101 - checks for section, '
-                                                      'web thickness and plate thickness.',
-                                                font=self._text_size["Text 9 bold"],anchor='nw', fill=self._color_text)
-                self._result_canvas.create_text([x+0*dx, (y+2*dy)*1],
-                                                text= 'Section modulus check',
-                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
-                self._result_canvas.create_text([x+0*dx, (y+3*dy)*1],
-                                                text= 'Shear area check',
-                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
-                self._result_canvas.create_text([x+0*dx, (y+4*dy)*1],
-                                                text= 'Plate thickness check',
-                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
-                self._result_canvas.create_text([x + x1*dx, (y+1*dy)*1],
-                                                text= 'Minimum value',
-                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
-                self._result_canvas.create_text([x+ x2*dx, (y+1*dy)*1],
-                                                text= 'Actual value',
-                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
-                self._result_canvas.create_text([x+ x3*dx, (y+1*dy)*1],
-                                                text= 'Accepted?',
-                                                font=self._text_size["Text 9"],anchor='nw', fill=self._color_text)
-
-                if state['slamming'][current_line]['state'] and slm_text_min_zpl is False:
-                    text = '(shear issue, change thickness or web height)'
-                else:
-                    text =  str('%.4E' % decimal.Decimal(min_sec_mod * m3_to_mm3)) +\
-                            ' [mm^3] ' if not slm_text_min_zpl else slm_text_min_zpl
-                self._result_canvas.create_text([x + x1*dx, (y+2*dy)*1], text= text,
-                                                font=self._text_size["Text 9 bold"],anchor='nw', fill=self._color_text)
-
-                # printing the calculated sectiton modulus
-                if state['slamming'][current_line]['state'] and slm_text_min_zpl is False:
-                    text = ''
-                else:
-                    text = str('%.4E' % decimal.Decimal(min(sec_mod[1], sec_mod[0])*m3_to_mm3))+ ' [mm^3]' \
-                        if not slm_text_min_zpl else str(slm_zpl)+'- zpl [cm^3]'
-                self._result_canvas.create_text([x + x2*dx, (y+2*dy)*1],
-                                               text=text,font=self._text_size['Text 9 bold'],anchor='nw',
-                                                fill = color_sec)
-                if not state['slamming'][current_line]['state']:
-                    self._result_canvas.create_text([x + x3*dx, (y+2*dy)*1],
-                                                   text='Ok' if min(sec_mod[1], sec_mod[0])*m3_to_mm3 >=
-                                                                min_sec_mod * m3_to_mm3 else 'Not ok',
-                                                    font=self._text_size['Text 9 bold'],anchor='nw',
-                                                    fill=color_sec)
-                #minimum shear area
-                text = str('%.4E' % decimal.Decimal(min_shear * m2_to_mm2))+' [mm^2] ' \
-                    if not slm_text_min_web_thk else str(round(slm_min_web_thk,1))+' [mm]'
-                self._result_canvas.create_text([x + x1*dx, (y+3*dy)*1],
-                                               text = text,
-                                               font=self._text_size["Text 9 bold"],anchor='nw',fill=self._color_text)
-                text = str('%.4E' % decimal.Decimal(shear_area * m2_to_mm2 ))+' [mm^2]' \
-                    if not slm_text_min_web_thk else str(obj_scnt_calc_stf.get_web_thk()*1000)+' [mm]'
-                self._result_canvas.create_text([x + x2*dx, (y+3*dy)*1],
-                                               text= text,
-                                               font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
-                if not state['slamming'][current_line]['state']:
-                    self._result_canvas.create_text([x + x3*dx, (y+3*dy)*1],
-                                                   text= 'Ok' if shear_area * m2_to_mm2 >= min_shear * m2_to_mm2 else
-                                                   'Not ok',
-                                                   font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
-
-                #minimum thickness for plate
-                text = str(round(min_thk,1)) + ' [mm]' if not state['slamming'][current_line]['state'] else \
-                    'Slamming minimum thickness: '+str(round(slm_min_pl_thk,2))+' [mm]'
-                self._result_canvas.create_text([x + x1*dx, (y+4*dy)*1],
-                                               text=text,
-                                               font=self._text_size["Text 9 bold"],anchor='nw', fill=self._color_text)
-
-                if not state['slamming'][current_line]['state']:
-                    self._result_canvas.create_text([x + x2*dx, (y+4*dy)*1],
-                                                   text=str(obj_scnt_calc_pl.get_pl_thk()*1000)+' [mm] ',
-                                                   font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
-
-                    self._result_canvas.create_text([x + x3*dx, (y+4*dy)*1],
-                                                   text='Ok' if obj_scnt_calc_pl.get_pl_thk()*1000 > min_thk
-                                                   else 'Not ok',
-                                                   font=self._text_size["Text 9 bold"],anchor='nw', fill=color_shear)
-
-
-                # buckling results
-                start_y, y = 5, 10
-                if self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
-                    '''
-                            return {'Plate': {'Plate buckling': up_buckling}, 'Stiffener': {'Overpressure plate side': stf_buckling_pl_side,
-                                                    'Overpressure stiffener side': stf_buckling_stf_side, 
-                                                    'Resistance between stiffeners': stf_plate_resistance,
-                                                    'Shear capacity': stf_shear_capacity},
-                'Girder': {'Overpressure plate side': girder_buckling_pl_side,
-                           'Overpressure girder side': girder_buckling_girder_side,
-                           'Shear capacity': girder_shear_capacity},
-                'Local buckling': local_buckling}
-                    '''
-
-                    self._result_canvas.create_text([x * 1, (y+(start_y+0)*dy) * 1],
-                                                   text='Buckling results DNV-RP-C201 - prescriptive - (plate, stiffener, girder):',
-                                                   font=self._text_size["Text 9 bold"], anchor='nw',
-                                                    fill = self._color_text)
-
-                    self._result_canvas.create_text([x + dx*0, (y+(start_y+2)*dy) * 1],
-                                               text='Overpressure plate side',font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*0, (y+(start_y+3)*dy) * 1],
-                                               text='Overpressure stiffener side',font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*0, (y+(start_y+4)*dy) * 1],
-                                               text='Resistance between stiffeners',font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*0, (y+(start_y+5)*dy) * 1],
-                                               text='Shear capacity',font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*0, (y+(start_y+6)*dy) * 1],
-                                               text='Maximum web height [mm]',
-                                                    font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*0, (y+(start_y+7)*dy) * 1],
-                                               text='Maximum flange width [mm]',
-                                                    font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text)
-
-                    #'Local buckling'
-                    x1, x2, x3 = 15,25,35
-                    self._result_canvas.create_text([x + dx*15, (y+(start_y+1)*dy) * 1],
-                                               text='Plate',font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*25, (y+(start_y+1)*dy) * 1],
-                                               text='Stiffener',font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=self._color_text)
-                    self._result_canvas.create_text([x + dx*35, (y+(start_y+1)*dy) * 1],
-                                               text='Girder',font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=self._color_text)
-                    x_mult = x1
-                    self._result_canvas.create_text([x + dx*x_mult , (y+(start_y+2)*dy) * 1],
-                                               text=str(round(buckling['Plate']['Plate buckling'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=color_buckling)
-                    x_mult = x2
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+2)*dy) * 1],
-                                               text=str(round(buckling['Stiffener']['Overpressure plate side'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=color_buckling)
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+3)*dy) * 1],
-                                               text=str(round(buckling['Stiffener']['Overpressure stiffener side'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=color_buckling)
-
-                    stfweb = round(buckling['Local buckling']['Stiffener'][0],3)*1000
-                    stffl = round(buckling['Local buckling']['Stiffener'][1],3)*1000
-
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+4)*dy) * 1],
-                                               text=str(round(buckling['Stiffener']['Resistance between stiffeners'],3))
-                                                    ,font=self._text_size["Text 9 bold"],
-                                               anchor='nw',
-                                                    fill= color_buckling)
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+5)*dy) * 1],
-                                               text=str(round(buckling['Stiffener']['Shear capacity'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',
-                                                    fill=color_buckling)
-
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+6)*dy) * 1],
-                                               text=str(stfweb),
-                                                    font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text if obj_scnt_calc_stf is None else 'red'
-                                                    if obj_scnt_calc_stf.hw > stfweb else 'green')
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+7)*dy) * 1],
-                                               text=str(stffl),
-                                                    font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text if obj_scnt_calc_stf is None else 'red'
-                                                    if obj_scnt_calc_stf.b > stffl else 'green')
-                    x_mult = x3
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+2)*dy) * 1],
-                                               text=str(round(buckling['Girder']['Overpressure plate side'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=color_buckling)
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+3)*dy) * 1],
-                                               text=str(round(buckling['Girder']['Overpressure girder side'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=color_buckling)
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+5)*dy) * 1],
-                                               text=str(round(buckling['Girder']['Shear capacity'],3)),
-                                                    font=self._text_size["Text 9 bold"],
-                                               anchor='nw',fill=color_buckling)
-
-                    gweb = round(buckling['Local buckling']['Girder'][0],3)*1000
-                    gfl = round(buckling['Local buckling']['Girder'][1],3)*1000
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+6)*dy) * 1],
-                                               text=str(gweb),
-                                                    font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text if obj_scnt_calc_girder is None else
-                        'red' if obj_scnt_calc_girder.hw > gweb else 'green')
-                    self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+7)*dy) * 1],
-                                               text=str(gfl),
-                                                    font=self._text_size["Text 9"],
-                                               anchor='nw',fill=self._color_text if obj_scnt_calc_girder is None else
-                        'red' if obj_scnt_calc_girder.b > gfl else 'green')
-
-                    #
-                    # self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+7)*dy) * 1],
-                    #                            text=str(round(buckling['Local buckling']['Girder'][1],3)),
-                    #                                 font=self._text_size["Text 9"],
-                    #                            anchor='nw',fill=color_buckling)
-
-
-                elif self._new_buckling_method.get() in ['ML-CL (PULS based)', 'ML-Numeric (PULS based)']:
-
-                    print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
-                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
-
-                    self._result_canvas.create_text(
-                        [x * 1, (y + (start_y + 0) * dy) * 1],
-                        text='Buckling results ANYstructure ML algorithm:',
-                        font=self._text_size["Text 9 bold"],
-                        anchor='nw',
-                        fill=self._color_text,
-                    )
-
-                    line_offset = 1
-
-                    if print_class_results:
-                        self._result_canvas.create_text(
-                            [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                            text='Buckling class: ' + state['ML buckling class'][current_line]['buckling'],
-                            font=self._text_size["Text 9 bold"],
-                            anchor='nw',
-                            fill=state['ML buckling colors'][current_line]['buckling'],
-                        )
-                        line_offset += 1
-
-                        self._result_canvas.create_text(
-                            [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                            text='Ultimate class: ' + state['ML buckling class'][current_line]['ultimate'],
-                            font=self._text_size["Text 9 bold"],
-                            anchor='nw',
-                            fill=state['ML buckling colors'][current_line]['ultimate'],
-                        )
-                        line_offset += 1
-
-                    if print_numeric_results:
-                        numeric = state.get('ML buckling numeric', {}).get(current_line, None)
-                        numeric_valid = state.get('ML buckling numeric valid', {}).get(current_line, {})
-                        numeric_colors = state.get('ML buckling numeric colors', {}).get(current_line, {})
-
-                        if numeric is not None:
-                            numeric_is_valid = numeric_valid.get('valid prediction', None) == 1
-
-                            if numeric_is_valid:
-                                buckling_uf_txt = f"{numeric.get('buckling UF', float('inf')):.3f}"
-                                ultimate_uf_txt = f"{numeric.get('ultimate UF', float('inf')):.3f}"
-                            else:
-                                buckling_uf_txt = 'invalid/NaN'
-                                ultimate_uf_txt = 'invalid/NaN'
-
-                            self._result_canvas.create_text(
-                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='Buckling UF numeric: ' + buckling_uf_txt,
-                                font=self._text_size["Text 9 bold"],
-                                anchor='nw',
-                                fill=numeric_colors.get('buckling', 'red'),
-                            )
-                            line_offset += 1
-
-                            self._result_canvas.create_text(
-                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='Ultimate UF numeric: ' + ultimate_uf_txt,
-                                font=self._text_size["Text 9 bold"],
-                                anchor='nw',
-                                fill=numeric_colors.get('ultimate', 'red'),
-                            )
-                            line_offset += 1
-
-                            numeric_status = numeric_valid.get('valid label', '')
-                            if numeric.get('error', ''):
-                                numeric_status += ' | ' + numeric.get('error', '')
-
-                            self._result_canvas.create_text(
-                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='Numeric UF status: ' + numeric_status,
-                                font=self._text_size["Text 9"],
-                                anchor='nw',
-                                fill=self._color_text if numeric_is_valid else 'red',
-                            )
-                            line_offset += 1
-
-                        else:
-                            self._result_canvas.create_text(
-                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='Numeric UF: not available',
-                                font=self._text_size["Text 9"],
-                                anchor='nw',
-                                fill=self._color_text,
-                            )
-                            line_offset += 1
-
-
-                # fatigue results
-
-                self._result_canvas.create_text([x * 1, (y+(start_y+8)*dy) * 1],
-                                                text='Fatigue results (DNVGL-RP-C203): ',
-                                                font=self._text_size["Text 9 bold"], anchor='nw', fill = self._color_text)
-
-                if self._line_to_struc[current_line][2] != None:
-                    if state['fatigue'][current_line]['damage'] is not None:
-                        damage = state['fatigue'][current_line]['damage']
-                        dff = state['fatigue'][current_line]['dff']
-                        self._result_canvas.create_text([x * 1, (y + (start_y+9) * dy) * 1],
-                                                        text='Total damage (DFF not included): '+str(round(damage,3)) +
-                                                             '  |  With DFF = '+str(dff)+' --> Damage: '+
-                                                             str(round(damage*dff,3)),
-                                                        font=self._text_size["Text 9 bold"], anchor='nw',
-                                                        fill=color_fatigue)
-                    else:
-                        self._result_canvas.create_text([x * 1, (y + (start_y+9) * dy) * 1],
-                                                        text='Total damage: NO RESULTS ',
-                                                        font=self._text_size["Text 9 bold"],
-                                                        anchor='nw', fill = self._color_text)
-                else:
-                    self._result_canvas.create_text([x * 1, (y + (start_y+9) * dy) * 1],
-                                                    text='Total damage: NO RESULTS ',
-                                                    font=self._text_size["Text 9 bold"],
-                                                    anchor='nw', fill = self._color_text)
-
-            elif self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is not None:
-
-                '''
-                Cylinder calculations
-                    'cylinder' = {'Unstiffened shell': uf_unstf_shell,
-                               'Longitudinal stiffened shell': uf_long_stf,
-                               'Ring stiffened shell': uf_ring_stf,
-                               'Heavy ring frame': uf_ring_frame,
-                               'Column stability check': column_stability,
-                               'Stiffener check': stiffener_check}
-                '''
-                cyl_obj = self._line_to_struc[self._active_line][5]
-                key_mapper = {'Unstiffened shell': 'Shell buckling',
-                               'Longitudinal stiffened shell': 'Panel Stiffener buckling',
-                               'Ring stiffened shell': 'Panel Ring Buckling',
-                               'Heavy ring frame': 'Heavy Ring Frame Buckling',
-                               'Column stability check': 'Column stability check',
-                               'Stiffener check': 'Stiffener check'}
-
-                text = 'Results for cylinders and curved plates/panels:'
-                self._result_canvas.create_text([x * 1, y * 1],
-                                                text=text, font=self._text_size['Text 12 bold'], anchor='nw',
-                                                fill = self._color_text)
-                y_location = 3
-                results = cyl_obj.get_utilization_factors()
-
-                for key, value in results.items():
-                    if key in ['Weight', 'Need to check column buckling', 'Column stability UF']:
-                        continue
-
-                    if all([key != 'Stiffener check', key != 'Stiffener check detailed']):
-                        text_key = key
-                        if key == 'Column stability check':
-                            if 'Need to check column buckling' in results.keys():
-                                txt_type = 'Text 10'
-                                if results['Need to check column buckling'] == False:
-                                    if results['Column stability UF'] is None:
-                                        text_value = 'N/A'
-                                    else:
-                                        text_value = ('Column buckling does not need to be checked'
-                                                      '\n- but UF = ' + str(round(results['Column stability UF'],2))
-                                                      )
-                                    uf_col = 'green'
-                                else:
-                                    uf_col = 'black'
-                                    if results['Column stability UF'] is None:
-                                        text_value = 'N/A'
-                                    else:
-                                        text_value = 'Column buckling need to be checked, UF = ' + str(
-                                            round(results['Column stability UF'], 2))
-                                        if results['Column stability UF'] <= 1.0:
-                                            uf_col = 'green'
-                                        else:
-                                            uf_col = 'red'
-                        else:
-                            text_value = 'N/A' if value is None else str(round(value, 2))
-
-                        if key != 'Column stability check':
-                            txt_type = 'Text 10 bold'
-                            if value is None:
-                                uf_col = 'grey'
-                            else:
-                                uf_col = 'red' if any([value > 1, value == False]) else 'green'
-
-
-                        self._result_canvas.create_text([x*1, y+dy*y_location],
-                                                       text=key_mapper[text_key],font=self._text_size[txt_type],
-                                                        anchor='nw', fill = self._color_text)
-                        self._result_canvas.create_text([dx*20, dy*y_location],
-                                                       text=text_value,font=self._text_size[txt_type],anchor='nw',
-                                                        fill=uf_col)
-                    elif key == 'Stiffener check':
-
-                        if value is not None:
-                            y_location +=1
-                            self._result_canvas.create_text([x, dy*y_location],
-                                                            text='Stiffener requirement checks:',
-                                                            font=self._text_size['Text 10 bold'],
-                                                            anchor='nw',
-                                                            fill = self._color_text)
-                            y_location += 1
-                            idx_y, idx_x = 0, 0
-
-                            for stf_type, chk_bool in value.items():
-                                stf_text = stf_type
-                                if stf_type == 'ring frame':
-                                    continue
-
-                                chk_text = 'OK' if chk_bool == True else 'failed' if chk_bool == False else 'N/A'
-
-                                self._result_canvas.create_text([15*dx*idx_x, dy*y_location],
-                                                                text=stf_text, font=self._text_size['Text 10 bold'],
-                                                                anchor='nw',
-                                                                fill=self._color_text if not value else 'black')
-
-                                self._result_canvas.create_text([15*dx*idx_x, y + (y_location+1)*dy],
-                                                                text=chk_text, font=self._text_size['Text 10 bold'],
-                                                                anchor='nw',
-                                                                fill='green' if chk_bool == True else 'red' if
-                                                                chk_bool == False else self._color_text)
-
-                                self._result_canvas.create_text([15*dx*idx_x, y + (y_location+2)*dy],
-                                                                text=results['Stiffener check detailed'][stf_type],
-                                                                font=self._text_size['Text 10'],
-                                                                anchor='nw',
-                                                                fill='green' if chk_bool == True else 'red' if
-                                                                chk_bool == False else self._color_text)
-                                idx_y += 1
-                                idx_x += 1
-
-
-                    y_location += 1
 
     def _build_report_data_snapshot(self):
         return project_services.ReportDataSnapshot(
