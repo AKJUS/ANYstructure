@@ -856,7 +856,8 @@ class CreateOptimizeWindow():
                                                 processes=self._new_processes.get(),
                                                 use_weight_filter=self._new_use_weight_filter.get(),
                                                 fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
-                                                ml_algo=self._get_ml_algo_for_optimization())
+                                                ml_algo=self._get_ml_algo_for_optimization(),
+                                                material_factor=selected_mat_fac)
 
         if self._opt_results is not None and self._opt_results[0] is not None:
             self._opt_actual_running_time.config(text='Actual running time: \n'

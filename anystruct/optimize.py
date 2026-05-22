@@ -20,6 +20,48 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.helper as hlp
 
 
+def _set_material_factor_on_structure(obj, material_factor):
+    """
+    Apply selected material factor to Plate/Stiffener/Girder objects.
+
+    This is important for the ML-Numeric optimizer because the numeric UF
+    is converted as:
+        UF_checked = UF_predicted * material_factor
+    and get_filtered_results reads the material factor from init_stuc_obj.Plate.
+
+    obj may be a single AllStructure-like object or a list/tuple of such objects
+    for geometric optimization.
+    """
+    if material_factor is None:
+        return obj
+
+    try:
+        mat_fac = float(material_factor)
+    except Exception:
+        return obj
+
+    def _apply(one_obj):
+        for attr_name in ('Plate', 'Stiffener', 'Girder'):
+            try:
+                part = getattr(one_obj, attr_name)
+            except Exception:
+                part = None
+            if part is not None:
+                try:
+                    part.mat_factor = mat_fac
+                except Exception:
+                    pass
+        return one_obj
+
+    if isinstance(obj, (list, tuple)):
+        for one_obj in obj:
+            _apply(one_obj)
+    else:
+        _apply(obj)
+
+    return obj
+
+
 def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lateral_pressure=None,
                      deltas=None, algorithm='anysmart', trials=30000, side='p',
                      const_chk=(True, True, True, True, True, True, True, False, False, False),
@@ -28,7 +70,7 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                      min_max_span=(2, 6), tot_len=None, frame_height=2.5, frame_distance=None,
                      slamming_press=0, predefined_stiffener_iter=None, processes=None, use_weight_filter=True,
                      load_pre=False, opt_girder_prop=None, puls_sheet=None, puls_acceptance=0.87,
-                     fdwn=1, fup=0.5, ml_algo=None, cylinder=False):
+                     fdwn=1, fup=0.5, ml_algo=None, cylinder=False, material_factor=None):
     '''
     The optimazation is initiated here. It is called from optimize_window.
     :param initial_structure_obj:
@@ -45,6 +87,10 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
         raise NotImplementedError(
             "External Excel-sheet PULS optimization was removed. Use prescriptive or ML-CL buckling checks."
         )
+
+    # Make material factor explicit for all optimizer variants.
+    # Single optimization receives one structure object; geometric optimization receives a list.
+    initial_structure_obj = _set_material_factor_on_structure(initial_structure_obj, material_factor)
 
     init_filter_weight = float('inf')
 

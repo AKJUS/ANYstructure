@@ -64,6 +64,36 @@ class CreateOptGeoWindow():
 
         return ml_algo
 
+    def _get_selected_material_factor(self):
+        """Return selected material factor from main app or fallback to 1.15."""
+        try:
+            return float(self.app._new_material_factor.get())
+        except Exception:
+            pass
+        try:
+            return float(self._initial_calc_obj.Plate.mat_factor)
+        except Exception:
+            return 1.15
+
+    def _apply_material_factor_to_structure(self, obj, mat_fac):
+        """Apply selected material factor to Plate/Stiffener/Girder before optimization."""
+        try:
+            mat_fac = float(mat_fac)
+        except Exception:
+            return obj
+
+        for attr_name in ('Plate', 'Stiffener', 'Girder'):
+            try:
+                part = getattr(obj, attr_name)
+            except Exception:
+                part = None
+            if part is not None:
+                try:
+                    part.mat_factor = mat_fac
+                except Exception:
+                    pass
+        return obj
+
     def _load_pickle_first_existing(self, file_bases):
         """Load the first existing pickle from one or more base filenames."""
         if isinstance(file_bases, str):
@@ -740,6 +770,7 @@ class CreateOptGeoWindow():
                       self._new_check_buckling_ml_numeric.get())
 
         selected_ml_algo = self._get_selected_ml_buckling()
+        selected_mat_fac = self._get_selected_material_factor()
 
         self.pso_parameters = (self._new_swarm_size.get(), self._new_omega.get(), self._new_phip.get(),
                                self._new_phig.get(), self._new_maxiter.get(), self._new_minstep.get(),
@@ -761,7 +792,9 @@ class CreateOptGeoWindow():
                 broke = True
                 break
             else:
-                init_objects.append(self.opt_create_struc_obj(self._opt_structure[line])[0])
+                init_obj_single = self.opt_create_struc_obj(self._opt_structure[line])[0]
+                self._apply_material_factor_to_structure(init_obj_single, selected_mat_fac)
+                init_objects.append(init_obj_single)
                 fat_obj_single = self.opt_create_struc_obj(self._opt_structure[line])[2]
                 fatigue_objects.append(fat_obj_single)
 
@@ -842,7 +875,8 @@ class CreateOptGeoWindow():
                                                       processes=self._new_processes.get(),
                                                       slamming_press=slamming_press, opt_girder_prop=opt_girder_prop,
                                                       fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
-                                                      ml_algo=selected_ml_algo)
+                                                      ml_algo=selected_ml_algo,
+                                                      material_factor=selected_mat_fac)
                     resulting_geo.append(geo_results)
 
                 # need to find the lowest
@@ -870,7 +904,8 @@ class CreateOptGeoWindow():
                                                   processes=self._new_processes.get(),
                                                   slamming_press=slamming_press, opt_girder_prop=opt_girder_prop,
                                                   fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
-                                                  ml_algo=selected_ml_algo)
+                                                  ml_algo=selected_ml_algo,
+                                                  material_factor=selected_mat_fac)
 
             self._geo_results = geo_results
 

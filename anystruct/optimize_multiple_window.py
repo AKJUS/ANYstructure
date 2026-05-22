@@ -630,8 +630,11 @@ class CreateOptimizeMultipleWindow():
         self.progress_count.set(0)
         counter = 0
         found_files = self._filez
+        selected_mat_fac = self._get_selected_material_factor()
+
         for line in self._active_lines:
             init_obj = self._line_structure(line)
+            self._apply_material_factor_to_structure(init_obj, selected_mat_fac)
 
             if __name__ == '__main__':
                 lateral_press = 200  # for testing
@@ -671,7 +674,8 @@ class CreateOptimizeMultipleWindow():
                                                                processes=self._new_processes.get(),
                                                                min_max_span=max_min_span, use_weight_filter=False,
                                                                fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
-                                                               ml_algo=self._get_selected_ml_algo()))
+                                                               ml_algo=self._get_selected_ml_algo(),
+                                                               material_factor=selected_mat_fac))
             self._harmonizer_data[line] = {}
             counter += 1
             self.progress_count.set(counter)
@@ -720,6 +724,8 @@ class CreateOptimizeMultipleWindow():
                     self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(),
                     self._new_check_ml_numeric_buckling.get())
         iter_run_info = dict()
+        selected_mat_fac = self._get_selected_material_factor()
+
         for slave_line in self._opt_results.keys():
             input_pressures = self.get_pressure_input(slave_line)
             iter_run_info[slave_line] = {'lateral pressure': input_pressures['lateral pressure'],
@@ -979,6 +985,26 @@ class CreateOptimizeMultipleWindow():
             pass
 
         return 1.15
+
+    def _apply_material_factor_to_structure(self, obj, mat_fac):
+        """Apply selected material factor to Plate/Stiffener/Girder for optimizer checks."""
+        try:
+            mat_fac = float(mat_fac)
+        except Exception:
+            return obj
+
+        for attr_name in ('Plate', 'Stiffener', 'Girder'):
+            try:
+                part = getattr(obj, attr_name)
+            except Exception:
+                part = None
+            if part is not None:
+                try:
+                    part.mat_factor = mat_fac
+                except Exception:
+                    pass
+
+        return obj
 
     def _get_selected_ml_algo(self):
         """
