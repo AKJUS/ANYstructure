@@ -900,7 +900,7 @@ class Application():
                                 self._ent_structure_type]
 
         self._new_buckling_method = tk.StringVar()
-        options = ['DNV-RP-C201 - prescriptive','ML-CL (PULS based)']
+        options = ['DNV-RP-C201 - prescriptive','ML-CL (PULS based)', 'ML-Numeric (PULS based)']
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
         self._buckling_method = ttk.OptionMenu(self._tab_prop, self._new_buckling_method, options[0], *options,
                                                command=self.update_frame)
@@ -2736,14 +2736,175 @@ class Application():
 
         return state
 
-    def get_color_and_calc_state(self, current_line = None, active_line_only = False):
+    def _ml_model_exists(self, mat_fac, key):
+        return (
+                mat_fac in self._ML_buckling
+                and key in self._ML_buckling[mat_fac]
+                and self._ML_buckling[mat_fac][key] is not None
+        )
+
+    def _predict_numeric_uf_pipeline(self, mat_fac, sp_or_up, boundary_type, buckling_ml_input):
+        """
+        Predict numeric buckling/ultimate UF using the numeric UF pipeline.
+
+        Returns
+        -------
+        dict
+            {
+                'available': bool,
+                'valid_prediction': int or None,
+                'valid_label': str,
+                'buckling_uf': float or inf,
+                'ultimate_uf': float or inf,
+                'error': str,
+            }
+        """
+
+        if sp_or_up == 'SP':
+            if boundary_type == 'Int':
+                prefix = 'num SP int'
+            else:
+                prefix = 'num SP GLGT'
+        else:
+            if boundary_type == 'Int':
+                prefix = 'num UP int'
+            else:
+                prefix = 'num UP GLGT'
+
+        valid_predictor_key = f'{prefix} validity predictor'
+        valid_xscaler_key = f'{prefix} validity xscaler'
+
+        reg_predictor_key = f'{prefix} UF reg predictor'
+        reg_xscaler_key = f'{prefix} UF reg xscaler'
+        reg_yscaler_key = f'{prefix} UF reg yscaler'
+
+        required_keys = [
+            valid_predictor_key,
+            valid_xscaler_key,
+            reg_predictor_key,
+            reg_xscaler_key,
+            reg_yscaler_key,
+        ]
+
+        missing = [
+            key for key in required_keys
+            if not self._ml_model_exists(mat_fac, key)
+        ]
+
+        if missing:
+            return {
+                'available': False,
+                'valid_prediction': None,
+                'valid_label': 'numeric ML unavailable',
+                'buckling_uf': float('inf'),
+                'ultimate_uf': float('inf'),
+                'error': 'Missing numeric ML model(s): ' + ', '.join(missing),
+            }
+
+        try:
+            # ---------------------------------------------------------------------
+            # Step 1: predict whether numeric UF is valid
+            # ---------------------------------------------------------------------
+            x_valid = self._ML_buckling[mat_fac][valid_xscaler_key].transform(
+                buckling_ml_input
+            )
+
+            valid_pred = self._ML_buckling[mat_fac][valid_predictor_key].predict(
+                x_valid
+            )[0]
+
+            valid_pred_int = int(valid_pred)
+
+            if valid_pred_int != 1:
+                return {
+                    'available': True,
+                    'valid_prediction': valid_pred_int,
+                    'valid_label': 'invalid/NaN UF predicted',
+                    'buckling_uf': float('inf'),
+                    'ultimate_uf': float('inf'),
+                    'error': '',
+                }
+
+            # ---------------------------------------------------------------------
+            # Step 2: predict numeric buckling/ultimate UF
+            # ---------------------------------------------------------------------
+            x_reg = self._ML_buckling[mat_fac][reg_xscaler_key].transform(
+                buckling_ml_input
+            )
+
+            y_scaled = self._ML_buckling[mat_fac][reg_predictor_key].predict(
+                x_reg
+            )
+
+            y_numeric = self._ML_buckling[mat_fac][reg_yscaler_key].inverse_transform(
+                y_scaled
+            )[0]
+
+            buckling_uf = float(y_numeric[0])
+            ultimate_uf = float(y_numeric[1])
+
+            return {
+                'available': True,
+                'valid_prediction': valid_pred_int,
+                'valid_label': 'valid numeric UF predicted',
+                'buckling_uf': buckling_uf,
+                'ultimate_uf': ultimate_uf,
+                'error': '',
+            }
+
+        except Exception as e:
+            return {
+                'available': False,
+                'valid_prediction': None,
+                'valid_label': 'numeric ML error',
+                'buckling_uf': float('inf'),
+                'ultimate_uf': float('inf'),
+                'error': str(e),
+            }
+
+    def _numeric_uf_color(self, uf, mat_fac):
+        """
+        Color based on numeric UF.
+
+        Assumption:
+            lower/equal to acceptance threshold is green.
+        """
+        if mat_fac == 1.1:
+            limit = 0.91
+        else:
+            limit = 0.87
+
+        try:
+            return 'green' if float(uf) <= limit else 'red'
+        except Exception:
+            return 'red'
+
+    def get_color_and_calc_state(self, current_line=None, active_line_only=False):
         ''' Return calculations and colors for line and results. '''
 
-        return_dict = {'colors': {}, 'section_modulus': {}, 'thickness': {}, 'shear_area': {}, 'buckling': {},
-                       'fatigue': {}, 'pressure_uls': {}, 'pressure_fls': {},
-                       'all_obj': {}, 'scant_calc_obj': {}, 'fatigue_obj': {}, 'utilization': {}, 'slamming': {},
-                       'color code': {}, 'ML buckling colors' : {}, 'ML buckling class' : {},
-                       'weights': {}, 'cylinder': {}}
+        return_dict = {
+            'colors': {},
+            'section_modulus': {},
+            'thickness': {},
+            'shear_area': {},
+            'buckling': {},
+            'fatigue': {},
+            'pressure_uls': {},
+            'pressure_fls': {},
+            'all_obj': {},
+            'scant_calc_obj': {},
+            'fatigue_obj': {},
+            'utilization': {},
+            'slamming': {},
+            'color code': {},
+            'ML buckling colors': {},
+            'ML buckling class': {},
+            'ML buckling numeric': {},
+            'ML buckling numeric valid': {},
+            'ML buckling numeric colors': {},
+            'weights': {},
+            'cylinder': {},
+        }
 
         return_dict['slamming'][current_line] = {}
 
@@ -2770,33 +2931,18 @@ class Application():
         all_cyl_thk = np.sort(all_cyl_thk)
 
         for current_line in line_iterator:
-            rec_for_color[current_line]  = {}
+            rec_for_color[current_line] = {}
             slamming_pressure = 0
             if current_line in self._line_to_struc.keys():
 
-
                 if self._line_to_struc[current_line][5] is not None:
                     cyl_obj = self._line_to_struc[current_line][5]
-                    # cyl_radius = round(cyl_obj.ShellObj.radius * 1000, 2)
-                    # cyl_thickness = round(cyl_obj.ShellObj.thk * 1000, 2)
-                    # cyl_long_str = cyl_obj.LongStfObj.get_beam_string()
-                    # cyl_ring_stf = cyl_obj.LongStfObj.get_beam_string()
-                    # cyl_heavy_ring = cyl_obj.LongStfObj.get_beam_string()
-                    # cyl_span = round(cyl_obj.ShellObj.dist_between_rings, 1)
-                    # cyl_tot_length = round(cyl_obj.ShellObj.length_of_shell, 1)
-                    # cyl_tot_cyl = round(cyl_obj.ShellObj.tot_cyl_length, 1)
-                    # cyl_sigma_axial = cyl_obj.sasd / 1e6
-                    # cyl_sigma_bend = cyl_obj.smsd / 1e6
-                    # cyl_sigma_tors = cyl_obj.tTsd / 1e6
-                    # cyl_tau_xy = cyl_obj.tQsd / 1e6
-                    # cyl_lat_press = cyl_obj.psd / 1e6
-                    # cyl_sigma_hoop = cyl_obj.shsd / 1e6
                     cyl_results = cyl_obj.get_utilization_factors()
                 else:
                     cyl_thickness = 0
 
                 all_obj = self._line_to_struc[current_line][0]
-                obj_scnt_calc_pl = all_obj.Plate #self._line_to_struc[current_line][1]
+                obj_scnt_calc_pl = all_obj.Plate  # self._line_to_struc[current_line][1]
                 obj_scnt_calc_stf = all_obj.Stiffener  # self._line_to_struc[current_line][1]
                 obj_scnt_calc_girder = all_obj.Girder  # self._line_to_struc[current_line][1]
 
@@ -2820,7 +2966,7 @@ class Application():
                 min_thk = obj_scnt_calc_pl.get_dnv_min_thickness(design_pressure)
                 color_thk = 'green' if obj_scnt_calc_pl.is_acceptable_pl_thk(design_pressure) else 'red'
                 rec_for_color[current_line]['plate thickness'] = (min_thk / 1000) / obj_scnt_calc_pl.get_pl_thk()
-                all_obj.lat_press = design_pressure/1000
+                all_obj.lat_press = design_pressure / 1000
                 buckling = all_obj.plate_buckling()
 
                 all_buckling_uf_list = list()
@@ -2839,7 +2985,7 @@ class Application():
                     min_shear = obj_scnt_calc_stf.get_minimum_shear_area(design_pressure)
                     min_sec_mod = obj_scnt_calc_stf.get_dnv_min_section_modulus(design_pressure)
                     rec_for_color[current_line]['section modulus'] = min_sec_mod / min(sec_mod)
-                    rec_for_color[current_line]['shear'] = min_shear/shear_area
+                    rec_for_color[current_line]['shear'] = min_shear / shear_area
                     return_dict['slamming'][current_line] = dict()
                     if slamming_pressure is not None and slamming_pressure > 0:
                         return_dict['slamming'][current_line]['state'] = True
@@ -2865,20 +3011,20 @@ class Application():
                     color_shear = 'green' if obj_scnt_calc_stf.is_acceptable_shear_area(shear_area, design_pressure) \
                         else 'red'
                 else:
-                    sec_mod = [0,0]
+                    sec_mod = [0, 0]
                     rec_for_color[current_line]['section modulus'] = 0.0
                     rec_for_color[current_line]['shear'] = 0
                     return_dict['slamming'][current_line] = dict()
                     fatigue_obj, p_int, p_ext, damage, dff = [None for dummy in range(5)]
                     color_sec = 'green' if all_obj.Stiffener is None else 'black'
-                    color_shear = 'green' if all_obj.Stiffener is None else'black'
+                    color_shear = 'green' if all_obj.Stiffener is None else 'black'
                     return_dict['slamming'][current_line]['state'] = False
 
                 if slamming_pressure is not None and slamming_pressure > 0 and obj_scnt_calc_stf is not None:
                     slamming_res = obj_scnt_calc_stf.calculate_slamming_stiffener(slamming_pressure,
-                                                                              red_fac=slamming_red_fac_pl)
+                                                                                  red_fac=slamming_red_fac_pl)
                     min_pl_slamming = obj_scnt_calc_stf.calculate_slamming_plate(slamming_pressure,
-                                                                             red_fac=slamming_red_fac_stf)
+                                                                                 red_fac=slamming_red_fac_stf)
 
                     if slamming_res['Zp_req'] is not None:
                         zpl = obj_scnt_calc_stf.get_net_effective_plastic_section_modulus()
@@ -2889,10 +3035,10 @@ class Application():
                         zpl_req = None
                         color_sec = 'red'
 
-                    color_shear = 'green' if round(obj_scnt_calc_stf.get_web_thk()* 1000,1)  >= \
-                                             round(slamming_res['tw_req'],1) else 'red'
-                    color_thk = 'green' if round(obj_scnt_calc_stf.get_pl_thk() * 1000,1) >= \
-                                           round(min_pl_slamming,1) else 'red'
+                    color_shear = 'green' if round(obj_scnt_calc_stf.get_web_thk() * 1000, 1) >= \
+                                             round(slamming_res['tw_req'], 1) else 'red'
+                    color_thk = 'green' if round(obj_scnt_calc_stf.get_pl_thk() * 1000, 1) >= \
+                                           round(min_pl_slamming, 1) else 'red'
 
                     return_dict['slamming'][current_line]['zpl'] = zpl
                     return_dict['slamming'][current_line]['zpl_req'] = zpl_req
@@ -2909,110 +3055,357 @@ class Application():
                     return_dict['cylinder'][current_line] = cyl_results
 
                 '''
-                Machine learning buckling 
-                        ['cl SP buc int predictor', 'cl SP buc int scaler',
-                        'cl SP ult int predictor', 'cl SP ult int scaler',
-                        'cl SP buc GLGT predictor', 'cl SP buc GLGT scaler',
-                        'cl SP ult GLGT predictor', 'cl SP ult GLGT scaler']
+                Machine learning buckling.
+
+                Classification pipeline:
+                    return_dict['ML buckling class']
+                    return_dict['ML buckling colors']
+
+                Numeric UF pipeline:
+                    return_dict['ML buckling numeric']
+                    return_dict['ML buckling numeric valid']
+                    return_dict['ML buckling numeric colors']
                 '''
+
                 mat_fac_error = ''
+
+                # -----------------------------------------------------------------------------
+                # Helper defaults in case ML cannot be evaluated
+                # -----------------------------------------------------------------------------
+                default_numeric_pred = {
+                    'available': False,
+                    'valid_prediction': None,
+                    'valid_label': 'numeric ML not available',
+                    'buckling_uf': float('inf'),
+                    'ultimate_uf': float('inf'),
+                    'error': '',
+                }
+
                 if obj_scnt_calc_pl.get_puls_sp_or_up() == 'UP':
-                    buckling_ml_input = obj_scnt_calc_pl.get_buckling_ml_input(design_lat_press=design_pressure)
+                    # =========================================================================
+                    # UP / unstiffened panel ML
+                    # =========================================================================
+                    buckling_ml_input = obj_scnt_calc_pl.get_buckling_ml_input(
+                        design_lat_press=design_pressure
+                    )
+
                     mat_fac = obj_scnt_calc_pl.mat_factor
                     mat_fac_error = ''
+
                     if mat_fac not in [1.1, 1.15]:
                         mat_fac_error = ' MATERIAL FACTOR MUST BE 1.1 or 1.15 -> using 1.15'
                         mat_fac = 1.15
-                    if obj_scnt_calc_pl.get_puls_boundary() == 'Int':
-                        if self._ML_buckling[mat_fac]['cl UP buc int predictor'] != None:
-                            x_buc = self._ML_buckling[mat_fac]['cl UP buc int scaler'].transform(buckling_ml_input)
-                            y_pred_buc = self._ML_buckling[mat_fac]['cl UP buc int predictor'].predict(x_buc)[0]
-                        else:
-                            y_pred_buc = 0
-                        if self._ML_buckling[mat_fac]['cl UP ult int predictor'] != None:
-                            x_ult = self._ML_buckling[mat_fac]['cl UP ult int scaler'].transform(buckling_ml_input)
-                            y_pred_ult = self._ML_buckling[mat_fac]['cl UP ult int predictor'].predict(x_ult)[0]
-                        else:
-                            y_pred_ult = 0
-                    else:
-                        if self._ML_buckling[mat_fac]['cl UP buc GLGT predictor'] != None:
-                            x_buc = self._ML_buckling[mat_fac]['cl UP buc GLGT scaler'].transform(buckling_ml_input)
-                            y_pred_buc = self._ML_buckling[mat_fac]['cl UP buc GLGT predictor'].predict(x_buc)[0]
-                        else:
-                            y_pred_buc = 0
-                        if self._ML_buckling[mat_fac]['cl UP ult GLGT predictor'] != None:
-                            x_ult = self._ML_buckling[mat_fac]['cl UP ult GLGT scaler'].transform(buckling_ml_input)
-                            y_pred_ult = self._ML_buckling[mat_fac]['cl UP ult GLGT predictor'].predict(x_ult)[0]
-                        else:
-                            y_pred_ult = 0
 
-                    x_csr = obj_scnt_calc_pl.get_buckling_ml_input(design_lat_press=design_pressure, csr = True)
-                    x_csr = self._ML_buckling[mat_fac]['CSR scaler UP'].transform(x_csr)
-                    csr_pl = self._ML_buckling[mat_fac]['CSR predictor UP'].predict(x_csr)[0]
+                    boundary_type = obj_scnt_calc_pl.get_puls_boundary()
+
+                    # -------------------------------------------------------------------------
+                    # Classification ML prediction
+                    # -------------------------------------------------------------------------
+                    if boundary_type == 'Int':
+                        if self._ML_buckling[mat_fac]['cl UP buc int predictor'] is not None:
+                            x_buc = self._ML_buckling[mat_fac]['cl UP buc int scaler'].transform(
+                                buckling_ml_input
+                            )
+                            y_pred_buc = self._ML_buckling[mat_fac]['cl UP buc int predictor'].predict(
+                                x_buc
+                            )[0]
+                        else:
+                            y_pred_buc = 'ML buckling model missing'
+
+                        if self._ML_buckling[mat_fac]['cl UP ult int predictor'] is not None:
+                            x_ult = self._ML_buckling[mat_fac]['cl UP ult int scaler'].transform(
+                                buckling_ml_input
+                            )
+                            y_pred_ult = self._ML_buckling[mat_fac]['cl UP ult int predictor'].predict(
+                                x_ult
+                            )[0]
+                        else:
+                            y_pred_ult = 'ML ultimate model missing'
+
+                    else:
+                        if self._ML_buckling[mat_fac]['cl UP buc GLGT predictor'] is not None:
+                            x_buc = self._ML_buckling[mat_fac]['cl UP buc GLGT scaler'].transform(
+                                buckling_ml_input
+                            )
+                            y_pred_buc = self._ML_buckling[mat_fac]['cl UP buc GLGT predictor'].predict(
+                                x_buc
+                            )[0]
+                        else:
+                            y_pred_buc = 'ML buckling model missing'
+
+                        if self._ML_buckling[mat_fac]['cl UP ult GLGT predictor'] is not None:
+                            x_ult = self._ML_buckling[mat_fac]['cl UP ult GLGT scaler'].transform(
+                                buckling_ml_input
+                            )
+                            y_pred_ult = self._ML_buckling[mat_fac]['cl UP ult GLGT predictor'].predict(
+                                x_ult
+                            )[0]
+                        else:
+                            y_pred_ult = 'ML ultimate model missing'
+
+                    # -------------------------------------------------------------------------
+                    # Numeric UF pipeline
+                    # -------------------------------------------------------------------------
+                    try:
+                        numeric_pred = self._predict_numeric_uf_pipeline(
+                            mat_fac=mat_fac,
+                            sp_or_up='UP',
+                            boundary_type=boundary_type,
+                            buckling_ml_input=buckling_ml_input,
+                        )
+                    except Exception as e:
+                        numeric_pred = default_numeric_pred.copy()
+                        numeric_pred['valid_label'] = 'numeric ML error'
+                        numeric_pred['error'] = str(e)
+
+                    # -------------------------------------------------------------------------
+                    # CSR prediction
+                    # -------------------------------------------------------------------------
+                    try:
+                        x_csr = obj_scnt_calc_pl.get_buckling_ml_input(
+                            design_lat_press=design_pressure,
+                            csr=True,
+                        )
+                        x_csr = self._ML_buckling[mat_fac]['CSR scaler UP'].transform(x_csr)
+                        csr_pl = self._ML_buckling[mat_fac]['CSR predictor UP'].predict(x_csr)[0]
+                    except Exception:
+                        csr_pl = 0
 
                     if self._new_material_factor.get() == 1.1:
                         accept = 'below or equal 0.91'
                     else:
                         accept = 'below or equal 0.87'
 
-                    return_dict['ML buckling colors'][current_line] = \
-                        {'buckling': 'green' if y_pred_buc == accept else 'red',
-                         'ultimate': 'green' if y_pred_ult == accept else 'red',
-                         'CSR requirement': 'green' if csr_pl == 1 else 'red'}
+                    return_dict['ML buckling colors'][current_line] = {
+                        'buckling': 'green' if y_pred_buc == accept else 'red',
+                        'ultimate': 'green' if y_pred_ult == accept else 'red',
+                        'CSR requirement': 'green' if csr_pl == 1 else 'red',
+                    }
 
-                    return_dict['ML buckling class'][current_line] = {'buckling': y_pred_buc + mat_fac_error,
-                                                                      'ultimate': y_pred_ult + mat_fac_error,
-                                                                      'CSR': [csr_pl, float('inf'),
-                                                                              float('inf'), float('inf')]}
+                    return_dict['ML buckling class'][current_line] = {
+                        'buckling': str(y_pred_buc) + mat_fac_error,
+                        'ultimate': str(y_pred_ult) + mat_fac_error,
+                        'CSR': [csr_pl, float('inf'), float('inf'), float('inf')],
+                    }
+
+                    # -------------------------------------------------------------------------
+                    # Numeric UF color handling
+                    # -------------------------------------------------------------------------
+                    if numeric_pred.get('valid_prediction', None) == 1:
+                        numeric_buc_color = self._numeric_uf_color(
+                            numeric_pred['buckling_uf'],
+                            mat_fac,
+                        )
+                        numeric_ult_color = self._numeric_uf_color(
+                            numeric_pred['ultimate_uf'],
+                            mat_fac,
+                        )
+                    else:
+                        numeric_buc_color = 'red'
+                        numeric_ult_color = 'red'
+
+                    return_dict['ML buckling numeric'][current_line] = {
+                        'buckling UF': numeric_pred['buckling_uf'],
+                        'ultimate UF': numeric_pred['ultimate_uf'],
+                        'error': numeric_pred['error'],
+                    }
+
+                    return_dict['ML buckling numeric valid'][current_line] = {
+                        'available': numeric_pred['available'],
+                        'valid prediction': numeric_pred['valid_prediction'],
+                        'valid label': numeric_pred['valid_label'],
+                    }
+
+                    return_dict['ML buckling numeric colors'][current_line] = {
+                        'buckling': numeric_buc_color,
+                        'ultimate': numeric_ult_color,
+                    }
+
                 else:
-                    buckling_ml_input = obj_scnt_calc_stf.get_buckling_ml_input(design_lat_press=design_pressure)
-                    mat_fac = obj_scnt_calc_pl.mat_factor
-                    mat_fac_error = ''
-                    if mat_fac not in [1.1, 1.15]:
-                        mat_fac = 1.15
-                        mat_fac_error = ' MATERIAL FACTOR MUST BE 1.1 or 1.15 -> using 1.15'
-                    if obj_scnt_calc_stf.get_puls_boundary() == 'Int':
-                        if self._ML_buckling[mat_fac]['cl SP buc int predictor'] != None:
-                            x_buc = self._ML_buckling[mat_fac]['cl SP buc int scaler'].transform(buckling_ml_input)
-                            y_pred_buc = self._ML_buckling[mat_fac]['cl SP buc int predictor'].predict(x_buc)[0]
+                    # =========================================================================
+                    # SP / stiffened panel ML
+                    # =========================================================================
+
+                    # Defensive guard: SP ML requires a stiffener object.
+                    if obj_scnt_calc_stf is None:
+                        mat_fac = obj_scnt_calc_pl.mat_factor
+
+                        if mat_fac not in [1.1, 1.15]:
+                            mat_fac_error = ' MATERIAL FACTOR MUST BE 1.1 or 1.15 -> using 1.15'
+                            mat_fac = 1.15
                         else:
-                            y_pred_buc = 0
-                        if self._ML_buckling[mat_fac]['cl SP ult int predictor'] != None:
-                            x_ult = self._ML_buckling[mat_fac]['cl SP ult int scaler'].transform(buckling_ml_input)
-                            y_pred_ult = self._ML_buckling[mat_fac]['cl SP ult int predictor'].predict(x_ult)[0]
-                        else:
-                            y_pred_ult = 0
+                            mat_fac_error = ''
+
+                        return_dict['ML buckling colors'][current_line] = {
+                            'buckling': 'red',
+                            'ultimate': 'red',
+                            'CSR requirement': 'red',
+                        }
+
+                        return_dict['ML buckling class'][current_line] = {
+                            'buckling': 'No stiffener - ML SP not available' + mat_fac_error,
+                            'ultimate': 'No stiffener - ML SP not available' + mat_fac_error,
+                            'CSR': [0, 0, 0, 0],
+                        }
+
+                        return_dict['ML buckling numeric'][current_line] = {
+                            'buckling UF': float('inf'),
+                            'ultimate UF': float('inf'),
+                            'error': 'No stiffener - numeric ML SP not available',
+                        }
+
+                        return_dict['ML buckling numeric valid'][current_line] = {
+                            'available': False,
+                            'valid prediction': None,
+                            'valid label': 'No stiffener - numeric ML SP not available',
+                        }
+
+                        return_dict['ML buckling numeric colors'][current_line] = {
+                            'buckling': 'red',
+                            'ultimate': 'red',
+                        }
+
                     else:
-                        if self._ML_buckling[mat_fac]['cl SP buc GLGT predictor'] != None:
-                            x_buc = self._ML_buckling[mat_fac]['cl SP buc GLGT scaler'].transform(buckling_ml_input)
-                            y_pred_buc = self._ML_buckling[mat_fac]['cl SP buc GLGT predictor'].predict(x_buc)[0]
+                        buckling_ml_input = obj_scnt_calc_stf.get_buckling_ml_input(
+                            design_lat_press=design_pressure
+                        )
+
+                        mat_fac = obj_scnt_calc_pl.mat_factor
+                        mat_fac_error = ''
+
+                        if mat_fac not in [1.1, 1.15]:
+                            mat_fac = 1.15
+                            mat_fac_error = ' MATERIAL FACTOR MUST BE 1.1 or 1.15 -> using 1.15'
+
+                        boundary_type = obj_scnt_calc_stf.get_puls_boundary()
+
+                        # ---------------------------------------------------------------------
+                        # Classification ML prediction
+                        # ---------------------------------------------------------------------
+                        if boundary_type == 'Int':
+                            if self._ML_buckling[mat_fac]['cl SP buc int predictor'] is not None:
+                                x_buc = self._ML_buckling[mat_fac]['cl SP buc int scaler'].transform(
+                                    buckling_ml_input
+                                )
+                                y_pred_buc = self._ML_buckling[mat_fac]['cl SP buc int predictor'].predict(
+                                    x_buc
+                                )[0]
+                            else:
+                                y_pred_buc = 'ML buckling model missing'
+
+                            if self._ML_buckling[mat_fac]['cl SP ult int predictor'] is not None:
+                                x_ult = self._ML_buckling[mat_fac]['cl SP ult int scaler'].transform(
+                                    buckling_ml_input
+                                )
+                                y_pred_ult = self._ML_buckling[mat_fac]['cl SP ult int predictor'].predict(
+                                    x_ult
+                                )[0]
+                            else:
+                                y_pred_ult = 'ML ultimate model missing'
+
                         else:
-                            y_pred_buc = 0
-                        if self._ML_buckling[mat_fac]['cl SP ult GLGT predictor'] != None:
-                            x_ult = self._ML_buckling[mat_fac]['cl SP ult GLGT scaler'].transform(buckling_ml_input)
-                            y_pred_ult = self._ML_buckling[mat_fac]['cl SP ult GLGT predictor'].predict(x_ult)[0]
+                            if self._ML_buckling[mat_fac]['cl SP buc GLGT predictor'] is not None:
+                                x_buc = self._ML_buckling[mat_fac]['cl SP buc GLGT scaler'].transform(
+                                    buckling_ml_input
+                                )
+                                y_pred_buc = self._ML_buckling[mat_fac]['cl SP buc GLGT predictor'].predict(
+                                    x_buc
+                                )[0]
+                            else:
+                                y_pred_buc = 'ML buckling model missing'
+
+                            if self._ML_buckling[mat_fac]['cl SP ult GLGT predictor'] is not None:
+                                x_ult = self._ML_buckling[mat_fac]['cl SP ult GLGT scaler'].transform(
+                                    buckling_ml_input
+                                )
+                                y_pred_ult = self._ML_buckling[mat_fac]['cl SP ult GLGT predictor'].predict(
+                                    x_ult
+                                )[0]
+                            else:
+                                y_pred_ult = 'ML ultimate model missing'
+
+                        # ---------------------------------------------------------------------
+                        # Numeric UF pipeline
+                        # ---------------------------------------------------------------------
+                        try:
+                            numeric_pred = self._predict_numeric_uf_pipeline(
+                                mat_fac=mat_fac,
+                                sp_or_up='SP',
+                                boundary_type=boundary_type,
+                                buckling_ml_input=buckling_ml_input,
+                            )
+                        except Exception as e:
+                            numeric_pred = default_numeric_pred.copy()
+                            numeric_pred['valid_label'] = 'numeric ML error'
+                            numeric_pred['error'] = str(e)
+
+                        # ---------------------------------------------------------------------
+                        # CSR prediction
+                        # ---------------------------------------------------------------------
+                        try:
+                            x_csr = obj_scnt_calc_stf.get_buckling_ml_input(
+                                design_lat_press=design_pressure,
+                                csr=True,
+                            )
+
+                            x_csr = self._ML_buckling[mat_fac]['CSR scaler SP'].transform(x_csr)
+                            csr_pl, csr_web, csr_web_fl, csr_fl = self._ML_buckling[mat_fac][
+                                'CSR predictor SP'
+                            ].predict(x_csr)[0]
+                        except Exception:
+                            csr_pl, csr_web, csr_web_fl, csr_fl = 0, 0, 0, 0
+
+                        if obj_scnt_calc_pl.mat_factor == 1.1:
+                            accept = 'below or equal 0.91'
                         else:
-                            y_pred_ult = 0
+                            accept = 'below or equal 0.87'
 
-                    x_csr = obj_scnt_calc_stf.get_buckling_ml_input(design_lat_press=design_pressure, csr = True)
+                        return_dict['ML buckling colors'][current_line] = {
+                            'buckling': 'green' if y_pred_buc == accept else 'red',
+                            'ultimate': 'green' if y_pred_ult == accept else 'red',
+                            'CSR requirement': 'green' if all(
+                                [csr_pl == 1, csr_web == 1, csr_web_fl == 1, csr_fl == 1]
+                            ) else 'red',
+                        }
 
-                    x_csr = self._ML_buckling[mat_fac]['CSR scaler SP'].transform(x_csr)
-                    csr_pl, csr_web, csr_web_fl, csr_fl = self._ML_buckling[mat_fac]['CSR predictor SP'].predict(x_csr)[0]
-                    if obj_scnt_calc_pl.mat_factor == 1.1:
-                        accept = 'below or equal 0.91'
-                    else:
-                        accept = 'below or equal 0.87'
+                        return_dict['ML buckling class'][current_line] = {
+                            'buckling': str(y_pred_buc) + mat_fac_error,
+                            'ultimate': str(y_pred_ult) + mat_fac_error,
+                            'CSR': [csr_pl, csr_web, csr_web_fl, csr_fl],
+                        }
 
+                        # ---------------------------------------------------------------------
+                        # Numeric UF color handling
+                        # ---------------------------------------------------------------------
+                        if numeric_pred.get('valid_prediction', None) == 1:
+                            numeric_buc_color = self._numeric_uf_color(
+                                numeric_pred['buckling_uf'],
+                                mat_fac,
+                            )
+                            numeric_ult_color = self._numeric_uf_color(
+                                numeric_pred['ultimate_uf'],
+                                mat_fac,
+                            )
+                        else:
+                            numeric_buc_color = 'red'
+                            numeric_ult_color = 'red'
 
-                    return_dict['ML buckling colors'][current_line] = \
-                        {'buckling': 'green' if y_pred_buc == accept else 'red',
-                         'ultimate': 'green' if y_pred_ult == accept else 'red',
-                         'CSR requirement': 'green' if
-                         all([csr_pl == 1, csr_web == 1, csr_web_fl == 1, csr_fl == 1]) else 'red'}
-                    return_dict['ML buckling class'][current_line] = {'buckling': y_pred_buc + mat_fac_error ,
-                                                                      'ultimate': y_pred_ult + mat_fac_error,
-                                                                      'CSR': [csr_pl, csr_web, csr_web_fl, csr_fl]}
+                        return_dict['ML buckling numeric'][current_line] = {
+                            'buckling UF': numeric_pred['buckling_uf'],
+                            'ultimate UF': numeric_pred['ultimate_uf'],
+                            'error': numeric_pred['error'],
+                        }
 
+                        return_dict['ML buckling numeric valid'][current_line] = {
+                            'available': numeric_pred['available'],
+                            'valid prediction': numeric_pred['valid_prediction'],
+                            'valid label': numeric_pred['valid_label'],
+                        }
+
+                        return_dict['ML buckling numeric colors'][current_line] = {
+                            'buckling': numeric_buc_color,
+                            'ultimate': numeric_ult_color,
+                        }
                 '''
                 Weight calculations for line.
                 '''
@@ -3028,7 +3421,7 @@ class Application():
                 p1 = self._point_dict['point' + str(points[0])]
                 p2 = self._point_dict['point' + str(points[1])]
 
-                mid_coord = [(p1[0]+p2[0])/2, (p1[1]+p2[1])/2]
+                mid_coord = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2]
 
                 return_dict['weights'][current_line] = {'line weight': line_weight, 'mid_coord': mid_coord}
 
@@ -3042,7 +3435,7 @@ class Application():
                 return_dict['section_modulus'][current_line] = {'sec_mod': sec_mod, 'min_sec_mod': 0} if \
                     obj_scnt_calc_stf is None else {'sec_mod': sec_mod, 'min_sec_mod': min_sec_mod}
                 return_dict['shear_area'][current_line] = {'shear_area': 0, 'min_shear_area': 0} if \
-                    obj_scnt_calc_stf is None else{'shear_area': shear_area, 'min_shear_area': min_shear}
+                    obj_scnt_calc_stf is None else {'shear_area': shear_area, 'min_shear_area': min_shear}
                 return_dict['thickness'][current_line] = {'thk': obj_scnt_calc_pl.get_pl_thk(), 'min_thk': min_thk}
                 return_dict['fatigue_obj'][current_line] = fatigue_obj
                 return_dict['color code'][current_line] = {}
@@ -3050,7 +3443,7 @@ class Application():
                 if fatigue_obj is not None:
                     return_dict['fatigue'][current_line] = {'damage': damage, 'dff': dff,
                                                             'curve': fatigue_obj.get_sn_curve()}
-                    rec_for_color[current_line]['fatigue'] = damage*dff
+                    rec_for_color[current_line]['fatigue'] = damage * dff
                 else:
                     return_dict['fatigue'][current_line] = {'damage': None, 'dff': None, 'curve': None}
                     rec_for_color[current_line]['fatigue'] = 0
@@ -3069,13 +3462,13 @@ class Application():
                                                             'thickness': thk_util}
 
                 # Color coding state
-                self._state_logger[current_line] = return_dict #  Logging the current state of the line.
+                self._state_logger[current_line] = return_dict  # Logging the current state of the line.
                 self._line_to_struc[current_line][0].need_recalc = False
             else:
                 pass
 
-        sec_in_model,  idx, recorded_sections = dict(), 0, list()
-        cyl_sec_in_model, idx_cyl, recorded_cyl_sections = dict(),  0, list()
+        sec_in_model, idx, recorded_sections = dict(), 0, list()
+        cyl_sec_in_model, idx_cyl, recorded_cyl_sections = dict(), 0, list()
 
         for data in self._line_to_struc.values():
             if data[0].Stiffener is not None:
@@ -3086,7 +3479,7 @@ class Application():
             if data[5] is not None:
                 if data[5].LongStfObj is not None:
                     if data[5].LongStfObj.get_beam_string() not in recorded_cyl_sections:
-                        cyl_sec_in_model[ data[5].LongStfObj.get_beam_string()] = idx_cyl
+                        cyl_sec_in_model[data[5].LongStfObj.get_beam_string()] = idx_cyl
                         recorded_cyl_sections.append(data[5].LongStfObj.get_beam_string())
                         idx_cyl += 1
 
@@ -3094,17 +3487,16 @@ class Application():
         cyl_sec_in_model['length'] = len(recorded_cyl_sections)
 
         if self._line_to_struc != {}:
-            sec_mod_map = np.arange(0,1.1,0.1)
-            fat_map = np.arange(0,1.1,0.1)
+            sec_mod_map = np.arange(0, 1.1, 0.1)
+            fat_map = np.arange(0, 1.1, 0.1)
             all_thicknesses = [round(objs[0].Plate.get_pl_thk(), 5) for objs in self._line_to_struc.values()]
             all_thicknesses = np.unique(all_thicknesses).tolist()
-            
-            
+
             thickest_plate = max(all_thicknesses)
             if len(all_thicknesses) > 1:
                 thk_map = np.arange(min(all_thicknesses), max(all_thicknesses) + (max(all_thicknesses) -
                                                                                   min(all_thicknesses)) / 10,
-                                     (max(all_thicknesses) - min(all_thicknesses)) / 10)
+                                    (max(all_thicknesses) - min(all_thicknesses)) / 10)
             else:
                 thk_map = all_thicknesses
 
@@ -3118,7 +3510,6 @@ class Application():
             #         thk_map_cyl = all_cyl_thk
             # else:
             #     thk_map_cyl = [1,]
-
 
             try:
                 all_pressures = sorted([self.get_highest_pressure(line)['normal']
@@ -3140,14 +3531,14 @@ class Application():
             all_utils = [max(list(return_dict['utilization'][line].values()))
                          for line in self._line_to_struc.keys()]
             all_utils = np.unique(all_utils).tolist()
-            if len(all_utils) >1:
-                util_map =  np.arange(0, 1.1, 0.1)
+            if len(all_utils) > 1:
+                util_map = np.arange(0, 1.1, 0.1)
             else:
                 util_map = all_utils
 
             sig_x = np.unique([self._line_to_struc[line][0].Plate.sigma_x1 for line in
                                self._line_to_struc.keys()]).tolist()
-            if len(sig_x) > 1: # TODO color coding when using sig_x1 and sig_x2 (23.12.2021)
+            if len(sig_x) > 1:  # TODO color coding when using sig_x1 and sig_x2 (23.12.2021)
                 sig_x_map = np.arange(min(sig_x), max(sig_x) + (max(sig_x) - min(sig_x)) / 10,
                                       (max(sig_x) - min(sig_x)) / 10)
             else:
@@ -3189,7 +3580,7 @@ class Application():
                                          'section modulus map': sec_mod_map,
                                          'fatigue map': fat_map,
                                          'highest pressure': highest_pressure, 'lowest pressure': lowest_pressure,
-                                         'pressure map': press_map, 'all pressures':all_pressures,
+                                         'pressure map': press_map, 'all pressures': all_pressures,
                                          'all utilizations': all_utils, 'utilization map': util_map,
                                          'max sigma x': max(sig_x), 'min sigma x': min(sig_x), 'sigma x map': sig_x_map,
                                          'max sigma y1': max(sig_y1), 'min sigma y1': min(sig_y1),
@@ -3201,14 +3592,14 @@ class Application():
                                          'sections in model': sec_in_model,
                                          'cyl sections in model': cyl_sec_in_model,
                                          'recorded sections': recorded_sections,
-                                         'recorded cylinder long sections' : recorded_cyl_sections,
+                                         'recorded cylinder long sections': recorded_cyl_sections,
                                          'spacings': spacing, 'max spacing': max(spacing), 'min spacing': min(spacing)}
             line_color_coding = {}
             cmap_sections = plt.get_cmap('jet')
             thk_sort_unique = return_dict['color code']['all thicknesses']
             spacing_sort_unique = return_dict['color code']['spacings']
             structure_type_unique = return_dict['color code']['structure types map']
-            tot_weight, weight_mult_dist_x, weight_mult_dist_y = 0, 0,0
+            tot_weight, weight_mult_dist_x, weight_mult_dist_y = 0, 0, 0
             for line, line_data in self._line_to_struc.items():
                 puls_method = line_data[0].Plate.get_puls_method()
                 puls_sp_or_up = line_data[0].Plate.get_puls_sp_or_up()
@@ -3235,14 +3626,14 @@ class Application():
                     # cyl_sigma_hoop = cyl_obj.shsd / 1e6
                     cyl_results = cyl_obj.get_utilization_factors()
 
-                    cyl_uf =  max([round(0 if cyl_results['Unstiffened shell'] is None else
-                                         cyl_results['Unstiffened shell'],2),
-                                   round(0 if cyl_results['Longitudinal stiffened shell'] is None else
-                                         cyl_results['Longitudinal stiffened shell'],2),
-                                   round(0 if cyl_results['Ring stiffened shell'] is None else
-                                         cyl_results['Ring stiffened shell'],2),
-                                   round(0 if cyl_results['Heavy ring frame'] is None else
-                                         cyl_results['Heavy ring frame'],2)])
+                    cyl_uf = max([round(0 if cyl_results['Unstiffened shell'] is None else
+                                        cyl_results['Unstiffened shell'], 2),
+                                  round(0 if cyl_results['Longitudinal stiffened shell'] is None else
+                                        cyl_results['Longitudinal stiffened shell'], 2),
+                                  round(0 if cyl_results['Ring stiffened shell'] is None else
+                                        cyl_results['Ring stiffened shell'], 2),
+                                  round(0 if cyl_results['Heavy ring frame'] is None else
+                                        cyl_results['Heavy ring frame'], 2)])
                 else:
                     cyl_uf = 0
                     cyl_long_str = None
@@ -3262,77 +3653,78 @@ class Application():
                 res = list()
 
                 for stress_list, this_stress in zip([sig_x, sig_y1, sig_y2, tau_xy],
-                                                     [line_data[0].Plate.sigma_x1, line_data[0].Plate.sigma_y1,
-                                                      line_data[0].Plate.sigma_y2, line_data[0].Plate.tau_xy]):
-                    if type(stress_list)==float:
+                                                    [line_data[0].Plate.sigma_x1, line_data[0].Plate.sigma_y1,
+                                                     line_data[0].Plate.sigma_y2, line_data[0].Plate.tau_xy]):
+                    if type(stress_list) == float:
                         res.append(1)
                     elif len(stress_list) == 1:
                         res.append(1)
                     elif max(stress_list) == 0 and min(stress_list) == 0:
                         res.append(0)
                     elif this_stress < 0:
-                        res.append(this_stress /min(stress_list))
+                        res.append(this_stress / min(stress_list))
                     elif this_stress >= 0:
-                        res.append(this_stress/ max(stress_list))
+                        res.append(this_stress / max(stress_list))
 
-                sig_x_uf, sig_y1_uf, sig_y2_uf , tau_xy_uf = res
+                sig_x_uf, sig_y1_uf, sig_y2_uf, tau_xy_uf = res
                 if type(all_cyl_thk) is not list:
                     all_cyl_thk = all_cyl_thk.tolist()
 
                 line_color_coding[line] = {'plate': matplotlib.colors.rgb2hex(cmap_sections(
-                    thk_sort_unique.index(round(line_data[0].Plate.get_pl_thk(),10))/len(thk_sort_unique))),
-                                           'spacing': 'black' if line_data[0].Stiffener is None else matplotlib.colors.rgb2hex(
-                                               cmap_sections(spacing_sort_unique.index(round(line_data[0].Stiffener
-                                                                                         .get_s(), 10)) / len(
-                                                   spacing_sort_unique))),
-                                           'section': 'black' if line_data[0].Stiffener is None else
-                                           matplotlib.colors.rgb2hex(cmap_sections(sec_in_model[line_data[0]
-                                                                                   .Stiffener.get_beam_string()]/
-                                                                                   len(list(recorded_sections)))),
-                                            'section cyl': 'black' if cyl_long_str is None else
-                                            matplotlib.colors.rgb2hex(cmap_sections(cyl_sec_in_model[cyl_long_str] /
-                                                                                    len(list(recorded_cyl_sections)))),
-                                           'structure type': matplotlib.colors.rgb2hex(
-                                               cmap_sections(structure_type_unique.index(line_data[0].Plate.get_structure_type())
-                                                             /len(structure_type_unique))),
-                                           'pressure color': 'black' if all_pressures in [[0],[0,1]] else matplotlib.colors.rgb2hex(cmap_sections(
-                                               this_pressure/highest_pressure)),
-                                           'pressure': this_pressure,
-                                           'rp uf color': matplotlib.colors.rgb2hex(cmap_sections(rp_util)),
-                                           'rp uf': rp_util,
-                                           'PULS method': puls_method,
-                                           'PULS sp or up':puls_sp_or_up,
-                                           'section modulus color': matplotlib.colors.rgb2hex(
-                                               cmap_sections(rec_for_color[line]['section modulus'])),
-                                           'fatigue color': matplotlib.colors.rgb2hex(
-                                               cmap_sections(rec_for_color[line]['fatigue'])),
-                                           'Total uf color rp' : matplotlib.colors.rgb2hex(
-                                               cmap_sections(tot_uf_rp)),
-                                           'Total uf rp': tot_uf_rp,
-                                           'fatigue uf' : rec_for_color[line]['fatigue'],
-                                           'section uf' : rec_for_color[line]['section modulus'],
-                                           'sigma x': matplotlib.colors.rgb2hex(cmap_sections(sig_x_uf)),
-                                           'sigma y1': matplotlib.colors.rgb2hex(cmap_sections(sig_y1_uf)),
-                                           'sigma y2': matplotlib.colors.rgb2hex(cmap_sections(sig_y2_uf)),
-                                           'tau xy':matplotlib.colors.rgb2hex(cmap_sections(tau_xy_uf)),
+                    thk_sort_unique.index(round(line_data[0].Plate.get_pl_thk(), 10)) / len(thk_sort_unique))),
+                    'spacing': 'black' if line_data[0].Stiffener is None else matplotlib.colors.rgb2hex(
+                        cmap_sections(spacing_sort_unique.index(round(line_data[0].Stiffener
+                                                                      .get_s(), 10)) / len(
+                            spacing_sort_unique))),
+                    'section': 'black' if line_data[0].Stiffener is None else
+                    matplotlib.colors.rgb2hex(cmap_sections(sec_in_model[line_data[0]
+                                                            .Stiffener.get_beam_string()] /
+                                                            len(list(recorded_sections)))),
+                    'section cyl': 'black' if cyl_long_str is None else
+                    matplotlib.colors.rgb2hex(cmap_sections(cyl_sec_in_model[cyl_long_str] /
+                                                            len(list(recorded_cyl_sections)))),
+                    'structure type': matplotlib.colors.rgb2hex(
+                        cmap_sections(structure_type_unique.index(line_data[0].Plate.get_structure_type())
+                                      / len(structure_type_unique))),
+                    'pressure color': 'black' if all_pressures in [[0], [0, 1]] else matplotlib.colors.rgb2hex(
+                        cmap_sections(
+                            this_pressure / highest_pressure)),
+                    'pressure': this_pressure,
+                    'rp uf color': matplotlib.colors.rgb2hex(cmap_sections(rp_util)),
+                    'rp uf': rp_util,
+                    'PULS method': puls_method,
+                    'PULS sp or up': puls_sp_or_up,
+                    'section modulus color': matplotlib.colors.rgb2hex(
+                        cmap_sections(rec_for_color[line]['section modulus'])),
+                    'fatigue color': matplotlib.colors.rgb2hex(
+                        cmap_sections(rec_for_color[line]['fatigue'])),
+                    'Total uf color rp': matplotlib.colors.rgb2hex(
+                        cmap_sections(tot_uf_rp)),
+                    'Total uf rp': tot_uf_rp,
+                    'fatigue uf': rec_for_color[line]['fatigue'],
+                    'section uf': rec_for_color[line]['section modulus'],
+                    'sigma x': matplotlib.colors.rgb2hex(cmap_sections(sig_x_uf)),
+                    'sigma y1': matplotlib.colors.rgb2hex(cmap_sections(sig_y1_uf)),
+                    'sigma y2': matplotlib.colors.rgb2hex(cmap_sections(sig_y2_uf)),
+                    'tau xy': matplotlib.colors.rgb2hex(cmap_sections(tau_xy_uf)),
                     'cylinder uf': matplotlib.colors.rgb2hex(cmap_sections(cyl_uf)),
-                    'cylinder plate' :  matplotlib.colors.rgb2hex
-                    (cmap_sections(0 if cyl_thickness is None else all_cyl_thk.index(cyl_thickness)/len(all_cyl_thk)))
+                    'cylinder plate': matplotlib.colors.rgb2hex
+                    (cmap_sections(0 if cyl_thickness is None else all_cyl_thk.index(cyl_thickness) / len(all_cyl_thk)))
 
-                                           }
+                }
                 return_dict['color code']['lines'] = line_color_coding
 
                 # COG calculations
                 # Steel
                 tot_weight += return_dict['weights'][line]['line weight']
-                weight_mult_dist_x += return_dict['weights'][line]['line weight']\
-                                      *return_dict['weights'][line]['mid_coord'][0]
-                weight_mult_dist_y += return_dict['weights'][line]['line weight']\
-                                      *return_dict['weights'][line]['mid_coord'][1]
+                weight_mult_dist_x += return_dict['weights'][line]['line weight'] \
+                                      * return_dict['weights'][line]['mid_coord'][0]
+                weight_mult_dist_y += return_dict['weights'][line]['line weight'] \
+                                      * return_dict['weights'][line]['mid_coord'][1]
 
-            tot_cog = [weight_mult_dist_x/tot_weight, weight_mult_dist_y/tot_weight]
+            tot_cog = [weight_mult_dist_x / tot_weight, weight_mult_dist_y / tot_weight]
         else:
-            tot_cog = [0,0]
+            tot_cog = [0, 0]
             tot_weight = 0
 
         return_dict['COG'] = tot_cog
@@ -3508,23 +3900,47 @@ class Application():
 
                         elif self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                             color = 'red' if 'red' in state['colors'][line].values() else 'green'
-                        elif self._new_buckling_method.get() == 'ML-CL (PULS based)':
-                            if 'black' in state['ML buckling colors'][line].values():
+                        elif self._new_buckling_method.get() in [
+                            'ML-CL (PULS based)',
+                            'ML-Numeric (PULS based)',
+                        ]:
+                            ml_method = self._new_buckling_method.get()
+
+                            if ml_method == 'ML-CL (PULS based)':
+                                # Existing classification pipeline colors
+                                ml_color_dict = state.get('ML buckling colors', {}).get(line, {})
+                            else:
+                                # New numeric UF pipeline colors
+                                ml_color_dict = state.get('ML buckling numeric colors', {}).get(line, {})
+
+                                # Fallback to classification colors if numeric state is not available.
+                                # This avoids black lines if the numeric models are not loaded yet.
+                                if ml_color_dict == {}:
+                                    ml_color_dict = state.get('ML buckling colors', {}).get(line, {})
+
+                            if ml_color_dict == {}:
+                                color = 'black'
+                            elif 'black' in ml_color_dict.values():
                                 color = 'black'
                             else:
-                                col1, col2 = state['ML buckling colors'][line]['buckling'], \
-                                             state['ML buckling colors'][line]['ultimate']
+                                col_buc = ml_color_dict.get('buckling', 'black')
+                                col_ult = ml_color_dict.get('ultimate', 'black')
 
                                 if self._line_to_struc[line][0].Plate.get_puls_method() == 'buckling':
-                                    color = col1
+                                    color = col_buc
                                 else:
-                                    color = col2
+                                    color = col_ult
 
+                                # If the selected ML check is green, keep the existing
+                                # fatigue/section/shear/thickness checks as additional
+                                # requirements for the displayed line color.
                                 if color == 'green':
-                                    color = 'green' if all([state['colors'][line][key] == 'green' for key in
-                                                            ['fatigue', 'section', 'shear','thickness']]) else 'red'
+                                    color = 'green' if all([
+                                        state['colors'][line][key] == 'green'
+                                        for key in ['fatigue', 'section', 'shear', 'thickness']
+                                    ]) else 'red'
 
-                    except (KeyError, TypeError):
+                    except (KeyError, TypeError, AttributeError):
                         color = 'black'
                 elif chk_box_active and state != None and self._line_to_struc != {}:
                     color = self.color_code_line(state, line, coord1, [coord2[0] - coord1[0], coord2[1] - coord1[1]])
@@ -3866,9 +4282,42 @@ class Application():
 
         elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-CL (PULS based)':
             color = 'black'
+            this_text = 'N/A'
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                              text='N/A')
+                                              text=this_text)
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
+            numeric = state.get('ML buckling numeric', {}).get(line, {})
+            numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
+            numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
+
+            if numeric_valid.get('valid prediction', None) == 1:
+                puls_method = state['color code']['lines'][line].get('PULS method', None)
+
+                if puls_method == 'buckling':
+                    uf = numeric.get('buckling UF', float('inf'))
+                    color = numeric_colors.get('buckling', 'red')
+                    this_text = 'buc UF=' + str(round(uf, 3))
+                elif puls_method == 'ultimate':
+                    uf = numeric.get('ultimate UF', float('inf'))
+                    color = numeric_colors.get('ultimate', 'red')
+                    this_text = 'ult UF=' + str(round(uf, 3))
+                else:
+                    buc_uf = numeric.get('buckling UF', float('inf'))
+                    ult_uf = numeric.get('ultimate UF', float('inf'))
+                    uf = max(buc_uf, ult_uf)
+                    color = 'green' if all([
+                        numeric_colors.get('buckling', 'red') == 'green',
+                        numeric_colors.get('ultimate', 'red') == 'green'
+                    ]) else 'red'
+                    this_text = 'UF=' + str(round(uf, 3))
+            else:
+                color = 'red'
+                this_text = numeric_valid.get('valid label', 'invalid/NaN')
+
+            if self._new_label_color_coding.get():
+                self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
+                                              text=this_text)
 
         elif self._new_colorcode_sigmax.get() == True:
             if self._line_to_struc[line][5] is not None:
@@ -3981,6 +4430,28 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text='N/A')
+            elif self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
+                numeric = state.get('ML buckling numeric', {}).get(line, {})
+                numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
+                numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
+
+                if numeric_valid.get('valid prediction', None) == 1:
+                    buc_uf = numeric.get('buckling UF', float('inf'))
+                    ult_uf = numeric.get('ultimate UF', float('inf'))
+                    total_uf = max(buc_uf, ult_uf)
+
+                    color = 'green' if all([
+                        numeric_colors.get('buckling', 'red') == 'green',
+                        numeric_colors.get('ultimate', 'red') == 'green'
+                    ]) else 'red'
+                    this_text = 'max UF=' + str(round(total_uf, 3))
+                else:
+                    color = 'red'
+                    this_text = numeric_valid.get('valid label', 'invalid/NaN')
+
+                if self._new_label_color_coding.get():
+                    self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
+                                                  text=this_text)
 
         elif self._new_colorcode_puls_acceptance.get():
             if state['color code']['lines'][line]['PULS method'] == None:
@@ -4116,6 +4587,7 @@ class Application():
 
         else:
             pass
+
 
     @staticmethod
     def draw_cylinder(text_size = None, canvas = None, CylObj: CylinderAndCurvedPlate = None,
@@ -4451,40 +4923,95 @@ class Application():
                     #                            anchor='nw',fill=color_buckling)
 
 
-                elif self._new_buckling_method.get() == 'ML-CL (PULS based)':
+                elif self._new_buckling_method.get() in ['ML-CL (PULS based)', 'ML-Numeric (PULS based)']:
 
-                    self._result_canvas.create_text([x * 1, (y+(start_y+0)*dy) * 1],
-                                                    text='Buckling results ANYstructure ML algorithm:',
-                                                    font=self._text_size["Text 9 bold"], anchor='nw',
-                                                    fill = self._color_text)
-                    self._result_canvas.create_text([x * 1, (y+(start_y+1)*dy) * 1],
-                                                    text='Buckling: ' + state['ML buckling class'][current_line]['buckling'],
-                                                    font=self._text_size["Text 9 bold"],
-                                                    anchor='nw', fill=state['ML buckling colors'][current_line]['buckling'])
-                    self._result_canvas.create_text([x * 1, (y+(start_y+2)*dy) * 1],
-                                                    text='Ultimate: ' +state['ML buckling class'][current_line]['ultimate'],
-                                                    font=self._text_size["Text 9 bold"],
-                                                    anchor='nw', fill=state['ML buckling colors'][current_line]['ultimate'])
-                    if obj_scnt_calc_pl.get_puls_sp_or_up() == 'SP':
-                        csr = state['ML buckling class'][current_line]['CSR']
-                        csr_str = ['Ok' if csr[0] == 1 else 'Not ok', 'Ok' if csr[1] == 1 else 'Not ok',
-                                   'Ok' if csr[2] == 1 else 'Not ok', 'Ok' if csr[3] == 1 else 'Not ok']
-                        self._result_canvas.create_text([x * 1, (y+(start_y+3)*dy) * 1],
-                                                        text='CSR requirements (stiffener):  plate-'+ csr_str[0]+ ' web-'+
-                                                             csr_str[1] + ' web/flange ratio-'+ csr_str[2] +
-                                                             ' flange-'+ csr_str[3] ,
-                                                        font=self._text_size["Text 9"],
-                                                        anchor='nw',
-                                                        fill=state['ML buckling colors'][current_line]['CSR requirement'])
-                    else:
-                        csr = state['ML buckling class'][current_line]['CSR']
-                        csr_str = 'Ok' if csr[0] == 1 else 'Not ok'
-                        self._result_canvas.create_text([x * 1, (y+(start_y+3)*dy) * 1],
-                                                        text='CSR requirements (stiffener):  Plate slenderness -'+
-                                                             csr_str,
-                                                        font=self._text_size["Text 9"],
-                                                        anchor='nw',
-                                                        fill=state['ML buckling colors'][current_line]['CSR requirement'])
+                    print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
+                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
+
+                    self._result_canvas.create_text(
+                        [x * 1, (y + (start_y + 0) * dy) * 1],
+                        text='Buckling results ANYstructure ML algorithm:',
+                        font=self._text_size["Text 9 bold"],
+                        anchor='nw',
+                        fill=self._color_text,
+                    )
+
+                    line_offset = 1
+
+                    if print_class_results:
+                        self._result_canvas.create_text(
+                            [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                            text='Buckling class: ' + state['ML buckling class'][current_line]['buckling'],
+                            font=self._text_size["Text 9 bold"],
+                            anchor='nw',
+                            fill=state['ML buckling colors'][current_line]['buckling'],
+                        )
+                        line_offset += 1
+
+                        self._result_canvas.create_text(
+                            [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                            text='Ultimate class: ' + state['ML buckling class'][current_line]['ultimate'],
+                            font=self._text_size["Text 9 bold"],
+                            anchor='nw',
+                            fill=state['ML buckling colors'][current_line]['ultimate'],
+                        )
+                        line_offset += 1
+
+                    if print_numeric_results:
+                        numeric = state.get('ML buckling numeric', {}).get(current_line, None)
+                        numeric_valid = state.get('ML buckling numeric valid', {}).get(current_line, {})
+                        numeric_colors = state.get('ML buckling numeric colors', {}).get(current_line, {})
+
+                        if numeric is not None:
+                            numeric_is_valid = numeric_valid.get('valid prediction', None) == 1
+
+                            if numeric_is_valid:
+                                buckling_uf_txt = f"{numeric.get('buckling UF', float('inf')):.3f}"
+                                ultimate_uf_txt = f"{numeric.get('ultimate UF', float('inf')):.3f}"
+                            else:
+                                buckling_uf_txt = 'invalid/NaN'
+                                ultimate_uf_txt = 'invalid/NaN'
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Buckling UF numeric: ' + buckling_uf_txt,
+                                font=self._text_size["Text 9 bold"],
+                                anchor='nw',
+                                fill=numeric_colors.get('buckling', 'red'),
+                            )
+                            line_offset += 1
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Ultimate UF numeric: ' + ultimate_uf_txt,
+                                font=self._text_size["Text 9 bold"],
+                                anchor='nw',
+                                fill=numeric_colors.get('ultimate', 'red'),
+                            )
+                            line_offset += 1
+
+                            numeric_status = numeric_valid.get('valid label', '')
+                            if numeric.get('error', ''):
+                                numeric_status += ' | ' + numeric.get('error', '')
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Numeric UF status: ' + numeric_status,
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text if numeric_is_valid else 'red',
+                            )
+                            line_offset += 1
+
+                        else:
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Numeric UF: not available',
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text,
+                            )
+                            line_offset += 1
 
 
                 # fatigue results

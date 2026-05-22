@@ -18,22 +18,29 @@ class ModelFileSpec:
 
 
 BUCKLING_MODEL_SPECS = (
+    # -------------------------------------------------------------------------
+    # Classification pipeline - existing CLPIPE models
+    # -------------------------------------------------------------------------
     ModelFileSpec("cl SP buc int predictor", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_SP",)),
     ModelFileSpec("cl SP buc int scaler", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_SP",)),
     ModelFileSpec("cl SP ult int predictor", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_SP",)),
     ModelFileSpec("cl SP ult int scaler", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_SP",)),
+
     ModelFileSpec("cl SP buc GLGT predictor", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_SP",)),
     ModelFileSpec("cl SP buc GLGT scaler", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_SP",)),
     ModelFileSpec("cl SP ult GLGT predictor", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_SP",)),
     ModelFileSpec("cl SP ult GLGT scaler", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_SP",)),
+
     ModelFileSpec("cl UP buc int predictor", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_UP",)),
     ModelFileSpec("cl UP buc int scaler", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_UP",)),
     ModelFileSpec("cl UP ult int predictor", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_UP",)),
     ModelFileSpec("cl UP ult int scaler", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_UP",)),
+
     ModelFileSpec("cl UP buc GLGT predictor", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_UP",)),
     ModelFileSpec("cl UP buc GLGT scaler", ("ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_UP",)),
     ModelFileSpec("cl UP ult GLGT predictor", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_UP",)),
     ModelFileSpec("cl UP ult GLGT scaler", ("ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_UP",)),
+
     ModelFileSpec(
         "CSR predictor UP",
         (
@@ -61,6 +68,97 @@ BUCKLING_MODEL_SPECS = (
             "ml_files\\CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler_SP",
             "ml_files\\CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler",
         ),
+    ),
+
+    # -------------------------------------------------------------------------
+    # Numeric UF pipeline - validity classifier + two-output UF regressor
+    # -------------------------------------------------------------------------
+    # SP, integrated support
+    ModelFileSpec(
+        "num SP int validity predictor",
+        ("ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num SP int validity xscaler",
+        ("ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num SP int UF reg predictor",
+        ("ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num SP int UF reg xscaler",
+        ("ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num SP int UF reg yscaler",
+        ("ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_1",),
+    ),
+
+    # SP, GL/GT support
+    ModelFileSpec(
+        "num SP GLGT validity predictor",
+        ("ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num SP GLGT validity xscaler",
+        ("ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num SP GLGT UF reg predictor",
+        ("ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num SP GLGT UF reg xscaler",
+        ("ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num SP GLGT UF reg yscaler",
+        ("ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+
+    # UP, integrated support
+    ModelFileSpec(
+        "num UP int validity predictor",
+        ("ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num UP int validity xscaler",
+        ("ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num UP int UF reg predictor",
+        ("ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num UP int UF reg xscaler",
+        ("ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_1",),
+    ),
+    ModelFileSpec(
+        "num UP int UF reg yscaler",
+        ("ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_1",),
+    ),
+
+    # UP, GL/GT support
+    ModelFileSpec(
+        "num UP GLGT validity predictor",
+        ("ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num UP GLGT validity xscaler",
+        ("ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num UP GLGT UF reg predictor",
+        ("ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num UP GLGT UF reg xscaler",
+        ("ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3",),
+    ),
+    ModelFileSpec(
+        "num UP GLGT UF reg yscaler",
+        ("ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_2,_3",),
     ),
 )
 
