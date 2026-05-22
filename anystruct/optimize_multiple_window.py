@@ -27,12 +27,18 @@ except ModuleNotFoundError:
 
 
 def helper_harmonizer_multi(iterator):
-    '''
-    :param :
-    :return:
-    '''
+    """
+    Multiprocessing helper for harmonized optimization.
+
+    The ML result payload is selected from the active constraint:
+        chk[8] -> ML-CL result, expected [buckling_class, ultimate_class]
+        chk[9] -> ML-Numeric result, expected [buckling_uf, ultimate_uf, valid_prediction]
+    """
 
     this_check, master_x = list(), None
+    use_ml_numeric = len(iterator['info']['checks']) > 9 and iterator['info']['checks'][9]
+    use_ml_cl = len(iterator['info']['checks']) > 8 and iterator['info']['checks'][8]
+
     for slave_line in iterator['info']['lines']:
         lateral_press = iterator['info'][slave_line]['lateral pressure']
         fat_press = iterator['info'][slave_line]['fatigue pressure']
@@ -40,19 +46,38 @@ def helper_harmonizer_multi(iterator):
         slamming_pressure = iterator['info'][slave_line]['slamming pressure']
         chk_calc_obj = iterator['info'][slave_line]['chk_calc_obj']
         master_x = list(iterator['x'])
-        ml_cl = iterator['info'][slave_line]['ML-CL']
+
+        if use_ml_numeric:
+            ml_result = iterator['info'][slave_line].get('ML-Numeric', [float('inf'), float('inf'), 0])
+        elif use_ml_cl:
+            ml_result = iterator['info'][slave_line].get('ML-CL', [0, 0])
+        else:
+            ml_result = None
+
         fup = iterator['info'][slave_line]['fup']
         fdwn = iterator['info'][slave_line]['fdwn']
+
         if iterator['info']['keep spacing']:
             x = [chk_calc_obj.get_s()] + master_x[1:] + [chk_calc_obj.span, chk_calc_obj.girder_lg]
         else:
             x = master_x + [chk_calc_obj.span, chk_calc_obj.girder_lg]
 
-        chk_any = op.any_constraints_all(x=x, obj=chk_calc_obj, lat_press=lateral_press,
-                                         init_weight=float('inf'), side='p', chk=iterator['info']['checks'],
-                                         fat_dict=None if fat_obj == None else fat_obj.get_fatigue_properties(),
-                                         fat_press=fat_press, slamming_press=slamming_pressure,PULSrun=None,
-                                         print_result=False,fdwn=fdwn, fup=fup, ml_results=ml_cl)
+        chk_any = op.any_constraints_all(
+            x=x,
+            obj=chk_calc_obj,
+            lat_press=lateral_press,
+            init_weight=float('inf'),
+            side='p',
+            chk=iterator['info']['checks'],
+            fat_dict=None if fat_obj is None else fat_obj.get_fatigue_properties(),
+            fat_press=fat_press,
+            slamming_press=slamming_pressure,
+            PULSrun=None,
+            print_result=False,
+            fdwn=fdwn,
+            fup=fup,
+            ml_results=ml_result,
+        )
         this_check.append(chk_any[0])
 
     if all(this_check) and master_x is not None:
@@ -60,10 +85,12 @@ def helper_harmonizer_multi(iterator):
     else:
         return None
 
+
 class CreateOptimizeMultipleWindow():
     '''
     This class initiates the MultiOpt window.
     '''
+
     def __init__(self, master, app=None):
         super(CreateOptimizeMultipleWindow, self).__init__()
         if __name__ == '__main__':
@@ -79,7 +106,7 @@ class CreateOptimizeMultipleWindow():
             self._fatigue_pressure = test.get_fatigue_pressures()
             self._fatigue_object = test.get_fatigue_object()
             self._normal_pressure = test.get_random_pressure()
-            image_dir = os.path.dirname(__file__)+'\\images\\'
+            image_dir = os.path.dirname(__file__) + '\\images\\'
             self._active_lines = []
             self._ML_buckling = dict()  # Buckling machine learning algorithm
             for name, file_base in zip(['cl SP buc int predictor', 'cl SP buc int scaler',
@@ -111,13 +138,13 @@ class CreateOptimizeMultipleWindow():
                                         "CLPIPE_CL_CSR-Tank_req_cl_UP_scaler",
                                         "CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor",
                                         "CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_SP_scaler"]):
-                    self._ML_buckling[name] = None
-                    if os.path.isfile(file_base + '.pickle'):
-                        file = open(file_base + '.pickle', 'rb')
-                        from sklearn.neural_network import MLPClassifier
-                        from sklearn.preprocessing import StandardScaler
-                        self._ML_buckling[name] = pickle.load(file)
-                        file.close()
+                self._ML_buckling[name] = None
+                if os.path.isfile(file_base + '.pickle'):
+                    file = open(file_base + '.pickle', 'rb')
+                    from sklearn.neural_network import MLPClassifier
+                    from sklearn.preprocessing import StandardScaler
+                    self._ML_buckling[name] = pickle.load(file)
+                    file.close()
         else:
             self.app = app
             self._load_objects = app._load_dict
@@ -157,12 +184,10 @@ class CreateOptimizeMultipleWindow():
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=95)
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=135)
 
-
         algorithms = ('anysmart', 'random', 'random_no_delta')
 
         tk.Label(self._frame, text='-- Structural optimizer for multiple selections --',
                  font='Verdana 15 bold').place(x=10, y=10)
-
 
         # upper and lower bounds for optimization
         # [0.6, 0.012, 0.3, 0.01, 0.1, 0.01]
@@ -189,12 +214,12 @@ class CreateOptimizeMultipleWindow():
         self._new_delta_fl_w = tk.DoubleVar()
         self._new_delta_fl_thk = tk.DoubleVar()
         self._new_swarm_size = tk.IntVar()
-        self._new_omega  = tk.DoubleVar()
-        self._new_phip  = tk.DoubleVar()
-        self._new_phig  = tk.DoubleVar()
+        self._new_omega = tk.DoubleVar()
+        self._new_phip = tk.DoubleVar()
+        self._new_phig = tk.DoubleVar()
         self._new_maxiter = tk.IntVar()
-        self._new_minstep  = tk.DoubleVar()
-        self._new_minfunc  = tk.DoubleVar()
+        self._new_minstep = tk.DoubleVar()
+        self._new_minfunc = tk.DoubleVar()
 
         ent_w = 10
         self._ent_spacing_upper = tk.Entry(self._frame, textvariable=self._new_spacing_upper, width=ent_w)
@@ -211,7 +236,8 @@ class CreateOptimizeMultipleWindow():
         self._ent_fl_thk_lower = tk.Entry(self._frame, textvariable=self._new_fl_thk_lower, width=ent_w)
         self._ent_span = tk.Entry(self._frame, textvariable=self._new_span, width=ent_w)
         self._ent_width_lg = tk.Entry(self._frame, textvariable=self._new_width_lg, width=ent_w)
-        self._ent_algorithm = tk.OptionMenu(self._frame, self._new_algorithm, command=self.selected_algorithm, *algorithms)
+        self._ent_algorithm = tk.OptionMenu(self._frame, self._new_algorithm, command=self.selected_algorithm,
+                                            *algorithms)
         self._ent_random_trials = tk.Entry(self._frame, textvariable=self._new_algorithm_random_trials)
         self._ent_delta_spacing = tk.Entry(self._frame, textvariable=self._new_delta_spacing, width=ent_w)
         self._ent_delta_pl_thk = tk.Entry(self._frame, textvariable=self._new_delta_pl_thk, width=ent_w)
@@ -220,36 +246,34 @@ class CreateOptimizeMultipleWindow():
         self._ent_delta_fl_w = tk.Entry(self._frame, textvariable=self._new_delta_fl_w, width=ent_w)
         self._ent_delta_fl_thk = tk.Entry(self._frame, textvariable=self._new_delta_fl_thk, width=ent_w)
 
-
         pso_width = 10
-        self._ent_swarm_size = tk.Entry(self._frame,textvariable=self._new_swarm_size, width = pso_width)
-        self._ent_omega = tk.Entry(self._frame,textvariable=self._new_omega, width = pso_width)
-        self._ent_phip = tk.Entry(self._frame,textvariable=self._new_phip, width = pso_width)
-        self._ent_phig = tk.Entry(self._frame,textvariable=self._new_phig, width = pso_width)
-        self._ent_maxiter = tk.Entry(self._frame,textvariable=self._new_maxiter, width = pso_width)
-        self._ent_minstep = tk.Entry(self._frame,textvariable=self._new_minstep, width = pso_width)
-        self._ent_minfunc = tk.Entry(self._frame,textvariable=self._new_minfunc, width = pso_width)
+        self._ent_swarm_size = tk.Entry(self._frame, textvariable=self._new_swarm_size, width=pso_width)
+        self._ent_omega = tk.Entry(self._frame, textvariable=self._new_omega, width=pso_width)
+        self._ent_phip = tk.Entry(self._frame, textvariable=self._new_phip, width=pso_width)
+        self._ent_phig = tk.Entry(self._frame, textvariable=self._new_phig, width=pso_width)
+        self._ent_maxiter = tk.Entry(self._frame, textvariable=self._new_maxiter, width=pso_width)
+        self._ent_minstep = tk.Entry(self._frame, textvariable=self._new_minstep, width=pso_width)
+        self._ent_minfunc = tk.Entry(self._frame, textvariable=self._new_minfunc, width=pso_width)
 
         start_x, start_y, dx, dy = 20, 70, 100, 40
 
         self._new_processes = tk.IntVar()
         self._new_processes.set(max(cpu_count() - 1, 1))
-        tk.Label(self._frame, text='Processes\n (CPUs)', font='Verdana 9 bold', bg = 'silver')\
+        tk.Label(self._frame, text='Processes\n (CPUs)', font='Verdana 9 bold', bg='silver') \
             .place(x=start_x + 12.3 * dx, y=start_y - 0.2 * dy)
-        tk.Entry(self._frame, textvariable=self._new_processes, width = 12, bg = 'silver')\
-            .place(x=start_x + 12.3 * dx, y=start_y + 0.7* dy)
+        tk.Entry(self._frame, textvariable=self._new_processes, width=12, bg='silver') \
+            .place(x=start_x + 12.3 * dx, y=start_y + 0.7 * dy)
 
         self._prop_canvas_dim = (500, 450)
         self._draw_scale = 500
         self._canvas_opt = tk.Canvas(self._frame, width=self._prop_canvas_dim[0], height=self._prop_canvas_dim[1],
-                                    background='azure',relief='groove', borderwidth=2)
-        self._canvas_opt.place(x=start_x+10.5*dx, y=start_y+3.5*dy)
+                                     background='azure', relief='groove', borderwidth=2)
+        self._canvas_opt.place(x=start_x + 10.5 * dx, y=start_y + 3.5 * dy)
         self._select_canvas_dim = (1000, 720)
-        self._canvas_select = tk.Canvas(self._frame, width=self._select_canvas_dim[0], height=self._select_canvas_dim[1],
-                                       background='azure',relief='groove', borderwidth=2)
-        self._canvas_select.place(x=start_x+0*dx, y=start_y+3.5*dy)
-
-
+        self._canvas_select = tk.Canvas(self._frame, width=self._select_canvas_dim[0],
+                                        height=self._select_canvas_dim[1],
+                                        background='azure', relief='groove', borderwidth=2)
+        self._canvas_select.place(x=start_x + 0 * dx, y=start_y + 3.5 * dy)
 
         # Labels for the pso
         self._lb_swarm_size = tk.Label(self._frame, text='swarm size')
@@ -264,17 +288,17 @@ class CreateOptimizeMultipleWindow():
         tk.Label(self._frame, text='Iteration delta [mm]', font='Verdana 9').place(x=start_x, y=start_y + dy)
         tk.Label(self._frame, text='Lower bounds [mm]', font='Verdana 9').place(x=start_x, y=start_y + 2 * dy)
         tk.Label(self._frame, text='Spacing [mm]', font='Verdana 7 bold').place(x=start_x + 1.97 * dx,
-                                                                               y=start_y - 0.6 * dy)
-        tk.Label(self._frame, text='Plate thk. [mm]', font='Verdana 7 bold').place(x=start_x + 2.97 * dx,
-                                                                                  y=start_y - 0.6 * dy)
-        tk.Label(self._frame, text='Web height [mm]', font='Verdana 7 bold').place(x=start_x + 3.97 * dx,
-                                                                                  y=start_y - 0.6 * dy)
-        tk.Label(self._frame, text='Web thk. [mm]', font='Verdana 7 bold').place(x=start_x + 4.97 * dx,
                                                                                 y=start_y - 0.6 * dy)
-        tk.Label(self._frame, text='Flange width [mm]', font='Verdana 7 bold').place(x=start_x + 5.97 * dx,
-                                                                                    y=start_y - 0.6 * dy)
-        tk.Label(self._frame, text='Flange thk. [mm]', font='Verdana 7 bold').place(x=start_x + 6.97 * dx,
+        tk.Label(self._frame, text='Plate thk. [mm]', font='Verdana 7 bold').place(x=start_x + 2.97 * dx,
                                                                                    y=start_y - 0.6 * dy)
+        tk.Label(self._frame, text='Web height [mm]', font='Verdana 7 bold').place(x=start_x + 3.97 * dx,
+                                                                                   y=start_y - 0.6 * dy)
+        tk.Label(self._frame, text='Web thk. [mm]', font='Verdana 7 bold').place(x=start_x + 4.97 * dx,
+                                                                                 y=start_y - 0.6 * dy)
+        tk.Label(self._frame, text='Flange width [mm]', font='Verdana 7 bold').place(x=start_x + 5.97 * dx,
+                                                                                     y=start_y - 0.6 * dy)
+        tk.Label(self._frame, text='Flange thk. [mm]', font='Verdana 7 bold').place(x=start_x + 6.97 * dx,
+                                                                                    y=start_y - 0.6 * dy)
         tk.Label(self._frame, text='Estimated running time for algorithm: ',
                  font='Verdana 9 bold').place(x=start_x, y=start_y + 2.8 * dy)
         self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 9 bold')
@@ -334,9 +358,9 @@ class CreateOptimizeMultipleWindow():
         self._new_check_slamming = tk.BooleanVar()
         self._new_check_local_buckling = tk.BooleanVar()
         self._new_check_ml_buckling = tk.BooleanVar()
+        self._new_check_ml_numeric_buckling = tk.BooleanVar()
         self._new_harmonizer = tk.BooleanVar()
         self._keep_spacing = tk.BooleanVar()
-
 
         self._new_check_sec_mod.set(True)
         self._new_check_min_pl_thk.set(True)
@@ -348,6 +372,7 @@ class CreateOptimizeMultipleWindow():
         self._new_harmonizer.set(False)
         self._keep_spacing.set(False)
         self._new_check_ml_buckling.set(False)
+        self._new_check_ml_numeric_buckling.set(False)
 
         self._new_swarm_size.set(100)
         self._new_omega.set(0.5)
@@ -377,69 +402,69 @@ class CreateOptimizeMultipleWindow():
         self._new_fl_thk_lower.trace('w', self.update_running_time)
         self._new_algorithm_random_trials.trace('w', self.update_running_time)
         self._new_algorithm.trace('w', self.update_running_time)
-        self._keep_spacing.trace('w',self.trace_keep_spacing_check)
+        self._keep_spacing.trace('w', self.trace_keep_spacing_check)
         self._new_check_ml_buckling.trace('w', self.update_running_time)
+        self._new_check_ml_numeric_buckling.trace('w', self.update_running_time)
 
         self.running_time_per_item = 1.009943181818182e-5
         self._runnig_time_label.config(text=str(self.get_running_time()))
         tk.Label(self._frame, text='Select algorithm type --->', font='Verdana 8 bold').place(x=start_x + dx * 8,
-                                                                                   y=start_y + 1 * dy)
+                                                                                              y=start_y + 1 * dy)
         self._ent_algorithm.place(x=start_x + dx * 10, y=start_y + dy)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
         tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
-            .place(x=start_x + dx * 15, y=start_y + dy *-0.5)
+            .place(x=start_x + dx * 15, y=start_y + dy * -0.5)
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
                                     font='Verdana 10', fg='Yellow')
         self.run_button.place(x=start_x + dx * 8, y=start_y)
-        self.run_results = tk.Button(self._frame,text='show calculated', command=self.plot_results, bg='white',
-                                    font='Verdana 10',fg='black')
-        self.run_results.place(x=start_x+dx*8, y=start_y+dy*1.5)
+        self.run_results = tk.Button(self._frame, text='show calculated', command=self.plot_results, bg='white',
+                                     font='Verdana 10', fg='black')
+        self.run_results.place(x=start_x + dx * 8, y=start_y + dy * 1.5)
         self._opt_actual_running_time.place(x=start_x + dx * 8, y=start_y - dy * 1.5)
         self.close_and_save = tk.Button(self._frame, text='Return and replace with selected optimized structure',
                                         command=self.save_and_close, bg='green', font='Verdana 10 bold', fg='yellow')
         self.close_and_save.place(x=start_x + dx * 10, y=10)
 
         tk.Button(self._frame, text='Open predefined stiffeners example',
-                  command=self.open_example_file, bg='white', font='Verdana 10')\
-            .place(x=start_x+dx*15,y=10)
-
-
-
-
+                  command=self.open_example_file, bg='white', font='Verdana 10') \
+            .place(x=start_x + dx * 15, y=10)
 
         start_y, start_x, dy = 530, 100, 35
-        tk.Label(self._frame,text='Check for minimum section modulus').place(x=start_x+dx*9.7,y=start_y+4*dy)
-        tk.Label(self._frame, text='Check for minimum plate thk.').place(x=start_x+dx*9.7,y=start_y+5*dy)
-        tk.Label(self._frame, text='Check for minimum shear area').place(x=start_x+dx*9.7,y=start_y+6*dy)
-        tk.Label(self._frame, text='Check for buckling (RP-C201)').place(x=start_x+dx*9.7,y=start_y+7*dy)
+        tk.Label(self._frame, text='Check for minimum section modulus').place(x=start_x + dx * 9.7, y=start_y + 4 * dy)
+        tk.Label(self._frame, text='Check for minimum plate thk.').place(x=start_x + dx * 9.7, y=start_y + 5 * dy)
+        tk.Label(self._frame, text='Check for minimum shear area').place(x=start_x + dx * 9.7, y=start_y + 6 * dy)
+        tk.Label(self._frame, text='Check for buckling (RP-C201)').place(x=start_x + dx * 9.7, y=start_y + 7 * dy)
         tk.Label(self._frame, text='Check for fatigue (RP-C203)').place(x=start_x + dx * 9.7, y=start_y + 8 * dy)
         tk.Label(self._frame, text='Check for bow slamming').place(x=start_x + dx * 9.7, y=start_y + 9 * dy)
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
         tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 11 * dy)
+        tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
         tk.Label(self._frame, text='Check to harmonize results. Same stiffener and plate dimensions '
-                                   '(defined by largest in opt).', font='Verdana 10 bold')\
+                                   '(defined by largest in opt).', font='Verdana 10 bold') \
             .place(x=start_x + dx * +8.5, y=start_y - 10.5 * dy)
         tk.Label(self._frame, text='Check to skip iterating over spacing (respective line spacing used).',
-                 font='Verdana 10 bold')\
+                 font='Verdana 10 bold') \
             .place(x=start_x + dx * +8.5, y=start_y - 9.8 * dy)
 
-        tk.Checkbutton(self._frame,variable=self._new_check_sec_mod).place(x=start_x+dx*12,y=start_y+4*dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_min_pl_thk).place(x=start_x+dx*12,y=start_y+5*dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_shear_area).place(x=start_x+dx*12,y=start_y+6*dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling).place(x=start_x+dx*12,y=start_y+7*dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_sec_mod).place(x=start_x + dx * 12, y=start_y + 4 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_min_pl_thk).place(x=start_x + dx * 12, y=start_y + 5 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_shear_area).place(x=start_x + dx * 12, y=start_y + 6 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling).place(x=start_x + dx * 12, y=start_y + 7 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_fatigue).place(x=start_x + dx * 12, y=start_y + 8 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_slamming).place(x=start_x + dx * 12, y=start_y + 9 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_local_buckling).place(x=start_x + dx * 12,
                                                                                    y=start_y + 10 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_ml_buckling).place(x=start_x + dx * 12,
-                                                                                   y=start_y + 11 * dy)
+                                                                                y=start_y + 11 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_ml_numeric_buckling).place(x=start_x + dx * 12,
+                                                                                        y=start_y + 12 * dy)
         tk.Checkbutton(self._frame, variable=self._new_harmonizer).place(x=start_x + dx * 8, y=start_y - 10.5 * dy)
         tk.Checkbutton(self._frame, variable=self._keep_spacing).place(x=start_x + dx * +8, y=start_y - 9.8 * dy)
 
         self._toggle_btn = tk.Button(self._frame, text="Iterate predefiened stiffeners", relief="raised",
-                                     command=self.toggle, bg = 'salmon')
+                                     command=self.toggle, bg='salmon')
 
-        self._toggle_btn.place(x=start_x+dx*9, y=start_y - dy * 13)
+        self._toggle_btn.place(x=start_x + dx * 9, y=start_y - dy * 13)
         self._toggle_object, self._filez = None, None
 
         # Stress scaling
@@ -448,13 +473,13 @@ class CreateOptimizeMultipleWindow():
         self._new_fdwn = tk.DoubleVar()
         self._new_fdwn.set(1)
 
-        tk.Label(self._frame, text='Factor when scaling stresses up, fup')\
+        tk.Label(self._frame, text='Factor when scaling stresses up, fup') \
             .place(x=start_x + dx * 13, y=start_y + 5 * dy)
-        ent_fup = tk.Entry(self._frame, textvariable=self._new_fup, width = 10)
+        ent_fup = tk.Entry(self._frame, textvariable=self._new_fup, width=10)
         ent_fup.place(x=start_x + dx * 15.5, y=start_y + 5 * dy)
-        tk.Label(self._frame, text='Factor when scaling stresses up, fdown')\
+        tk.Label(self._frame, text='Factor when scaling stresses up, fdown') \
             .place(x=start_x + dx * 13, y=start_y + 6 * dy)
-        ent_fdwn = tk.Entry(self._frame, textvariable=self._new_fdwn, width = 10)
+        ent_fdwn = tk.Entry(self._frame, textvariable=self._new_fdwn, width=10)
         ent_fdwn.place(x=start_x + dx * 15.5, y=start_y + 6 * dy)
 
         self.draw_properties()
@@ -462,10 +487,9 @@ class CreateOptimizeMultipleWindow():
         # ----------------------------------END OF OPTIMIZE SINGLE COPY-----------------------------------------------
         self.progress_count = tk.IntVar()
         self.progress_count.set(0)
-        self.progress_bar = Progressbar(self._frame, orient="horizontal",length=200, mode="determinate",
+        self.progress_bar = Progressbar(self._frame, orient="horizontal", length=200, mode="determinate",
                                         variable=self.progress_count)
-        self.progress_bar.place(x=start_x+dx*10.5,y=start_y-dy*11.5)
-
+        self.progress_bar.place(x=start_x + dx * 10.5, y=start_y - dy * 11.5)
 
         self.controls()
         self.draw_select_canvas()
@@ -476,7 +500,6 @@ class CreateOptimizeMultipleWindow():
             self._ent_spacing_lower.configure({"background": "red"})
             self._ent_delta_spacing.configure({"background": "red"})
             self._ent_spacing_upper.configure({"background": "red"})
-
 
     def selected_algorithm(self, event):
         '''
@@ -528,23 +551,23 @@ class CreateOptimizeMultipleWindow():
             self._ent_random_trials.place_forget()
             start_x = 150
 
-            self._lb_swarm_size.place(x=start_x + dx*11 , y=start_y - 1 * dy)
-            self._lb_omega.place(x=start_x + dx*11 , y=start_y - 0 * dy)
-            self._lb_phip.place(x=start_x + dx*11 , y=start_y + 1 * dy)
-            self._lb_phig.place(x=start_x + dx*11 , y=start_y + 2 * dy)
+            self._lb_swarm_size.place(x=start_x + dx * 11, y=start_y - 1 * dy)
+            self._lb_omega.place(x=start_x + dx * 11, y=start_y - 0 * dy)
+            self._lb_phip.place(x=start_x + dx * 11, y=start_y + 1 * dy)
+            self._lb_phig.place(x=start_x + dx * 11, y=start_y + 2 * dy)
 
-            self._lb_maxiter.place(x=start_x + dx*14 , y=start_y - 1 * dy)
-            self._lb_minstep.place(x=start_x + dx*14, y=start_y + 0 * dy)
-            self._lb_minfunc.place(x=start_x + dx*14, y=start_y + 1 * dy)
+            self._lb_maxiter.place(x=start_x + dx * 14, y=start_y - 1 * dy)
+            self._lb_minstep.place(x=start_x + dx * 14, y=start_y + 0 * dy)
+            self._lb_minfunc.place(x=start_x + dx * 14, y=start_y + 1 * dy)
 
-            self._ent_swarm_size.place(x=start_x + dx*12 , y=start_y - 1 * dy)
-            self._ent_omega.place(x=start_x + dx*12 , y=start_y - 0 * dy)
-            self._ent_phip.place(x=start_x + dx*12 , y=start_y + 1 * dy)
-            self._ent_phig.place(x=start_x + dx*12 , y=start_y + 2 * dy)
+            self._ent_swarm_size.place(x=start_x + dx * 12, y=start_y - 1 * dy)
+            self._ent_omega.place(x=start_x + dx * 12, y=start_y - 0 * dy)
+            self._ent_phip.place(x=start_x + dx * 12, y=start_y + 1 * dy)
+            self._ent_phig.place(x=start_x + dx * 12, y=start_y + 2 * dy)
 
-            self._ent_maxiter.place(x=start_x + dx*15 , y=start_y - 1 * dy)
-            self._ent_minstep.place(x=start_x + dx*15, y=start_y + 0 * dy)
-            self._ent_minfunc.place(x=start_x + dx*15, y=start_y + 1 * dy)
+            self._ent_maxiter.place(x=start_x + dx * 15, y=start_y - 1 * dy)
+            self._ent_minstep.place(x=start_x + dx * 15, y=start_y + 0 * dy)
+            self._ent_minfunc.place(x=start_x + dx * 15, y=start_y + 1 * dy)
 
     def get_pressure_input(self, line):
         if __name__ == '__main__':
@@ -585,24 +608,25 @@ class CreateOptimizeMultipleWindow():
         Function when pressing the optimization botton inside this window.
         :return:
         '''
-        self.run_button.config(bg = 'white')
+        self.run_button.config(bg='white')
         self._opt_results = {}
         t_start = time.time()
 
         self.progress_bar.config(maximum=len(self._active_lines))
         self._opt_actual_running_time.config(text='')
-        
+
         contraints = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                      self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(), False)
-        
-        self.pso_parameters = (self._new_swarm_size.get(),self._new_omega.get(),self._new_phip.get(),
-                               self._new_phig.get(),self._new_maxiter.get(),self._new_minstep.get(),
+                      self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(),
+                      self._new_check_ml_numeric_buckling.get())
+
+        self.pso_parameters = (self._new_swarm_size.get(), self._new_omega.get(), self._new_phip.get(),
+                               self._new_phig.get(), self._new_maxiter.get(), self._new_minstep.get(),
                                self._new_minfunc.get())
 
         max_min_span = None
-        
+
         self.progress_count.set(0)
         counter = 0
         found_files = self._filez
@@ -610,7 +634,7 @@ class CreateOptimizeMultipleWindow():
             init_obj = self._line_structure(line)
 
             if __name__ == '__main__':
-                lateral_press = 200 #for testing
+                lateral_press = 200  # for testing
                 fat_obj = test.get_fatigue_object()
                 fat_press = test.get_fatigue_pressures()
                 slamming_pressure = test.get_slamming_pressure()
@@ -627,27 +651,27 @@ class CreateOptimizeMultipleWindow():
                 fat_obj = input_pressures['fatigue object']
 
             if self._toggle_btn.config('relief')[-1] == 'sunken':
-                found_files, predefined_stiffener_iter = self.toggle(found_files=found_files, obj = init_obj,
+                found_files, predefined_stiffener_iter = self.toggle(found_files=found_files, obj=init_obj,
                                                                      iterating=True)
             else:
                 predefined_stiffener_iter = None
 
             self._opt_results[line] = list(op.run_optmizataion(init_obj, self.get_lower_bounds(init_obj),
-                                                          self.get_upper_bounds(init_obj),
-                                                          lateral_press,self.get_deltas(),
-                                                          algorithm=self._new_algorithm.get(),
-                                                          trials=self._new_algorithm_random_trials.get(),
-                                                          side=init_obj.Plate.get_side(),
-                                                          const_chk=contraints,
-                                                          pso_options=self.pso_parameters,
-                                                          fatigue_obj=fat_obj,
-                                                          fat_press_ext_int=fat_press,
-                                                          slamming_press=slamming_pressure,
-                                                          predefined_stiffener_iter = predefined_stiffener_iter,
-                                                          processes=self._new_processes.get(),
-                                                          min_max_span=max_min_span, use_weight_filter=False,
-                                                           fdwn = self._new_fdwn.get(), fup = self._new_fdwn.get(),
-                                                           ml_algo=self._ML_buckling))
+                                                               self.get_upper_bounds(init_obj),
+                                                               lateral_press, self.get_deltas(),
+                                                               algorithm=self._new_algorithm.get(),
+                                                               trials=self._new_algorithm_random_trials.get(),
+                                                               side=init_obj.Plate.get_side(),
+                                                               const_chk=contraints,
+                                                               pso_options=self.pso_parameters,
+                                                               fatigue_obj=fat_obj,
+                                                               fat_press_ext_int=fat_press,
+                                                               slamming_press=slamming_pressure,
+                                                               predefined_stiffener_iter=predefined_stiffener_iter,
+                                                               processes=self._new_processes.get(),
+                                                               min_max_span=max_min_span, use_weight_filter=False,
+                                                               fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
+                                                               ml_algo=self._get_selected_ml_algo()))
             self._harmonizer_data[line] = {}
             counter += 1
             self.progress_count.set(counter)
@@ -655,7 +679,7 @@ class CreateOptimizeMultipleWindow():
 
             if self._opt_results[line] != None:
                 self._opt_actual_running_time.config(text='Accumulated running time: \n'
-                                                         + str(time.time() - t_start) + ' sec')
+                                                          + str(time.time() - t_start) + ' sec')
             #     print('Runned', line, 'OK')
             # else:
             #     print('Runned', line, 'NOT OK - no results')
@@ -685,7 +709,7 @@ class CreateOptimizeMultipleWindow():
                     # except TypeError:
                     #     [print(val) for val in fail_ok[2]]
 
-                    all_ok_checks.append(tuple([round(val,10) for val in fail_ok[2][0:6]]))
+                    all_ok_checks.append(tuple([round(val, 10) for val in fail_ok[2][0:6]]))
         all_ok_checks = set(all_ok_checks)
 
         # make iterator for multiprocessing
@@ -693,15 +717,17 @@ class CreateOptimizeMultipleWindow():
         to_check = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                     self._new_check_shear_area.get(), self._new_check_buckling.get(),
                     self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                    self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(), False)
+                    self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(),
+                    self._new_check_ml_numeric_buckling.get())
         iter_run_info = dict()
         for slave_line in self._opt_results.keys():
             input_pressures = self.get_pressure_input(slave_line)
             iter_run_info[slave_line] = {'lateral pressure': input_pressures['lateral pressure'],
                                          'fatigue pressure': input_pressures['fatigue pressure'],
-                                         'fatigue object':input_pressures['fatigue object'],
-                                         'slamming pressure':input_pressures['slamming pressure'],
-                                         'chk_calc_obj': self._opt_results[slave_line][0], 'ML-CL': [0,0],
+                                         'fatigue object': input_pressures['fatigue object'],
+                                         'slamming pressure': input_pressures['slamming pressure'],
+                                         'chk_calc_obj': self._opt_results[slave_line][0], 'ML-CL': [0, 0],
+                                         'ML-Numeric': [float('inf'), float('inf'), 0],
                                          'fup': self._new_fup.get(), 'fdwn': self._new_fdwn.get()}
         iter_run_info['lines'] = list(self._opt_results.keys())
         iter_run_info['checks'] = to_check
@@ -710,100 +736,69 @@ class CreateOptimizeMultipleWindow():
         for x_check in all_ok_checks:
             iterator.append({'x': x_check, 'info': iter_run_info})
 
-        if to_check[8]:
-            # Do ML-CL checks
+        if to_check[8] or to_check[9]:
+            # Do ML-CL or ML-Numeric checks for harmonized candidates
             to_run = list()
+            to_run_owner = list()
+
             for x_and_info in iterator:
                 for slave_line in x_and_info['info']['lines']:
                     iter_run_info = x_and_info['info']
                     lateral_press = iter_run_info[slave_line]['lateral pressure']
-                    fat_press = iter_run_info[slave_line]['fatigue pressure']
                     fat_obj = iter_run_info[slave_line]['fatigue object']
-                    slamming_pressure = iter_run_info[slave_line]['slamming pressure']
                     chk_calc_obj = iter_run_info[slave_line]['chk_calc_obj']
                     master_x = list(x_and_info['x'])
+
                     if iter_run_info['keep spacing']:
-                        x = [chk_calc_obj.Plate.get_s()] + master_x[1:] + [chk_calc_obj.Plate.span, chk_calc_obj.Plate.girder_lg]
+                        x = [chk_calc_obj.Plate.get_s()] + master_x[1:] + [
+                            chk_calc_obj.Plate.span,
+                            chk_calc_obj.Plate.girder_lg,
+                        ]
                     else:
                         x = master_x + [chk_calc_obj.Plate.span, chk_calc_obj.Plate.girder_lg]
-                    fdwn = self._new_fdwn.get()
-                    fup = self._new_fdwn.get()
-                    calc_object = op.create_new_calc_obj(chk_calc_obj, x, fat_obj.get_fatigue_properties(), fdwn=fdwn,
-                                                         fup=fup)
 
-                    calc_object_stf = op.create_new_calc_obj(chk_calc_obj.Stiffener, x,
-                                                             fat_obj.get_fatigue_properties(), fdwn=fdwn, fup=fup)
-                    calc_object_pl = op.create_new_calc_obj(chk_calc_obj.Plate, x, fat_obj.get_fatigue_properties(),
-                                                            fdwn=fdwn, fup=fup)
-                    calc_object = [calc.AllStructure(Plate=calc_object_pl[0], Stiffener=calc_object_stf[0], Girder=None,
-                                                     main_dict=chk_calc_obj.get_main_properties()['main dict']),
-                                   calc_object_pl[1]]
+                    fdwn = self._new_fdwn.get()
+                    fup = self._new_fup.get()
+
+                    calc_object_stf = op.create_new_calc_obj(
+                        chk_calc_obj.Stiffener,
+                        x,
+                        None if fat_obj is None else fat_obj.get_fatigue_properties(),
+                        fdwn=fdwn,
+                        fup=fup,
+                    )
+                    calc_object_pl = op.create_new_calc_obj(
+                        chk_calc_obj.Plate,
+                        x,
+                        None if fat_obj is None else fat_obj.get_fatigue_properties(),
+                        fdwn=fdwn,
+                        fup=fup,
+                    )
+                    calc_object = [
+                        calc.AllStructure(
+                            Plate=calc_object_pl[0],
+                            Stiffener=None if chk_calc_obj.Stiffener is None else calc_object_stf[0],
+                            Girder=None,
+                            main_dict=chk_calc_obj.get_main_properties()['main dict'],
+                        ),
+                        calc_object_pl[1],
+                    ]
                     calc_object[0].lat_press = lateral_press
 
+                    to_run_owner.append((x_and_info, slave_line))
                     to_run.append((calc_object, x, lateral_press))
 
-            # ML-CL to be used.
-            sp_int, sp_gl_gt, up_int, up_gl_gt, \
-            sp_int_idx, sp_gl_gt_idx, up_int_idx, up_gl_gt_idx = \
-                list(), list(), list(), list(), list(), list(), list(), list()
+            if to_check[8]:
+                sort_again = self._predict_ml_cl_for_to_run(to_run)
+                result_key = 'ML-CL'
+            else:
+                sort_again = self._predict_ml_numeric_for_to_run(to_run)
+                result_key = 'ML-Numeric'
 
-            # Create iterator
-            idx_count = 0
-            for calc_object, x, lat_press in to_run:
-                idx_count += 1
+            for idx, (x_and_info, slave_line) in enumerate(to_run_owner):
+                x_and_info['info'][slave_line][result_key] = sort_again[idx]
 
-                if calc_object[0].Plate.get_puls_sp_or_up() == 'UP':
-                    if calc_object[0].Plate.get_puls_boundary() == 'Int':
-                        up_int.append(calc_object[0].Stiffener.get_buckling_ml_input(lat_press, alone=False))
-                        up_int_idx.append(idx_count-1)
-                    else:
-                        up_gl_gt_idx.append(idx_count-1)
-                else:
-                    if calc_object[0].Stiffener.get_puls_boundary() == 'Int':
-                        sp_int.append(calc_object[0].Stiffener.get_buckling_ml_input(lat_press, alone=False))
-                        sp_int_idx.append(idx_count-1)
-                    else:
-                        sp_gl_gt.append(calc_object[0].Stiffener.get_buckling_ml_input(lat_press, alone=False))
-                        sp_gl_gt_idx.append(idx_count-1)
-
-            # Predict
-            sort_again = np.zeros([len(to_run), 2])
-
-            if len(sp_int) != 0:
-                sp_int_res = [self._ML_buckling['cl SP buc int predictor'].predict(self._ML_buckling['cl SP buc int scaler']
-                                                                         .transform(sp_int)),
-                              self._ML_buckling['cl SP ult int predictor'].predict(self._ML_buckling['cl SP buc int scaler']
-                                                                         .transform(sp_int))]
-                for idx, res_buc, res_ult in zip(sp_int_idx, sp_int_res[0], sp_int_res[1]):
-                    sort_again[idx] = [res_buc, res_ult]
-
-            if len(sp_gl_gt) != 0:
-                sp_gl_gt_res = [self._ML_buckling['cl SP buc GLGT predictor'].predict(self._ML_buckling['cl SP buc GLGT scaler']
-                                                                            .transform(sp_gl_gt)),
-                                self._ML_buckling['cl SP buc GLGT predictor'].predict(self._ML_buckling['cl SP buc GLGT scaler']
-                                                                            .transform(sp_gl_gt))]
-                for idx, res_buc, res_ult in zip(sp_gl_gt_idx, sp_gl_gt_res[0], sp_gl_gt_res[1]):
-                    sort_again[idx] = [res_buc, res_ult]
-            if len(up_int) != 0:
-                up_int_res = [self._ML_buckling['cl UP buc int predictor'].predict(self._ML_buckling['cl UP buc int scaler']
-                                                                         .transform(up_int)),
-                              self._ML_buckling['cl UP ult int predictor'].predict(self._ML_buckling['cl UP buc int scaler']
-                                                                         .transform(up_int))]
-                for idx, res_buc, res_ult in zip(up_int_idx, up_int_res[0], up_int_res[1]):
-                    sort_again[idx] = [res_buc, res_ult]
-            if len(up_gl_gt) != 0:
-                up_gl_gt_res = [self._ML_buckling['cl UP buc GLGT predictor'].predict(self._ML_buckling['cl UP buc GLGT scaler']
-                                                                            .transform(up_gl_gt)),
-                                self._ML_buckling['cl UP buc GLGT predictor'].predict(self._ML_buckling['cl UP buc GLGT scaler']
-                                                                            .transform(up_gl_gt))]
-                for idx, res_buc, res_ult in zip(up_gl_gt_idx, up_gl_gt_res[0], up_gl_gt_res[1]):
-                    sort_again[idx] = [res_buc, res_ult]
-
-            for idx, x_and_info in enumerate(iterator):
-                for slave_line in x_and_info['info']['lines']:
-                    iterator[idx]['info'][slave_line]['ML-CL'] = sort_again[idx]
-
-        # END ML-CL calc
+        # END ML calc
 
         processes = max(cpu_count() - 1, 1)
         with Pool(processes) as my_process:
@@ -814,9 +809,9 @@ class CreateOptimizeMultipleWindow():
             if res is not None:
                 after_multirun_check_ok.append(res)
 
-        lowest_area, lowest_x  = float('inf'), None
+        lowest_area, lowest_x = float('inf'), None
         for ok_chkd in set(after_multirun_check_ok):
-            if sum(op.get_field_tot_area(ok_chkd )) < lowest_area:
+            if sum(op.get_field_tot_area(ok_chkd)) < lowest_area:
                 lowest_area = sum(op.get_field_tot_area(ok_chkd))
                 lowest_x = ok_chkd
 
@@ -833,10 +828,11 @@ class CreateOptimizeMultipleWindow():
                 calc_object_stf = op.create_new_calc_obj(line_structure_obj.Plate, this_x,
                                                          fat_obj.get_fatigue_properties(), fdwn=fdwn, fup=fup)
                 calc_object_pl = op.create_new_calc_obj(line_structure_obj.Stiffener, this_x,
-                                                         fat_obj.get_fatigue_properties(), fdwn=fdwn, fup=fup)
-                self._opt_results[line][0] = [calc.AllStructure(Plate=calc_object_pl[0], Stiffener=calc_object_stf[0], Girder=None,
-                                                 main_dict=chk_calc_obj.get_main_properties()['main dict']),
-                               calc_object_pl[1]]
+                                                        fat_obj.get_fatigue_properties(), fdwn=fdwn, fup=fup)
+                self._opt_results[line][0] = [
+                    calc.AllStructure(Plate=calc_object_pl[0], Stiffener=calc_object_stf[0], Girder=None,
+                                      main_dict=chk_calc_obj.get_main_properties()['main dict']),
+                    calc_object_pl[1]]
 
                 self._update_harmonized_fatigue_result(line, this_x)
             return True
@@ -853,17 +849,17 @@ class CreateOptimizeMultipleWindow():
         '''
 
         # Find highest section modulus.
-        harm_res= {}
+        harm_res = {}
         chk = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
-                      self._new_check_shear_area.get(), self._new_check_buckling.get(),
-                      self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                      self._new_check_local_buckling.get())
+               self._new_check_shear_area.get(), self._new_check_buckling.get(),
+               self._new_check_fatigue.get(), self._new_check_slamming.get(),
+               self._new_check_local_buckling.get())
         for master_line in self._opt_results.keys():
             master_obj = self._opt_results[master_line][0]
             master_x = [master_obj.Plate.get_s(), master_obj.Plate.get_pl_thk(), master_obj.Stiffener.get_web_h(),
                         master_obj.Stiffener.get_web_thk(), master_obj.Stiffener.get_fl_w(),
                         master_obj.Stiffener.get_fl_thk(),
-                        master_obj.Plate.span,master_obj.Plate.girder_lg]
+                        master_obj.Plate.span, master_obj.Plate.girder_lg]
             harm_res[master_line] = []
             for slave_line in self._opt_results.keys():
                 input_pressures = self.get_pressure_input(slave_line)
@@ -874,31 +870,33 @@ class CreateOptimizeMultipleWindow():
                 chk_calc_obj = self._opt_results[slave_line][1]
 
                 chk_result = list(op.run_optmizataion(chk_calc_obj,
-                                                      master_x[0:6]+[chk_calc_obj.Plate.span,
-                                                                     chk_calc_obj.Plate.girder_lg],
-                                                      master_x[0:6]+[chk_calc_obj.Plate.span,
-                                                                     chk_calc_obj.Plate.girder_lg],
-                                                      lateral_press,self.get_deltas(),
+                                                      master_x[0:6] + [chk_calc_obj.Plate.span,
+                                                                       chk_calc_obj.Plate.girder_lg],
+                                                      master_x[0:6] + [chk_calc_obj.Plate.span,
+                                                                       chk_calc_obj.Plate.girder_lg],
+                                                      lateral_press, self.get_deltas(),
                                                       algorithm=self._new_algorithm.get(),
                                                       trials=self._new_algorithm_random_trials.get(),
                                                       side=chk_calc_obj.Plate.get_side(), const_chk=chk,
-                                                      pso_options=self.pso_parameters,fatigue_obj=fat_obj,
+                                                      pso_options=self.pso_parameters, fatigue_obj=fat_obj,
                                                       fat_press_ext_int=fat_press, slamming_press=slamming_pressure,
-                                                      predefined_stiffener_iter = None,
+                                                      predefined_stiffener_iter=None,
                                                       processes=self._new_processes.get(), min_max_span=None,
                                                       use_weight_filter=True,
-                                                      fdwn = self._new_fdwn.get(), fup = self._new_fdwn.get()))[0:4]
+                                                      fdwn=self._new_fdwn.get(), fup=self._new_fup.get()))[0:4]
                 print('Master:', master_line, 'Slave', slave_line, 'Check', chk_result[-1])
                 harm_res[master_line].append(chk_result)
 
-        harmonized_area, harmonized_line =float('inf'), None
+        harmonized_area, harmonized_line = float('inf'), None
         for master_line, all_slave_res in harm_res.items():
             if all([slave_line_res[-1] for slave_line_res in all_slave_res]):
                 master_obj = self._opt_results[master_line][0]
                 master_area = sum(op.get_field_tot_area([master_obj.Plate.get_s(), master_obj.Plate.get_pl_thk(),
-                                                         master_obj.Stiffener.get_web_h(), master_obj.Stiffener.get_web_thk(),
-                                                         master_obj.Stiffener.get_fl_w(), master_obj.Stiffener.get_fl_thk(),
-                                                         master_obj.Plate.span,master_obj.Plate.girder_lg]))
+                                                         master_obj.Stiffener.get_web_h(),
+                                                         master_obj.Stiffener.get_web_thk(),
+                                                         master_obj.Stiffener.get_fl_w(),
+                                                         master_obj.Stiffener.get_fl_thk(),
+                                                         master_obj.Plate.span, master_obj.Plate.girder_lg]))
                 if master_area < harmonized_area:
                     harmonized_area = master_area
                     harmonized_line = master_line
@@ -912,10 +910,12 @@ class CreateOptimizeMultipleWindow():
                 self._opt_results[line][0] = opt.create_new_structure_obj(line_structure_obj, harmonized_x)
 
                 calc_object_stf = op.create_new_calc_obj(line_structure_obj.Plate, harmonized_x)
-                calc_object_pl = op.create_new_calc_obj(line_structure_obj.Stiffener,harmonized_x)
+                calc_object_pl = op.create_new_calc_obj(line_structure_obj.Stiffener, harmonized_x)
                 self._opt_results[line][0] = [calc.AllStructure(Plate=calc_object_pl[0], Stiffener=calc_object_stf[0],
-                                                                Girder=None, main_dict=chk_calc_obj.get_main_properties()['main dict']),
-                               calc_object_pl[1]]
+                                                                Girder=None,
+                                                                main_dict=chk_calc_obj.get_main_properties()[
+                                                                    'main dict']),
+                                              calc_object_pl[1]]
 
                 self._update_harmonized_fatigue_result(line, harmonized_x)
             return True
@@ -935,18 +935,20 @@ class CreateOptimizeMultipleWindow():
                 number_of_combinations = \
                     max((self._new_spacing_upper.get() - self._new_spacing_lower.get()) / self._new_delta_spacing.get(),
                         1) * \
-                    max((self._new_pl_thk_upper.get() - self._new_pl_thk_lower.get()) / self._new_delta_pl_thk.get(), 1) * \
+                    max((self._new_pl_thk_upper.get() - self._new_pl_thk_lower.get()) / self._new_delta_pl_thk.get(),
+                        1) * \
                     max((self._new_web_h_upper.get() - self._new_web_h_lower.get()) / self._new_delta_web_h.get(), 1) * \
                     max((self._new_web_thk_upper.get() - self._new_web_thk_lower.get()) / self._new_delta_web_thk.get(),
                         1) * \
                     max((self._new_fl_w_upper.get() - self._new_fl_w_lower.get()) / self._new_delta_fl_w.get(), 1) * \
                     max((self._new_fl_thk_upper.get() - self._new_fl_thk_lower.get()) / self._new_delta_fl_thk.get(), 1)
-                return int(number_of_combinations * self.running_time_per_item)*len(self._active_lines)
+                return int(number_of_combinations * self.running_time_per_item) * len(self._active_lines)
             except TclError:
                 return 0
         else:
             try:
-                return int(self._new_algorithm_random_trials.get() * self.running_time_per_item)*len(self._active_lines)
+                return int(self._new_algorithm_random_trials.get() * self.running_time_per_item) * len(
+                    self._active_lines)
             except TclError:
                 return 0
 
@@ -959,19 +961,245 @@ class CreateOptimizeMultipleWindow():
                          float(self._new_delta_web_h.get()) / 1000, float(self._new_delta_web_thk.get()) / 1000,
                          float(self._new_delta_fl_w.get()) / 1000, float(self._new_delta_fl_thk.get()) / 1000])
 
+    def _get_selected_material_factor(self):
+        """
+        Return selected material factor from the main application when available.
+        Fallback is the material factor on the first selected line, and then 1.15.
+        """
+        try:
+            return float(self.app._new_material_factor.get())
+        except Exception:
+            pass
 
+        try:
+            if len(self._active_lines) > 0:
+                first_line = self._active_lines[0]
+                return float(self._line_structure(first_line).Plate.mat_factor)
+        except Exception:
+            pass
+
+        return 1.15
+
+    def _get_selected_ml_algo(self):
+        """
+        Return ML model dictionary for the selected material factor.
+
+        Main app usually stores:
+            self._ML_buckling[1.10][key]
+            self._ML_buckling[1.15][key]
+
+        Standalone/test mode may store a flat dictionary:
+            self._ML_buckling[key]
+        """
+        mat_fac = self._get_selected_material_factor()
+
+        try:
+            if mat_fac in self._ML_buckling:
+                return self._ML_buckling[mat_fac]
+        except Exception:
+            pass
+
+        return self._ML_buckling
+
+    def _get_ml_input_for_calc_object(self, calc_object, lat_press):
+        """
+        Return the correct ML input row for SP/UP candidate objects.
+        """
+        if calc_object[0].Plate.get_puls_sp_or_up() == 'UP' or calc_object[0].Stiffener is None:
+            return calc_object[0].Plate.get_buckling_ml_input(lat_press, alone=False)
+
+        return calc_object[0].Stiffener.get_buckling_ml_input(lat_press, alone=False)
+
+    def _predict_ml_cl_for_to_run(self, to_run):
+        """
+        Predict ML-CL class results for harmonizer candidate objects.
+
+        Returns
+        -------
+        np.ndarray
+            shape = (len(to_run), 2)
+            columns = [buckling_class, ultimate_class]
+        """
+        ml_algo = self._get_selected_ml_algo()
+
+        sp_int, sp_gl_gt, up_int, up_gl_gt = list(), list(), list(), list()
+        sp_int_idx, sp_gl_gt_idx, up_int_idx, up_gl_gt_idx = list(), list(), list(), list()
+
+        for idx, (calc_object, x, lat_press) in enumerate(to_run):
+            ml_input = self._get_ml_input_for_calc_object(calc_object, lat_press)
+
+            if calc_object[0].Plate.get_puls_sp_or_up() == 'UP':
+                if calc_object[0].Plate.get_puls_boundary() == 'Int':
+                    up_int.append(ml_input)
+                    up_int_idx.append(idx)
+                else:
+                    up_gl_gt.append(ml_input)
+                    up_gl_gt_idx.append(idx)
+            else:
+                if calc_object[0].Stiffener.get_puls_boundary() == 'Int':
+                    sp_int.append(ml_input)
+                    sp_int_idx.append(idx)
+                else:
+                    sp_gl_gt.append(ml_input)
+                    sp_gl_gt_idx.append(idx)
+
+        sort_again = np.zeros([len(to_run), 2])
+
+        if len(sp_int) != 0:
+            x_buc = ml_algo['cl SP buc int scaler'].transform(sp_int)
+            x_ult = ml_algo['cl SP ult int scaler'].transform(sp_int)
+            sp_int_res = [
+                ml_algo['cl SP buc int predictor'].predict(x_buc),
+                ml_algo['cl SP ult int predictor'].predict(x_ult),
+            ]
+            for idx, res_buc, res_ult in zip(sp_int_idx, sp_int_res[0], sp_int_res[1]):
+                sort_again[idx] = [res_buc, res_ult]
+
+        if len(sp_gl_gt) != 0:
+            x_buc = ml_algo['cl SP buc GLGT scaler'].transform(sp_gl_gt)
+            x_ult = ml_algo['cl SP ult GLGT scaler'].transform(sp_gl_gt)
+            sp_gl_gt_res = [
+                ml_algo['cl SP buc GLGT predictor'].predict(x_buc),
+                ml_algo['cl SP ult GLGT predictor'].predict(x_ult),
+            ]
+            for idx, res_buc, res_ult in zip(sp_gl_gt_idx, sp_gl_gt_res[0], sp_gl_gt_res[1]):
+                sort_again[idx] = [res_buc, res_ult]
+
+        if len(up_int) != 0:
+            x_buc = ml_algo['cl UP buc int scaler'].transform(up_int)
+            x_ult = ml_algo['cl UP ult int scaler'].transform(up_int)
+            up_int_res = [
+                ml_algo['cl UP buc int predictor'].predict(x_buc),
+                ml_algo['cl UP ult int predictor'].predict(x_ult),
+            ]
+            for idx, res_buc, res_ult in zip(up_int_idx, up_int_res[0], up_int_res[1]):
+                sort_again[idx] = [res_buc, res_ult]
+
+        if len(up_gl_gt) != 0:
+            x_buc = ml_algo['cl UP buc GLGT scaler'].transform(up_gl_gt)
+            x_ult = ml_algo['cl UP ult GLGT scaler'].transform(up_gl_gt)
+            up_gl_gt_res = [
+                ml_algo['cl UP buc GLGT predictor'].predict(x_buc),
+                ml_algo['cl UP ult GLGT predictor'].predict(x_ult),
+            ]
+            for idx, res_buc, res_ult in zip(up_gl_gt_idx, up_gl_gt_res[0], up_gl_gt_res[1]):
+                sort_again[idx] = [res_buc, res_ult]
+
+        return sort_again
+
+    def _predict_ml_numeric_for_to_run(self, to_run):
+        """
+        Predict ML-Numeric UF results for harmonizer candidate objects.
+
+        The numeric regressor predicts raw UF. The optimization check expects
+        material-factored UF, so this method applies:
+            UF = predicted_UF * material_factor
+
+        Returns
+        -------
+        np.ndarray
+            shape = (len(to_run), 3)
+            columns = [buckling_uf, ultimate_uf, valid_prediction]
+        """
+        ml_algo = self._get_selected_ml_algo()
+        mat_fac = self._get_selected_material_factor()
+
+        groups = {
+            'sp_int': {'x': [], 'idx': [], 'prefix': 'num SP int'},
+            'sp_glgt': {'x': [], 'idx': [], 'prefix': 'num SP GLGT'},
+            'up_int': {'x': [], 'idx': [], 'prefix': 'num UP int'},
+            'up_glgt': {'x': [], 'idx': [], 'prefix': 'num UP GLGT'},
+        }
+
+        for idx, (calc_object, x, lat_press) in enumerate(to_run):
+            ml_input = self._get_ml_input_for_calc_object(calc_object, lat_press)
+
+            if calc_object[0].Plate.get_puls_sp_or_up() == 'UP':
+                if calc_object[0].Plate.get_puls_boundary() == 'Int':
+                    key = 'up_int'
+                else:
+                    key = 'up_glgt'
+            else:
+                if calc_object[0].Stiffener.get_puls_boundary() == 'Int':
+                    key = 'sp_int'
+                else:
+                    key = 'sp_glgt'
+
+            groups[key]['x'].append(ml_input)
+            groups[key]['idx'].append(idx)
+
+        sort_again = np.zeros([len(to_run), 3])
+        sort_again[:, 0] = float('inf')
+        sort_again[:, 1] = float('inf')
+        sort_again[:, 2] = 0
+
+        for group in groups.values():
+            if len(group['x']) == 0:
+                continue
+
+            prefix = group['prefix']
+
+            valid_predictor_key = f'{prefix} validity predictor'
+            valid_xscaler_key = f'{prefix} validity xscaler'
+            reg_predictor_key = f'{prefix} UF reg predictor'
+            reg_xscaler_key = f'{prefix} UF reg xscaler'
+            reg_yscaler_key = f'{prefix} UF reg yscaler'
+
+            required_keys = [
+                valid_predictor_key,
+                valid_xscaler_key,
+                reg_predictor_key,
+                reg_xscaler_key,
+                reg_yscaler_key,
+            ]
+
+            if any(key not in ml_algo or ml_algo[key] is None for key in required_keys):
+                continue
+
+            x_valid = ml_algo[valid_xscaler_key].transform(group['x'])
+            valid_pred = ml_algo[valid_predictor_key].predict(x_valid)
+
+            x_reg = ml_algo[reg_xscaler_key].transform(group['x'])
+            y_scaled = ml_algo[reg_predictor_key].predict(x_reg)
+            y_numeric_raw = ml_algo[reg_yscaler_key].inverse_transform(y_scaled)
+
+            for local_idx, global_idx in enumerate(group['idx']):
+                valid_int = int(valid_pred[local_idx])
+                if valid_int == 1:
+                    sort_again[global_idx, 0] = float(y_numeric_raw[local_idx, 0]) * mat_fac
+                    sort_again[global_idx, 1] = float(y_numeric_raw[local_idx, 1]) * mat_fac
+                    sort_again[global_idx, 2] = 1
+                else:
+                    sort_again[global_idx, 0] = float('inf')
+                    sort_again[global_idx, 1] = float('inf')
+                    sort_again[global_idx, 2] = valid_int
+
+        return sort_again
 
     def update_running_time(self, *args):
-        '''
-        Estimate the running time of the algorithm.
-        :return:
-        '''
+        """
+        Estimate the running time of the algorithm and keep buckling checks mutually exclusive.
+        """
         try:
             self._runnig_time_label.config(text=str(self.get_running_time()))
         except ZeroDivisionError:
             pass  # _tkinter.TclError: pass
 
-        if self._new_check_ml_buckling.get() == True:
+        selected_buckling_checks = [
+            self._new_check_buckling.get(),
+            self._new_check_ml_buckling.get(),
+            self._new_check_ml_numeric_buckling.get(),
+        ]
+
+        if selected_buckling_checks.count(True) > 1:
+            tk.messagebox.showerror('You can only select one buckling type. Reselect.')
+
+            self._new_check_buckling.set(False)
+            self._new_check_local_buckling.set(False)
+            self._new_check_ml_buckling.set(False)
+            self._new_check_ml_numeric_buckling.set(False)
+
+        elif self._new_check_ml_buckling.get() or self._new_check_ml_numeric_buckling.get():
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)
 
@@ -1000,10 +1228,10 @@ class CreateOptimizeMultipleWindow():
     def _clear_line_fatigue(self, line):
         self._line_bundle(line)[line_structure.FATIGUE] = None
 
-    def get_upper_bounds(self,obj):
+    def get_upper_bounds(self, obj):
         '''
         Return an numpy array of upper bounds.
-        :return: 
+        :return:
         '''
         if self._keep_spacing:
             spacing = obj.Plate.get_s()
@@ -1014,10 +1242,10 @@ class CreateOptimizeMultipleWindow():
                          self._new_fl_w_upper.get() / 1000, self._new_fl_thk_upper.get() / 1000,
                          obj.Plate.span, obj.Plate.girder_lg])
 
-    def get_lower_bounds(self,obj):
+    def get_lower_bounds(self, obj):
         '''
         Return an numpy array of lower bounds.
-        :return: 
+        :return:
         '''
         if self._keep_spacing:
             spacing = obj.Plate.get_s()
@@ -1031,8 +1259,8 @@ class CreateOptimizeMultipleWindow():
     def checkered(self, line_distance):
         '''
         Creates a grid in the properties canvas.
-        :param line_distance: 
-        :return: 
+        :param line_distance:
+        :return:
         '''
         # vertical lines at an interval of "line_distance" pixel
         for x in range(line_distance, self._prop_canvas_dim[0], line_distance):
@@ -1041,7 +1269,7 @@ class CreateOptimizeMultipleWindow():
         for y in range(line_distance, self._prop_canvas_dim[1], line_distance):
             self._canvas_opt.create_line(0, y, self._prop_canvas_dim[0], y, fill="grey", stipple='gray50')
 
-    def draw_properties(self,init_obj = None, opt_obj=None,line=None):
+    def draw_properties(self, init_obj=None, opt_obj=None, line=None):
         '''
         Drawing properties in the canvas.
         :return:
@@ -1058,114 +1286,123 @@ class CreateOptimizeMultipleWindow():
 
             self._canvas_opt.create_rectangle(0, 0, self._prop_canvas_dim[0] + 10, 80, fill='white')
             self._canvas_opt.create_line(10, 10, 30, 10, fill=init_color, width=5)
-            self._canvas_opt.create_text(270, 10, text='Initial    - Pl.: ' + str(init_obj.Plate.get_s() * 1000) + 'x' + str(
-                init_obj.Plate.get_pl_thk() * 1000) +
-                                                      ' Stf.: ' + str(init_obj.Stiffener.get_web_h() * 1000) + 'x' + str(
-                init_obj.Stiffener.get_web_thk() * 1000) + '+' +
-                                                      str(init_obj.Stiffener.get_fl_w() * 1000) + 'x' +
-                                                       str(init_obj.Stiffener.get_fl_thk() * 1000),
-                                        font='Verdana 8',
-                                        fill=init_color)
+            self._canvas_opt.create_text(270, 10,
+                                         text='Initial    - Pl.: ' + str(init_obj.Plate.get_s() * 1000) + 'x' + str(
+                                             init_obj.Plate.get_pl_thk() * 1000) +
+                                              ' Stf.: ' + str(init_obj.Stiffener.get_web_h() * 1000) + 'x' + str(
+                                             init_obj.Stiffener.get_web_thk() * 1000) + '+' +
+                                              str(init_obj.Stiffener.get_fl_w() * 1000) + 'x' +
+                                              str(init_obj.Stiffener.get_fl_thk() * 1000),
+                                         font='Verdana 8',
+                                         fill=init_color)
             self._canvas_opt.create_text(120, 30, text='Weight (per Lg width): ' +
-                                                      str(int(op.calc_weight([init_obj.Plate.get_s(),
-                                                                              init_obj.Plate.get_pl_thk(),
-                                                                              init_obj.Stiffener.get_web_h(),
-                                                                              init_obj.Stiffener.get_web_thk(),
-                                                                              init_obj.Stiffener.get_fl_w(),
-                                                                              init_obj.Stiffener.get_fl_thk(),
-                                                                              init_obj.Stiffener.span,
-                                                                              init_obj.Stiffener.girder_lg]))),
-                                        font='Verdana 8', fill=init_color)
-    
-            self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Plate.get_s() / 2, ctr_y, ctr_x + m * init_obj.Plate.get_s() / 2,
-                                             ctr_y - m * init_obj.Plate.get_pl_thk(), fill=init_color, stipple=init_stipple)
-            self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Stiffener.get_web_thk() / 2, ctr_y - m * init_obj.Stiffener.get_pl_thk(),
-                                             ctr_x + m * init_obj.Stiffener.get_web_thk() / 2, ctr_y - m * (init_obj.Stiffener.get_web_h() + init_obj.Stiffener.get_pl_thk())
-                                             , fill=init_color, stipple=init_stipple)
+                                                       str(int(op.calc_weight([init_obj.Plate.get_s(),
+                                                                               init_obj.Plate.get_pl_thk(),
+                                                                               init_obj.Stiffener.get_web_h(),
+                                                                               init_obj.Stiffener.get_web_thk(),
+                                                                               init_obj.Stiffener.get_fl_w(),
+                                                                               init_obj.Stiffener.get_fl_thk(),
+                                                                               init_obj.Stiffener.span,
+                                                                               init_obj.Stiffener.girder_lg]))),
+                                         font='Verdana 8', fill=init_color)
+
+            self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Plate.get_s() / 2, ctr_y,
+                                              ctr_x + m * init_obj.Plate.get_s() / 2,
+                                              ctr_y - m * init_obj.Plate.get_pl_thk(), fill=init_color,
+                                              stipple=init_stipple)
+            self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Stiffener.get_web_thk() / 2,
+                                              ctr_y - m * init_obj.Stiffener.get_pl_thk(),
+                                              ctr_x + m * init_obj.Stiffener.get_web_thk() / 2, ctr_y - m * (
+                                                          init_obj.Stiffener.get_web_h() + init_obj.Stiffener.get_pl_thk())
+                                              , fill=init_color, stipple=init_stipple)
             if init_obj.Stiffener.get_stiffener_type() not in ['L', 'L-bulb']:
-                self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Stiffener.get_fl_w() / 2, ctr_y - m * (init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h()),
-                                                 ctr_x + m * init_obj.Stiffener.get_fl_w() / 2,
-                                                 ctr_y - m * (init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h() + init_obj.Stiffener.get_fl_thk()),
-                                                 fill=init_color, stipple=init_stipple)
+                self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Stiffener.get_fl_w() / 2, ctr_y - m * (
+                            init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h()),
+                                                  ctr_x + m * init_obj.Stiffener.get_fl_w() / 2,
+                                                  ctr_y - m * (
+                                                              init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h() + init_obj.Stiffener.get_fl_thk()),
+                                                  fill=init_color, stipple=init_stipple)
             else:
                 self._canvas_opt.create_rectangle(ctr_x - m * init_obj.Stiffener.get_web_thk() / 2,
-                                                 ctr_y - m * (init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h()),
-                                                 ctr_x + m * init_obj.Stiffener.get_fl_w(),
-                                                 ctr_y - m * (init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h() + init_obj.Stiffener.get_fl_thk()),
-                                                 fill=init_color, stipple=init_stipple)
-    
+                                                  ctr_y - m * (
+                                                              init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h()),
+                                                  ctr_x + m * init_obj.Stiffener.get_fl_w(),
+                                                  ctr_y - m * (
+                                                              init_obj.Plate.get_pl_thk() + init_obj.Stiffener.get_web_h() + init_obj.Stiffener.get_fl_thk()),
+                                                  fill=init_color, stipple=init_stipple)
+
         if opt_obj != None:
             # [0.6, 0.012, 0.25, 0.01, 0.1, 0.01]
-            self._canvas_opt.config(bg = 'palegreen')
+            self._canvas_opt.config(bg='palegreen')
             self._canvas_opt.create_rectangle(ctr_x - m * opt_obj.Plate.get_s() / 2, ctr_y,
-                                             ctr_x + m * opt_obj.Plate.get_s() / 2,
-                                             ctr_y - m * opt_obj.Plate.get_pl_thk(), fill=opt_color,
-                                             stipple=opt_stippe)
+                                              ctr_x + m * opt_obj.Plate.get_s() / 2,
+                                              ctr_y - m * opt_obj.Plate.get_pl_thk(), fill=opt_color,
+                                              stipple=opt_stippe)
 
             self._canvas_opt.create_rectangle(ctr_x - m * opt_obj.Stiffener.get_web_thk() / 2, ctr_y -
-                                             m * opt_obj.Plate.get_pl_thk(),
-                                             ctr_x + m * opt_obj.Stiffener.get_web_thk() / 2,
-                                             ctr_y - m * (
-                                             opt_obj.Stiffener.get_web_h() + opt_obj.Plate.get_pl_thk())
-                                             , fill=opt_color, stipple=opt_stippe)
+                                              m * opt_obj.Plate.get_pl_thk(),
+                                              ctr_x + m * opt_obj.Stiffener.get_web_thk() / 2,
+                                              ctr_y - m * (
+                                                      opt_obj.Stiffener.get_web_h() + opt_obj.Plate.get_pl_thk())
+                                              , fill=opt_color, stipple=opt_stippe)
             if init_obj.Stiffener.get_stiffener_type() not in ['L', 'L-bulb']:
                 self._canvas_opt.create_rectangle(ctr_x - m * opt_obj.Stiffener.get_fl_w() / 2, ctr_y
-                                                 - m * (
-                                                 opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h()),
-                                                 ctr_x + m * opt_obj.Stiffener.get_fl_w() / 2, ctr_y -
-                                                 m * (
-                                                 opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h() +
-                                                 opt_obj.Stiffener.get_fl_thk()),
-                                                 fill=opt_color, stipple=opt_stippe)
+                                                  - m * (
+                                                          opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h()),
+                                                  ctr_x + m * opt_obj.Stiffener.get_fl_w() / 2, ctr_y -
+                                                  m * (
+                                                          opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h() +
+                                                          opt_obj.Stiffener.get_fl_thk()),
+                                                  fill=opt_color, stipple=opt_stippe)
             else:
                 self._canvas_opt.create_rectangle(ctr_x - m * opt_obj.Stiffener.get_web_thk() / 2, ctr_y
-                                                 - m * (
-                                                 opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h()),
-                                                 ctr_x + m * opt_obj.Stiffener.get_fl_w(), ctr_y -
-                                                 m * (
-                                                 opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h() +
-                                                 opt_obj.Stiffener.get_fl_thk()),
-                                                 fill=opt_color, stipple=opt_stippe)
+                                                  - m * (
+                                                          opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h()),
+                                                  ctr_x + m * opt_obj.Stiffener.get_fl_w(), ctr_y -
+                                                  m * (
+                                                          opt_obj.Plate.get_pl_thk() + opt_obj.Stiffener.get_web_h() +
+                                                          opt_obj.Stiffener.get_fl_thk()),
+                                                  fill=opt_color, stipple=opt_stippe)
 
             self._canvas_opt.create_line(10, 50, 30, 50, fill=opt_color, width=5)
             self._canvas_opt.create_text(270, 50,
-                                        text='Optimized - Pl.: ' + str(round(opt_obj.Plate.get_s() * 1000,1)) + 'x' +
-                                             str(round(opt_obj.Plate.get_pl_thk() * 1000,1)) + ' Stf.: '
-                                             + str(round(opt_obj.Stiffener.get_web_h() * 1000,1)) +
-                                             'x' + str(round(opt_obj.Stiffener.get_web_thk() * 1000,1)) + '+' +
-                                             str(round(opt_obj.Stiffener.get_fl_w() * 1000,1)) +
-                                             'x' + str(round(opt_obj.Stiffener.get_fl_thk() * 1000,1)),
-                                        font='Verdana 8', fill=opt_color)
+                                         text='Optimized - Pl.: ' + str(round(opt_obj.Plate.get_s() * 1000, 1)) + 'x' +
+                                              str(round(opt_obj.Plate.get_pl_thk() * 1000, 1)) + ' Stf.: '
+                                              + str(round(opt_obj.Stiffener.get_web_h() * 1000, 1)) +
+                                              'x' + str(round(opt_obj.Stiffener.get_web_thk() * 1000, 1)) + '+' +
+                                              str(round(opt_obj.Stiffener.get_fl_w() * 1000, 1)) +
+                                              'x' + str(round(opt_obj.Stiffener.get_fl_thk() * 1000, 1)),
+                                         font='Verdana 8', fill=opt_color)
             self._canvas_opt.create_text(120, 70, text='Weight (per Lg width): '
-                                                      + str(int(op.calc_weight([opt_obj.Plate.get_s(),
-                                                                                opt_obj.Plate.get_pl_thk(),
-                                                                                opt_obj.Stiffener.get_web_h(),
-                                                                                opt_obj.Stiffener.get_web_thk(),
-                                                                                opt_obj.Stiffener.get_fl_w(),
-                                                                                opt_obj.Stiffener.get_fl_thk(),
-                                                                                opt_obj.Plate.span,
-                                                                                opt_obj.Plate.girder_lg]))),
-                                        font='Verdana 8', fill=opt_color)
+                                                       + str(int(op.calc_weight([opt_obj.Plate.get_s(),
+                                                                                 opt_obj.Plate.get_pl_thk(),
+                                                                                 opt_obj.Stiffener.get_web_h(),
+                                                                                 opt_obj.Stiffener.get_web_thk(),
+                                                                                 opt_obj.Stiffener.get_fl_w(),
+                                                                                 opt_obj.Stiffener.get_fl_thk(),
+                                                                                 opt_obj.Plate.span,
+                                                                                 opt_obj.Plate.girder_lg]))),
+                                         font='Verdana 8', fill=opt_color)
 
         elif self._opt_results != {}:
             self._canvas_opt.config(bg='green')
             self._canvas_opt.create_text(200, 200, text='Optimization results avaliable.\n\n'
-                                                       'Middle click orange lines to\n view results.',
-                                         font = 'Verdana 14 bold')
+                                                        'Middle click orange lines to\n view results.',
+                                         font='Verdana 14 bold')
 
         else:
             self._canvas_opt.config(bg='mistyrose')
-            self._canvas_opt.create_text(200, 60, text='No optimization results found.', font = 'Verdana 14 bold')
+            self._canvas_opt.create_text(200, 60, text='No optimization results found.', font='Verdana 14 bold')
 
         if line != None:
             if __name__ == '__main__':
                 lateral_press = 200  # for testing
             else:
                 lateral_press = self.app.get_highest_pressure(line)['normal'] / 1000
-            self._canvas_opt.create_text(250, self._prop_canvas_dim[1]-10,
-                                        text= line + ' lateral pressure: '+str(lateral_press)+' kPa',
-                                        font='Verdana 10 bold',fill='red')
-            
+            self._canvas_opt.create_text(250, self._prop_canvas_dim[1] - 10,
+                                         text=line + ' lateral pressure: ' + str(lateral_press) + ' kPa',
+                                         font='Verdana 10 bold', fill='red')
+
     def draw_select_canvas(self, load_selected=False):
         '''
         Making the lines canvas.
@@ -1175,22 +1412,24 @@ class CreateOptimizeMultipleWindow():
 
         # grid for the canavs
 
-        self._canvas_select.create_line(self._canvas_draw_origo[0], 0, self._canvas_draw_origo[0], self._select_canvas_dim[1],
-                                     stipple='gray50')
-        self._canvas_select.create_line(0, self._canvas_draw_origo[1], self._select_canvas_dim[0], self._canvas_draw_origo[1],
-                                     stipple='gray50')
-        self._canvas_select.create_text(self._canvas_draw_origo[0] - 30 ,
-                                     self._canvas_draw_origo[1] + 20 , text='(0,0)',
-                                     font='Text 10')
-        self._canvas_select.create_text([800 ,60],
-                                     text='Mouse left click:  select lines to loads\n'
-                                          'Mouse mid click: show properties for one line\n'
-                                          'Mouse right click: clear all selection\n'
-                                          'Shift key press: add selected line\n'
-                                          'Control key press: remove selected line\n\n'
-                                          'NOTE! Select lines you want to return before\n'
-                                          'pressing return button.', font='Verdana 8 bold',
-                                     fill='red')
+        self._canvas_select.create_line(self._canvas_draw_origo[0], 0, self._canvas_draw_origo[0],
+                                        self._select_canvas_dim[1],
+                                        stipple='gray50')
+        self._canvas_select.create_line(0, self._canvas_draw_origo[1], self._select_canvas_dim[0],
+                                        self._canvas_draw_origo[1],
+                                        stipple='gray50')
+        self._canvas_select.create_text(self._canvas_draw_origo[0] - 30,
+                                        self._canvas_draw_origo[1] + 20, text='(0,0)',
+                                        font='Text 10')
+        self._canvas_select.create_text([800, 60],
+                                        text='Mouse left click:  select lines to loads\n'
+                                             'Mouse mid click: show properties for one line\n'
+                                             'Mouse right click: clear all selection\n'
+                                             'Shift key press: add selected line\n'
+                                             'Control key press: remove selected line\n\n'
+                                             'NOTE! Select lines you want to return before\n'
+                                             'pressing return button.', font='Verdana 8 bold',
+                                        fill='red')
         # drawing the line dictionary.
         if len(self._line_dict) != 0:
             for line, value in self._line_dict.items():
@@ -1206,14 +1445,14 @@ class CreateOptimizeMultipleWindow():
                         color, width = 'orange', 8
                     self._canvas_select.create_line(coord1, coord2, width=width, fill=color)
                     self._canvas_select.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 + 10,
-                                                 text='Line ' + str(get_num(line)), font='Verdand 10 bold',
-                                                 fill='red')
+                                                    text='Line ' + str(get_num(line)), font='Verdand 10 bold',
+                                                    fill='red')
                 else:
                     if line in self._opt_results.keys():
                         color = 'orange'
                     self._canvas_select.create_line(coord1, coord2, width=3, fill=color)
                     self._canvas_select.create_text(coord1[0] - 20 + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 + 10,
-                                                 text='line' + str(get_num(line)), font="Text 8", fill='black')
+                                                    text='line' + str(get_num(line)), font="Text 8", fill='black')
 
     def algorithm_info(self):
         ''' When button is clicked, info is displayed.'''
@@ -1272,7 +1511,7 @@ class CreateOptimizeMultipleWindow():
             return
 
         mess = tk.messagebox.showwarning('Closed without saving', 'Closing will not save loads you have created',
-                                  type = 'okcancel')
+                                         type='okcancel')
         if mess == 'ok':
             self._frame.grab_release()
             self._frame.destroy()
@@ -1281,11 +1520,11 @@ class CreateOptimizeMultipleWindow():
     def get_point_canvas_coord(self, point_no):
         '''
         Returning the canvas coordinates of the point. This value will change with slider.
-        :param point_no: 
-        :return: 
+        :param point_no:
+        :return:
         '''
-        point_coord_x = self._canvas_draw_origo[0] + self._point_dict[point_no][0]* self._canvas_scale
-        point_coord_y = self._canvas_draw_origo[1] - self._point_dict[point_no][1]* self._canvas_scale
+        point_coord_x = self._canvas_draw_origo[0] + self._point_dict[point_no][0] * self._canvas_scale
+        point_coord_y = self._canvas_draw_origo[1] - self._point_dict[point_no][1] * self._canvas_scale
 
         return [point_coord_x, point_coord_y]
 
@@ -1305,14 +1544,14 @@ class CreateOptimizeMultipleWindow():
         self._frame.bind("<MouseWheel>", self.mouse_scroll)
         self._frame.bind("<B2-Motion>", self.button_2_click_and_drag)
 
-    def shift_pressed(self,event=None):
+    def shift_pressed(self, event=None):
         '''
         Event is executed when shift key pressed.
         :return:
         '''
         self._add_to_lines = True
 
-    def ctrl_pressed(self,event=None):
+    def ctrl_pressed(self, event=None):
         '''
         Event when control is pressed.
         :param event:
@@ -1353,7 +1592,7 @@ class CreateOptimizeMultipleWindow():
                         if self._add_to_lines:
                             if key not in self._active_lines:
                                 self._active_lines.append(key)
-                        elif self._add_to_lines== False:
+                        elif self._add_to_lines == False:
                             if key in self._active_lines:
                                 self._active_lines.remove(key)
                         self._canvas_select.delete('all')
@@ -1361,7 +1600,7 @@ class CreateOptimizeMultipleWindow():
         self.draw_select_canvas()
         self.update_running_time()
 
-    def right_click(self,event):
+    def right_click(self, event):
         '''
         Event when right click.
         :param evnet:
@@ -1374,7 +1613,7 @@ class CreateOptimizeMultipleWindow():
         self.draw_select_canvas()
         self.update_running_time()
 
-    def mid_click(self,event):
+    def mid_click(self, event):
         '''
         Event when right click.
         :param evnet:
@@ -1409,12 +1648,12 @@ class CreateOptimizeMultipleWindow():
                         self._canvas_select.delete('all')
                         self._active_lines = []
                         self._active_lines.append(key)
-                        if key in self._opt_results.keys() and self._opt_results[key]!=None:
-                            self.draw_properties(init_obj=self._line_structure(key),opt_obj=self._opt_results[key][0],
+                        if key in self._opt_results.keys() and self._opt_results[key] != None:
+                            self.draw_properties(init_obj=self._line_structure(key), opt_obj=self._opt_results[key][0],
                                                  line=key)
                             self._mid_click_line = key
                         else:
-                            self.draw_properties(init_obj=self._line_structure(key),line=key)
+                            self.draw_properties(init_obj=self._line_structure(key), line=key)
                             self._mid_click_line = None
                         break
                 self.draw_select_canvas()
@@ -1443,12 +1682,12 @@ class CreateOptimizeMultipleWindow():
                     return
 
             self.app.on_close_opt_multiple_window(to_return)
-            messagebox.showinfo(title='Return info', message='Returning: '+str(list(to_return.keys())) +
+            messagebox.showinfo(title='Return info', message='Returning: ' + str(list(to_return.keys())) +
                                                              '\nLines without results are not returned.')
 
         self._frame.destroy()
 
-    def toggle(self, found_files = None, obj = None, iterating = False):
+    def toggle(self, found_files=None, obj=None, iterating=False):
         '''
         On off button.
         :param found_files:
@@ -1462,16 +1701,16 @@ class CreateOptimizeMultipleWindow():
             predefined_structure = None
             if self._toggle_btn.config('relief')[-1] == 'sunken':
                 self._toggle_btn.config(relief="raised")
-                self._toggle_btn.config(bg = 'salmon')
-                self._ent_spacing_upper.config(bg = 'white')
-                self._ent_spacing_lower.config(bg = 'white')
-                self._ent_delta_spacing.config(bg = 'white')
+                self._toggle_btn.config(bg='salmon')
+                self._ent_spacing_upper.config(bg='white')
+                self._ent_spacing_lower.config(bg='white')
+                self._ent_delta_spacing.config(bg='white')
             else:
                 self._toggle_btn.config(relief="sunken")
                 self._toggle_btn.config(bg='lightgreen')
-                self._ent_spacing_upper.config(bg = 'lightgreen')
-                self._ent_spacing_lower.config(bg = 'lightgreen')
-                self._ent_delta_spacing.config(bg = 'lightgreen')
+                self._ent_spacing_upper.config(bg='lightgreen')
+                self._ent_spacing_lower.config(bg='lightgreen')
+                self._ent_delta_spacing.config(bg='lightgreen')
                 openfile = list(askopenfilenames(parent=self._frame, title='Choose files to open',
                                                  initialdir=self._root_dir))
                 if openfile == []:
@@ -1493,18 +1732,18 @@ class CreateOptimizeMultipleWindow():
             if len(self._opt_results[self._mid_click_line]) != 0:
                 op.plot_optimization_results(self._opt_results[self._mid_click_line])
 
-    def mouse_scroll(self,event):
-        self._canvas_scale +=  event.delta/50
+    def mouse_scroll(self, event):
+        self._canvas_scale += event.delta / 50
         self._canvas_scale = 0 if self._canvas_scale < 0 else self._canvas_scale
 
         self.draw_select_canvas()
 
-    def button_2_click_and_drag(self,event):
+    def button_2_click_and_drag(self, event):
 
-        self._canvas_draw_origo = (self._canvas_draw_origo[0]-(self._previous_drag_mouse[0]-event.x),
-                                  self._canvas_draw_origo[1]-(self._previous_drag_mouse[1]-event.y))
+        self._canvas_draw_origo = (self._canvas_draw_origo[0] - (self._previous_drag_mouse[0] - event.x),
+                                   self._canvas_draw_origo[1] - (self._previous_drag_mouse[1] - event.y))
 
-        self._previous_drag_mouse = (event.x,event.y)
+        self._previous_drag_mouse = (event.x, event.y)
         self.draw_select_canvas()
 
     def open_example_file(self):
