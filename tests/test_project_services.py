@@ -200,6 +200,214 @@ def test_line_structure_service_syncs_or_removes_fatigue_for_updated_domain():
     assert line_bundles["line1"][2] is None
 
 
+def _flat_structure_property_request(calculation_domain="Flat plate, stiffened with girder"):
+    return project_services.FlatStructurePropertyRequest(
+        calculation_domain=calculation_domain,
+        base_values={
+            "material": 355,
+            "material_factor": 1.15,
+            "span": 4000,
+            "spacing": 700,
+            "plate_thk": 20,
+            "stf_web_h": 400,
+            "stf_web_t": 12,
+            "stf_fl_w": 150,
+            "stf_fl_t": 20,
+            "structure_type": "GENERAL_INTERNAL_WT",
+            "stf_type": "T",
+            "sigma_y1": 90,
+            "sigma_y2": 90,
+            "sigma_x1": 40,
+            "sigma_x2": 40,
+            "tau_xy": 5,
+            "plate_kpp": 1,
+            "stf_kps": 1,
+            "stf_km1": 12,
+            "stf_km2": 24,
+            "stf_km3": 12,
+            "pressure_side": "both sides",
+            "zstar_optimization": True,
+            "puls_method": "ultimate",
+            "puls_boundary": "Int",
+            "puls_stiffener_end": "Continuous",
+            "puls_sp_or_up": "SP",
+            "puls_up_boundary": "SSSS",
+            "panel_or_shell": "panel",
+            "girder_lg": 10000,
+        },
+        girder_values={
+            "web_h": 700,
+            "web_t": 15,
+            "fl_w": 250,
+            "fl_t": 25,
+            "type": "L",
+        },
+        buckling_values={
+            "min_pressure_adjacent_spans": 0,
+            "load_factor_stresses": 1,
+            "stiffener_end_support": "Continuous",
+            "girder_end_support": "Sniped",
+            "tension_field": "not allowed",
+            "plate_effective_against_sigy": True,
+            "buckling_length_factor_stf": 0,
+            "buckling_length_factor_girder": 0,
+            "km3": 12,
+            "km2": 24,
+            "girder_dist_lateral_support": 0,
+            "stiffener_dist_lateral_support": 0,
+            "panel_length": 0,
+            "fabrication_method_stiffener": "welded",
+            "fabrication_method_girder": "welded",
+        },
+        structure_types={"vertical": ["GENERAL_INTERNAL_WT"]},
+    )
+
+
+def test_flat_structure_property_service_builds_legacy_property_bundle_from_plain_values():
+    properties, stiffener_properties = project_services.FlatStructurePropertyService.build(
+        _flat_structure_property_request()
+    )
+
+    assert properties["main dict"]["calculation domain"] == ["Flat plate, stiffened with girder", ""]
+    assert properties["main dict"]["material yield"] == [355e6, "Pa"]
+    assert properties["Plate"]["span"] == [4.0, "m"]
+    assert properties["Plate"]["plate_thk"] == [0.02, "m"]
+    assert properties["Stiffener"]["spacing"] == [0.7, "m"]
+    assert properties["Girder"]["stf_web_height"] == [0.7, "m"]
+    assert properties["Girder"]["stf_type"] == ["L", ""]
+    assert stiffener_properties is properties["Stiffener"]
+
+
+def test_flat_structure_property_service_omits_stiffener_and_girder_for_unstiffened_domain():
+    properties, stiffener_properties = project_services.FlatStructurePropertyService.build(
+        _flat_structure_property_request("Flat plate, unstiffened")
+    )
+
+    assert properties["Stiffener"] is None
+    assert properties["Girder"] is None
+    assert stiffener_properties["stf_web_height"] == [0.4, "m"]
+
+
+def _cylinder_structure_property_request(load_mode=0):
+    return project_services.CylinderStructurePropertyRequest(
+        calculation_domain="Longitudinal Stiffened shell (Force input)",
+        dummy_values={
+            "span": 4000,
+            "plate_thk": 20,
+            "structure_type": "GENERAL_INTERNAL_WT",
+            "sigma_y1": 90,
+            "sigma_y2": 90,
+            "sigma_x1": 40,
+            "sigma_x2": 40,
+            "tau_xy": 5,
+            "plate_kpp": 1,
+            "stf_kps": 1,
+            "stf_km1": 12,
+            "stf_km2": 24,
+            "stf_km3": 12,
+            "pressure_side": "both sides",
+            "zstar_optimization": True,
+            "puls_method": "ultimate",
+            "puls_boundary": "Int",
+            "puls_stiffener_end": "Continuous",
+            "puls_sp_or_up": "SP",
+            "puls_up_boundary": "SSSS",
+            "panel_or_shell": "shell",
+            "material_factor": 1.15,
+            "spacing": 700,
+        },
+        shell_values={
+            "thickness": 20,
+            "radius": 5000,
+            "distance_between_rings": 5000,
+            "length": 5000,
+            "total_length": 5000,
+            "k_factor": 1.0,
+        },
+        longitudinal_values={
+            "spacing": 700,
+            "web_h": 450,
+            "web_t": 12,
+            "fl_w": 150,
+            "fl_t": 20,
+            "type": "T",
+        },
+        ring_stiffener_values={
+            "web_h": 0,
+            "web_t": 0,
+            "fl_w": 0,
+            "fl_t": 0,
+            "type": "T",
+        },
+        ring_frame_values={
+            "web_h": 0,
+            "web_t": 0,
+            "fl_w": 0,
+            "fl_t": 0,
+            "type": "T",
+        },
+        load_input={
+            "mode": load_mode,
+            "Nsd": 1000,
+            "Msd": 2000,
+            "Tsd": 3000,
+            "Qsd": 4000,
+            "sasd": 40,
+            "smsd": 195,
+            "tTsd": -12.7,
+            "tQsd": 4.8,
+            "psd": 0.2,
+            "shsd": 0,
+        },
+        main_values={
+            "material_factor": 1.15,
+            "fab_method_ring_stiffener": "welded",
+            "fab_method_ring_frame": "welded",
+            "e_module": 210000000000,
+            "poisson": 0.3,
+            "yield": 355,
+            "length_between_girders": 5000,
+            "panel_spacing": 700,
+            "ring_stiffener_excluded": True,
+            "ring_frame_excluded": True,
+            "uls_or_als": "ULS",
+            "end_cap_pressure": False,
+        },
+        structure_types={"vertical": ["GENERAL_INTERNAL_WT"]},
+    )
+
+
+def test_cylinder_structure_property_service_builds_legacy_property_bundle_from_stress_values():
+    result = project_services.CylinderStructurePropertyService.build(
+        _cylinder_structure_property_request(load_mode=0)
+    )
+
+    assert result.geometry == 3
+    assert result.main_dict["geometry"] == [3, ""]
+    assert result.main_dict["sasd"] == [40e6, "Pa"]
+    assert result.main_dict["smsd"] == [195e6, "Pa"]
+    assert result.main_dict["tTsd"] == [12.7e6, "Pa"]
+    assert result.main_dict["psd"] == [0.2e6, "Pa"]
+    assert result.shell_dict["plate_thk"] == [0.02, "m"]
+    assert result.shell_dict["radius"] == [5.0, "m"]
+    assert result.longitudinal_dict["spacing"] == [0.7, "m"]
+    assert result.longitudinal_dict["stf_web_height"] == [0.45, "m"]
+    assert result.ring_frame_dict["span"] == [4.0, "m"]
+    assert result.derived_stresses == (40, 195, 12.7, 4.8, 0)
+    assert len(result.derived_forces) == 4
+
+
+def test_cylinder_structure_property_service_derives_stresses_from_force_values():
+    result = project_services.CylinderStructurePropertyService.build(
+        _cylinder_structure_property_request(load_mode=1)
+    )
+
+    assert len(result.derived_stresses) == 5
+    assert result.derived_forces == (1000, 2000, 3000, 4000)
+    assert result.main_dict["sasd"][0] == result.derived_stresses[0] * 1e6
+    assert result.main_dict["shsd"][0] == result.derived_stresses[4] * 1e6
+
+
 def test_line_load_service_rebuilds_line_loads_and_reports_changed_lines():
     first_structure = DummyStructure()
     second_structure = DummyStructure()

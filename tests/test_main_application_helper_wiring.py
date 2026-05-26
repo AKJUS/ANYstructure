@@ -28,10 +28,13 @@ def test_main_application_uses_geometry_helpers_for_active_lookups():
 
 def test_main_application_uses_helpers_for_structure_property_unit_conversions():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    services_source = (Path(__file__).resolve().parents[1] / "anystruct" / "project_services.py").read_text(
+        encoding="utf-8"
+    )
     source = main_source.read_text(encoding="utf-8")
     flat_builder = source[
         source.index("def _build_flat_structure_properties"):
-        source.index("def _build_cylinder_structure_properties")
+        source.index("def _build_cylinder_structure_property_request")
     ]
     cylinder_builder = source[
         source.index("def _build_cylinder_structure_properties"):
@@ -39,8 +42,14 @@ def test_main_application_uses_helpers_for_structure_property_unit_conversions()
     ]
     property_block = flat_builder + cylinder_builder
 
-    assert "api_helpers.mpa_to_pa" in property_block
-    assert "api_helpers.mm_to_m" in property_block
+    assert "FlatStructurePropertyService.build(" in flat_builder
+    assert "CylinderStructurePropertyService.build(" in cylinder_builder
+    assert "api_helpers.mpa_to_pa" in services_source
+    assert "api_helpers.mm_to_m" in services_source
+    assert "helper_cylinder_stress_to_force_to_stress(" in services_source
+    assert "api_helpers.mpa_to_pa" not in property_block
+    assert "api_helpers.mm_to_m" not in property_block
+    assert "helper_cylinder_stress_to_force_to_stress(" not in property_block
     assert not re.search(r"[\w.)\]]\s*\*\s*1e6", property_block)
     assert not re.search(r"[\w.)\]]\s*/\s*1000", property_block)
 
@@ -68,6 +77,14 @@ def test_new_structure_delegates_property_building():
         source.index("def _resolve_new_structure_properties"):
         source.index("def _add_structure_to_active_line")
     ]
+    flat_builder = source[
+        source.index("def _build_flat_structure_property_request"):
+        source.index("def _build_cylinder_structure_property_request")
+    ]
+    cylinder_builder = source[
+        source.index("def _build_cylinder_structure_property_request"):
+        source.index("def _structure_input_is_missing")
+    ]
     add_structure = source[
         source.index("def _add_structure_to_active_line"):
         source.index("def _scale_existing_flat_structure_if_needed")
@@ -78,6 +95,17 @@ def test_new_structure_delegates_property_building():
     ]
 
     assert "self._build_flat_structure_properties()" in resolver
+    assert "elif isinstance(toggle_multi, tuple):" in resolver
+    assert "prop_dict, obj_dict_stf = toggle_multi" in resolver
+    assert "FlatStructurePropertyRequest(" in flat_builder
+    assert "FlatStructurePropertyService.build(" in flat_builder
+    assert "api_helpers.mpa_to_pa" not in flat_builder
+    assert "api_helpers.mm_to_m" not in flat_builder
+    assert "CylinderStructurePropertyRequest(" in cylinder_builder
+    assert "CylinderStructurePropertyService.build(" in cylinder_builder
+    assert "helper_cylinder_stress_to_force_to_stress(" not in cylinder_builder
+    assert "api_helpers.mpa_to_pa" not in cylinder_builder
+    assert "api_helpers.mm_to_m" not in cylinder_builder
     assert "self._build_cylinder_structure_properties()" in resolver
     assert "self._structure_input_is_missing()" in new_structure
     assert "self._create_all_structure_from_properties(prop_dict)" in add_structure
@@ -174,6 +202,8 @@ def test_excel_callbacks_delegate_workbook_adapter_access():
     assert "ExcelProjectImportService.read_path(" in excel_block
     assert "ExcelProjectGeometryImportService.add_records(" in excel_block
     assert "def _sync_excel_import_geometry" in excel_block
+    assert "def _build_flat_structure_property_request_from_excel_record" in source
+    assert "FlatStructurePropertyService.build(flat_request)" in excel_block
     assert "flat_plate_records" in excel_block
     assert "cylinder_records" in excel_block
     assert "row_data[" not in excel_block
@@ -181,3 +211,11 @@ def test_excel_callbacks_delegate_workbook_adapter_access():
     assert "this_line = self.new_line()" not in excel_block
     assert "ExcelInterface(" not in source
     assert "excel_inteface" not in source
+
+    flat_import_block = excel_block[
+        excel_block.index("# Flat"):
+        excel_block.index("# Cylinders")
+    ]
+    assert "_new_plate_thk.set(" not in flat_import_block
+    assert "_new_sigma_x1.set(" not in flat_import_block
+    assert "_new_girder_web_h.set(" not in flat_import_block

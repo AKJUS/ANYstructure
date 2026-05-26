@@ -66,4 +66,10 @@ def test_excel_import_and_ml_cl_buckling_option_remain_available():
 
     assert "sub_sesam.add_command(label='Import excel file', command=self.open_excel_file)" in source
     assert "sub_menu.add_command(label='Open excel input', command=self.open_excel_file)" in source
-    assert "options = ['DNV-RP-C201 - prescriptive','ML-CL (PULS based)', 'ML-Numeric (PULS based)']" in source
+    buckling_options = source[
+        source.index("self._new_buckling_method = tk.StringVar()"):
+        source.index("self._lab_buckling_method = ttk.Label")
+    ]
+    assert "'ML-CL (PULS based)'" in buckling_options
+    assert "'ML-Numeric (PULS based)'" in buckling_options
+    assert "'DNV PULS'" not in buckling_options

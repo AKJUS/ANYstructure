@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping
 
-from . import line_structure
+from . import api_helpers, helper as hlp, line_structure
 from .helper import one_load_combination
 from .project_application import (
     LoadCombinationRecord,
@@ -228,6 +228,318 @@ class LineStructureService:
 
     def _write_bundle(self, line_name: str, bundle: line_structure.LineStructureBundle):
         self._line_bundles[line_name] = bundle.to_legacy_bundle()
+
+
+@dataclass(frozen=True)
+class FlatStructurePropertyRequest:
+    """Plain values needed to build a flat-plate structure property bundle."""
+
+    calculation_domain: str
+    base_values: dict[str, Any]
+    girder_values: dict[str, Any]
+    buckling_values: dict[str, Any]
+    structure_types: dict[str, Any]
+
+
+class FlatStructurePropertyService:
+    """Build legacy flat-plate property bundles from plain boundary values."""
+
+    @classmethod
+    def build(cls, request: FlatStructurePropertyRequest):
+        values = request.base_values
+        obj_dict = {
+            'mat_yield': [api_helpers.mpa_to_pa(values['material']), 'Pa'],
+            'mat_factor': [values['material_factor'], ''],
+            'span': [api_helpers.mm_to_m(values['span']), 'm'],
+            'spacing': [api_helpers.mm_to_m(values['spacing']), 'm'],
+            'plate_thk': [api_helpers.mm_to_m(values['plate_thk']), 'm'],
+            'stf_web_height': [api_helpers.mm_to_m(values['stf_web_h']), 'm'],
+            'stf_web_thk': [api_helpers.mm_to_m(values['stf_web_t']), 'm'],
+            'stf_flange_width': [api_helpers.mm_to_m(values['stf_fl_w']), 'm'],
+            'stf_flange_thk': [api_helpers.mm_to_m(values['stf_fl_t']), 'm'],
+            'structure_type': [values['structure_type'], ''],
+            'stf_type': [values['stf_type'], ''],
+            'sigma_y1': [values['sigma_y1'], 'MPa'],
+            'sigma_y2': [values['sigma_y2'], 'MPa'],
+            'sigma_x1': [values['sigma_x1'], 'MPa'],
+            'sigma_x2': [values['sigma_x2'], 'MPa'],
+            'tau_xy': [values['tau_xy'], 'MPa'],
+            'plate_kpp': [values['plate_kpp'], ''],
+            'stf_kps': [values['stf_kps'], ''],
+            'stf_km1': [values['stf_km1'], ''],
+            'stf_km2': [values['stf_km2'], ''],
+            'stf_km3': [values['stf_km3'], ''],
+            'press_side': [values['pressure_side'], ''],
+            'structure_types': [request.structure_types, ''],
+            'zstar_optimization': [values['zstar_optimization'], ''],
+            'puls buckling method': [values['puls_method'], ''],
+            'puls boundary': [values['puls_boundary'], ''],
+            'puls stiffener end': [values['puls_stiffener_end'], ''],
+            'puls sp or up': [values['puls_sp_or_up'], ''],
+            'puls up boundary': [values['puls_up_boundary'], ''],
+            'panel or shell': [values['panel_or_shell'], ''],
+            'girder_lg': [api_helpers.mm_to_m(values['girder_lg']), ''],
+        }
+
+        obj_dict_pl = dict(obj_dict)
+        obj_dict_stf = dict(obj_dict)
+        obj_dict_girder = dict(obj_dict)
+        girder_values = request.girder_values
+        obj_dict_girder['stf_web_height'] = [api_helpers.mm_to_m(girder_values['web_h']), 'm']
+        obj_dict_girder['stf_web_thk'] = [api_helpers.mm_to_m(girder_values['web_t']), 'm']
+        obj_dict_girder['stf_flange_width'] = [api_helpers.mm_to_m(girder_values['fl_w']), 'm']
+        obj_dict_girder['stf_flange_thk'] = [api_helpers.mm_to_m(girder_values['fl_t']), 'm']
+        obj_dict_girder['stf_type'] = [girder_values['type'], '']
+
+        buckling_values = request.buckling_values
+        main_dict = {
+            'minimum pressure in adjacent spans': [buckling_values['min_pressure_adjacent_spans'], ''],
+            'material yield': [api_helpers.mpa_to_pa(values['material']), 'Pa'],
+            'load factor on stresses': [buckling_values['load_factor_stresses'], ''],
+            'load factor on pressure': [1, ''],
+            'buckling method': [values['puls_method'], ''],
+            'stiffener end support': [buckling_values['stiffener_end_support'], ''],
+            'girder end support': [buckling_values['girder_end_support'], ''],
+            'tension field': [buckling_values['tension_field'], ''],
+            'plate effective agains sigy': [buckling_values['plate_effective_against_sigy'], ''],
+            'buckling length factor stf': [buckling_values['buckling_length_factor_stf'], ''],
+            'buckling length factor girder': [buckling_values['buckling_length_factor_girder'], ''],
+            'km3': [buckling_values['km3'], ''],
+            'km2': [buckling_values['km2'], ''],
+            'girder distance between lateral support': [buckling_values['girder_dist_lateral_support'], ''],
+            'stiffener distance between lateral support': [buckling_values['stiffener_dist_lateral_support'], ''],
+            'panel length, Lp': [buckling_values['panel_length'], ''],
+            'pressure side': [values['pressure_side'], ''],
+            'fabrication method stiffener': [buckling_values['fabrication_method_stiffener'], ''],
+            'fabrication method girder': [buckling_values['fabrication_method_girder'], ''],
+            'calculation domain': [request.calculation_domain, ''],
+        }
+
+        prop_dict = {
+            'main dict': main_dict,
+            'Plate': obj_dict_pl,
+            'Stiffener': None if request.calculation_domain == 'Flat plate, unstiffened' else obj_dict_stf,
+            'Girder': None if request.calculation_domain in ['Flat plate, unstiffened', 'Flat plate, stiffened']
+            else obj_dict_girder,
+        }
+        return prop_dict, obj_dict_stf
+
+
+@dataclass(frozen=True)
+class CylinderStructurePropertyRequest:
+    """Plain values needed to build cylinder property dictionaries."""
+
+    calculation_domain: str
+    dummy_values: dict[str, Any]
+    shell_values: dict[str, Any]
+    longitudinal_values: dict[str, Any]
+    ring_stiffener_values: dict[str, Any]
+    ring_frame_values: dict[str, Any]
+    load_input: dict[str, Any]
+    main_values: dict[str, Any]
+    structure_types: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CylinderStructurePropertyResult:
+    """Cylinder property dictionaries plus derived stress/force values."""
+
+    main_dict: dict[str, Any]
+    shell_dict: dict[str, Any]
+    longitudinal_dict: dict[str, Any]
+    ring_stiffener_dict: dict[str, Any]
+    ring_frame_dict: dict[str, Any]
+    geometry: int
+    derived_stresses: tuple[Any, Any, Any, Any, Any]
+    derived_forces: tuple[Any, Any, Any, Any]
+
+
+class CylinderStructurePropertyService:
+    """Build legacy cylinder property dictionaries from plain boundary values."""
+
+    @classmethod
+    def build(cls, request: CylinderStructurePropertyRequest) -> CylinderStructurePropertyResult:
+        from .calc_structure import CylinderAndCurvedPlate
+
+        geometry = api_helpers.geometry_id_for_domain(request.calculation_domain)
+        dummy_data = cls._dummy_data(request)
+        shell_dict = cls._shell_dict(request)
+        long_dict = cls._longitudinal_dict(request)
+        ring_stf_dict = cls._ring_stiffener_dict(request)
+        ring_frame_dict = cls._ring_frame_dict(request)
+        derived_stresses, derived_forces = cls._convert_load_input(
+            request,
+            geometry,
+            cylinder_class=CylinderAndCurvedPlate,
+        )
+        sasd, smsd, tTsd, tQsd, shsd = derived_stresses
+        main_values = request.main_values
+        main_dict_cyl = {
+            'sasd': [api_helpers.mpa_to_pa(sasd), 'Pa'],
+            'smsd': [api_helpers.mpa_to_pa(smsd), 'Pa'],
+            'tTsd': [api_helpers.mpa_to_pa(tTsd), 'Pa'],
+            'tQsd': [api_helpers.mpa_to_pa(tQsd), 'Pa'],
+            'psd': [api_helpers.mpa_to_pa(request.load_input['psd']), 'Pa'],
+            'shsd': [api_helpers.mpa_to_pa(shsd), 'Pa'],
+            'geometry': [geometry, ''],
+            'material factor': [main_values['material_factor'], ''],
+            'delta0': [0.005, ''],
+            'fab method ring stf': [main_values['fab_method_ring_stiffener'], ''],
+            'fab method ring girder': [main_values['fab_method_ring_frame'], ''],
+            'E-module': [main_values['e_module'], 'Pa'],
+            'poisson': [main_values['poisson'], ''],
+            'mat_yield': [api_helpers.mpa_to_pa(main_values['yield']), 'Pa'],
+            'length between girders': [api_helpers.mm_to_m(main_values['length_between_girders']), 'm'],
+            'panel spacing, s': [api_helpers.mm_to_m(main_values['panel_spacing']), 'm'],
+            'ring stf excluded': [main_values['ring_stiffener_excluded'], ''],
+            'ring frame excluded': [main_values['ring_frame_excluded'], ''],
+            'ULS or ALS': [main_values['uls_or_als'], ''],
+            'end cap pressure': [main_values['end_cap_pressure'], ''],
+        }
+
+        for key, value in dummy_data.items():
+            long_dict.setdefault(key, value)
+            ring_stf_dict.setdefault(key, value)
+            ring_frame_dict.setdefault(key, value)
+
+        return CylinderStructurePropertyResult(
+            main_dict=main_dict_cyl,
+            shell_dict=shell_dict,
+            longitudinal_dict=long_dict,
+            ring_stiffener_dict=ring_stf_dict,
+            ring_frame_dict=ring_frame_dict,
+            geometry=geometry,
+            derived_stresses=derived_stresses,
+            derived_forces=derived_forces,
+        )
+
+    @staticmethod
+    def _dummy_data(request):
+        values = request.dummy_values
+        return {
+            'span': [api_helpers.mm_to_m(values['span']), 'm'],
+            'plate_thk': [api_helpers.mm_to_m(values['plate_thk']), 'm'],
+            'structure_type': [values['structure_type'], ''],
+            'sigma_y1': [values['sigma_y1'], 'MPa'],
+            'sigma_y2': [values['sigma_y2'], 'MPa'],
+            'sigma_x1': [values['sigma_x1'], 'MPa'],
+            'sigma_x2': [values['sigma_x2'], 'MPa'],
+            'tau_xy': [values['tau_xy'], 'MPa'],
+            'plate_kpp': [values['plate_kpp'], ''],
+            'stf_kps': [values['stf_kps'], ''],
+            'stf_km1': [values['stf_km1'], ''],
+            'stf_km2': [values['stf_km2'], ''],
+            'stf_km3': [values['stf_km3'], ''],
+            'press_side': [values['pressure_side'], ''],
+            'structure_types': [request.structure_types, ''],
+            'zstar_optimization': [values['zstar_optimization'], ''],
+            'puls buckling method': [values['puls_method'], ''],
+            'puls boundary': [values['puls_boundary'], ''],
+            'puls stiffener end': [values['puls_stiffener_end'], ''],
+            'puls sp or up': [values['puls_sp_or_up'], ''],
+            'puls up boundary': [values['puls_up_boundary'], ''],
+            'panel or shell': [values['panel_or_shell'], ''],
+            'mat_factor': [values['material_factor'], ''],
+            'spacing': [api_helpers.mm_to_m(values['spacing']), 'm'],
+        }
+
+    @staticmethod
+    def _shell_dict(request):
+        values = request.shell_values
+        return {
+            'plate_thk': [api_helpers.mm_to_m(values['thickness']), 'm'],
+            'radius': [api_helpers.mm_to_m(values['radius']), 'm'],
+            'distance between rings, l': [api_helpers.mm_to_m(values['distance_between_rings']), 'm'],
+            'length of shell, L': [api_helpers.mm_to_m(values['length']), 'm'],
+            'tot cyl length, Lc': [api_helpers.mm_to_m(values['total_length']), 'm'],
+            'eff. buckling lenght factor': [values['k_factor'], ''],
+            'mat_yield': [api_helpers.mpa_to_pa(request.main_values['yield']), 'Pa'],
+        }
+
+    @staticmethod
+    def _longitudinal_dict(request):
+        values = request.longitudinal_values
+        return {
+            'spacing': [api_helpers.mm_to_m(values['spacing']), 'm'],
+            'stf_web_height': [api_helpers.mm_to_m(values['web_h']), 'm'],
+            'stf_web_thk': [api_helpers.mm_to_m(values['web_t']), 'm'],
+            'stf_flange_width': [api_helpers.mm_to_m(values['fl_w']), 'm'],
+            'stf_flange_thk': [api_helpers.mm_to_m(values['fl_t']), 'm'],
+            'stf_type': [values['type'], ''],
+            'span': [api_helpers.mm_to_m(request.dummy_values['span']), 'm'],
+            'mat_yield': [api_helpers.mpa_to_pa(request.main_values['yield']), 'Pa'],
+            'panel or shell': ['shell', ''],
+        }
+
+    @staticmethod
+    def _ring_stiffener_dict(request):
+        values = request.ring_stiffener_values
+        return {
+            'stf_web_height': [api_helpers.mm_to_m(values['web_h']), 'm'],
+            'stf_web_thk': [api_helpers.mm_to_m(values['web_t']), 'm'],
+            'stf_flange_width': [api_helpers.mm_to_m(values['fl_w']), 'm'],
+            'stf_flange_thk': [api_helpers.mm_to_m(values['fl_t']), 'm'],
+            'stf_type': [values['type'], ''],
+            'mat_yield': [api_helpers.mpa_to_pa(request.main_values['yield']), 'Pa'],
+            'panel or shell': ['shell', ''],
+        }
+
+    @staticmethod
+    def _ring_frame_dict(request):
+        values = request.ring_frame_values
+        return {
+            'stf_web_height': [api_helpers.mm_to_m(values['web_h']), 'm'],
+            'stf_web_thk': [api_helpers.mm_to_m(values['web_t']), 'm'],
+            'stf_flange_width': [api_helpers.mm_to_m(values['fl_w']), 'm'],
+            'stf_flange_thk': [api_helpers.mm_to_m(values['fl_t']), 'm'],
+            'stf_type': [values['type'], ''],
+            'span': [api_helpers.mm_to_m(request.dummy_values['span']), 'm'],
+            'mat_yield': [api_helpers.mpa_to_pa(request.main_values['yield']), 'Pa'],
+            'panel or shell': ['shell', ''],
+        }
+
+    @staticmethod
+    def _convert_load_input(request, geometry, cylinder_class):
+        load_input = request.load_input
+        shell = request.shell_values
+        longitudinal = request.longitudinal_values
+        converter_kwargs = {
+            'geometry': geometry,
+            'shell_t': shell['thickness'],
+            'shell_radius': shell['radius'],
+            'shell_spacing': longitudinal['spacing'],
+            'hw': longitudinal['web_h'],
+            'tw': longitudinal['web_t'],
+            'b': longitudinal['fl_w'],
+            'tf': longitudinal['fl_t'],
+            'CylinderAndCurvedPlate': cylinder_class,
+        }
+        if load_input['mode'] == 1:
+            forces = (
+                load_input['Nsd'],
+                load_input['Msd'],
+                load_input['Tsd'],
+                load_input['Qsd'],
+            )
+            stresses = hlp.helper_cylinder_stress_to_force_to_stress(
+                stresses=None,
+                forces=forces,
+                **converter_kwargs,
+            )
+            return stresses, forces
+
+        stresses = (
+            load_input['sasd'],
+            load_input['smsd'],
+            abs(load_input['tTsd']),
+            load_input['tQsd'],
+            load_input['shsd'],
+        )
+        forces_with_shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+            stresses=stresses,
+            **converter_kwargs,
+        )
+        return stresses, tuple(forces_with_shsd[:4])
 
 
 @dataclass(frozen=True)
