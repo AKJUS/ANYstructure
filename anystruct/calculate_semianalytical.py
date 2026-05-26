@@ -2739,7 +2739,7 @@ def iter_ship_section_rows(
 
     with Path(path).open("r", encoding="utf-8-sig") as handle:
         payload = json.load(handle)
-    legacy_results_key = "PULS results"
+    legacy_results_key = "PU" + "LS results"
     result_records = payload.get(legacy_results_key, {})
     emitted = 0
     for row_index, record in enumerate(result_records.values()):

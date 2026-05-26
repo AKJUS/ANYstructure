@@ -329,6 +329,7 @@ class Application():
                                             # Example {8: (5,20), 22: (12,20), 'all': (16,20)}
 
         self._ML_buckling = ml_models.load_buckling_models((self._root_dir,))
+        self._ML_classes = ml_models.default_ml_class_messages()
 
         # Used to select parameter
         self._stuctural_definition = ['mat_yield','mat_factor', 'span', 'spacing', 'plate_thk', 'stf_web_height',
@@ -902,8 +903,8 @@ class Application():
         self._new_buckling_method = tk.StringVar()
         options = [
             'DNV-RP-C201 - prescriptive',
-            'ML-Numeric (SemiAnalytical based)',
-            'ML-CL (SemiAnalytical based)',
+            'ML-Numeric (PULS based)',
+            'ML-CL (PULS based)',
             'SemiAnalytical S3/U3',
         ]
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
@@ -4044,12 +4045,12 @@ class Application():
                                     for key in ['fatigue', 'section', 'shear', 'thickness']
                                 ]) else 'red'
                         elif self._new_buckling_method.get() in [
-                            'ML-CL (SemiAnalytical based)',
-                            'ML-Numeric (SemiAnalytical based)',
+                            'ML-CL (PULS based)',
+                            'ML-Numeric (PULS based)',
                         ]:
                             ml_method = self._new_buckling_method.get()
 
-                            if ml_method == 'ML-CL (SemiAnalytical based)':
+                            if ml_method == 'ML-CL (PULS based)':
                                 # Existing classification pipeline colors
                                 ml_color_dict = state.get('ML buckling colors', {}).get(line, {})
                             else:
@@ -4423,7 +4424,7 @@ class Application():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=round(state['color code']['lines'][line]['rp uf'],2))
 
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-CL (SemiAnalytical based)':
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-CL (PULS based)':
             color = 'black'
             this_text = 'N/A'
             if self._new_label_color_coding.get():
@@ -4453,7 +4454,7 @@ class Application():
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                               text=this_text)
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)':
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
             numeric = state.get('ML buckling numeric', {}).get(line, {})
             numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
             numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
@@ -4592,7 +4593,7 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=round(state['color code']['lines'][line]['Total uf rp'],2))
-            elif self._new_buckling_method.get() == 'ML-CL (SemiAnalytical based)':
+            elif self._new_buckling_method.get() == 'ML-CL (PULS based)':
                 color = 'black'
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
@@ -4619,7 +4620,7 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=this_text)
-            elif self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)':
+            elif self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
                 numeric = state.get('ML buckling numeric', {}).get(line, {})
                 numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
                 numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
@@ -4939,13 +4940,13 @@ class Application():
 
                 elif self._new_buckling_method.get() in [
                     'SemiAnalytical S3/U3',
-                    'ML-CL (SemiAnalytical based)',
-                    'ML-Numeric (SemiAnalytical based)',
+                    'ML-CL (PULS based)',
+                    'ML-Numeric (PULS based)',
                 ]:
 
                     print_semi_analytical_results = self._new_buckling_method.get() == 'SemiAnalytical S3/U3'
-                    print_class_results = self._new_buckling_method.get() == 'ML-CL (SemiAnalytical based)'
-                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)'
+                    print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
+                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
 
                     self._result_canvas.create_text(
                         [x * 1, (y + (start_y + 0) * dy) * 1],
@@ -5502,6 +5503,9 @@ class Application():
                                                      fill='grey', outline='grey')
 
 
+    def _get_ml_classes(self):
+        return getattr(self, '_ML_classes', ml_models.default_ml_class_messages())
+
     def _build_report_data_snapshot(self):
         return project_services.ReportDataSnapshot(
             project_information=self._project_information.get('1.0', tk.END),
@@ -5516,7 +5520,7 @@ class Application():
                 line_name: self.get_highest_pressure(line_name)
                 for line_name in self._line_to_struc
             },
-            ml_classes=self._ML_classes,
+            ml_classes=self._get_ml_classes(),
         )
 
     def report_generate(self, autosave = False):

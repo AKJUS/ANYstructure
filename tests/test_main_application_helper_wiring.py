@@ -246,8 +246,11 @@ def test_report_and_sesam_callbacks_delegate_request_orchestration():
     assert "ReportRequestService.create_pdf(" in report_block
     assert "ReportRequestService.create_table(" in report_block
     assert "def _build_report_data_snapshot" in report_block
+    assert "def _get_ml_classes" in source
     assert "ReportDataSnapshot(" in report_block
     assert "self._build_report_data_snapshot()" in report_block
+    assert "ml_classes=self._get_ml_classes()" in report_block
+    assert "ml_classes=self._ML_classes" not in report_block
     assert 'ReportRequest(filename, "Section results", 10, self)' not in report_block
     assert "LetterMaker" not in source
     assert "SimpleDocTemplate" not in source

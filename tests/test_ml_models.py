@@ -42,3 +42,13 @@ def test_resolve_model_pickle_accepts_ml_files_directory_roots_and_material_fact
         resolved = ml_models.resolve_model_pickle(spec, (ml_files,), 1.1)
 
         assert resolved == factor_model
+
+
+def test_default_ml_class_messages_are_copied_for_gui_and_report_use():
+    first = ml_models.default_ml_class_messages()
+    second = ml_models.default_ml_class_messages()
+
+    first[0] = "changed"
+
+    assert second[0] == "N/A"
+    assert second[11] == "UF above 1.0"

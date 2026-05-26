@@ -31,7 +31,7 @@ def test_main_gui_has_no_external_puls_run_or_result_controls():
     assert "def puls_delete_all" not in source
     assert "def on_puls_results_for_line" not in source
     assert "Set location of PULS excel sheet" not in source
-    assert "['DNV-RP-C201 - prescriptive','DNV PULS','ML-CL (SemiAnalytical based)']" not in source
+    assert "['DNV-RP-C201 - prescriptive','DNV PULS','ML-CL (PULS based)']" not in source
     assert "self._PULS_results" not in source
     assert "== 'DNV PULS'" not in source
 
@@ -71,7 +71,7 @@ def test_excel_import_and_ml_cl_buckling_option_remain_available():
         source.index("self._new_buckling_method = tk.StringVar()"):
         source.index("self._lab_buckling_method = ttk.Label")
     ]
-    assert "'ML-CL (SemiAnalytical based)'" in buckling_options
-    assert "'ML-Numeric (SemiAnalytical based)'" in buckling_options
+    assert "'ML-CL (PULS based)'" in buckling_options
+    assert "'ML-Numeric (PULS based)'" in buckling_options
     assert "'SemiAnalytical S3/U3'" in buckling_options
     assert "'DNV PULS'" not in buckling_options

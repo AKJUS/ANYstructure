@@ -451,7 +451,7 @@ class LetterMaker(object):
             colors = self.data.result_state['colors']
         elif self.data.buckling_method == 'SemiAnalytical S3/U3':
             colors = self.data.result_state.get('SemiAnalytical colors', {})
-        elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+        elif self.data.buckling_method == 'ML-Numeric (PULS based)':
             colors = self.data.result_state.get('ML buckling numeric colors', {})
         else:
             colors = self.data.result_state['ML buckling colors']
@@ -521,7 +521,7 @@ class LetterMaker(object):
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                     self.c.setStrokeColor(all_line_data.get('SemiAnalytical colors', {}).get(line, {}).get(puls_method, 'black'))
-                elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+                elif self.data.buckling_method == 'ML-Numeric (PULS based)':
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                     self.c.setStrokeColor(

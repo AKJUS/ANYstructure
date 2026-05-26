@@ -330,7 +330,7 @@ class FlatStru():
         Various buckling realted parameters are set here. For details, see\n
         DNV-RP-C201 Buckling strength of plated structures.\n
 
-        :param calculation_method: 'DNV-RP-C201 - prescriptive', 'ML-CL (SemiAnalytical based)'
+        :param calculation_method: 'DNV-RP-C201 - prescriptive', 'ML-CL (PULS based)'
         :type calculation_method: str
         :param buckling_acceptance: for ML-CL calculations, either 'buckling' or 'ultimate'
         :type buckling_acceptance: str
@@ -359,8 +359,8 @@ class FlatStru():
         api_helpers.assert_choice(buckling_acceptance, api_helpers.BUCKLING_ACCEPTANCE_TYPES, 'buckling_acceptance')
         api_helpers.assert_choice(stiffener_support, api_helpers.SUPPORT_TYPES, 'stiffener_support')
         api_helpers.assert_choice(girder_support, api_helpers.SUPPORT_TYPES, 'girder_support')
-        if calculation_method == 'ML-CL (SemiAnalytical based)':
-            raise NotImplementedError('ML-CL (SemiAnalytical based) not yet implemented')
+        if calculation_method == 'ML-CL (PULS based)':
+            raise NotImplementedError('ML-CL (PULS based) not yet implemented')
         sigy_mapper = {True: 'Stf. pl. effective against sigma y', False:'All sigma y to girder'}
         self._FlatStructure._stiffened_plate_effective_aginst_sigy = sigy_mapper[stiffened_plate_effective_aginst_sigy]
         self._FlatStructure.method = buckling_acceptance

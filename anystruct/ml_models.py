@@ -7,6 +7,25 @@ from typing import Any, Iterable
 
 
 MATERIAL_FACTORS = (1.1, 1.15)
+ML_CLASS_MESSAGES = {
+    0: "N/A",
+    1: "A negative utilisation factor is found.",
+    2: "At least one of the in-plane loads must be non-zero.",
+    3: "Division by zero",
+    4: "Overflow",
+    5: "The aspect ratio exceeds the PULS code limit",
+    6: "The global slenderness exceeds 4. Please reduce stiffener span or increase stiffener height.",
+    7: "The applied pressure is too high for this plate field.",
+    8: "web-flange-ratio",
+    9: "UF below or equal 0.87",
+    10: "UF between 0.87 and 1.0",
+    11: "UF above 1.0",
+}
+
+
+def default_ml_class_messages():
+    """Return the ML classifier result messages used by GUI/report surfaces."""
+    return dict(ML_CLASS_MESSAGES)
 
 
 @dataclass(frozen=True)
