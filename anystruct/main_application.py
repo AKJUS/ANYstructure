@@ -5315,10 +5315,12 @@ class Application():
         '''
 
         if not autosave:
-            save_file = filedialog.asksaveasfile(mode="w", defaultextension=".pdf")
-            filename = save_file.name
-            if save_file is None:  # ask saveasfile return `None` if dialog closed with "cancel".
+            target = project_application.ProjectFileDialogService.selected_output_target(
+                filedialog.asksaveasfilename(defaultextension=".pdf")
+            )
+            if target is None:
                 return
+            filename = target.path
         else:
             filename = '../testrun.pdf'
 
@@ -5333,7 +5335,7 @@ class Application():
             self.grid_display_tanks(save=True)
 
         project_services.ReportRequestService.create_pdf(
-            project_services.ReportRequest(filename, "Section results", 10, self._build_report_data_snapshot()),
+            project_services.ReportRequest(str(filename), "Section results", 10, self._build_report_data_snapshot()),
         )
         try:
             os.startfile(filename)
@@ -5347,10 +5349,12 @@ class Application():
     def table_generate(self, autosave = False):
 
         if not autosave:
-            save_file = filedialog.asksaveasfile(mode="w", defaultextension=".pdf")
-            filename = save_file.name
-            if save_file is None:  # ask saveasfile return `None` if dialog closed with "cancel".
+            target = project_application.ProjectFileDialogService.selected_output_target(
+                filedialog.asksaveasfilename(defaultextension=".pdf")
+            )
+            if target is None:
                 return
+            filename = target.path
         else:
             filename = '../testrun.pdf'
 
@@ -5359,7 +5363,7 @@ class Application():
             return
 
         project_services.ReportRequestService.create_table(
-            project_services.ReportRequest(filename, "Section results", 10, self._build_report_data_snapshot()),
+            project_services.ReportRequest(str(filename), "Section results", 10, self._build_report_data_snapshot()),
         )
         try:
             os.startfile(filename)
@@ -5654,6 +5658,72 @@ class Application():
             structure_types=self._structure_types,
         ), overpressure
 
+    def _build_flat_structure_property_request_from_cylinder_excel_record(self, import_record):
+        shell_thk = import_record.shell_values[0]
+        long_web_h, long_web_t, long_fl_w, long_fl_t, panel_spacing, long_type = \
+            import_record.longitudinal_values
+
+        return project_services.FlatStructurePropertyRequest(
+            calculation_domain=import_record.calculation_domain,
+            base_values={
+                'material': self._new_material.get(),
+                'material_factor': self._new_material_factor.get(),
+                'span': hlp.dist(import_record.first_point, import_record.second_point),
+                'spacing': panel_spacing,
+                'plate_thk': shell_thk,
+                'stf_web_h': long_web_h,
+                'stf_web_t': long_web_t,
+                'stf_fl_w': long_fl_w,
+                'stf_fl_t': long_fl_t,
+                'structure_type': self._new_stucture_type.get(),
+                'stf_type': long_type,
+                'sigma_y1': self._new_sigma_y1.get(),
+                'sigma_y2': self._new_sigma_y2.get(),
+                'sigma_x1': self._new_sigma_x1.get(),
+                'sigma_x2': self._new_sigma_x2.get(),
+                'tau_xy': self._new_tauxy.get(),
+                'plate_kpp': self._new_plate_kpp.get(),
+                'stf_kps': self._new_stf_kps.get(),
+                'stf_km1': self._new_stf_km1.get(),
+                'stf_km2': self._new_stf_km2.get(),
+                'stf_km3': self._new_stf_km3.get(),
+                'pressure_side': self._new_pressure_side.get(),
+                'zstar_optimization': self._new_zstar_optimization.get(),
+                'puls_method': self._new_puls_method.get(),
+                'puls_boundary': self._new_puls_panel_boundary.get(),
+                'puls_stiffener_end': self._new_buckling_stf_end_support.get(),
+                'puls_sp_or_up': self._new_puls_sp_or_up.get(),
+                'puls_up_boundary': self._new_puls_up_boundary.get(),
+                'panel_or_shell': self._new_panel_or_shell.get(),
+                'girder_lg': self._new_girder_length_LG.get(),
+            },
+            girder_values={
+                'web_h': self._new_girder_web_h.get(),
+                'web_t': self._new_girder_web_t.get(),
+                'fl_w': self._new_girder_fl_w.get(),
+                'fl_t': self._new_girder_fl_t.get(),
+                'type': self._new_girder_type.get(),
+            },
+            buckling_values={
+                'min_pressure_adjacent_spans': self._new_buckling_min_press_adj_spans.get(),
+                'load_factor_stresses': self._new_buckling_lf_stresses.get(),
+                'stiffener_end_support': self._new_buckling_stf_end_support.get(),
+                'girder_end_support': self._new_buckling_girder_end_support.get(),
+                'tension_field': self._new_buckling_tension_field.get(),
+                'plate_effective_against_sigy': self._new_buckling_effective_against_sigy.get(),
+                'buckling_length_factor_stf': self._new_buckling_length_factor_stf.get(),
+                'buckling_length_factor_girder': self._new_buckling_length_factor_stf.get(),
+                'km3': self._new_buckling_km3.get(),
+                'km2': self._new_buckling_km2.get(),
+                'girder_dist_lateral_support': self._new_buckling_girder_dist_bet_lat_supp.get(),
+                'stiffener_dist_lateral_support': self._new_buckling_stf_dist_bet_lat_supp.get(),
+                'panel_length': self._new_panel_length_Lp.get(),
+                'fabrication_method_stiffener': self._new_buckling_fab_method_stf.get(),
+                'fabrication_method_girder': self._new_buckling_fab_method_girder.get(),
+            },
+            structure_types=self._structure_types,
+        )
+
     def _build_cylinder_structure_property_request(self):
         return project_services.CylinderStructurePropertyRequest(
             calculation_domain=self._new_calculation_domain.get(),
@@ -5742,6 +5812,52 @@ class Application():
             structure_types=self._structure_types,
         )
 
+    def _build_cylinder_excel_import_defaults(self):
+        return project_services.CylinderExcelImportDefaults(
+            plate_thk=self._new_plate_thk.get(),
+            structure_type=self._new_stucture_type.get(),
+            sigma_y1=self._new_sigma_y1.get(),
+            sigma_y2=self._new_sigma_y2.get(),
+            sigma_x1=self._new_sigma_x1.get(),
+            sigma_x2=self._new_sigma_x2.get(),
+            tau_xy=self._new_tauxy.get(),
+            plate_kpp=self._new_plate_kpp.get(),
+            stf_kps=self._new_stf_kps.get(),
+            stf_km1=self._new_stf_km1.get(),
+            stf_km2=self._new_stf_km2.get(),
+            stf_km3=self._new_stf_km3.get(),
+            pressure_side=self._new_pressure_side.get(),
+            zstar_optimization=self._new_zstar_optimization.get(),
+            puls_method=self._new_puls_method.get(),
+            puls_boundary=self._new_puls_panel_boundary.get(),
+            puls_stiffener_end=self._new_buckling_stf_end_support.get(),
+            puls_sp_or_up=self._new_puls_sp_or_up.get(),
+            puls_up_boundary=self._new_puls_up_boundary.get(),
+            panel_or_shell=self._new_panel_or_shell.get(),
+            material_factor=self._new_material_factor.get(),
+            design_pressure=self._new_shell_psd.get(),
+            shear_stress=self._new_shell_shsd.get(),
+            e_module=self._new_shell_e_module.get(),
+            poisson=self._new_shell_poisson.get(),
+            length_between_girders=self._new_shell_ring_frame_length_between_girders.get(),
+            fab_method_ring_stiffener=self._new_shell_ring_stf_fab_method.get(),
+            fab_method_ring_frame=self._new_shell_ring_frame_fab_method.get(),
+            end_cap_pressure=self._new_shell_end_cap_pressure_included.get(),
+            structure_types=self._structure_types,
+            ring_stiffener_type=self._new_shell_ring_stf_type.get(),
+            ring_frame_type=self._new_shell_ring_frame_type.get(),
+        )
+
+    def _create_cylinder_structure_from_property_result(self, result):
+        return self._create_cylinder_structure_from_properties(
+            result.main_dict,
+            result.shell_dict,
+            result.longitudinal_dict,
+            result.ring_stiffener_dict,
+            result.ring_frame_dict,
+            result.geometry,
+        )
+
     def _build_cylinder_structure_properties(self):
         result = project_services.CylinderStructurePropertyService.build(
             self._build_cylinder_structure_property_request()
@@ -5760,14 +5876,7 @@ class Application():
             self._new_shell_Tsd.set(Tsd)
             self._new_shell_Qsd.set(Qsd)
 
-        cylinder_obj = self._create_cylinder_structure_from_properties(
-            result.main_dict,
-            result.shell_dict,
-            result.longitudinal_dict,
-            result.ring_stiffener_dict,
-            result.ring_frame_dict,
-            result.geometry,
-        )
+        cylinder_obj = self._create_cylinder_structure_from_property_result(result)
 
         return (
             cylinder_obj,
@@ -5803,14 +5912,16 @@ class Application():
 
     def _create_cylinder_structure_from_properties(self, main_dict_cyl, shell_dict, long_dict, ring_stf_dict,
                                                    ring_frame_dict, geometry):
+        ring_stf_excluded = main_dict_cyl.get('ring stf excluded', [self._new_shell_exclude_ring_stf.get()])[0]
+        ring_frame_excluded = main_dict_cyl.get('ring frame excluded', [self._new_shell_exclude_ring_frame.get()])[0]
         return CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
                                       long_stf=None if geometry in [1, 2, 5, 6]
                                       else Structure(long_dict),
                                       ring_stf=None if any([geometry in [1, 2, 3, 4],
-                                                            self._new_shell_exclude_ring_stf.get()])
+                                                            ring_stf_excluded])
                                       else Structure(ring_stf_dict),
                                       ring_frame=None if any([geometry in [1, 2, 3, 4],
-                                                              self._new_shell_exclude_ring_frame.get()])
+                                                              ring_frame_excluded])
                                       else Structure(ring_frame_dict))
 
     def _clear_tanks_and_grid(self):
@@ -5855,6 +5966,12 @@ class Application():
                 geometry = main_dict_cyl['geometry'][0]
         else:
             prop_dict = pasted_structure.get_main_properties()
+
+        if cylinder_return is not None:
+            CylinderObj = cylinder_return
+            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
+                cylinder_return.get_all_properties()
+            geometry = main_dict_cyl['geometry'][0]
 
         if obj_dict_stf is None and isinstance(prop_dict, dict):
             obj_dict_stf = prop_dict.get('Stiffener')
@@ -7015,15 +7132,15 @@ class Application():
 
     def save_no_dialogue(self, event = None, backup = False):
         if backup:
-            self.savefile(
-                filename=project_application.ProjectPersistenceService.backup_path(self._root_dir),
-                backup=backup,
-            )
+            target = project_application.ProjectFileDialogService.backup_save_target(self._root_dir)
+            self.savefile(filename=target.path, backup=backup)
             return
-        if self.__last_save_file is not None:
-            self.savefile(filename=self.__last_save_file)
-        else:
+
+        target = project_application.ProjectFileDialogService.remembered_save_target(self.__last_save_file)
+        if target is None:
             tk.messagebox.showerror('Save error', 'No saves in this session yet.')
+            return
+        self.savefile(filename=target.path)
 
     def savefile(self, filename = None, backup = False):
         '''
@@ -7034,12 +7151,13 @@ class Application():
             filename = filedialog.asksaveasfilename(defaultextension=".txt")
             if not filename:
                 return
-            if not backup:
-                self.__last_save_file = filename
+        save_target = project_application.ProjectFileDialogService.selected_save_target(filename, backup=backup)
+        if save_target.remember_as_last_save:
+            self.__last_save_file = str(save_target.path)
 
         try:
             save_result = project_application.ProjectSaveService.save_path(
-                filename,
+                save_target.path,
                 self._build_project_save_input(),
             )
         except project_application.ProjectPersistenceError as error:
@@ -7074,19 +7192,8 @@ class Application():
             weight_and_cog=self._weight_logger,
         )
 
-    def openfile(self, defined = None, alone = False):
-        '''
-        Opens a file with data (JSON).
-        '''
-
-        if defined == None:
-            filename = filedialog.askopenfilename(defaultextension=".txt")
-            if not filename:
-                return
-        else:
-            filename = defined
-
-        hydration_defaults = project_application.ProjectHydrationDefaults(
+    def _build_project_hydration_defaults(self):
+        return project_application.ProjectHydrationDefaults(
             structure_types=self._structure_types,
             zstar_optimization=self._new_zstar_optimization.get(),
             puls_buckling_method=self._new_puls_method.get(),
@@ -7096,24 +7203,12 @@ class Application():
             puls_up_boundary=self._new_puls_up_boundary.get(),
             material_factor=self._new_material_factor.get(),
         )
-        try:
-            opened_project = project_application.ProjectOpenService.open_path(
-                filename,
-                hydration_defaults,
-            )
-        except project_application.ProjectPersistenceError as error:
-            tk.messagebox.showerror('Open error', str(error))
-            return
 
-        open_transfer = opened_project.transfer
-        hydration = opened_project.hydration
-
-        self.reset()
+    def _apply_open_project_text_and_theme(self, open_transfer):
+        self._project_information.delete("1.0", tk.END)
         if open_transfer.project_information:
-            self._project_information.delete("1.0", tk.END)
             self._project_information.insert(1.0, open_transfer.project_information)
         else:
-            self._project_information.delete("1.0", tk.END)
             self._project_information.insert(1.0, 'No information on project provided. Input here.')
 
         if open_transfer.shifting:
@@ -7123,6 +7218,7 @@ class Application():
 
         self.set_colors(open_transfer.theme)
 
+    def _apply_open_project_geometry_and_objects(self, open_transfer, hydration):
         self._point_dict = open_transfer.points
         self._line_dict = open_transfer.lines
         self._line_to_struc = hydration.line_bundles
@@ -7136,24 +7232,26 @@ class Application():
         for section_properties in hydration.section_properties:
             self._sections = add_new_section(self._sections, struc.Section(section_properties))
 
+    def _apply_open_project_accelerations(self, open_transfer):
         self._accelerations_dict = open_transfer.accelerations
-
         self._new_static_acc.set(self._accelerations_dict['static'])
         self._new_dyn_acc_loaded.set(self._accelerations_dict['dyn_loaded'])
         self._new_dyn_acc_ballast.set(self._accelerations_dict['dyn_ballast'])
 
+    def _apply_open_project_load_combinations(self, open_transfer):
         for load_combination in open_transfer.load_combinations:
             name = load_combination.name
             if load_combination.has_include:
-                self._new_load_comb_dict[name] = [tk.DoubleVar(),tk.DoubleVar(),tk.IntVar()]
+                self._new_load_comb_dict[name] = [tk.DoubleVar(), tk.DoubleVar(), tk.IntVar()]
                 self._new_load_comb_dict[name][0].set(load_combination.static_factor)
                 self._new_load_comb_dict[name][1].set(load_combination.dynamic_factor)
                 self._new_load_comb_dict[name][2].set(load_combination.include)
             else:
-                self._new_load_comb_dict[name] = [tk.DoubleVar(),tk.IntVar()]
+                self._new_load_comb_dict[name] = [tk.DoubleVar(), tk.IntVar()]
                 self._new_load_comb_dict[name][0].set(load_combination.static_factor)
                 self._new_load_comb_dict[name][1].set(load_combination.dynamic_factor)
 
+    def _apply_open_project_tanks(self, open_transfer):
         try:
             self._main_grid.import_grid(open_transfer.tank_grid)
             self._grid_calc = grid_window.CreateGridWindow(self._main_grid, self._canvas_dim,
@@ -7162,8 +7260,8 @@ class Application():
             self._main_grid.bfs_search_data = open_transfer.tank_search_data
             self._grid_calc.bfs_search_data = open_transfer.tank_search_data
 
-            for comp_no in range(2, int(self._main_grid.get_highest_number_in_grid())+1):
-                self._compartments_listbox.insert('end',comp_no)
+            for comp_no in range(2, int(self._main_grid.get_highest_number_in_grid()) + 1):
+                self._compartments_listbox.insert('end', comp_no)
                 tank_name = 'comp' + str(comp_no)
                 self._tank_dict[tank_name] = Tanks(open_transfer.tank_properties[tank_name])
         except IndexError:
@@ -7171,12 +7269,9 @@ class Application():
                 point_coord_x = self._canvas_base_origo[0] + self._point_dict[point_no][0] * self._canvas_scale
                 point_coord_y = self._canvas_base_origo[1] - self._point_dict[point_no][1] * self._canvas_scale
 
-                self.grid_operations(line_name, [point_coord_x,point_coord_y])
+                self.grid_operations(line_name, [point_coord_x, point_coord_y])
 
-        self._new_buckling_method.set(open_transfer.buckling_method)
-
-            # Setting the scale of the canvas
-
+    def _apply_open_project_canvas_scale(self):
         points = self._point_dict
         if len(points) != 0:
             highest_y = max([coord[1] for coord in points.values()])
@@ -7187,36 +7282,62 @@ class Application():
         if not any([highest_x == 0, highest_y == 0]):
             self._canvas_scale = min(800 / highest_y, 800 / highest_x, 15)
 
-        # if 'buckling type' in imported.keys():
-        #     self._new_buckling_slider.set(imported['buckling type'])
-        #     self._buckling_slider.set(imported['buckling type'])
-
+    def _finalize_open_project(self, open_transfer, filename):
+        self._new_buckling_method.set(open_transfer.buckling_method)
         self._weight_logger = open_transfer.weight_and_cog
-
         self.get_cob()
         self._parent.wm_title('| ANYstructure |     ' + str(filename))
         self.update_frame()
 
-    def restore_previous(self):
-        if project_application.ProjectPersistenceService.backup_exists(self._root_dir):
-            self.openfile(
-                defined=project_application.ProjectPersistenceService.backup_path(self._root_dir)
+    def openfile(self, defined = None, alone = False):
+        '''
+        Opens a file with data (JSON).
+        '''
+
+        if defined == None:
+            target = project_application.ProjectFileDialogService.selected_open_target(
+                filedialog.askopenfilename(defaultextension=".txt")
             )
+        else:
+            target = project_application.ProjectFileDialogService.selected_open_target(defined)
+        if target is None:
+            return
+
+        try:
+            opened_project = project_application.ProjectOpenService.open_path(
+                target.path,
+                self._build_project_hydration_defaults(),
+            )
+        except project_application.ProjectPersistenceError as error:
+            tk.messagebox.showerror('Open error', str(error))
+            return
+
+        open_transfer = opened_project.transfer
+        hydration = opened_project.hydration
+
+        self.reset()
+        self._apply_open_project_text_and_theme(open_transfer)
+        self._apply_open_project_geometry_and_objects(open_transfer, hydration)
+        self._apply_open_project_accelerations(open_transfer)
+        self._apply_open_project_load_combinations(open_transfer)
+        self._apply_open_project_tanks(open_transfer)
+        self._apply_open_project_canvas_scale()
+        self._finalize_open_project(open_transfer, target.path)
+
+    def restore_previous(self):
+        target = project_application.ProjectFileDialogService.restore_target(self._root_dir)
+        if target is not None:
+            self.openfile(defined=target.path)
 
     def open_example(self, file_name = 'ship_section_example.txt'):
         ''' Open the example file. To be used in help menu. '''
-        if os.path.isfile(file_name) :
-            self.openfile(defined = file_name)
-        else:
-            self.openfile(defined= self._root_dir + '/' + file_name)
+        target = project_application.ProjectFileDialogService.example_open_target(file_name, self._root_dir)
+        self.openfile(defined=target.path)
 
     def open_example_excel_file(self):
         file_name = 'excel_input_example.xlsx'
-
-        if os.path.isfile(file_name) :
-            project_services.ExcelProjectImportService.open_example_path(file_name)
-        else:
-            project_services.ExcelProjectImportService.open_example_path(self._root_dir + '/' + file_name)
+        target = project_application.ProjectFileDialogService.example_open_target(file_name, self._root_dir)
+        project_services.ExcelProjectImportService.open_example_path(target.path)
 
     def _sync_excel_import_geometry(self, geometry_import):
         for point in geometry_import.created_points:
@@ -7231,11 +7352,13 @@ class Application():
     def open_excel_file(self):
         ''' Open an excel file with data to read into ANYstructure '''
 
-        imp_file = filedialog.askopenfilename(defaultextension=".xlsx")
-        if not imp_file:
+        target = project_application.ProjectFileDialogService.selected_open_target(
+            filedialog.askopenfilename(defaultextension=".xlsx")
+        )
+        if target is None:
             return
 
-        import_data = project_services.ExcelProjectImportService.read_path(imp_file)
+        import_data = project_services.ExcelProjectImportService.read_path(target.path)
         flat_plate_records = import_data.flat_plate_records
         cylinder_records = import_data.cylinder_records
 
@@ -7282,83 +7405,20 @@ class Application():
         for imported_line in cylinder_geometry.imported_lines:
             import_record = imported_line.record
             this_line = imported_line.line.name
-            l1x, l1y = import_record.first_point
-            l2x, l2y = import_record.second_point
             self._active_line = this_line
             self._line_is_active = True
             self._new_calculation_domain.set(import_record.calculation_domain)
-            shell_thk, shell_radius, dist_rings, shell_length, shell_tot_length, shell_k, shell_mat = \
-                import_record.shell_values
-            self._new_shell_thk.set(shell_thk)
-            self._new_shell_radius.set(shell_radius)
-            self._new_shell_dist_rings.set(dist_rings)
-            self._new_shell_length.set(shell_length)
-            self._new_shell_tot_length.set(shell_tot_length)
-            self._new_shell_k_factor.set(shell_k)
-            self._new_shell_mat_factor.set(shell_mat)
-
-            long_web_h, long_web_t, long_fl_w, long_fl_t, panel_spacing, long_type = \
-                import_record.longitudinal_values
-            self._new_stf_web_h.set(long_web_h)
-            self._new_stf_web_t.set(long_web_t)
-            self._new_stf_fl_w.set(long_fl_w)
-            self._new_stf_fl_t.set(long_fl_t)
-            self._new_shell_panel_spacing.set(panel_spacing)
-            self._new_stf_type.set(long_type)
-
-            if import_record.ring_stiffener_values[0] is None:
-                self._new_shell_exclude_ring_stf.set(True)
-            else:
-                self._new_shell_exclude_ring_stf.set(False)
-                ring_hw, ring_tw, ring_b, ring_tf, ring_type = import_record.ring_stiffener_values
-                self._new_shell_ring_stf_hw.set(ring_hw)
-                self._new_shell_ring_stf_tw.set(ring_tw)
-                self._new_shell_ring_stf_b.set(ring_b)
-                self._new_shell_ring_stf_tf.set(ring_tf)
-                self._new_shell_ring_stf_type.set(ring_type)
-
-            if import_record.ring_frame_values[0] is None:
-                self._new_shell_exclude_ring_frame.set(True)
-            else:
-                self._new_shell_exclude_ring_frame.set(False)
-                frame_hw, frame_tw, frame_b, frame_tf, frame_length, frame_type = import_record.ring_frame_values
-                self._new_shell_ring_frame_hw.set(frame_hw)
-                self._new_shell_ring_frame_tw.set(frame_tw)
-                self._new_shell_ring_frame_b.set(frame_b)
-                self._new_shell_ring_frame_tf.set(frame_tf)
-                self._new_shell_ring_frame_length_between_girders.set(frame_length)
-                self._new_shell_ring_frame_type.set(frame_type)
-
-            if import_record.stress_values[0] is None:
-                pass
-            else:
-                #mapper ={1: 'Force', 2: 'Stress'}
-                sasd, smsd, tTsd, tQsd, psd, shsd = import_record.stress_values
-                self._new_shell_stress_or_force.set(2)
-                self._new_shell_sasd.set(sasd)
-                self._new_shell_smsd.set(smsd)
-                self._new_shell_tTsd.set(tTsd)
-                self._new_shell_tQsd.set(tQsd)
-                self._new_shell_psd.set(psd)
-                self._new_shell_shsd.set(shsd)
-
-            if import_record.force_values[0] is None:
-                pass
-            else:
-                nsd, msd, tsd, qsd = import_record.force_values
-                self._new_shell_stress_or_force.set(1)
-                self._new_shell_Nsd.set(nsd)
-                self._new_shell_Msd.set(msd)
-                self._new_shell_Tsd.set(tsd)
-                self._new_shell_Qsd.set(qsd)
-                self._new_shell_psd.set(import_record.stress_values[4])
-            uls_or_als, shell_yield, ring_stf_fab, ring_frame_fab = import_record.end_values
-            self._new_shell_uls_or_als.set(uls_or_als)
-            self._new_shell_yield.set(shell_yield)
-            self._new_shell_end_cap_pressure_included.set(shell_yield)
-            self._new_shell_fab_ring_stf.set(ring_stf_fab)
-            self._new_shell_fab_ring_frame.set(ring_frame_fab)
-            self.new_structure()
+            cylinder_request = project_services.CylinderExcelImportPropertyService.build_request(
+                import_record,
+                self._build_cylinder_excel_import_defaults(),
+            )
+            cylinder_result = project_services.CylinderStructurePropertyService.build(cylinder_request)
+            cylinder_obj = self._create_cylinder_structure_from_property_result(cylinder_result)
+            flat_request = self._build_flat_structure_property_request_from_cylinder_excel_record(import_record)
+            self.new_structure(
+                toggle_multi=project_services.FlatStructurePropertyService.build(flat_request),
+                cylinder_return=cylinder_obj,
+            )
 
     def button_load_info_click(self, event = None):
         ''' Get the load information for one line.'''
@@ -7919,19 +7979,20 @@ class Application():
         Printing to a js file
         :return:
         '''
-        save_file = filedialog.asksaveasfile(mode="w", defaultextension=".js")
-        if save_file is None:  # ask saveasfile return `None` if dialog closed with "cancel".
+        target = project_application.ProjectFileDialogService.selected_output_target(
+            filedialog.asksaveasfilename(defaultextension=".js")
+        )
+        if target is None:
             return
-        js_lines = project_services.SesamExportService.build_js_lines(
+        project_services.SesamExportService.write_js_path(
             project_services.SesamExportRequest(
                 points=self._point_dict,
                 lines=self._line_dict,
                 sections=self._sections,
                 line_bundles=self._line_to_struc,
-            )
+            ),
+            target.path,
         )
-        save_file.writelines(js_lines)
-        save_file.close()
 
 if __name__ == '__main__':
 

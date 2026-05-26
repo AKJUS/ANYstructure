@@ -1,6 +1,16 @@
 import pytest
 
-from anystruct.api import CylStru, FlatStru
+from anystruct.api import (
+    CylStru,
+    FlatStru,
+    ProjectFileCodec,
+    ProjectHydrationDefaults,
+    ProjectState,
+    load_project_state,
+    open_project,
+    save_project_state,
+)
+from anystruct.project_state import PROJECT_FORMAT_VERSION
 
 
 def test_flat_structure_api_returns_special_provisions():
@@ -81,3 +91,24 @@ def test_cylinder_api_returns_unstiffened_shell_buckling_golden_result():
 def test_cylinder_api_rejects_unknown_domain():
     with pytest.raises(AssertionError):
         CylStru(calculation_domain="not a domain")
+
+
+def test_public_api_project_file_facade_round_trips_state(tmp_path):
+    project_path = tmp_path / "api_project.txt"
+    state = ProjectState(
+        project_information="public api",
+        theme="dark",
+        points={"point1": [0, 0]},
+        extras={"PULS results": {"obsolete": True}},
+    )
+
+    saved_path = save_project_state(state, project_path)
+    loaded = load_project_state(project_path)
+    opened = open_project(project_path, ProjectHydrationDefaults(structure_types={}))
+    encoded = ProjectFileCodec.encode_mapping(loaded)
+
+    assert saved_path == project_path
+    assert loaded.project_information == "public api"
+    assert opened.transfer.theme == "dark"
+    assert encoded["format version"] == PROJECT_FORMAT_VERSION
+    assert "PULS results" not in encoded

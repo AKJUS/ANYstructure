@@ -36,3 +36,15 @@ def test_api_uses_shared_unit_conversions():
 
     assert source.count("api_helpers.mpa_to_pa") == 12
     assert source.count("api_helpers.mm_to_m") == 8
+
+
+def test_api_exposes_project_file_facade_through_application_services():
+    api_source = Path(__file__).resolve().parents[1] / "anystruct" / "api.py"
+    source = api_source.read_text(encoding="utf-8")
+
+    assert "ProjectFileCodec" in source
+    assert "ProjectHydrationDefaults" in source
+    assert "ProjectPersistenceService.load_state_from_path(path)" in source
+    assert "ProjectPersistenceService.save_state_to_path(project_state, path)" in source
+    assert "ProjectOpenService.open_path(path, hydration_defaults)" in source
+    assert "ProjectSaveService.save_path(path, save_input)" in source

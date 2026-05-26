@@ -97,6 +97,8 @@ def test_new_structure_delegates_property_building():
     assert "self._build_flat_structure_properties()" in resolver
     assert "elif isinstance(toggle_multi, tuple):" in resolver
     assert "prop_dict, obj_dict_stf = toggle_multi" in resolver
+    assert "if cylinder_return is not None:" in resolver
+    assert "CylinderObj = cylinder_return" in resolver
     assert "FlatStructurePropertyRequest(" in flat_builder
     assert "FlatStructurePropertyService.build(" in flat_builder
     assert "api_helpers.mpa_to_pa" not in flat_builder
@@ -130,6 +132,10 @@ def test_new_structure_delegates_property_building():
 def test_savefile_delegates_save_command_assembly_and_persistence():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
+    save_no_dialogue = source[
+        source.index("def save_no_dialogue"):
+        source.index("def savefile")
+    ]
     savefile = source[
         source.index("def savefile"):
         source.index("def _build_project_save_input")
@@ -139,11 +145,71 @@ def test_savefile_delegates_save_command_assembly_and_persistence():
         source.index("def openfile")
     ]
 
+    assert "ProjectFileDialogService.backup_save_target(" in save_no_dialogue
+    assert "ProjectFileDialogService.remembered_save_target(" in save_no_dialogue
     assert "ProjectSaveService.save_path(" in savefile
+    assert "ProjectFileDialogService.selected_save_target(" in savefile
     assert "self._build_project_save_input()" in savefile
     assert "ProjectSnapshotService.create_state(" not in savefile
     assert "save_state_to_path(" not in savefile
     assert "ProjectSaveInput(" in save_input_builder
+
+
+def test_openfile_delegates_project_open_application_steps():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    openfile = source[
+        source.index("def openfile"):
+        source.index("def restore_previous")
+    ]
+
+    assert "ProjectOpenService.open_path(" in openfile
+    assert "ProjectFileDialogService.selected_open_target(" in openfile
+    assert "self._build_project_hydration_defaults()" in openfile
+    assert "self._apply_open_project_text_and_theme(open_transfer)" in openfile
+    assert "self._apply_open_project_geometry_and_objects(open_transfer, hydration)" in openfile
+    assert "self._apply_open_project_accelerations(open_transfer)" in openfile
+    assert "self._apply_open_project_load_combinations(open_transfer)" in openfile
+    assert "self._apply_open_project_tanks(open_transfer)" in openfile
+    assert "self._apply_open_project_canvas_scale()" in openfile
+    assert "self._finalize_open_project(open_transfer, target.path)" in openfile
+    assert "ProjectHydrationDefaults(" not in openfile
+    assert "load_state_from_path(" not in source
+    assert "json.load(" not in source
+
+
+def test_restore_and_example_open_delegate_file_target_resolution():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    restore_block = source[
+        source.index("def restore_previous"):
+        source.index("def open_example")
+    ]
+    example_block = source[
+        source.index("def open_example"):
+        source.index("def open_example_excel_file")
+    ]
+
+    assert "ProjectFileDialogService.restore_target(" in restore_block
+    assert "ProjectPersistenceService.backup_exists(" not in restore_block
+    assert "ProjectPersistenceService.backup_path(" not in restore_block
+    assert "ProjectFileDialogService.example_open_target(" in example_block
+    assert "os.path.isfile(file_name)" not in example_block
+    assert "self._root_dir + '/' + file_name" not in example_block
+
+
+def test_example_excel_open_delegates_file_target_resolution():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    example_excel_block = source[
+        source.index("def open_example_excel_file"):
+        source.index("def _sync_excel_import_geometry")
+    ]
+
+    assert "ProjectFileDialogService.example_open_target(" in example_excel_block
+    assert "ExcelProjectImportService.open_example_path(target.path)" in example_excel_block
+    assert "os.path.isfile(file_name)" not in example_excel_block
+    assert "self._root_dir + '/' + file_name" not in example_excel_block
 
 
 def test_line_pressure_calculation_delegates_to_project_service():
@@ -186,8 +252,14 @@ def test_report_and_sesam_callbacks_delegate_request_orchestration():
     assert "LetterMaker" not in source
     assert "SimpleDocTemplate" not in source
     assert "reportlab" not in source
-    assert "SesamExportService.build_js_lines(" in export_block
+    assert "ProjectFileDialogService.selected_output_target(" in report_block
+    assert "filedialog.asksaveasfilename(defaultextension=\".pdf\")" in report_block
+    assert not re.search(r"filedialog\.asksaveasfile\(", report_block)
+    assert "SesamExportService.write_js_path(" in export_block
     assert "sesam.JSfile(" not in export_block
+    assert "save_file.writelines(" not in export_block
+    assert not re.search(r"filedialog\.asksaveasfile\(", export_block)
+    assert "ProjectFileDialogService.selected_output_target(" in export_block
 
 
 def test_excel_callbacks_delegate_workbook_adapter_access():
@@ -200,10 +272,16 @@ def test_excel_callbacks_delegate_workbook_adapter_access():
 
     assert "ExcelProjectImportService.open_example_path(" in excel_block
     assert "ExcelProjectImportService.read_path(" in excel_block
+    assert "ProjectFileDialogService.selected_open_target(" in excel_block
     assert "ExcelProjectGeometryImportService.add_records(" in excel_block
     assert "def _sync_excel_import_geometry" in excel_block
     assert "def _build_flat_structure_property_request_from_excel_record" in source
+    assert "def _build_flat_structure_property_request_from_cylinder_excel_record" in source
+    assert "def _build_cylinder_excel_import_defaults" in source
     assert "FlatStructurePropertyService.build(flat_request)" in excel_block
+    assert "CylinderExcelImportPropertyService.build_request(" in excel_block
+    assert "CylinderStructurePropertyService.build(cylinder_request)" in excel_block
+    assert "cylinder_return=cylinder_obj" in excel_block
     assert "flat_plate_records" in excel_block
     assert "cylinder_records" in excel_block
     assert "row_data[" not in excel_block
@@ -219,3 +297,12 @@ def test_excel_callbacks_delegate_workbook_adapter_access():
     assert "_new_plate_thk.set(" not in flat_import_block
     assert "_new_sigma_x1.set(" not in flat_import_block
     assert "_new_girder_web_h.set(" not in flat_import_block
+
+    cylinder_import_block = excel_block[
+        excel_block.index("# Cylinders"):
+        excel_block.index("def button_load_info_click")
+    ]
+    assert "_new_shell_thk.set(" not in cylinder_import_block
+    assert "_new_shell_radius.set(" not in cylinder_import_block
+    assert "_new_shell_Nsd.set(" not in cylinder_import_block
+    assert "_new_shell_end_cap_pressure_included.set(shell_yield)" not in cylinder_import_block

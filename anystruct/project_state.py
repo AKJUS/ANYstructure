@@ -46,11 +46,8 @@ class ProjectState:
             "buckling method",
             "shifting",
             "Weight and COG",
-            "PULS results",
         }
         buckling_method = data.get("buckling method", "DNV-RP-C201 - prescriptive")
-        if buckling_method == "DNV PULS":
-            buckling_method = "DNV-RP-C201 - prescriptive"
 
         return cls(
             project_information=data.get("project information", ""),

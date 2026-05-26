@@ -1,6 +1,7 @@
 """Application services for project edits that do not depend on Tkinter."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from . import api_helpers, helper as hlp, line_structure
@@ -11,6 +12,9 @@ from .project_application import (
     ProjectHydrationDefaults,
     ProjectHydrationResult,
     ProjectHydrationService,
+    ProjectFileDialogService,
+    ProjectFileTarget,
+    ProjectFileCodec,
     ProjectOpenResult,
     ProjectOpenService,
     ProjectOpenTransfer,
@@ -783,6 +787,12 @@ class SesamExportService:
         export.write_beams()
         return tuple(export.output_lines)
 
+    @classmethod
+    def write_js_path(cls, request: SesamExportRequest, path, export_factory=None) -> Path:
+        export_path = Path(path)
+        export_path.write_text("".join(cls.build_js_lines(request, export_factory)), encoding="utf-8")
+        return export_path
+
 
 @dataclass(frozen=True)
 class ExcelProjectImportData:
@@ -853,6 +863,184 @@ class CylinderExcelImportRecord:
 
 
 @dataclass(frozen=True)
+class CylinderExcelImportDefaults:
+    """Current project defaults needed when a workbook omits cylinder UI-only values."""
+
+    plate_thk: Any
+    structure_type: Any
+    sigma_y1: Any
+    sigma_y2: Any
+    sigma_x1: Any
+    sigma_x2: Any
+    tau_xy: Any
+    plate_kpp: Any
+    stf_kps: Any
+    stf_km1: Any
+    stf_km2: Any
+    stf_km3: Any
+    pressure_side: Any
+    zstar_optimization: Any
+    puls_method: Any
+    puls_boundary: Any
+    puls_stiffener_end: Any
+    puls_sp_or_up: Any
+    puls_up_boundary: Any
+    panel_or_shell: Any
+    material_factor: Any
+    design_pressure: Any
+    shear_stress: Any
+    e_module: Any
+    poisson: Any
+    length_between_girders: Any
+    fab_method_ring_stiffener: Any
+    fab_method_ring_frame: Any
+    end_cap_pressure: Any
+    structure_types: dict[str, Any]
+    ring_stiffener_type: Any = "T"
+    ring_frame_type: Any = "T"
+
+
+class CylinderExcelImportPropertyService:
+    """Convert supported cylinder workbook records into plain property requests."""
+
+    @classmethod
+    def build_request(
+        cls,
+        record: CylinderExcelImportRecord,
+        defaults: CylinderExcelImportDefaults,
+    ) -> CylinderStructurePropertyRequest:
+        span = hlp.dist(record.first_point, record.second_point)
+        shell_thk, shell_radius, dist_rings, shell_length, shell_total_length, shell_k, shell_mat = \
+            record.shell_values
+        long_web_h, long_web_t, long_fl_w, long_fl_t, panel_spacing, long_type = \
+            record.longitudinal_values
+        ring_stf_values, ring_stf_excluded = cls._component_values(
+            record.ring_stiffener_values,
+            default_type=defaults.ring_stiffener_type,
+            has_length=False,
+        )
+        ring_frame_values, ring_frame_excluded = cls._component_values(
+            record.ring_frame_values,
+            default_type=defaults.ring_frame_type,
+            has_length=True,
+        )
+        load_input = cls._load_input(record, defaults)
+        uls_or_als, shell_yield, _ring_stf_fab, _ring_frame_fab = record.end_values
+
+        return CylinderStructurePropertyRequest(
+            calculation_domain=record.calculation_domain,
+            dummy_values={
+                "span": span,
+                "plate_thk": defaults.plate_thk,
+                "structure_type": defaults.structure_type,
+                "sigma_y1": defaults.sigma_y1,
+                "sigma_y2": defaults.sigma_y2,
+                "sigma_x1": defaults.sigma_x1,
+                "sigma_x2": defaults.sigma_x2,
+                "tau_xy": defaults.tau_xy,
+                "plate_kpp": defaults.plate_kpp,
+                "stf_kps": defaults.stf_kps,
+                "stf_km1": defaults.stf_km1,
+                "stf_km2": defaults.stf_km2,
+                "stf_km3": defaults.stf_km3,
+                "pressure_side": defaults.pressure_side,
+                "zstar_optimization": defaults.zstar_optimization,
+                "puls_method": defaults.puls_method,
+                "puls_boundary": defaults.puls_boundary,
+                "puls_stiffener_end": defaults.puls_stiffener_end,
+                "puls_sp_or_up": defaults.puls_sp_or_up,
+                "puls_up_boundary": defaults.puls_up_boundary,
+                "panel_or_shell": defaults.panel_or_shell,
+                "material_factor": defaults.material_factor,
+                "spacing": panel_spacing,
+            },
+            shell_values={
+                "thickness": shell_thk,
+                "radius": shell_radius,
+                "distance_between_rings": dist_rings,
+                "length": shell_length,
+                "total_length": shell_total_length,
+                "k_factor": shell_k,
+            },
+            longitudinal_values={
+                "spacing": panel_spacing,
+                "web_h": long_web_h,
+                "web_t": long_web_t,
+                "fl_w": long_fl_w,
+                "fl_t": long_fl_t,
+                "type": long_type,
+            },
+            ring_stiffener_values={
+                "web_h": ring_stf_values[0],
+                "web_t": ring_stf_values[1],
+                "fl_w": ring_stf_values[2],
+                "fl_t": ring_stf_values[3],
+                "type": ring_stf_values[4],
+            },
+            ring_frame_values={
+                "web_h": ring_frame_values[0],
+                "web_t": ring_frame_values[1],
+                "fl_w": ring_frame_values[2],
+                "fl_t": ring_frame_values[3],
+                "type": ring_frame_values[5],
+            },
+            load_input=load_input,
+            main_values={
+                "material_factor": shell_mat,
+                "fab_method_ring_stiffener": defaults.fab_method_ring_stiffener,
+                "fab_method_ring_frame": defaults.fab_method_ring_frame,
+                "e_module": defaults.e_module,
+                "poisson": defaults.poisson,
+                "yield": shell_yield,
+                "length_between_girders": (
+                    defaults.length_between_girders if ring_frame_excluded else ring_frame_values[4]
+                ),
+                "panel_spacing": panel_spacing,
+                "ring_stiffener_excluded": ring_stf_excluded,
+                "ring_frame_excluded": ring_frame_excluded,
+                "uls_or_als": uls_or_als,
+                "end_cap_pressure": defaults.end_cap_pressure,
+            },
+            structure_types=defaults.structure_types,
+        )
+
+    @staticmethod
+    def _component_values(values, *, default_type, has_length):
+        if not values or values[0] is None:
+            if has_length:
+                return (0, 0, 0, 0, 0, default_type), True
+            return (0, 0, 0, 0, default_type), True
+        return values, False
+
+    @staticmethod
+    def _load_input(record, defaults):
+        stresses = record.stress_values or ()
+        forces = record.force_values or ()
+        has_stresses = bool(stresses) and stresses[0] is not None
+        has_forces = bool(forces) and forces[0] is not None
+
+        sasd, smsd, tTsd, tQsd, psd, shsd = (
+            stresses if has_stresses else (0, 0, 0, 0, defaults.design_pressure, defaults.shear_stress)
+        )
+        psd = defaults.design_pressure if psd is None else psd
+        shsd = defaults.shear_stress if shsd is None else shsd
+        nsd, msd, tsd, qsd = forces if has_forces else (0, 0, 0, 0)
+        return {
+            "mode": 1 if has_forces else 2,
+            "Nsd": nsd,
+            "Msd": msd,
+            "Tsd": tsd,
+            "Qsd": qsd,
+            "sasd": sasd,
+            "smsd": smsd,
+            "tTsd": tTsd,
+            "tQsd": tQsd,
+            "psd": psd,
+            "shsd": shsd,
+        }
+
+
+@dataclass(frozen=True)
 class ExcelImportedLine:
     """One workbook record matched to the project line it created."""
 
@@ -908,7 +1096,7 @@ class ExcelProjectImportService:
     """Read the supported Excel project import workbook through an adapter."""
 
     @classmethod
-    def read_path(cls, path: str, workbook_factory: Callable[..., Any] | None = None):
+    def read_path(cls, path: str | Path, workbook_factory: Callable[..., Any] | None = None):
         workbook = cls._open_workbook(
             path,
             visible=False,
@@ -932,7 +1120,7 @@ class ExcelProjectImportService:
             workbook.close_book()
 
     @classmethod
-    def open_example_path(cls, path: str, workbook_factory: Callable[..., Any] | None = None):
+    def open_example_path(cls, path: str | Path, workbook_factory: Callable[..., Any] | None = None):
         """Open the bundled input workbook for inspection in Excel."""
         return cls._open_workbook(
             path,
@@ -947,7 +1135,7 @@ class ExcelProjectImportService:
             from .excel_inteface import ExcelInterface
 
             workbook_factory = ExcelInterface
-        return workbook_factory(path, visible=visible, read_only=read_only)
+        return workbook_factory(str(path), visible=visible, read_only=read_only)
 
 
 @dataclass(frozen=True)

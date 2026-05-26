@@ -19,6 +19,9 @@ from .calc_structure import (
 from .project_state import ProjectState
 
 
+ProjectFileCodec = project_io.ProjectFileCodec
+
+
 @dataclass(frozen=True)
 class LoadCombinationRecord:
     """Plain load-combination value captured at the UI boundary."""
@@ -46,13 +49,14 @@ class ProjectPersistenceService:
     """Load and save project state without depending on Tk file objects."""
 
     BACKUP_FILE_NAME = "backup.txt"
+    codec = ProjectFileCodec
 
     @classmethod
     def save_state_to_path(cls, state: ProjectState, path: str | Path) -> Path:
         project_path = Path(path)
         try:
             with project_path.open("w", encoding="utf-8") as project_file:
-                project_io.dump_project_state(state, project_file)
+                cls.codec.dump(state, project_file)
         except (OSError, TypeError, ValueError) as error:
             raise ProjectPersistenceError("save", project_path, error) from error
         return project_path
@@ -62,7 +66,7 @@ class ProjectPersistenceService:
         project_path = Path(path)
         try:
             with project_path.open(encoding="utf-8") as project_file:
-                return project_io.load_project_state(project_file)
+                return cls.codec.load(project_file)
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
             raise ProjectPersistenceError("load", project_path, error) from error
 
@@ -73,6 +77,58 @@ class ProjectPersistenceService:
     @classmethod
     def backup_exists(cls, root_dir: str | Path) -> bool:
         return cls.backup_path(root_dir).is_file()
+
+
+@dataclass(frozen=True)
+class ProjectFileTarget:
+    """Resolved project file path plus whether it should become the remembered save path."""
+
+    path: Path
+    remember_as_last_save: bool = False
+
+
+class ProjectFileDialogService:
+    """Resolve project file targets without depending on Tk dialogs."""
+
+    @staticmethod
+    def selected_save_target(filename: str | Path, *, backup: bool = False) -> ProjectFileTarget:
+        return ProjectFileTarget(Path(filename), remember_as_last_save=not backup)
+
+    @staticmethod
+    def selected_output_target(filename: str | Path | None) -> ProjectFileTarget | None:
+        if filename in (None, ""):
+            return None
+        return ProjectFileTarget(Path(filename), remember_as_last_save=False)
+
+    @staticmethod
+    def selected_open_target(filename: str | Path | None) -> ProjectFileTarget | None:
+        if filename in (None, ""):
+            return None
+        return ProjectFileTarget(Path(filename), remember_as_last_save=False)
+
+    @staticmethod
+    def backup_save_target(root_dir: str | Path) -> ProjectFileTarget:
+        return ProjectFileTarget(ProjectPersistenceService.backup_path(root_dir), remember_as_last_save=False)
+
+    @staticmethod
+    def remembered_save_target(last_save_file: str | Path | None) -> ProjectFileTarget | None:
+        if last_save_file is None:
+            return None
+        return ProjectFileTarget(Path(last_save_file), remember_as_last_save=False)
+
+    @staticmethod
+    def restore_target(root_dir: str | Path) -> ProjectFileTarget | None:
+        backup_path = ProjectPersistenceService.backup_path(root_dir)
+        if not backup_path.is_file():
+            return None
+        return ProjectFileTarget(backup_path, remember_as_last_save=False)
+
+    @staticmethod
+    def example_open_target(file_name: str | Path, root_dir: str | Path) -> ProjectFileTarget:
+        project_path = Path(file_name)
+        if not project_path.is_file():
+            project_path = Path(root_dir) / project_path
+        return ProjectFileTarget(project_path, remember_as_last_save=False)
 
 
 @dataclass(frozen=True)

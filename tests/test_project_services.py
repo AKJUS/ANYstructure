@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 
 from anystruct import (
     calc_loads,
@@ -408,6 +409,125 @@ def test_cylinder_structure_property_service_derives_stresses_from_force_values(
     assert result.main_dict["shsd"][0] == result.derived_stresses[4] * 1e6
 
 
+def _cylinder_excel_import_defaults(end_cap_pressure="not included in axial force"):
+    return project_services.CylinderExcelImportDefaults(
+        plate_thk=20,
+        structure_type="GENERAL_INTERNAL_WT",
+        sigma_y1=90,
+        sigma_y2=90,
+        sigma_x1=40,
+        sigma_x2=40,
+        tau_xy=5,
+        plate_kpp=1,
+        stf_kps=1,
+        stf_km1=12,
+        stf_km2=24,
+        stf_km3=12,
+        pressure_side="both sides",
+        zstar_optimization=True,
+        puls_method="ultimate",
+        puls_boundary="Int",
+        puls_stiffener_end="Continuous",
+        puls_sp_or_up="SP",
+        puls_up_boundary="SSSS",
+        panel_or_shell="shell",
+        material_factor=1.15,
+        design_pressure=-0.2,
+        shear_stress=0,
+        e_module=210000000000,
+        poisson=0.3,
+        length_between_girders=2500,
+        fab_method_ring_stiffener=1,
+        fab_method_ring_frame=2,
+        end_cap_pressure=end_cap_pressure,
+        structure_types={"vertical": ["GENERAL_INTERNAL_WT"]},
+    )
+
+
+def _cylinder_excel_import_record(
+    *,
+    stress_values=(40, 195, -12.7, 4.8, 0.2, 0),
+    force_values=(None, None, None, None),
+    ring_stiffener_values=(300, 12, 120, 20, "T"),
+    ring_frame_values=(400, 14, 160, 22, 5000, "L"),
+):
+    return project_services.CylinderExcelImportRecord(
+        calculation_domain="Longitudinal Stiffened shell (Force input)",
+        first_point=(0, 0),
+        second_point=(0, 5000),
+        shell_values=(20, 5000, 5000, 5000, 5000, 1.0, 1.25),
+        longitudinal_values=(450, 12, 150, 20, 700, "T"),
+        ring_stiffener_values=ring_stiffener_values,
+        ring_frame_values=ring_frame_values,
+        stress_values=stress_values,
+        force_values=force_values,
+        end_values=("ULS", 460, "Fabricated", "Cold formed"),
+    )
+
+
+def test_cylinder_excel_import_property_service_maps_stress_record_to_cylinder_request():
+    request = project_services.CylinderExcelImportPropertyService.build_request(
+        _cylinder_excel_import_record(),
+        _cylinder_excel_import_defaults(),
+    )
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert request.load_input["mode"] == 2
+    assert request.dummy_values["span"] == 5000
+    assert request.shell_values["thickness"] == 20
+    assert request.longitudinal_values["spacing"] == 700
+    assert request.main_values["material_factor"] == 1.25
+    assert request.main_values["yield"] == 460
+    assert request.main_values["ring_stiffener_excluded"] is False
+    assert request.main_values["ring_frame_excluded"] is False
+    assert result.main_dict["sasd"] == [40e6, "Pa"]
+    assert result.main_dict["mat_yield"] == [460e6, "Pa"]
+    assert result.shell_dict["radius"] == [5.0, "m"]
+
+
+def test_cylinder_excel_import_property_service_prefers_force_values_when_present():
+    request = project_services.CylinderExcelImportPropertyService.build_request(
+        _cylinder_excel_import_record(force_values=(1000, 2000, 3000, 4000)),
+        _cylinder_excel_import_defaults(),
+    )
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert request.load_input["mode"] == 1
+    assert result.derived_forces == (1000, 2000, 3000, 4000)
+    assert result.main_dict["psd"] == [0.2e6, "Pa"]
+
+
+def test_cylinder_excel_import_property_service_excludes_missing_ring_components():
+    request = project_services.CylinderExcelImportPropertyService.build_request(
+        _cylinder_excel_import_record(
+            ring_stiffener_values=(None, None, None, None, None),
+            ring_frame_values=(None, None, None, None, None, None),
+        ),
+        _cylinder_excel_import_defaults(),
+    )
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert request.main_values["ring_stiffener_excluded"] is True
+    assert request.main_values["ring_frame_excluded"] is True
+    assert request.ring_stiffener_values["web_h"] == 0
+    assert request.ring_frame_values["web_h"] == 0
+    assert result.ring_stiffener_dict["stf_web_height"] == [0.0, "m"]
+    assert result.ring_frame_dict["stf_web_height"] == [0.0, "m"]
+
+
+def test_cylinder_excel_import_property_service_uses_default_end_cap_pressure_not_shell_yield():
+    request = project_services.CylinderExcelImportPropertyService.build_request(
+        _cylinder_excel_import_record(),
+        _cylinder_excel_import_defaults(end_cap_pressure="included in axial force"),
+    )
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert request.main_values["yield"] == 460
+    assert request.main_values["end_cap_pressure"] == "included in axial force"
+    assert result.main_dict["end cap pressure"] == ["included in axial force", ""]
+    assert result.main_dict["end cap pressure"][0] != request.main_values["yield"]
+
+
 def test_line_load_service_rebuilds_line_loads_and_reports_changed_lines():
     first_structure = DummyStructure()
     second_structure = DummyStructure()
@@ -483,6 +603,24 @@ def test_sesam_export_service_builds_supported_lines_from_plain_request():
     assert lines == ("points\n", "lines\n", "sections\n", "beams\n")
 
 
+def test_sesam_export_service_writes_supported_lines_to_path(tmp_path):
+    request = project_services.SesamExportRequest(
+        points={"point1": [0, 0]},
+        lines={"line1": [1, 2]},
+        sections=("T",),
+        line_bundles={"line1": ["bundle"]},
+    )
+
+    export_path = project_services.SesamExportService.write_js_path(
+        request,
+        tmp_path / "geometry.js",
+        DummySesamExport,
+    )
+
+    assert export_path == tmp_path / "geometry.js"
+    assert export_path.read_text(encoding="utf-8") == "points\nlines\nsections\nbeams\n"
+
+
 def test_excel_project_import_service_reads_supported_sheets_and_closes_workbook():
     workbooks = []
 
@@ -492,7 +630,7 @@ def test_excel_project_import_service_reads_supported_sheets_and_closes_workbook
         return workbook
 
     import_data = project_services.ExcelProjectImportService.read_path(
-        "import.xlsx",
+        Path("import.xlsx"),
         workbook_factory=workbook_factory,
     )
 
@@ -612,7 +750,9 @@ def test_report_data_snapshot_keeps_plain_report_input_data():
 
 
 def test_project_services_keeps_project_application_compatibility_exports():
+    assert project_services.ProjectFileCodec is project_application.ProjectFileCodec
     assert project_services.ProjectPersistenceService is project_application.ProjectPersistenceService
+    assert project_services.ProjectFileDialogService is project_application.ProjectFileDialogService
     assert project_services.ProjectOpenService is project_application.ProjectOpenService
     assert project_services.ProjectSaveService is project_application.ProjectSaveService
     assert project_services.ProjectSnapshotService is project_application.ProjectSnapshotService

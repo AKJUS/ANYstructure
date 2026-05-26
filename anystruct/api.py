@@ -15,6 +15,15 @@ try:
     import anystruct.fatigue_window as fatigue
     import anystruct.load_factor_window as load_factors
     import anystruct.api_helpers as api_helpers
+    from anystruct.project_application import (
+        ProjectFileCodec,
+        ProjectHydrationDefaults,
+        ProjectOpenService,
+        ProjectPersistenceService,
+        ProjectSaveInput,
+        ProjectSaveService,
+    )
+    from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
 except ModuleNotFoundError:
@@ -35,8 +44,39 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.fatigue_window as fatigue
     import ANYstructure.anystruct.load_factor_window as load_factors
     import ANYstructure.anystruct.api_helpers as api_helpers
+    from ANYstructure.anystruct.project_application import (
+        ProjectFileCodec,
+        ProjectHydrationDefaults,
+        ProjectOpenService,
+        ProjectPersistenceService,
+        ProjectSaveInput,
+        ProjectSaveService,
+    )
+    from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
+
+
+def load_project_state(path):
+    """Load an ANYstructure project file into canonical project state."""
+    return ProjectPersistenceService.load_state_from_path(path)
+
+
+def save_project_state(project_state, path):
+    """Save canonical project state using the supported project-file codec."""
+    return ProjectPersistenceService.save_state_to_path(project_state, path)
+
+
+def open_project(path, hydration_defaults=None):
+    """Load and hydrate an ANYstructure project through the application service facade."""
+    if hydration_defaults is None:
+        hydration_defaults = ProjectHydrationDefaults()
+    return ProjectOpenService.open_path(path, hydration_defaults)
+
+
+def save_project(path, save_input):
+    """Create and save project state from a public project save input."""
+    return ProjectSaveService.save_path(path, save_input)
 
 
 class FlatStru():
