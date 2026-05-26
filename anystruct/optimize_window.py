@@ -597,7 +597,7 @@ class CreateOptimizeWindow():
         self._new_check_min_pl_thk = tk.BooleanVar()
         self._new_check_shear_area = tk.BooleanVar()
         self._new_check_buckling = tk.BooleanVar()
-        self._new_check_buckling_puls_s3 = tk.BooleanVar()
+        self._new_check_buckling_semi_analytical = tk.BooleanVar()
         self._new_check_buckling_ml_cl = tk.BooleanVar()
         self._new_check_buckling_ml_numeric = tk.BooleanVar()
         self._new_check_fatigue = tk.BooleanVar()
@@ -612,10 +612,10 @@ class CreateOptimizeWindow():
         self._new_check_slamming.set(False)
         self._new_check_local_buckling.set(True)
         self._new_use_weight_filter.set(True)
-        self._new_check_buckling_puls_s3.set(False)
+        self._new_check_buckling_semi_analytical.set(False)
         self._new_check_buckling_ml_cl.set(False)
         self._new_check_buckling_ml_numeric.set(False)
-        self._new_check_buckling_puls_s3.trace('w', self.update_running_time)
+        self._new_check_buckling_semi_analytical.trace('w', self.update_running_time)
         self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
         self._new_check_buckling_ml_numeric.trace('w', self.update_running_time)
 
@@ -628,7 +628,7 @@ class CreateOptimizeWindow():
         tk.Label(self._frame, text='Check for bow slamming').place(x=start_x + dx * 9.7, y=start_y + 9 * dy)
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
         tk.Label(self._frame, text='Use weight filter (for speed)').place(x=start_x + dx * 9.7, y=start_y + 11 * dy)
-        tk.Label(self._frame, text='Check for buckling (PULS-S3/U3)').place(x=start_x + dx * 9.7,
+        tk.Label(self._frame, text='Check for buckling (SemiAnalytical S3/U3)').place(x=start_x + dx * 9.7,
                                                                             y=start_y + 12 * dy)
         tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 13 * dy)
         tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7, y=start_y + 14 * dy)
@@ -643,7 +643,7 @@ class CreateOptimizeWindow():
                                                                                    y=start_y + 10 * dy)
         tk.Checkbutton(self._frame, variable=self._new_use_weight_filter).place(x=start_x + dx * 12,
                                                                                 y=start_y + 11 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_puls_s3).place(x=start_x + dx * 12,
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical).place(x=start_x + dx * 12,
                                                                                      y=start_y + 12 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl).place(x=start_x + dx * 12,
                                                                                    y=start_y + 13 * dy)
@@ -789,11 +789,11 @@ class CreateOptimizeWindow():
     def _ensure_single_buckling_check(self):
         '''
         Only one buckling formulation should be active at a time:
-            RP-C201, PULS-S3/U3, ML-CL, or ML-Numeric.
+            RP-C201, SemiAnalytical S3/U3, ML-CL, or ML-Numeric.
         '''
         selected = [
             self._new_check_buckling.get(),
-            self._new_check_buckling_puls_s3.get(),
+            self._new_check_buckling_semi_analytical.get(),
             self._new_check_buckling_ml_cl.get(),
             self._new_check_buckling_ml_numeric.get(),
         ]
@@ -805,8 +805,8 @@ class CreateOptimizeWindow():
                 self._new_check_buckling.set(False)
                 self._new_check_local_buckling.set(False)
 
-            if self._new_check_buckling_puls_s3.get():
-                self._new_check_buckling_puls_s3.set(False)
+            if self._new_check_buckling_semi_analytical.get():
+                self._new_check_buckling_semi_analytical.set(False)
 
             if self._new_check_buckling_ml_cl.get():
                 self._new_check_buckling_ml_cl.set(False)
@@ -835,7 +835,7 @@ class CreateOptimizeWindow():
         contraints = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                      self._new_check_local_buckling.get(), self._new_check_buckling_puls_s3.get(),
+                      self._new_check_local_buckling.get(), self._new_check_buckling_semi_analytical.get(),
                       self._new_check_buckling_ml_cl.get(), self._new_check_buckling_ml_numeric.get())
         self._initial_calc_obj.Plate.set_span(self._new_span.get())
         selected_mat_fac = self._get_material_factor_for_optimization()

@@ -275,38 +275,38 @@ class LetterMaker(object):
                                             ' -> '+'OK' if max(buc_util) < 1 else
                                             'Highest buckling utilization DNV-RP-C203: '+
                                             str(round(max(buc_util),2))+' -> '+'NOT OK')
-                    elif self.data.buckling_method == 'PULS-S3/U3':
+                    elif self.data.buckling_method == 'SemiAnalytical S3/U3':
                         puls_method = line_structure.plate(line_bundle).get_puls_method()
                         puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
-                        puls_s3 = result_state.get('PULS-S3', {}).get(line, {})
-                        puls_s3_valid = result_state.get('PULS-S3 valid', {}).get(line, {})
-                        puls_s3_colors = result_state.get('PULS-S3 colors', {}).get(line, {})
-                        acceptance = puls_s3.get('acceptance', 0.87)
+                        semi_analytical = result_state.get('SemiAnalytical', {}).get(line, {})
+                        semi_analytical_valid = result_state.get('SemiAnalytical valid', {}).get(line, {})
+                        semi_analytical_colors = result_state.get('SemiAnalytical colors', {}).get(line, {})
+                        acceptance = semi_analytical.get('acceptance', 0.87)
 
                         textobject.textLine(
-                            'PULS-S3/U3 results using ' + str(puls_method) +
+                            'SemiAnalytical S3/U3 results using ' + str(puls_method) +
                             ' utilization with acceptance ' + str(round(acceptance, 3))
                         )
-                        if puls_s3_valid.get('valid prediction', None) == 1:
+                        if semi_analytical_valid.get('valid prediction', None) == 1:
                             textobject.setFillColor(
-                                'red' if puls_s3_colors.get('buckling', 'red') == 'red' else 'black'
+                                'red' if semi_analytical_colors.get('buckling', 'red') == 'red' else 'black'
                             )
                             textobject.textLine(
-                                'Buckling PULS-S3/U3 UF: ' +
-                                str(round(puls_s3.get('buckling UF', float('inf')), 3))
+                                'Buckling SemiAnalytical S3/U3 UF: ' +
+                                str(round(semi_analytical.get('buckling UF', float('inf')), 3))
                             )
                             textobject.setFillColor(
-                                'red' if puls_s3_colors.get('ultimate', 'red') == 'red' else 'black'
+                                'red' if semi_analytical_colors.get('ultimate', 'red') == 'red' else 'black'
                             )
                             textobject.textLine(
-                                'Ultimate PULS-S3/U3 UF: ' +
-                                str(round(puls_s3.get('ultimate UF', float('inf')), 3))
+                                'Ultimate SemiAnalytical S3/U3 UF: ' +
+                                str(round(semi_analytical.get('ultimate UF', float('inf')), 3))
                             )
                         else:
                             textobject.setFillColor('red')
                             textobject.textLine(
-                                'PULS-S3/U3 status: ' +
-                                puls_s3_valid.get('valid label', 'invalid/unsupported')
+                                'SemiAnalytical S3/U3 status: ' +
+                                semi_analytical_valid.get('valid label', 'invalid/unsupported')
                             )
                         textobject.setFillColor('black')
                     else:
@@ -449,8 +449,8 @@ class LetterMaker(object):
         lines = self.data.lines
         if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
             colors = self.data.result_state['colors']
-        elif self.data.buckling_method == 'PULS-S3/U3':
-            colors = self.data.result_state.get('PULS-S3 colors', {})
+        elif self.data.buckling_method == 'SemiAnalytical S3/U3':
+            colors = self.data.result_state.get('SemiAnalytical colors', {})
         elif self.data.buckling_method == 'ML-Numeric (PULS based)':
             colors = self.data.result_state.get('ML buckling numeric colors', {})
         else:
@@ -517,10 +517,10 @@ class LetterMaker(object):
             elif draw_type == 'utilization':
                 if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                     self.c.setStrokeColor(all_line_data['color code']['lines'][line]['rp uf color'])
-                elif self.data.buckling_method == 'PULS-S3/U3':
+                elif self.data.buckling_method == 'SemiAnalytical S3/U3':
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
-                    self.c.setStrokeColor(all_line_data.get('PULS-S3 colors', {}).get(line, {}).get(puls_method, 'black'))
+                    self.c.setStrokeColor(all_line_data.get('SemiAnalytical colors', {}).get(line, {}).get(puls_method, 'black'))
                 elif self.data.buckling_method == 'ML-Numeric (PULS based)':
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
@@ -628,8 +628,8 @@ class LetterMaker(object):
             textobject.setFont("Helvetica-Oblique", 12)
             if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                 this_text = 'DNV-RP-C201 Buckling Strength of Plated Structures'
-            elif self.data.buckling_method == 'PULS-S3/U3':
-                this_text = 'PULS-S3/U3 utilization factors'
+            elif self.data.buckling_method == 'SemiAnalytical S3/U3':
+                this_text = 'SemiAnalytical S3/U3 utilization factors'
             else:
                 this_text = 'ML-CL utilization factors not avaliable. ML-CLassifier only shows ok or not ok.'
 
@@ -638,7 +638,7 @@ class LetterMaker(object):
 
             if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                 all_utils = all_line_data['color code']['utilization map']
-            elif self.data.buckling_method == 'PULS-S3/U3':
+            elif self.data.buckling_method == 'SemiAnalytical S3/U3':
                 all_utils = all_line_data['color code']['utilization map']
             else:
                 all_utils = list()

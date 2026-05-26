@@ -15,11 +15,11 @@ import csv
 try:
     import anystruct.calc_structure as calc
     import anystruct.helper as hlp
-    import anystruct.calculate_puls as puls_s3
+    import anystruct.calculate_puls as semi_analytical
 except ModuleNotFoundError:
     import ANYstructure.anystruct.calc_structure as calc
     import ANYstructure.anystruct.helper as hlp
-    import ANYstructure.anystruct.calculate_puls as puls_s3
+    import ANYstructure.anystruct.calculate_puls as semi_analytical
 
 
 def _set_material_factor_on_structure(obj, material_factor):
@@ -87,7 +87,7 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     '''
     if puls_sheet is not None:
         raise NotImplementedError(
-            "External Excel-sheet PULS optimization was removed. Use the built-in PULS-S3 replacement, "
+            "External Excel-sheet PULS optimization was removed. Use the built-in SemiAnalytical replacement, "
             "prescriptive, ML-CL, or ML-Numeric buckling checks."
         )
 
@@ -741,7 +741,7 @@ def _predict_numeric_uf_group(ml_algo, input_rows, prefix, mat_fac):
         return result
 
 
-def _puls_s3_float(value, default=0.0):
+def _semi_analytical_float(value, default=0.0):
     try:
         if value is None:
             return default
@@ -750,7 +750,7 @@ def _puls_s3_float(value, default=0.0):
         return default
 
 
-def _puls_s3_stiffener_type(value):
+def _semi_analytical_stiffener_type(value):
     return {
         'T': 'T-bar',
         'T-bar': 'T-bar',
@@ -763,7 +763,7 @@ def _puls_s3_stiffener_type(value):
     }.get(value, value)
 
 
-def _puls_s3_stiffener_boundary(value):
+def _semi_analytical_stiffener_boundary(value):
     return {
         'C': 'Cont',
         'Cont': 'Cont',
@@ -773,7 +773,7 @@ def _puls_s3_stiffener_boundary(value):
     }.get(value, value)
 
 
-def _puls_s3_in_plane_support(value):
+def _semi_analytical_in_plane_support(value):
     return {
         'Int': 'Integrated',
         'Integrated': 'Integrated',
@@ -793,9 +793,9 @@ def _puls_selected_method(value):
     return text
 
 
-def _get_puls_s3_input_for_optimization(calc_object, lat_press):
+def _get_semi_analytical_input_for_optimization(calc_object, lat_press):
     """
-    Build the reduced PULS-S3 input from an optimization candidate.
+    Build the reduced SemiAnalytical input from an optimization candidate.
 
     The replacement currently covers regular stiffened SP panels.  It follows
     the same candidate object and pressure convention as the ML-Numeric SP
@@ -818,13 +818,13 @@ def _get_puls_s3_input_for_optimization(calc_object, lat_press):
     else:
         sigxd = max(sig_x1, sig_x2)
 
-    pressure_mpa = _puls_s3_float(lat_press) / 1000.0
-    return puls_s3.S3PanelInput(
+    pressure_mpa = _semi_analytical_float(lat_press) / 1000.0
+    return semi_analytical.S3PanelInput(
         length=stiffener.span * 1000.0,
         stiffener_spacing=stiffener.spacing,
         plate_thickness=stiffener.t,
-        stiffener_type=_puls_s3_stiffener_type(stiffener.get_stiffener_type()),
-        stiffener_boundary=_puls_s3_stiffener_boundary(stiffener.get_puls_stf_end()),
+        stiffener_type=_semi_analytical_stiffener_type(stiffener.get_stiffener_type()),
+        stiffener_boundary=_semi_analytical_stiffener_boundary(stiffener.get_puls_stf_end()),
         stiffener_height=stiffener.hw,
         web_thickness=stiffener.tw,
         flange_width=stiffener.b,
@@ -836,24 +836,24 @@ def _get_puls_s3_input_for_optimization(calc_object, lat_press):
         transverse_stress_2=0.0 if puls_boundary == 'GL' else stiffener.sigma_y2,
         shear_stress=stiffener.tau_xy,
         pressure=pressure_mpa,
-        in_plane_support=_puls_s3_in_plane_support(puls_boundary),
+        in_plane_support=_semi_analytical_in_plane_support(puls_boundary),
         elastic_modulus=210000.0,
         poisson_ratio=0.3,
     )
 
 
-def _predict_puls_s3_uf(calc_object, lat_press):
+def _predict_semi_analytical_uf(calc_object, lat_press):
     """
-    Return [buckling_uf, ultimate_uf, valid_prediction] for the PULS-S3 solver.
+    Return [buckling_uf, ultimate_uf, valid_prediction] for the SemiAnalytical solver.
     """
     result = np.array([float('inf'), float('inf'), 0.0], dtype=float)
 
     try:
-        panel = _get_puls_s3_input_for_optimization(calc_object, lat_press)
+        panel = _get_semi_analytical_input_for_optimization(calc_object, lat_press)
         if panel is None:
             return result
 
-        solved = puls_s3.solve_s3_panel(panel)
+        solved = semi_analytical.solve_s3_panel(panel)
         if (
             solved.valid
             and solved.buckling_usage_factor is not None
@@ -876,11 +876,11 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
     Checking all constraints defined.
 
     ml_results is used for both ML pipelines:
-        chk[7]  PULS-S3 replacement:
+        chk[7]  SemiAnalytical replacement:
             ml_results[0] = buckling UF
             ml_results[1] = ultimate UF
             ml_results[2] = valid prediction flag, 1 = valid, 0 = invalid/unsupported
-            ml_results[3] = PULS acceptance limit
+            ml_results[3] = SemiAnalytical acceptance limit
             accepted if selected UF / acceptance < 1.0
 
         chk[8]  ML-CL:
@@ -913,7 +913,7 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                                      main_dict=obj.get_main_properties()['main dict']), calc_object_pl[1]]
     calc_object[0].lat_press = lat_press
 
-    # PULS-S3 buckling check
+    # SemiAnalytical buckling check
     if chk[7]:
         if ml_results is not None:
             try:
@@ -921,7 +921,7 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                 puls_acceptance = float(ml_results[3]) if len(ml_results) > 3 else 0.87
 
                 if valid_prediction != 1:
-                    return False, 'PULS-S3', x, all_checks
+                    return False, 'SemiAnalytical', x, all_checks
 
                 puls_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
                 if puls_method == 'buckling':
@@ -931,7 +931,7 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                 else:
                     puls_uf = None
             except Exception:
-                return False, 'PULS-S3', x, all_checks
+                return False, 'SemiAnalytical', x, all_checks
         elif PULSrun is not None:
             x_id = x_to_string(x)
             puls_acceptance = PULSrun.puls_acceptance
@@ -943,16 +943,16 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
             else:
                 puls_uf = None
         else:
-            return False, 'PULS-S3', x, all_checks
+            return False, 'SemiAnalytical', x, all_checks
 
         if type(puls_uf) == str or puls_uf is None:
-            return False, 'PULS-S3', x, all_checks
+            return False, 'SemiAnalytical', x, all_checks
 
         all_checks[8] = puls_uf / puls_acceptance
         if puls_uf / puls_acceptance >= 1:
             if print_result:
-                print('PULS-S3', calc_object[0].get_one_line_string(), False)
-            return False, 'PULS-S3', x, all_checks
+                print('SemiAnalytical', calc_object[0].get_one_line_string(), False)
+            return False, 'SemiAnalytical', x, all_checks
 
     # Buckling ML-CL
     if chk[8]:
@@ -1500,13 +1500,13 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
     Using multiprocessing to return list of applicable results.
 
     Supports:
-        chk[7] = built-in PULS-S3 replacement
+        chk[7] = built-in SemiAnalytical replacement
         chk[8] = ML-CL classification pipeline
         chk[9] = ML-Numeric UF pipeline
     '''
 
     if chk[7]:
-        # Built-in PULS-S3 replacement. Columns: buckling UF, ultimate UF,
+        # Built-in SemiAnalytical replacement. Columns: buckling UF, ultimate UF,
         # valid prediction, acceptance limit.
         sort_again = np.full([len(iterable_all), 4], np.inf, dtype=float)
         sort_again[:, 2] = 0.0
@@ -1523,7 +1523,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
                                              main_dict=init_stuc_obj.get_main_properties()['main dict']),
                            calc_object_pl[1]]
 
-            sort_again[idx, 0:3] = _predict_puls_s3_uf(calc_object, lat_press)
+            sort_again[idx, 0:3] = _predict_semi_analytical_uf(calc_object, lat_press)
 
         PULSrun = None
 

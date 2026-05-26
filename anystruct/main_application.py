@@ -904,13 +904,13 @@ class Application():
             'DNV-RP-C201 - prescriptive',
             'ML-Numeric (PULS based)',
             'ML-CL (PULS based)',
-            'PULS-S3/U3',
+            'SemiAnalytical S3/U3',
         ]
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
         self._buckling_method = ttk.OptionMenu(self._tab_prop, self._new_buckling_method, options[0], *options,
                                                command=self.update_frame)
 
-        # ML-CL keeps the historic PULS-derived panel input parameters below.
+        # ML-CL and SemiAnalytical share the historic panel input parameters below.
         self._ent_puls_uf = ttk.Entry(self._tab_prop, textvariable=self._new_puls_uf, width=int(ent_width * 1))
         self._new_puls_uf.trace('w', self.trace_acceptance_change)
 
@@ -970,12 +970,12 @@ class Application():
                                          ttk.Entry(self._tab_prop, textvariable=self._new_buckling_lf_stresses,
                                                    width=int(ent_width * 1))]
 
-        self._lab_puls_acceptance=  ttk.Label(self._tab_prop, text='PULS acceptance')
-        self._lab_puls_uf =  ttk.Label(self._tab_prop, text='PULS utilization factor:')
-        self._lab_puls_int_gt =  ttk.Label(self._tab_prop, text='PULS Int-integrated GL-free left/right GT-free top/bottom')
+        self._lab_puls_acceptance=  ttk.Label(self._tab_prop, text='Buckling acceptance')
+        self._lab_puls_uf =  ttk.Label(self._tab_prop, text='Utilization factor:')
+        self._lab_puls_int_gt =  ttk.Label(self._tab_prop, text='Int-integrated GL-free left/right GT-free top/bottom')
         self._lab_puls_cont_sniped =  ttk.Label(self._tab_prop, text='Continous or Sniped',
                                                 font = self._text_size['Text 8'])
-        self._lab_puls_up_supp =  ttk.Label(self._tab_prop, text='PULS UP support - left,right,upper,lower\n'
+        self._lab_puls_up_supp =  ttk.Label(self._tab_prop, text='UP support - left,right,upper,lower\n'
                                                                  'S: simply supported C: Continuous',
                                            font = self._text_size['Text 8'])
         # self._zstar_label = ttk.Label(self._tab_prop, text='z* optimization (buckling RP-C201)',
@@ -2859,8 +2859,8 @@ class Application():
         except Exception:
             return 'red'
 
-    def _puls_s3_uf_color(self, uf):
-        """PULS-S3/U3 uses the same acceptance entry as the historic PULS checks."""
+    def _semi_analytical_uf_color(self, uf):
+        """SemiAnalytical S3/U3 uses the shared buckling acceptance entry."""
         try:
             return 'green' if float(uf) <= float(self._new_puls_uf.get()) else 'red'
         except Exception:
@@ -2889,9 +2889,9 @@ class Application():
             'ML buckling numeric': {},
             'ML buckling numeric valid': {},
             'ML buckling numeric colors': {},
-            'PULS-S3': {},
-            'PULS-S3 valid': {},
-            'PULS-S3 colors': {},
+            'SemiAnalytical': {},
+            'SemiAnalytical valid': {},
+            'SemiAnalytical colors': {},
             'weights': {},
             'cylinder': {},
         }
@@ -2949,7 +2949,7 @@ class Application():
                         selected_mat_fac = obj_scnt_calc_pl.mat_factor
 
                     cached_mat_fac = None
-                    cached_has_puls_s3 = False
+                    cached_has_semi_analytical = False
                     if cached_state is not None:
                         cached_mat_fac = (
                             cached_state
@@ -2957,14 +2957,14 @@ class Application():
                             .get(current_line, {})
                             .get('material factor', None)
                         )
-                        cached_has_puls_s3 = current_line in cached_state.get('PULS-S3', {})
+                        cached_has_semi_analytical = current_line in cached_state.get('SemiAnalytical', {})
 
                     try:
                         cached_mat_fac = None if cached_mat_fac is None else float(cached_mat_fac)
                     except Exception:
                         cached_mat_fac = None
 
-                    if cached_state is not None and cached_mat_fac == selected_mat_fac and cached_has_puls_s3:
+                    if cached_state is not None and cached_mat_fac == selected_mat_fac and cached_has_semi_analytical:
                         return cached_state
                     # Otherwise continue and recalculate this line so numeric UF is updated.
                 try:
@@ -3477,50 +3477,50 @@ class Application():
                         }
 
                 # -------------------------------------------------------------------------
-                # Built-in PULS replacement.
+                # Built-in semi-analytical replacement.
                 #
                 # The current solver branch covers S3. U3 will reuse this same state surface
                 # when the unstiffened regular plate branch is added.
                 # -------------------------------------------------------------------------
                 try:
-                    puls_s3_pred = op._predict_puls_s3_uf([all_obj, None], design_pressure)
-                    puls_s3_valid = int(puls_s3_pred[2]) == 1
+                    semi_analytical_pred = op._predict_semi_analytical_uf([all_obj, None], design_pressure)
+                    semi_analytical_valid = int(semi_analytical_pred[2]) == 1
                 except Exception as e:
-                    puls_s3_pred = [float('inf'), float('inf'), 0]
-                    puls_s3_valid = False
-                    puls_s3_error = str(e)
+                    semi_analytical_pred = [float('inf'), float('inf'), 0]
+                    semi_analytical_valid = False
+                    semi_analytical_error = str(e)
                 else:
-                    puls_s3_error = ''
+                    semi_analytical_error = ''
 
-                puls_s3_buc_uf = float(puls_s3_pred[0]) if puls_s3_valid else float('inf')
-                puls_s3_ult_uf = float(puls_s3_pred[1]) if puls_s3_valid else float('inf')
-                puls_s3_acceptance = float(self._new_puls_uf.get())
+                semi_analytical_buc_uf = float(semi_analytical_pred[0]) if semi_analytical_valid else float('inf')
+                semi_analytical_ult_uf = float(semi_analytical_pred[1]) if semi_analytical_valid else float('inf')
+                semi_analytical_acceptance = float(self._new_puls_uf.get())
 
-                if puls_s3_valid:
-                    puls_s3_buc_color = self._puls_s3_uf_color(puls_s3_buc_uf)
-                    puls_s3_ult_color = self._puls_s3_uf_color(puls_s3_ult_uf)
-                    puls_s3_valid_label = 'valid PULS-S3 UF predicted'
+                if semi_analytical_valid:
+                    semi_analytical_buc_color = self._semi_analytical_uf_color(semi_analytical_buc_uf)
+                    semi_analytical_ult_color = self._semi_analytical_uf_color(semi_analytical_ult_uf)
+                    semi_analytical_valid_label = 'valid SemiAnalytical UF predicted'
                 else:
-                    puls_s3_buc_color = 'red'
-                    puls_s3_ult_color = 'red'
-                    puls_s3_valid_label = 'PULS-S3/U3 unsupported or invalid'
+                    semi_analytical_buc_color = 'red'
+                    semi_analytical_ult_color = 'red'
+                    semi_analytical_valid_label = 'SemiAnalytical S3/U3 unsupported or invalid'
 
-                return_dict['PULS-S3'][current_line] = {
-                    'buckling UF': puls_s3_buc_uf,
-                    'ultimate UF': puls_s3_ult_uf,
-                    'acceptance': puls_s3_acceptance,
-                    'error': puls_s3_error,
+                return_dict['SemiAnalytical'][current_line] = {
+                    'buckling UF': semi_analytical_buc_uf,
+                    'ultimate UF': semi_analytical_ult_uf,
+                    'acceptance': semi_analytical_acceptance,
+                    'error': semi_analytical_error,
                 }
 
-                return_dict['PULS-S3 valid'][current_line] = {
-                    'available': puls_s3_valid,
-                    'valid prediction': 1 if puls_s3_valid else 0,
-                    'valid label': puls_s3_valid_label,
+                return_dict['SemiAnalytical valid'][current_line] = {
+                    'available': semi_analytical_valid,
+                    'valid prediction': 1 if semi_analytical_valid else 0,
+                    'valid label': semi_analytical_valid_label,
                 }
 
-                return_dict['PULS-S3 colors'][current_line] = {
-                    'buckling': puls_s3_buc_color,
-                    'ultimate': puls_s3_ult_color,
+                return_dict['SemiAnalytical colors'][current_line] = {
+                    'buckling': semi_analytical_buc_color,
+                    'ultimate': semi_analytical_ult_color,
                 }
 
                 '''
@@ -3571,14 +3571,14 @@ class Application():
                 sec_util = 0 if min(sec_mod) == 0 else min_sec_mod / min(sec_mod)
                 buc_util = 1 if float('inf') in buckling else max(all_buckling_uf_list)
                 rec_for_color[current_line]['rp buckling'] = max(all_buckling_uf_list)
-                puls_s3_util = buc_util
-                if return_dict['PULS-S3 valid'][current_line].get('valid prediction', None) == 1:
+                semi_analytical_util = buc_util
+                if return_dict['SemiAnalytical valid'][current_line].get('valid prediction', None) == 1:
                     if op._puls_selected_method(obj_scnt_calc_pl.get_puls_method()) == 'ultimate':
-                        puls_s3_util = return_dict['PULS-S3'][current_line]['ultimate UF']
+                        semi_analytical_util = return_dict['SemiAnalytical'][current_line]['ultimate UF']
                     else:
-                        puls_s3_util = return_dict['PULS-S3'][current_line]['buckling UF']
+                        semi_analytical_util = return_dict['SemiAnalytical'][current_line]['buckling UF']
                 return_dict['utilization'][current_line] = {'buckling': buc_util,
-                                                            'PULS buckling': puls_s3_util,
+                                                            'SemiAnalytical buckling': semi_analytical_util,
                                                             'fatigue': fat_util,
                                                             'section': sec_util,
                                                             'shear': shear_util,
@@ -3815,8 +3815,8 @@ class Application():
                     'pressure': this_pressure,
                     'rp uf color': matplotlib.colors.rgb2hex(cmap_sections(rp_util)),
                     'rp uf': rp_util,
-                    'PULS method': puls_method,
-                    'PULS sp or up': puls_sp_or_up,
+                    'Buckling method': puls_method,
+                    'Buckling SP/UP': puls_sp_or_up,
                     'section modulus color': matplotlib.colors.rgb2hex(
                         cmap_sections(rec_for_color[line]['section modulus'])),
                     'fatigue color': matplotlib.colors.rgb2hex(
@@ -4023,20 +4023,20 @@ class Application():
 
                         elif self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                             color = 'red' if 'red' in state['colors'][line].values() else 'green'
-                        elif self._new_buckling_method.get() == 'PULS-S3/U3':
-                            puls_s3_valid = state.get('PULS-S3 valid', {}).get(line, {})
-                            puls_s3_colors = state.get('PULS-S3 colors', {}).get(line, {})
+                        elif self._new_buckling_method.get() == 'SemiAnalytical S3/U3':
+                            semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
+                            semi_analytical_colors = state.get('SemiAnalytical colors', {}).get(line, {})
 
-                            if puls_s3_valid.get('valid prediction', None) != 1:
+                            if semi_analytical_valid.get('valid prediction', None) != 1:
                                 color = 'red'
                             else:
                                 puls_method = op._puls_selected_method(
                                     self._line_to_struc[line][0].Plate.get_puls_method()
                                 )
                                 if puls_method == 'ultimate':
-                                    color = puls_s3_colors.get('ultimate', 'red')
+                                    color = semi_analytical_colors.get('ultimate', 'red')
                                 else:
-                                    color = puls_s3_colors.get('buckling', 'red')
+                                    color = semi_analytical_colors.get('buckling', 'red')
 
                             if color == 'green':
                                 color = 'green' if all([
@@ -4429,26 +4429,26 @@ class Application():
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                               text=this_text)
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'PULS-S3/U3':
-            puls_s3 = state.get('PULS-S3', {}).get(line, {})
-            puls_s3_valid = state.get('PULS-S3 valid', {}).get(line, {})
-            puls_s3_colors = state.get('PULS-S3 colors', {}).get(line, {})
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'SemiAnalytical S3/U3':
+            semi_analytical = state.get('SemiAnalytical', {}).get(line, {})
+            semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
+            semi_analytical_colors = state.get('SemiAnalytical colors', {}).get(line, {})
 
-            if puls_s3_valid.get('valid prediction', None) == 1:
-                puls_method = state['color code']['lines'][line].get('PULS method', None)
+            if semi_analytical_valid.get('valid prediction', None) == 1:
+                puls_method = state['color code']['lines'][line].get('Buckling method', None)
                 puls_method = op._puls_selected_method(puls_method)
 
                 if puls_method == 'ultimate':
-                    uf = puls_s3.get('ultimate UF', float('inf'))
-                    color = puls_s3_colors.get('ultimate', 'red')
+                    uf = semi_analytical.get('ultimate UF', float('inf'))
+                    color = semi_analytical_colors.get('ultimate', 'red')
                     this_text = 'ult UF=' + str(round(uf, 3))
                 else:
-                    uf = puls_s3.get('buckling UF', float('inf'))
-                    color = puls_s3_colors.get('buckling', 'red')
+                    uf = semi_analytical.get('buckling UF', float('inf'))
+                    color = semi_analytical_colors.get('buckling', 'red')
                     this_text = 'buc UF=' + str(round(uf, 3))
             else:
                 color = 'red'
-                this_text = puls_s3_valid.get('valid label', 'invalid')
+                this_text = semi_analytical_valid.get('valid label', 'invalid')
 
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
@@ -4459,7 +4459,7 @@ class Application():
             numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
 
             if numeric_valid.get('valid prediction', None) == 1:
-                puls_method = state['color code']['lines'][line].get('PULS method', None)
+                puls_method = state['color code']['lines'][line].get('Buckling method', None)
 
                 if puls_method == 'buckling':
                     uf = numeric.get('buckling UF', float('inf'))
@@ -4597,24 +4597,24 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text='N/A')
-            elif self._new_buckling_method.get() == 'PULS-S3/U3':
-                puls_s3 = state.get('PULS-S3', {}).get(line, {})
-                puls_s3_valid = state.get('PULS-S3 valid', {}).get(line, {})
-                puls_s3_colors = state.get('PULS-S3 colors', {}).get(line, {})
+            elif self._new_buckling_method.get() == 'SemiAnalytical S3/U3':
+                semi_analytical = state.get('SemiAnalytical', {}).get(line, {})
+                semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
+                semi_analytical_colors = state.get('SemiAnalytical colors', {}).get(line, {})
 
-                if puls_s3_valid.get('valid prediction', None) == 1:
-                    buc_uf = puls_s3.get('buckling UF', float('inf'))
-                    ult_uf = puls_s3.get('ultimate UF', float('inf'))
+                if semi_analytical_valid.get('valid prediction', None) == 1:
+                    buc_uf = semi_analytical.get('buckling UF', float('inf'))
+                    ult_uf = semi_analytical.get('ultimate UF', float('inf'))
                     total_uf = max(buc_uf, ult_uf)
 
                     color = 'green' if all([
-                        puls_s3_colors.get('buckling', 'red') == 'green',
-                        puls_s3_colors.get('ultimate', 'red') == 'green'
+                        semi_analytical_colors.get('buckling', 'red') == 'green',
+                        semi_analytical_colors.get('ultimate', 'red') == 'green'
                     ]) else 'red'
                     this_text = 'max UF=' + str(round(total_uf, 3))
                 else:
                     color = 'red'
-                    this_text = puls_s3_valid.get('valid label', 'invalid')
+                    this_text = semi_analytical_valid.get('valid label', 'invalid')
 
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
@@ -4643,22 +4643,24 @@ class Application():
                                                   text=this_text)
 
         elif self._new_colorcode_puls_acceptance.get():
-            if state['color code']['lines'][line]['PULS method'] == None:
+            buckling_method = state['color code']['lines'][line].get('Buckling method', None)
+            if buckling_method == None:
                 color = 'black'
             else:
-                color = 'blue' if state['color code']['lines'][line]['PULS method'] == 'ultimate' else 'red'
+                color = 'blue' if buckling_method == 'ultimate' else 'red'
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                              text=state['color code']['lines'][line]['PULS method'])
+                                              text=buckling_method)
 
         elif self._new_colorcode_puls_sp_or_up.get():
-            if state['color code']['lines'][line]['PULS sp or up'] == None:
+            buckling_sp_or_up = state['color code']['lines'][line].get('Buckling SP/UP', None)
+            if buckling_sp_or_up == None:
                 color = 'black'
             else:
-                color = 'blue' if state['color code']['lines'][line]['PULS sp or up'] == 'SP' else 'red'
+                color = 'blue' if buckling_sp_or_up == 'SP' else 'red'
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                              text=state['color code']['lines'][line]['PULS sp or up'])
+                                              text=buckling_sp_or_up)
         else:
             color = 'black'
 
@@ -4936,18 +4938,18 @@ class Application():
 
 
                 elif self._new_buckling_method.get() in [
-                    'PULS-S3/U3',
+                    'SemiAnalytical S3/U3',
                     'ML-CL (PULS based)',
                     'ML-Numeric (PULS based)',
                 ]:
 
-                    print_puls_s3_results = self._new_buckling_method.get() == 'PULS-S3/U3'
+                    print_semi_analytical_results = self._new_buckling_method.get() == 'SemiAnalytical S3/U3'
                     print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
                     print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
 
                     self._result_canvas.create_text(
                         [x * 1, (y + (start_y + 0) * dy) * 1],
-                        text='Buckling results ANYstructure PULS/ML algorithm:',
+                        text='Buckling results ANYstructure SemiAnalytical/ML algorithm:',
                         font=self._text_size["Text 9 bold"],
                         anchor='nw',
                         fill=self._color_text,
@@ -4956,66 +4958,66 @@ class Application():
                     line_offset = 1
 
                     # -------------------------------------------------------------------------
-                    # Built-in PULS replacement result
+                    # Built-in semi-analytical replacement result
                     # -------------------------------------------------------------------------
-                    if print_puls_s3_results:
-                        puls_s3 = state.get('PULS-S3', {}).get(current_line, None)
-                        puls_s3_valid = state.get('PULS-S3 valid', {}).get(current_line, {})
-                        puls_s3_colors = state.get('PULS-S3 colors', {}).get(current_line, {})
+                    if print_semi_analytical_results:
+                        semi_analytical = state.get('SemiAnalytical', {}).get(current_line, None)
+                        semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(current_line, {})
+                        semi_analytical_colors = state.get('SemiAnalytical colors', {}).get(current_line, {})
 
-                        if puls_s3 is not None:
-                            puls_s3_is_valid = puls_s3_valid.get('valid prediction', None) == 1
-                            if puls_s3_is_valid:
-                                buckling_uf_txt = f"{puls_s3.get('buckling UF', float('inf')):.3f}"
-                                ultimate_uf_txt = f"{puls_s3.get('ultimate UF', float('inf')):.3f}"
+                        if semi_analytical is not None:
+                            semi_analytical_is_valid = semi_analytical_valid.get('valid prediction', None) == 1
+                            if semi_analytical_is_valid:
+                                buckling_uf_txt = f"{semi_analytical.get('buckling UF', float('inf')):.3f}"
+                                ultimate_uf_txt = f"{semi_analytical.get('ultimate UF', float('inf')):.3f}"
                             else:
                                 buckling_uf_txt = 'invalid/unsupported'
                                 ultimate_uf_txt = 'invalid/unsupported'
 
                             self._result_canvas.create_text(
                                 [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='Buckling UF PULS-S3/U3: ' + buckling_uf_txt,
+                                text='Buckling UF SemiAnalytical S3/U3: ' + buckling_uf_txt,
                                 font=self._text_size["Text 9 bold"],
                                 anchor='nw',
-                                fill=puls_s3_colors.get('buckling', 'red'),
+                                fill=semi_analytical_colors.get('buckling', 'red'),
                             )
                             line_offset += 1
 
                             self._result_canvas.create_text(
                                 [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='Ultimate UF PULS-S3/U3: ' + ultimate_uf_txt,
+                                text='Ultimate UF SemiAnalytical S3/U3: ' + ultimate_uf_txt,
                                 font=self._text_size["Text 9 bold"],
                                 anchor='nw',
-                                fill=puls_s3_colors.get('ultimate', 'red'),
+                                fill=semi_analytical_colors.get('ultimate', 'red'),
                             )
                             line_offset += 1
 
                             self._result_canvas.create_text(
                                 [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='PULS acceptance limit: <= ' + str(round(puls_s3.get('acceptance', 0.87), 3)),
+                                text='SemiAnalytical acceptance limit: <= ' + str(round(semi_analytical.get('acceptance', 0.87), 3)),
                                 font=self._text_size["Text 9"],
                                 anchor='nw',
                                 fill=self._color_text,
                             )
                             line_offset += 1
 
-                            puls_s3_status = puls_s3_valid.get('valid label', '')
-                            if puls_s3.get('error', ''):
-                                puls_s3_status += ' | ' + puls_s3.get('error', '')
+                            semi_analytical_status = semi_analytical_valid.get('valid label', '')
+                            if semi_analytical.get('error', ''):
+                                semi_analytical_status += ' | ' + semi_analytical.get('error', '')
 
                             self._result_canvas.create_text(
                                 [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='PULS-S3/U3 status: ' + puls_s3_status,
+                                text='SemiAnalytical S3/U3 status: ' + semi_analytical_status,
                                 font=self._text_size["Text 9"],
                                 anchor='nw',
-                                fill=self._color_text if puls_s3_is_valid else 'red',
+                                fill=self._color_text if semi_analytical_is_valid else 'red',
                             )
                             line_offset += 1
 
                         else:
                             self._result_canvas.create_text(
                                 [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='PULS-S3/U3: not available',
+                                text='SemiAnalytical S3/U3: not available',
                                 font=self._text_size["Text 9"],
                                 anchor='nw',
                                 fill=self._color_text,

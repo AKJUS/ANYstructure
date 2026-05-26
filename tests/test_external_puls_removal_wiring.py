@@ -40,7 +40,7 @@ def test_optimizer_has_no_external_puls_excel_selection():
     source = read_optimize_window_source()
 
     assert "Check for buckling (PULS)" not in source
-    assert "Check for buckling (PULS-S3/U3)" in source
+    assert "Check for buckling (SemiAnalytical S3/U3)" in source
     assert "Set location of PULS excel sheet" not in source
     assert "puls_sheet = puls_sheet_location" not in source
 
@@ -73,5 +73,5 @@ def test_excel_import_and_ml_cl_buckling_option_remain_available():
     ]
     assert "'ML-CL (PULS based)'" in buckling_options
     assert "'ML-Numeric (PULS based)'" in buckling_options
-    assert "'PULS-S3/U3'" in buckling_options
+    assert "'SemiAnalytical S3/U3'" in buckling_options
     assert "'DNV PULS'" not in buckling_options

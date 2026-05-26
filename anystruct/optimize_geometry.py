@@ -552,7 +552,7 @@ class CreateOptGeoWindow():
         self._new_check_slamming = tk.BooleanVar()
         self._new_check_local_buckling = tk.BooleanVar()
         self._new_harmonize_spacing = tk.BooleanVar()
-        self._new_check_buckling_puls_s3 = tk.BooleanVar()
+        self._new_check_buckling_semi_analytical = tk.BooleanVar()
         self._new_check_buckling_ml_cl = tk.BooleanVar()
         self._new_check_buckling_ml_numeric = tk.BooleanVar()
 
@@ -566,11 +566,11 @@ class CreateOptGeoWindow():
         self._new_option_fraction.set(None)
         self._new_option_panel.set(None)
         self._new_harmonize_spacing.set(False)
-        self._new_check_buckling_puls_s3.set(False)
+        self._new_check_buckling_semi_analytical.set(False)
         self._new_check_buckling_ml_cl.set(False)
         self._new_check_buckling_ml_numeric.set(False)
 
-        self._new_check_buckling_puls_s3.trace('w', self.update_running_time)
+        self._new_check_buckling_semi_analytical.trace('w', self.update_running_time)
         self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
         self._new_check_buckling_ml_numeric.trace('w', self.update_running_time)
 
@@ -582,7 +582,7 @@ class CreateOptGeoWindow():
         tk.Label(self._frame, text='Check for fatigue (RP-C203)').place(x=start_x + dx * 9.7, y=start_y + 8 * dy)
         tk.Label(self._frame, text='Check for bow slamming').place(x=start_x + dx * 9.7, y=start_y + 9 * dy)
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
-        tk.Label(self._frame, text='Check for buckling, PULS-S3/U3').place(x=start_x + dx * 9.7,
+        tk.Label(self._frame, text='Check for buckling, SemiAnalytical S3/U3').place(x=start_x + dx * 9.7,
                                                                            y=start_y + 11 * dy)
         tk.Label(self._frame, text='Check for buckling, ML-CL').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
         tk.Label(self._frame, text='Check for buckling, ML-Numeric').place(x=start_x + dx * 9.7,
@@ -619,7 +619,7 @@ class CreateOptGeoWindow():
         tk.Checkbutton(self._frame, variable=self._new_check_slamming).place(x=start_x + dx * 12, y=start_y + 9 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_local_buckling).place(x=start_x + dx * 12,
                                                                                    y=start_y + 10 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_puls_s3).place(x=start_x + dx * 12,
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical).place(x=start_x + dx * 12,
                                                                                      y=start_y + 11 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl).place(x=start_x + dx * 12,
                                                                                    y=start_y + 12 * dy)
@@ -773,7 +773,7 @@ class CreateOptGeoWindow():
         contraints = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                      self._new_check_local_buckling.get(), self._new_check_buckling_puls_s3.get(),
+                      self._new_check_local_buckling.get(), self._new_check_buckling_semi_analytical.get(),
                       self._new_check_buckling_ml_cl.get(),
                       self._new_check_buckling_ml_numeric.get())
 
@@ -1158,7 +1158,7 @@ class CreateOptGeoWindow():
 
         selected_buckling_checks = [
             self._new_check_buckling.get(),
-            self._new_check_buckling_puls_s3.get(),
+            self._new_check_buckling_semi_analytical.get(),
             self._new_check_buckling_ml_cl.get(),
             self._new_check_buckling_ml_numeric.get(),
         ]
@@ -1170,8 +1170,8 @@ class CreateOptGeoWindow():
                 self._new_check_buckling.set(False)
                 self._new_check_local_buckling.set(False)
 
-            if self._new_check_buckling_puls_s3.get():
-                self._new_check_buckling_puls_s3.set(False)
+            if self._new_check_buckling_semi_analytical.get():
+                self._new_check_buckling_semi_analytical.set(False)
 
             if self._new_check_buckling_ml_cl.get():
                 self._new_check_buckling_ml_cl.set(False)
@@ -1179,7 +1179,7 @@ class CreateOptGeoWindow():
             if self._new_check_buckling_ml_numeric.get():
                 self._new_check_buckling_ml_numeric.set(False)
 
-        elif (self._new_check_buckling_puls_s3.get() or self._new_check_buckling_ml_cl.get()
+        elif (self._new_check_buckling_semi_analytical.get() or self._new_check_buckling_ml_cl.get()
               or self._new_check_buckling_ml_numeric.get()):
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)

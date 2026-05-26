@@ -56,7 +56,7 @@ def test_external_excel_puls_sheet_argument_is_removed(opt_input):
         )
 
 
-def test_puls_s3_optimizer_replacement_is_available(opt_input):
+def test_semi_analytical_optimizer_replacement_is_available(opt_input):
     obj, _, _, lat_press, _, _, _, x0 = opt_input
 
     calc_object_stf = opt.create_new_calc_obj(obj.Stiffener, x0, None)
@@ -71,11 +71,11 @@ def test_puls_s3_optimizer_replacement_is_available(opt_input):
         calc_object_pl[1],
     ]
 
-    puls_result = opt._predict_puls_s3_uf(calc_object, lat_press)
+    semi_analytical_result = opt._predict_semi_analytical_uf(calc_object, lat_press)
 
-    assert puls_result[2] == 1
-    assert np.isfinite(puls_result[0])
-    assert np.isfinite(puls_result[1])
+    assert semi_analytical_result[2] == 1
+    assert np.isfinite(semi_analytical_result[0])
+    assert np.isfinite(semi_analytical_result[1])
 
     check_ok, check_not_ok = opt.get_filtered_results(
         [x0],
@@ -87,4 +87,4 @@ def test_puls_s3_optimizer_replacement_is_available(opt_input):
     )
 
     assert len(check_ok) + len(check_not_ok) == 1
-    assert (check_ok or check_not_ok)[0][1] in ('Check OK', 'PULS-S3')
+    assert (check_ok or check_not_ok)[0][1] in ('Check OK', 'SemiAnalytical')
