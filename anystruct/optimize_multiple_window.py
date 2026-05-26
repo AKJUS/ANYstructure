@@ -36,6 +36,7 @@ def helper_harmonizer_multi(iterator):
     """
 
     this_check, master_x = list(), None
+    use_puls_s3 = len(iterator['info']['checks']) > 7 and iterator['info']['checks'][7]
     use_ml_numeric = len(iterator['info']['checks']) > 9 and iterator['info']['checks'][9]
     use_ml_cl = len(iterator['info']['checks']) > 8 and iterator['info']['checks'][8]
 
@@ -47,7 +48,9 @@ def helper_harmonizer_multi(iterator):
         chk_calc_obj = iterator['info'][slave_line]['chk_calc_obj']
         master_x = list(iterator['x'])
 
-        if use_ml_numeric:
+        if use_puls_s3:
+            ml_result = iterator['info'][slave_line].get('PULS-S3', [float('inf'), float('inf'), 0, 0.87])
+        elif use_ml_numeric:
             ml_result = iterator['info'][slave_line].get('ML-Numeric', [float('inf'), float('inf'), 0])
         elif use_ml_cl:
             ml_result = iterator['info'][slave_line].get('ML-CL', [0, 0])
@@ -357,6 +360,7 @@ class CreateOptimizeMultipleWindow():
         self._new_check_fatigue = tk.BooleanVar()
         self._new_check_slamming = tk.BooleanVar()
         self._new_check_local_buckling = tk.BooleanVar()
+        self._new_check_puls_s3_buckling = tk.BooleanVar()
         self._new_check_ml_buckling = tk.BooleanVar()
         self._new_check_ml_numeric_buckling = tk.BooleanVar()
         self._new_harmonizer = tk.BooleanVar()
@@ -371,6 +375,7 @@ class CreateOptimizeMultipleWindow():
         self._new_check_local_buckling.set(True)
         self._new_harmonizer.set(False)
         self._keep_spacing.set(False)
+        self._new_check_puls_s3_buckling.set(False)
         self._new_check_ml_buckling.set(False)
         self._new_check_ml_numeric_buckling.set(False)
 
@@ -403,6 +408,7 @@ class CreateOptimizeMultipleWindow():
         self._new_algorithm_random_trials.trace('w', self.update_running_time)
         self._new_algorithm.trace('w', self.update_running_time)
         self._keep_spacing.trace('w', self.trace_keep_spacing_check)
+        self._new_check_puls_s3_buckling.trace('w', self.update_running_time)
         self._new_check_ml_buckling.trace('w', self.update_running_time)
         self._new_check_ml_numeric_buckling.trace('w', self.update_running_time)
 
@@ -437,8 +443,11 @@ class CreateOptimizeMultipleWindow():
         tk.Label(self._frame, text='Check for fatigue (RP-C203)').place(x=start_x + dx * 9.7, y=start_y + 8 * dy)
         tk.Label(self._frame, text='Check for bow slamming').place(x=start_x + dx * 9.7, y=start_y + 9 * dy)
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 11 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
+        tk.Label(self._frame, text='Check for buckling (PULS-S3/U3)').place(x=start_x + dx * 9.7,
+                                                                            y=start_y + 11 * dy)
+        tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
+        tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7,
+                                                                            y=start_y + 13 * dy)
         tk.Label(self._frame, text='Check to harmonize results. Same stiffener and plate dimensions '
                                    '(defined by largest in opt).', font='Verdana 10 bold') \
             .place(x=start_x + dx * +8.5, y=start_y - 10.5 * dy)
@@ -454,10 +463,12 @@ class CreateOptimizeMultipleWindow():
         tk.Checkbutton(self._frame, variable=self._new_check_slamming).place(x=start_x + dx * 12, y=start_y + 9 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_local_buckling).place(x=start_x + dx * 12,
                                                                                    y=start_y + 10 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_puls_s3_buckling).place(x=start_x + dx * 12,
+                                                                                     y=start_y + 11 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_ml_buckling).place(x=start_x + dx * 12,
-                                                                                y=start_y + 11 * dy)
+                                                                                y=start_y + 12 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_ml_numeric_buckling).place(x=start_x + dx * 12,
-                                                                                        y=start_y + 12 * dy)
+                                                                                        y=start_y + 13 * dy)
         tk.Checkbutton(self._frame, variable=self._new_harmonizer).place(x=start_x + dx * 8, y=start_y - 10.5 * dy)
         tk.Checkbutton(self._frame, variable=self._keep_spacing).place(x=start_x + dx * +8, y=start_y - 9.8 * dy)
 
@@ -618,7 +629,8 @@ class CreateOptimizeMultipleWindow():
         contraints = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                      self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(),
+                      self._new_check_local_buckling.get(), self._new_check_puls_s3_buckling.get(),
+                      self._new_check_ml_buckling.get(),
                       self._new_check_ml_numeric_buckling.get())
 
         self.pso_parameters = (self._new_swarm_size.get(), self._new_omega.get(), self._new_phip.get(),
@@ -721,7 +733,8 @@ class CreateOptimizeMultipleWindow():
         to_check = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                     self._new_check_shear_area.get(), self._new_check_buckling.get(),
                     self._new_check_fatigue.get(), self._new_check_slamming.get(),
-                    self._new_check_local_buckling.get(), False, self._new_check_ml_buckling.get(),
+                    self._new_check_local_buckling.get(), self._new_check_puls_s3_buckling.get(),
+                    self._new_check_ml_buckling.get(),
                     self._new_check_ml_numeric_buckling.get())
         iter_run_info = dict()
         selected_mat_fac = self._get_selected_material_factor()
@@ -733,6 +746,7 @@ class CreateOptimizeMultipleWindow():
                                          'fatigue object': input_pressures['fatigue object'],
                                          'slamming pressure': input_pressures['slamming pressure'],
                                          'chk_calc_obj': self._opt_results[slave_line][0], 'ML-CL': [0, 0],
+                                         'PULS-S3': [float('inf'), float('inf'), 0, 0.87],
                                          'ML-Numeric': [float('inf'), float('inf'), 0],
                                          'fup': self._new_fup.get(), 'fdwn': self._new_fdwn.get()}
         iter_run_info['lines'] = list(self._opt_results.keys())
@@ -742,8 +756,8 @@ class CreateOptimizeMultipleWindow():
         for x_check in all_ok_checks:
             iterator.append({'x': x_check, 'info': iter_run_info})
 
-        if to_check[8] or to_check[9]:
-            # Do ML-CL or ML-Numeric checks for harmonized candidates
+        if to_check[7] or to_check[8] or to_check[9]:
+            # Do PULS-S3, ML-CL or ML-Numeric checks for harmonized candidates
             to_run = list()
             to_run_owner = list()
 
@@ -794,7 +808,10 @@ class CreateOptimizeMultipleWindow():
                     to_run_owner.append((x_and_info, slave_line))
                     to_run.append((calc_object, x, lateral_press))
 
-            if to_check[8]:
+            if to_check[7]:
+                sort_again = self._predict_puls_s3_for_to_run(to_run)
+                result_key = 'PULS-S3'
+            elif to_check[8]:
                 sort_again = self._predict_ml_cl_for_to_run(to_run)
                 result_key = 'ML-CL'
             else:
@@ -1113,6 +1130,22 @@ class CreateOptimizeMultipleWindow():
 
         return sort_again
 
+    def _predict_puls_s3_for_to_run(self, to_run):
+        """
+        Predict built-in PULS-S3 UF results for harmonizer candidate objects.
+
+        Returns columns [buckling_uf, ultimate_uf, valid_prediction, acceptance].
+        U3 will reuse this GUI slot when the unstiffened solver branch is added.
+        """
+        sort_again = np.full([len(to_run), 4], float('inf'), dtype=float)
+        sort_again[:, 2] = 0
+        sort_again[:, 3] = 0.87
+
+        for idx, (calc_object, x, lat_press) in enumerate(to_run):
+            sort_again[idx, 0:3] = op._predict_puls_s3_uf(calc_object, lat_press)
+
+        return sort_again
+
     def _predict_ml_numeric_for_to_run(self, to_run):
         """
         Predict ML-Numeric UF results for harmonizer candidate objects.
@@ -1213,6 +1246,7 @@ class CreateOptimizeMultipleWindow():
 
         selected_buckling_checks = [
             self._new_check_buckling.get(),
+            self._new_check_puls_s3_buckling.get(),
             self._new_check_ml_buckling.get(),
             self._new_check_ml_numeric_buckling.get(),
         ]
@@ -1222,10 +1256,12 @@ class CreateOptimizeMultipleWindow():
 
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)
+            self._new_check_puls_s3_buckling.set(False)
             self._new_check_ml_buckling.set(False)
             self._new_check_ml_numeric_buckling.set(False)
 
-        elif self._new_check_ml_buckling.get() or self._new_check_ml_numeric_buckling.get():
+        elif (self._new_check_puls_s3_buckling.get() or self._new_check_ml_buckling.get()
+              or self._new_check_ml_numeric_buckling.get()):
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)
 

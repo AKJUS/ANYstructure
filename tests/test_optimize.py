@@ -40,7 +40,7 @@ def test_weight_calc(opt_input):
     assert opt.calc_weight(opt_input[-1]) == pytest.approx(8125.711486965601)
 
 
-def test_external_excel_puls_optimization_is_removed(opt_input):
+def test_external_excel_puls_sheet_argument_is_removed(opt_input):
     obj, upper_bounds, lower_bounds, lat_press, deltas, fat_obj, fat_press, _ = opt_input
 
     with pytest.raises(NotImplementedError, match="External Excel-sheet PULS optimization was removed"):
@@ -50,7 +50,41 @@ def test_external_excel_puls_optimization_is_removed(opt_input):
             lower_bounds,
             lat_press,
             deltas,
-            const_chk=(True, True, True, True, True, True, True, True, False, False),
+            puls_sheet="removed-puls.xlsm",
             fatigue_obj=fat_obj,
             fat_press_ext_int=fat_press,
         )
+
+
+def test_puls_s3_optimizer_replacement_is_available(opt_input):
+    obj, _, _, lat_press, _, _, _, x0 = opt_input
+
+    calc_object_stf = opt.create_new_calc_obj(obj.Stiffener, x0, None)
+    calc_object_pl = opt.create_new_calc_obj(obj.Plate, x0, None)
+    calc_object = [
+        calc.AllStructure(
+            Plate=calc_object_pl[0],
+            Stiffener=calc_object_stf[0],
+            Girder=None,
+            main_dict=obj.get_main_properties()['main dict'],
+        ),
+        calc_object_pl[1],
+    ]
+
+    puls_result = opt._predict_puls_s3_uf(calc_object, lat_press)
+
+    assert puls_result[2] == 1
+    assert np.isfinite(puls_result[0])
+    assert np.isfinite(puls_result[1])
+
+    check_ok, check_not_ok = opt.get_filtered_results(
+        [x0],
+        obj,
+        lat_press,
+        float('inf'),
+        chk=(False, False, False, False, False, False, False, True, False, False),
+        processes=1,
+    )
+
+    assert len(check_ok) + len(check_not_ok) == 1
+    assert (check_ok or check_not_ok)[0][1] in ('Check OK', 'PULS-S3')

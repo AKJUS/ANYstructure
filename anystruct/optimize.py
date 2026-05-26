@@ -15,9 +15,11 @@ import csv
 try:
     import anystruct.calc_structure as calc
     import anystruct.helper as hlp
+    import anystruct.calculate_puls as puls_s3
 except ModuleNotFoundError:
     import ANYstructure.anystruct.calc_structure as calc
     import ANYstructure.anystruct.helper as hlp
+    import ANYstructure.anystruct.calculate_puls as puls_s3
 
 
 def _set_material_factor_on_structure(obj, material_factor):
@@ -83,9 +85,10 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     :param pso_options:
     :return:
     '''
-    if puls_sheet is not None or const_chk[7]:
+    if puls_sheet is not None:
         raise NotImplementedError(
-            "External Excel-sheet PULS optimization was removed. Use prescriptive or ML-CL buckling checks."
+            "External Excel-sheet PULS optimization was removed. Use the built-in PULS-S3 replacement, "
+            "prescriptive, ML-CL, or ML-Numeric buckling checks."
         )
 
     # Make material factor explicit for all optimizer variants.
@@ -738,6 +741,133 @@ def _predict_numeric_uf_group(ml_algo, input_rows, prefix, mat_fac):
         return result
 
 
+def _puls_s3_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _puls_s3_stiffener_type(value):
+    return {
+        'T': 'T-bar',
+        'T-bar': 'T-bar',
+        'L': 'Angle',
+        'Angle': 'Angle',
+        'L-bulb': 'L-bulb',
+        'FB': 'Flatbar',
+        'F': 'Flatbar',
+        'Flatbar': 'Flatbar',
+    }.get(value, value)
+
+
+def _puls_s3_stiffener_boundary(value):
+    return {
+        'C': 'Cont',
+        'Cont': 'Cont',
+        'Continuous': 'Cont',
+        'S': 'Sniped',
+        'Sniped': 'Sniped',
+    }.get(value, value)
+
+
+def _puls_s3_in_plane_support(value):
+    return {
+        'Int': 'Integrated',
+        'Integrated': 'Integrated',
+        'GL': 'Girder - long',
+        'Girder - long': 'Girder - long',
+        'GT': 'Girder - trans',
+        'Girder - trans': 'Girder - trans',
+    }.get(value, value)
+
+
+def _puls_selected_method(value):
+    text = str(value).strip().lower()
+    if text in ('1', 'buckling'):
+        return 'buckling'
+    if text in ('2', 'ultimate'):
+        return 'ultimate'
+    return text
+
+
+def _get_puls_s3_input_for_optimization(calc_object, lat_press):
+    """
+    Build the reduced PULS-S3 input from an optimization candidate.
+
+    The replacement currently covers regular stiffened SP panels.  It follows
+    the same candidate object and pressure convention as the ML-Numeric SP
+    path: geometry/stresses are in the candidate object, and lateral pressure
+    is converted from kPa to MPa for the PULS-style input surface.
+    """
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+
+    if all_structure.Plate.get_puls_sp_or_up() != 'SP':
+        return None
+    if all_structure.Stiffener is None:
+        return None
+
+    stiffener = all_structure.Stiffener
+    puls_boundary = stiffener.get_puls_boundary()
+    sig_x1 = stiffener.sigma_x1
+    sig_x2 = stiffener.sigma_x2
+    if sig_x1 * sig_x2 >= 0:
+        sigxd = sig_x1 if abs(sig_x1) > abs(sig_x2) else sig_x2
+    else:
+        sigxd = max(sig_x1, sig_x2)
+
+    pressure_mpa = _puls_s3_float(lat_press) / 1000.0
+    return puls_s3.S3PanelInput(
+        length=stiffener.span * 1000.0,
+        stiffener_spacing=stiffener.spacing,
+        plate_thickness=stiffener.t,
+        stiffener_type=_puls_s3_stiffener_type(stiffener.get_stiffener_type()),
+        stiffener_boundary=_puls_s3_stiffener_boundary(stiffener.get_puls_stf_end()),
+        stiffener_height=stiffener.hw,
+        web_thickness=stiffener.tw,
+        flange_width=stiffener.b,
+        flange_thickness=stiffener.tf,
+        yield_stress_plate=stiffener.mat_yield / 1e6,
+        yield_stress_stiffener=stiffener.mat_yield / 1e6,
+        axial_stress=0.0 if puls_boundary == 'GT' else sigxd,
+        transverse_stress_1=0.0 if puls_boundary == 'GL' else stiffener.sigma_y1,
+        transverse_stress_2=0.0 if puls_boundary == 'GL' else stiffener.sigma_y2,
+        shear_stress=stiffener.tau_xy,
+        pressure=pressure_mpa,
+        in_plane_support=_puls_s3_in_plane_support(puls_boundary),
+        elastic_modulus=210000.0,
+        poisson_ratio=0.3,
+    )
+
+
+def _predict_puls_s3_uf(calc_object, lat_press):
+    """
+    Return [buckling_uf, ultimate_uf, valid_prediction] for the PULS-S3 solver.
+    """
+    result = np.array([float('inf'), float('inf'), 0.0], dtype=float)
+
+    try:
+        panel = _get_puls_s3_input_for_optimization(calc_object, lat_press)
+        if panel is None:
+            return result
+
+        solved = puls_s3.solve_s3_panel(panel)
+        if (
+            solved.valid
+            and solved.buckling_usage_factor is not None
+            and solved.ultimate_usage_factor is not None
+        ):
+            result[0] = float(solved.buckling_usage_factor)
+            result[1] = float(solved.ultimate_usage_factor)
+            result[2] = 1.0
+    except Exception:
+        pass
+
+    return result
+
+
 def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, True, True, True, True, True, True, False,
                                                                        False, False),
                         fat_dict=None, fat_press=None, slamming_press=0, PULSrun: calc.PULSpanel = None,
@@ -746,6 +876,13 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
     Checking all constraints defined.
 
     ml_results is used for both ML pipelines:
+        chk[7]  PULS-S3 replacement:
+            ml_results[0] = buckling UF
+            ml_results[1] = ultimate UF
+            ml_results[2] = valid prediction flag, 1 = valid, 0 = invalid/unsupported
+            ml_results[3] = PULS acceptance limit
+            accepted if selected UF / acceptance < 1.0
+
         chk[8]  ML-CL:
             ml_results[0] = buckling class result
             ml_results[1] = ultimate class result
@@ -776,32 +913,55 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                                      main_dict=obj.get_main_properties()['main dict']), calc_object_pl[1]]
     calc_object[0].lat_press = lat_press
 
-    # PULS buckling check
-    if chk[7] and PULSrun is not None:
-        x_id = x_to_string(x)
-        if calc_object[0].Plate.get_puls_method() == 'buckling':
-            puls_uf = PULSrun.get_puls_line_results(x_id)["Buckling strength"]["Actual usage Factor"][0]
-        elif calc_object[0].Plate.get_puls_method() == 'ultimate':
-            puls_uf = PULSrun.get_puls_line_results(x_id)["Ultimate capacity"]["Actual usage Factor"][0]
+    # PULS-S3 buckling check
+    if chk[7]:
+        if ml_results is not None:
+            try:
+                valid_prediction = int(ml_results[2]) if len(ml_results) > 2 else 0
+                puls_acceptance = float(ml_results[3]) if len(ml_results) > 3 else 0.87
+
+                if valid_prediction != 1:
+                    return False, 'PULS-S3', x, all_checks
+
+                puls_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
+                if puls_method == 'buckling':
+                    puls_uf = float(ml_results[0])
+                elif puls_method == 'ultimate':
+                    puls_uf = float(ml_results[1])
+                else:
+                    puls_uf = None
+            except Exception:
+                return False, 'PULS-S3', x, all_checks
+        elif PULSrun is not None:
+            x_id = x_to_string(x)
+            puls_acceptance = PULSrun.puls_acceptance
+            puls_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
+            if puls_method == 'buckling':
+                puls_uf = PULSrun.get_puls_line_results(x_id)["Buckling strength"]["Actual usage Factor"][0]
+            elif puls_method == 'ultimate':
+                puls_uf = PULSrun.get_puls_line_results(x_id)["Ultimate capacity"]["Actual usage Factor"][0]
+            else:
+                puls_uf = None
         else:
-            puls_uf = None
+            return False, 'PULS-S3', x, all_checks
 
         if type(puls_uf) == str or puls_uf is None:
-            return False, 'PULS', x, all_checks
+            return False, 'PULS-S3', x, all_checks
 
-        all_checks[8] = puls_uf / PULSrun.puls_acceptance
-        if puls_uf / PULSrun.puls_acceptance >= 1:
+        all_checks[8] = puls_uf / puls_acceptance
+        if puls_uf / puls_acceptance >= 1:
             if print_result:
-                print('PULS', calc_object[0].get_one_line_string(), False)
-            return False, 'PULS', x, all_checks
+                print('PULS-S3', calc_object[0].get_one_line_string(), False)
+            return False, 'PULS-S3', x, all_checks
 
     # Buckling ML-CL
     if chk[8]:
         if ml_results is None:
             return False, 'Buckling ML-CL', x, all_checks
 
-        if any([calc_object[0].Plate.get_puls_method() == 'buckling' and ml_results[0] != 9,
-                calc_object[0].Plate.get_puls_method() == 'ultimate' and ml_results[1] != 9]):
+        puls_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
+        if any([puls_method == 'buckling' and ml_results[0] != 9,
+                puls_method == 'ultimate' and ml_results[1] != 9]):
             if print_result:
                 stf_text = calc_object[0].Stiffener.get_one_line_string() if calc_object[
                                                                                  0].Stiffener is not None else 'No stiffener'
@@ -817,9 +977,10 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
             valid_prediction = int(ml_results[2]) if ml_results is not None and len(ml_results) > 2 else 0
 
             if valid_prediction == 1:
-                if calc_object[0].Plate.get_puls_method() == 'buckling':
+                puls_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
+                if puls_method == 'buckling':
                     numeric_uf = float(ml_results[0])
-                elif calc_object[0].Plate.get_puls_method() == 'ultimate':
+                elif puls_method == 'ultimate':
                     numeric_uf = float(ml_results[1])
                 else:
                     numeric_uf = float('inf')
@@ -1339,17 +1500,19 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
     Using multiprocessing to return list of applicable results.
 
     Supports:
-        chk[7] = external PULS sheet
+        chk[7] = built-in PULS-S3 replacement
         chk[8] = ML-CL classification pipeline
         chk[9] = ML-Numeric UF pipeline
     '''
 
     if chk[7]:
-        # PULS to be used.
-        dict_to_run = {}
-        for x in iterable_all:
-            x_id = x_to_string(x)
+        # Built-in PULS-S3 replacement. Columns: buckling UF, ultimate UF,
+        # valid prediction, acceptance limit.
+        sort_again = np.full([len(iterable_all), 4], np.inf, dtype=float)
+        sort_again[:, 2] = 0.0
+        sort_again[:, 3] = float(puls_acceptance)
 
+        for idx, x in enumerate(iterable_all):
             calc_object_stf = None if init_stuc_obj.Stiffener is None else create_new_calc_obj(init_stuc_obj.Stiffener,
                                                                                                x, fat_dict,
                                                                                                fdwn=fdwn, fup=fup)
@@ -1360,13 +1523,9 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
                                              main_dict=init_stuc_obj.get_main_properties()['main dict']),
                            calc_object_pl[1]]
 
-            dict_to_run[x_id] = calc_object[0].Plate.get_puls_input()
-            dict_to_run[x_id]['Identification'] = x_id
-            dict_to_run[x_id]['Pressure (fixed)'] = lat_press  # PULS sheet to have pressure in MPa
+            sort_again[idx, 0:3] = _predict_puls_s3_uf(calc_object, lat_press)
 
-        PULSrun = calc.PULSpanel(dict_to_run, puls_sheet_location=puls_sheet, puls_acceptance=puls_acceptance)
-        PULSrun.run_all()
-        sort_again = None
+        PULSrun = None
 
     elif chk[8]:
         # ML-CL to be used.
@@ -1495,7 +1654,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
 
     iter_var = list()
     for idx, item in enumerate(iterable_all):
-        if chk[8] or chk[9]:
+        if chk[7] or chk[8] or chk[9]:
             this_ml_result = sort_again[idx]
         else:
             this_ml_result = None
@@ -1508,8 +1667,11 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
     if processes is None:
         processes = max(cpu_count() - 1, 1)
 
-    with Pool(processes) as my_process:
-        res_pre = my_process.starmap(any_constraints_all, iter_var)
+    if processes == 1:
+        res_pre = [any_constraints_all(*args) for args in iter_var]
+    else:
+        with Pool(processes) as my_process:
+            res_pre = my_process.starmap(any_constraints_all, iter_var)
 
     check_ok, check_not_ok = list(), list()
     for item in res_pre:
