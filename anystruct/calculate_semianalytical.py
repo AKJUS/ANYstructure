@@ -1,7 +1,7 @@
-"""Reduced semi-analytical PULS S3 panel calculations.
+"""Reduced SemiAnalytical S3 panel calculations.
 
 This module is a first physics milestone for regular stiffened S3 panels.  It
-keeps the PULS CSV files as benchmark data and does not fit corrections from
+keeps the reference CSV files as benchmark data and does not fit corrections from
 them.  The implementation follows the direct semi-analytical shape described
 in DNV-CG-0128 Sec.4:
 
@@ -11,9 +11,9 @@ in DNV-CG-0128 Sec.4:
 * elastic mode factors and a first-yield collapse check are reported as
   usage factors.
 
-The production PULS code uses a richer element library and element validity
+The production closed-form reference code uses a richer element library and element validity
 manual than the public guideline.  The result diagnostics therefore name the
-covered assumptions instead of presenting this reduced model as PULS parity.
+covered assumptions instead of presenting this reduced model as closed-tool parity.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class S3PanelInput:
     """Input surface for the regular stiffened S3 panel milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  CSV
-    PULS exports use positive in-plane normal stress for compression; the
+    reference exports use positive in-plane normal stress for compression; the
     helper functions in this module preserve that sign convention.
     """
 
@@ -99,6 +99,8 @@ class S3SolverConfig:
     torsional_imperfection_scale: float = 1.0
     pressure_local_share: float = 0.65
     pressure_global_share: float = 0.35
+    include_pressure_dominated_yield_in_buckling_strength: bool = False
+    pressure_dominated_yield_preload_ratio: float = 0.30
     yield_utilization_limit: float = 1.0
     pressure_yield_limit: float = 1.0
     max_load_factor: float = 100.0
@@ -228,8 +230,12 @@ def _optional_float(value: Any) -> float | None:
 
 
 def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
-    """Map a PULS stiffened-panel CSV row into the solver input type."""
+    """Map a reference stiffened-panel CSV row into the solver input type."""
 
+    elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
+    poisson_ratio = _optional_float(row.get("Poisson's ratio"))
+    if poisson_ratio is None:
+        poisson_ratio = _optional_float(row.get("Poisson ratio"))
     return S3PanelInput(
         length=_float_from_row(row, "Length of panel"),
         stiffener_spacing=_float_from_row(row, "Stiffener spacing"),
@@ -248,7 +254,58 @@ def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
         shear_stress=_float_from_row(row, "Shear stress"),
         pressure=_float_from_row(row, "Pressure (fixed)"),
         in_plane_support=str(row.get("In-plane support", "")).strip(),
+        elastic_modulus=elastic_modulus or S3PanelInput.__dataclass_fields__["elastic_modulus"].default,
+        poisson_ratio=poisson_ratio or S3PanelInput.__dataclass_fields__["poisson_ratio"].default,
     )
+
+
+def _ship_section_value(section: Mapping[str, Any], key: str) -> Any:
+    value = section[key]
+    if isinstance(value, (list, tuple)):
+        return value[0]
+    return value
+
+
+def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten one ANYstructure ship-section result record to CSV-like S3 fields."""
+
+    plate = record["Plate geometry"]
+    stiffener = record["Primary stiffeners"]
+    material = record["Material"]
+    loads = record["Applied loads"]
+    support = record.get("Bound cond.", {})
+    buckling = record.get("Buckling strength", {})
+    ultimate = record.get("Ultimate capacity", {})
+
+    return {
+        "_ship_line": record.get("Identification", ""),
+        "Length of panel": _ship_section_value(plate, "Length of panel"),
+        "Stiffener spacing": _ship_section_value(plate, "Stiffener spacing"),
+        "Plate thick.": _ship_section_value(plate, "Plate thick."),
+        "Stiffener type": _ship_section_value(stiffener, "Stiffener type"),
+        "Stiffener boundary": _ship_section_value(stiffener, "Stiffener boundary"),
+        "Stiff. Height": _ship_section_value(stiffener, "Stiff. Height"),
+        "Web thick.": _ship_section_value(stiffener, "Web thick."),
+        "Flange width": _ship_section_value(stiffener, "Flange width"),
+        "Flange thick.": _ship_section_value(stiffener, "Flange thick."),
+        "Yield stress plate": _ship_section_value(material, "Yield stress plate"),
+        "Yield stress stiffener": _ship_section_value(material, "Yield stress stiffener"),
+        "Modulus of elasticity": _ship_section_value(material, "Modulus of elasticity"),
+        "Poisson's ratio": _ship_section_value(material, "Poisson's ratio"),
+        "Axial stress": _ship_section_value(loads, "Axial stress"),
+        "Trans. stress 1": _ship_section_value(loads, "Trans. stress"),
+        "Trans. stress 2": _ship_section_value(loads, "Trans. stress 2"),
+        "Shear stress": _ship_section_value(loads, "Shear stress"),
+        "Pressure (fixed)": _ship_section_value(loads, "Pressure (fixed)"),
+        "In-plane support": _ship_section_value(support, "In-plane support") if support else "",
+        "Buckling Actual usage Factor inc NaN": (
+            _ship_section_value(buckling, "Actual usage Factor") if buckling else ""
+        ),
+        "Ultimate Actual usage Factor inc NaN": (
+            _ship_section_value(ultimate, "Actual usage Factor") if ultimate else ""
+        ),
+        "output cl str buc": _ship_section_value(buckling, "Status") if buckling else "",
+    }
 
 
 def normalized_load_components(panel: S3PanelInput) -> dict[str, float]:
@@ -1107,7 +1164,7 @@ def _stiffener_web_local_buckling(
 
     The web is treated as a long simply supported plate strip under a reference
     web-edge compression envelope and panel shear.  The candidate keeps the
-    full PULS web/stiffener stress redistribution out of scope, but the explicit
+    full web/stiffener stress redistribution out of scope, but the explicit
     interaction avoids treating tall loaded webs as compression-only strips.
     """
 
@@ -2029,14 +2086,14 @@ def _interpolate_capacity(
 def _notes() -> list[str]:
     return [
         "regular S3 unit strip only; U3, T1, K3, corrugation and FRP are outside this milestone",
-        "positive PULS CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
-        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production PULS basis",
-        "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; raw elastic usage is reported separately",
+        "positive reference CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production reference basis",
+        "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure dominated first-yield is reported in ultimate diagnostics but excluded from buckling-strength control by default",
         "shear-normal Ritz coupling is truncated in elastic and continuation checks; classical local plate shear remains a fallback candidate",
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
         "stiffener yield exposes SI/PI section branches, lateral-deformation and sniped bending, SI-only torsional stress, and effective attached plate width",
         "global longitudinal strip stiffness degrades from local elastic utilization on the nonlinear load path",
-        "validity limits are explicit covered-domain checks because the PULS user manual is not assumed",
+        "validity limits are explicit covered-domain checks because the reference user manual is not assumed",
     ]
 
 
@@ -2050,6 +2107,22 @@ def _invalid_result(reason: str, diagnostics: dict[str, Any] | None = None) -> S
         diagnostics=diagnostics or {},
         covered_domain_notes=_notes(),
     )
+
+
+def _pressure_dominated_yield_limit(
+    panel: S3PanelInput,
+    pressure_yield: Mapping[str, Any],
+    final_yield: Mapping[str, Any],
+    config: S3SolverConfig,
+) -> bool:
+    if panel.pressure <= EPS:
+        return False
+    final_max = float(final_yield.get("max") or 0.0)
+    if final_max <= EPS:
+        return False
+    preload_max = float(pressure_yield.get("max") or 0.0)
+    preload_share = preload_max / final_max
+    return preload_share >= config.pressure_dominated_yield_preload_ratio
 
 
 def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) -> S3Result:
@@ -2262,11 +2335,28 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             },
         )
 
-    buckling_strength_limits = {
-        "ultimate_capacity": ultimate_capacity_factor,
-    }
+    pressure_dominated_yield = _pressure_dominated_yield_limit(
+        panel,
+        pressure_yield,
+        final_yield,
+        config,
+    )
+    include_ultimate_in_buckling_strength = (
+        config.include_pressure_dominated_yield_in_buckling_strength
+        or not pressure_dominated_yield
+    )
+    buckling_strength_limits = {}
+    excluded_buckling_strength_limits = {}
+    if include_ultimate_in_buckling_strength:
+        buckling_strength_limits["ultimate_capacity"] = ultimate_capacity_factor
+    else:
+        excluded_buckling_strength_limits[
+            "ultimate_capacity"
+        ] = "pressure-dominated-fixed-preload-yield"
     if buckling_factor is not None:
         buckling_strength_limits["elastic_buckling_envelope"] = buckling_factor
+    if not buckling_strength_limits:
+        buckling_strength_limits["ultimate_capacity"] = ultimate_capacity_factor
     buckling_strength_control, buckling_strength_capacity_factor = min(
         buckling_strength_limits.items(),
         key=lambda item: float(item[1]),
@@ -2276,8 +2366,11 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         "usage_factor": 1.0 / max(buckling_strength_capacity_factor, EPS),
         "controlling_limit": buckling_strength_control,
         "component_capacity_factors": buckling_strength_limits,
+        "excluded_component_capacity_factors": excluded_buckling_strength_limits,
         "elastic_usage_factor": elastic_buckling_usage,
         "ultimate_usage_factor": 1.0 / max(ultimate_capacity_factor, EPS),
+        "pressure_dominated_yield_limit": pressure_dominated_yield,
+        "ultimate_included": include_ultimate_in_buckling_strength,
     }
     diagnostics = {
         "collapse_state": collapse_state,
@@ -2638,6 +2731,28 @@ def iter_csv_rows(
                 break
 
 
+def iter_ship_section_rows(
+    path: str | Path,
+    limit: int | None = None,
+) -> Iterator[tuple[int, Mapping[str, Any]]]:
+    """Yield stiffened S3-like records from an ANYstructure ship-section export."""
+
+    with Path(path).open("r", encoding="utf-8-sig") as handle:
+        payload = json.load(handle)
+    legacy_results_key = "PULS results"
+    result_records = payload.get(legacy_results_key, {})
+    emitted = 0
+    for row_index, record in enumerate(result_records.values()):
+        if not isinstance(record, Mapping):
+            continue
+        if "Plate geometry" not in record or "Primary stiffeners" not in record:
+            continue
+        yield row_index, ship_section_record_to_csv_row(record)
+        emitted += 1
+        if limit is not None and emitted >= limit:
+            break
+
+
 def benchmark_csv(
     csv_path: str | Path,
     config: S3SolverConfig | None = None,
@@ -2645,6 +2760,14 @@ def benchmark_csv(
     fixture: bool = False,
 ) -> BenchmarkReport:
     return _benchmark_rows(iter_csv_rows(csv_path, limit=limit, fixture=fixture), config or S3SolverConfig())
+
+
+def benchmark_ship_section(
+    path: str | Path,
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> BenchmarkReport:
+    return _benchmark_rows(iter_ship_section_rows(path, limit=limit), config or S3SolverConfig())
 
 
 def _benchmark_command(args: argparse.Namespace) -> int:
@@ -2660,11 +2783,24 @@ def _benchmark_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ship_section_command(args: argparse.Namespace) -> int:
+    config = S3SolverConfig(
+        max_load_factor=args.max_load_factor,
+        use_effective_stiffener_width=args.effective_stiffener_width,
+    )
+    report = benchmark_ship_section(args.input, config=config, limit=args.limit)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.format_text())
+    return 0
+
+
 def _build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Reduced semi-analytical PULS S3 calculations")
+    parser = argparse.ArgumentParser(description="Reduced SemiAnalytical S3 calculations")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    benchmark = subparsers.add_parser("benchmark", help="Compare S3 results with a PULS CSV export")
-    benchmark.add_argument("--csv", default="PULSforChatGPT.csv", help="PULS CSV path")
+    benchmark = subparsers.add_parser("benchmark", help="Compare S3 results with a reference CSV export")
+    benchmark.add_argument("--csv", default="reference_s3.csv", help="reference CSV path")
     benchmark.add_argument("--limit", type=int, default=None, help="Read only the first N selected CSV rows")
     benchmark.add_argument("--fixture", action="store_true", help="Use the deterministic fixture row indices")
     benchmark.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
@@ -2680,6 +2816,30 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help="Maximum continuation factor for the benchmark solve",
     )
     benchmark.set_defaults(run=_benchmark_command)
+
+    ship_section = subparsers.add_parser(
+        "ship-section",
+        help="Compare S3 results with an ANYstructure ship-section dictionary export",
+    )
+    ship_section.add_argument(
+        "--input",
+        default=r"C:\Github\ANYstructure\anystruct\ship_section_example.txt",
+        help="ANYstructure ship-section export path",
+    )
+    ship_section.add_argument("--limit", type=int, default=None, help="Read only the first N S3 rows")
+    ship_section.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
+    ship_section.add_argument(
+        "--effective-stiffener-width",
+        action="store_true",
+        help="Apply length-based effective attached-plate width in stiffener yield and column checks",
+    )
+    ship_section.add_argument(
+        "--max-load-factor",
+        type=float,
+        default=S3SolverConfig.max_load_factor,
+        help="Maximum continuation factor for the benchmark solve",
+    )
+    ship_section.set_defaults(run=_ship_section_command)
     return parser
 
 

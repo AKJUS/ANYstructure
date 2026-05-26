@@ -15,11 +15,11 @@ import csv
 try:
     import anystruct.calc_structure as calc
     import anystruct.helper as hlp
-    import anystruct.calculate_puls as semi_analytical
+    import anystruct.calculate_semianalytical as semi_analytical
 except ModuleNotFoundError:
     import ANYstructure.anystruct.calc_structure as calc
     import ANYstructure.anystruct.helper as hlp
-    import ANYstructure.anystruct.calculate_puls as semi_analytical
+    import ANYstructure.anystruct.calculate_semianalytical as semi_analytical
 
 
 def _set_material_factor_on_structure(obj, material_factor):
