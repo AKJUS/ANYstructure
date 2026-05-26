@@ -73,4 +73,5 @@ def test_excel_import_and_ml_cl_buckling_option_remain_available():
     ]
     assert "'ML-CL (PULS based)'" in buckling_options
     assert "'ML-Numeric (PULS based)'" in buckling_options
+    assert "'PULS-S3/U3'" in buckling_options
     assert "'DNV PULS'" not in buckling_options

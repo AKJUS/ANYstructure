@@ -900,7 +900,12 @@ class Application():
                                 self._ent_structure_type]
 
         self._new_buckling_method = tk.StringVar()
-        options = ['DNV-RP-C201 - prescriptive', 'ML-Numeric (PULS based)', 'ML-CL (PULS based)']
+        options = [
+            'DNV-RP-C201 - prescriptive',
+            'ML-Numeric (PULS based)',
+            'ML-CL (PULS based)',
+            'PULS-S3/U3',
+        ]
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
         self._buckling_method = ttk.OptionMenu(self._tab_prop, self._new_buckling_method, options[0], *options,
                                                command=self.update_frame)
@@ -2854,6 +2859,13 @@ class Application():
         except Exception:
             return 'red'
 
+    def _puls_s3_uf_color(self, uf):
+        """PULS-S3/U3 uses the same acceptance entry as the historic PULS checks."""
+        try:
+            return 'green' if float(uf) <= float(self._new_puls_uf.get()) else 'red'
+        except Exception:
+            return 'red'
+
     def get_color_and_calc_state(self, current_line=None, active_line_only=False):
         ''' Return calculations and colors for line and results. '''
 
@@ -2877,6 +2889,9 @@ class Application():
             'ML buckling numeric': {},
             'ML buckling numeric valid': {},
             'ML buckling numeric colors': {},
+            'PULS-S3': {},
+            'PULS-S3 valid': {},
+            'PULS-S3 colors': {},
             'weights': {},
             'cylinder': {},
         }
@@ -2934,6 +2949,7 @@ class Application():
                         selected_mat_fac = obj_scnt_calc_pl.mat_factor
 
                     cached_mat_fac = None
+                    cached_has_puls_s3 = False
                     if cached_state is not None:
                         cached_mat_fac = (
                             cached_state
@@ -2941,13 +2957,14 @@ class Application():
                             .get(current_line, {})
                             .get('material factor', None)
                         )
+                        cached_has_puls_s3 = current_line in cached_state.get('PULS-S3', {})
 
                     try:
                         cached_mat_fac = None if cached_mat_fac is None else float(cached_mat_fac)
                     except Exception:
                         cached_mat_fac = None
 
-                    if cached_state is not None and cached_mat_fac == selected_mat_fac:
+                    if cached_state is not None and cached_mat_fac == selected_mat_fac and cached_has_puls_s3:
                         return cached_state
                     # Otherwise continue and recalculate this line so numeric UF is updated.
                 try:
@@ -3458,6 +3475,54 @@ class Application():
                             'buckling': numeric_buc_color,
                             'ultimate': numeric_ult_color,
                         }
+
+                # -------------------------------------------------------------------------
+                # Built-in PULS replacement.
+                #
+                # The current solver branch covers S3. U3 will reuse this same state surface
+                # when the unstiffened regular plate branch is added.
+                # -------------------------------------------------------------------------
+                try:
+                    puls_s3_pred = op._predict_puls_s3_uf([all_obj, None], design_pressure)
+                    puls_s3_valid = int(puls_s3_pred[2]) == 1
+                except Exception as e:
+                    puls_s3_pred = [float('inf'), float('inf'), 0]
+                    puls_s3_valid = False
+                    puls_s3_error = str(e)
+                else:
+                    puls_s3_error = ''
+
+                puls_s3_buc_uf = float(puls_s3_pred[0]) if puls_s3_valid else float('inf')
+                puls_s3_ult_uf = float(puls_s3_pred[1]) if puls_s3_valid else float('inf')
+                puls_s3_acceptance = float(self._new_puls_uf.get())
+
+                if puls_s3_valid:
+                    puls_s3_buc_color = self._puls_s3_uf_color(puls_s3_buc_uf)
+                    puls_s3_ult_color = self._puls_s3_uf_color(puls_s3_ult_uf)
+                    puls_s3_valid_label = 'valid PULS-S3 UF predicted'
+                else:
+                    puls_s3_buc_color = 'red'
+                    puls_s3_ult_color = 'red'
+                    puls_s3_valid_label = 'PULS-S3/U3 unsupported or invalid'
+
+                return_dict['PULS-S3'][current_line] = {
+                    'buckling UF': puls_s3_buc_uf,
+                    'ultimate UF': puls_s3_ult_uf,
+                    'acceptance': puls_s3_acceptance,
+                    'error': puls_s3_error,
+                }
+
+                return_dict['PULS-S3 valid'][current_line] = {
+                    'available': puls_s3_valid,
+                    'valid prediction': 1 if puls_s3_valid else 0,
+                    'valid label': puls_s3_valid_label,
+                }
+
+                return_dict['PULS-S3 colors'][current_line] = {
+                    'buckling': puls_s3_buc_color,
+                    'ultimate': puls_s3_ult_color,
+                }
+
                 '''
                 Weight calculations for line.
                 '''
@@ -3506,8 +3571,14 @@ class Application():
                 sec_util = 0 if min(sec_mod) == 0 else min_sec_mod / min(sec_mod)
                 buc_util = 1 if float('inf') in buckling else max(all_buckling_uf_list)
                 rec_for_color[current_line]['rp buckling'] = max(all_buckling_uf_list)
+                puls_s3_util = buc_util
+                if return_dict['PULS-S3 valid'][current_line].get('valid prediction', None) == 1:
+                    if op._puls_selected_method(obj_scnt_calc_pl.get_puls_method()) == 'ultimate':
+                        puls_s3_util = return_dict['PULS-S3'][current_line]['ultimate UF']
+                    else:
+                        puls_s3_util = return_dict['PULS-S3'][current_line]['buckling UF']
                 return_dict['utilization'][current_line] = {'buckling': buc_util,
-                                                            'PULS buckling': buc_util,
+                                                            'PULS buckling': puls_s3_util,
                                                             'fatigue': fat_util,
                                                             'section': sec_util,
                                                             'shear': shear_util,
@@ -3952,6 +4023,26 @@ class Application():
 
                         elif self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                             color = 'red' if 'red' in state['colors'][line].values() else 'green'
+                        elif self._new_buckling_method.get() == 'PULS-S3/U3':
+                            puls_s3_valid = state.get('PULS-S3 valid', {}).get(line, {})
+                            puls_s3_colors = state.get('PULS-S3 colors', {}).get(line, {})
+
+                            if puls_s3_valid.get('valid prediction', None) != 1:
+                                color = 'red'
+                            else:
+                                puls_method = op._puls_selected_method(
+                                    self._line_to_struc[line][0].Plate.get_puls_method()
+                                )
+                                if puls_method == 'ultimate':
+                                    color = puls_s3_colors.get('ultimate', 'red')
+                                else:
+                                    color = puls_s3_colors.get('buckling', 'red')
+
+                            if color == 'green':
+                                color = 'green' if all([
+                                    state['colors'][line][key] == 'green'
+                                    for key in ['fatigue', 'section', 'shear', 'thickness']
+                                ]) else 'red'
                         elif self._new_buckling_method.get() in [
                             'ML-CL (PULS based)',
                             'ML-Numeric (PULS based)',
@@ -4338,6 +4429,30 @@ class Application():
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                               text=this_text)
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'PULS-S3/U3':
+            puls_s3 = state.get('PULS-S3', {}).get(line, {})
+            puls_s3_valid = state.get('PULS-S3 valid', {}).get(line, {})
+            puls_s3_colors = state.get('PULS-S3 colors', {}).get(line, {})
+
+            if puls_s3_valid.get('valid prediction', None) == 1:
+                puls_method = state['color code']['lines'][line].get('PULS method', None)
+                puls_method = op._puls_selected_method(puls_method)
+
+                if puls_method == 'ultimate':
+                    uf = puls_s3.get('ultimate UF', float('inf'))
+                    color = puls_s3_colors.get('ultimate', 'red')
+                    this_text = 'ult UF=' + str(round(uf, 3))
+                else:
+                    uf = puls_s3.get('buckling UF', float('inf'))
+                    color = puls_s3_colors.get('buckling', 'red')
+                    this_text = 'buc UF=' + str(round(uf, 3))
+            else:
+                color = 'red'
+                this_text = puls_s3_valid.get('valid label', 'invalid')
+
+            if self._new_label_color_coding.get():
+                self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
+                                              text=this_text)
         elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
             numeric = state.get('ML buckling numeric', {}).get(line, {})
             numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
@@ -4482,6 +4597,28 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text='N/A')
+            elif self._new_buckling_method.get() == 'PULS-S3/U3':
+                puls_s3 = state.get('PULS-S3', {}).get(line, {})
+                puls_s3_valid = state.get('PULS-S3 valid', {}).get(line, {})
+                puls_s3_colors = state.get('PULS-S3 colors', {}).get(line, {})
+
+                if puls_s3_valid.get('valid prediction', None) == 1:
+                    buc_uf = puls_s3.get('buckling UF', float('inf'))
+                    ult_uf = puls_s3.get('ultimate UF', float('inf'))
+                    total_uf = max(buc_uf, ult_uf)
+
+                    color = 'green' if all([
+                        puls_s3_colors.get('buckling', 'red') == 'green',
+                        puls_s3_colors.get('ultimate', 'red') == 'green'
+                    ]) else 'red'
+                    this_text = 'max UF=' + str(round(total_uf, 3))
+                else:
+                    color = 'red'
+                    this_text = puls_s3_valid.get('valid label', 'invalid')
+
+                if self._new_label_color_coding.get():
+                    self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
+                                                  text=this_text)
             elif self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
                 numeric = state.get('ML buckling numeric', {}).get(line, {})
                 numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
@@ -4798,20 +4935,92 @@ class Application():
                     #                            anchor='nw',fill=color_buckling)
 
 
-                elif self._new_buckling_method.get() in ['ML-CL (PULS based)', 'ML-Numeric (PULS based)']:
+                elif self._new_buckling_method.get() in [
+                    'PULS-S3/U3',
+                    'ML-CL (PULS based)',
+                    'ML-Numeric (PULS based)',
+                ]:
 
+                    print_puls_s3_results = self._new_buckling_method.get() == 'PULS-S3/U3'
                     print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
                     print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
 
                     self._result_canvas.create_text(
                         [x * 1, (y + (start_y + 0) * dy) * 1],
-                        text='Buckling results ANYstructure ML algorithm:',
+                        text='Buckling results ANYstructure PULS/ML algorithm:',
                         font=self._text_size["Text 9 bold"],
                         anchor='nw',
                         fill=self._color_text,
                     )
 
                     line_offset = 1
+
+                    # -------------------------------------------------------------------------
+                    # Built-in PULS replacement result
+                    # -------------------------------------------------------------------------
+                    if print_puls_s3_results:
+                        puls_s3 = state.get('PULS-S3', {}).get(current_line, None)
+                        puls_s3_valid = state.get('PULS-S3 valid', {}).get(current_line, {})
+                        puls_s3_colors = state.get('PULS-S3 colors', {}).get(current_line, {})
+
+                        if puls_s3 is not None:
+                            puls_s3_is_valid = puls_s3_valid.get('valid prediction', None) == 1
+                            if puls_s3_is_valid:
+                                buckling_uf_txt = f"{puls_s3.get('buckling UF', float('inf')):.3f}"
+                                ultimate_uf_txt = f"{puls_s3.get('ultimate UF', float('inf')):.3f}"
+                            else:
+                                buckling_uf_txt = 'invalid/unsupported'
+                                ultimate_uf_txt = 'invalid/unsupported'
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Buckling UF PULS-S3/U3: ' + buckling_uf_txt,
+                                font=self._text_size["Text 9 bold"],
+                                anchor='nw',
+                                fill=puls_s3_colors.get('buckling', 'red'),
+                            )
+                            line_offset += 1
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='Ultimate UF PULS-S3/U3: ' + ultimate_uf_txt,
+                                font=self._text_size["Text 9 bold"],
+                                anchor='nw',
+                                fill=puls_s3_colors.get('ultimate', 'red'),
+                            )
+                            line_offset += 1
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='PULS acceptance limit: <= ' + str(round(puls_s3.get('acceptance', 0.87), 3)),
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text,
+                            )
+                            line_offset += 1
+
+                            puls_s3_status = puls_s3_valid.get('valid label', '')
+                            if puls_s3.get('error', ''):
+                                puls_s3_status += ' | ' + puls_s3.get('error', '')
+
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='PULS-S3/U3 status: ' + puls_s3_status,
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text if puls_s3_is_valid else 'red',
+                            )
+                            line_offset += 1
+
+                        else:
+                            self._result_canvas.create_text(
+                                [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                text='PULS-S3/U3: not available',
+                                font=self._text_size["Text 9"],
+                                anchor='nw',
+                                fill=self._color_text,
+                            )
+                            line_offset += 1
 
                     # -------------------------------------------------------------------------
                     # Classification pipeline result
