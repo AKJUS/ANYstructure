@@ -1,31 +1,15 @@
-"""Reduced SemiAnalytical S3 panel calculations.
+"""Runtime S3/U3 semi-analytical PULS solver for ANYstructure.
 
-This module is a first physics milestone for regular stiffened S3 panels.  It
-keeps the reference CSV files as benchmark data and does not fit corrections from
-them.  The implementation follows the direct semi-analytical shape described
-in DNV-CG-0128 Sec.4:
-
-* panel deflections are represented with Rayleigh-Ritz sine modes,
-* a nonlinear equilibrium residual is traced along a proportional in-plane
-  load path while lateral pressure remains fixed,
-* elastic mode factors and a first-yield collapse check are reported as
-  usage factors.
-
-The production closed-form reference code uses a richer element library and element validity
-manual than the public guideline.  The result diagnostics therefore name the
-covered assumptions instead of presenting this reduced model as closed-tool parity.
+This file intentionally contains only the solver, validity diagnostics, and
+ANYstructure adapter functions.  Benchmarks, verification reports, CLI commands,
+and regression fixtures live in C:/Github/ANYintelligent/calculate_puls.py.
 """
 
 from __future__ import annotations
 
-import argparse
-import csv
-import json
 import math
-import statistics
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -38,7 +22,7 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 }
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
-FIXTURE_ROW_INDICES = (0, 1, 2, 8, 21, 55, 89, 144, 377, 987)
+SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
 
 
 @dataclass(frozen=True)
@@ -46,7 +30,7 @@ class S3PanelInput:
     """Input surface for the regular stiffened S3 panel milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  CSV
-    reference exports use positive in-plane normal stress for compression; the
+    PULS exports use positive in-plane normal stress for compression; the
     helper functions in this module preserve that sign convention.
     """
 
@@ -80,6 +64,41 @@ class S3PanelInput:
 
 
 @dataclass(frozen=True)
+class U3PanelInput:
+    """Input surface for the regular unstiffened U3 plate milestone.
+
+    Geometric dimensions are millimetres and stresses/pressure are MPa.  The
+    ANYstructure/PULS exports use two end values for longitudinal and
+    transverse stress; the current U3 Ritz path uses their linear plate-field
+    interpolation in yield checks and their mean values in elastic buckling.
+    """
+
+    length: float
+    width: float
+    plate_thickness: float
+    yield_stress_plate: float
+    axial_stress_1: float
+    axial_stress_2: float
+    transverse_stress_1: float
+    transverse_stress_2: float
+    shear_stress: float
+    pressure: float
+    in_plane_support: str
+    rotational_support_1: str = "SS"
+    rotational_support_2: str = "SS"
+    elastic_modulus: float = 210000.0
+    poisson_ratio: float = 0.3
+
+    @property
+    def axial_stress(self) -> float:
+        return 0.5 * (self.axial_stress_1 + self.axial_stress_2)
+
+    @property
+    def mean_transverse_stress(self) -> float:
+        return 0.5 * (self.transverse_stress_1 + self.transverse_stress_2)
+
+
+@dataclass(frozen=True)
 class S3SolverConfig:
     """Numerical and covered-domain controls for the reduced S3 solver."""
 
@@ -94,13 +113,16 @@ class S3SolverConfig:
     local_global_coupling_gain: float = 1.0
     web_shear_interaction_exponent: float = 1.0
     local_plate_web_interaction_exponent: float = 2.0
+    flanged_local_plate_restraint_factor: float = 1.10
     use_effective_stiffener_width: bool = False
     sniped_eccentricity_factor: float = 1.2
     torsional_imperfection_scale: float = 1.0
-    pressure_local_share: float = 0.65
-    pressure_global_share: float = 0.35
+    pressure_local_share: float = 0.0
+    pressure_global_share: float = 1.0
     include_pressure_dominated_yield_in_buckling_strength: bool = False
-    pressure_dominated_yield_preload_ratio: float = 0.30
+    include_lateral_deformation_in_ultimate_yield: bool = False
+    include_global_curvature_in_plate_yield: bool = False
+    pressure_dominated_yield_preload_ratio: float = 0.05
     yield_utilization_limit: float = 1.0
     pressure_yield_limit: float = 1.0
     max_load_factor: float = 100.0
@@ -119,6 +141,13 @@ class S3SolverConfig:
     max_flange_slenderness: float = 45.0
     max_web_to_flange_ratio: float = 5.0
     hot_spot_grid: tuple[float, ...] = (0.125, 0.25, 0.5, 0.75, 0.875)
+    check_mode_convergence: bool = False
+    medium_longitudinal_modes: tuple[int, ...] = (1, 2, 3, 4)
+    medium_transverse_modes: tuple[int, ...] = (1, 2, 3)
+    high_longitudinal_modes: tuple[int, ...] = (1, 2, 3, 4, 5)
+    high_transverse_modes: tuple[int, ...] = (1, 2, 3, 4)
+    high_confidence_drift_limit: float = 0.05
+    medium_confidence_drift_limit: float = 0.12
 
 
 @dataclass(frozen=True)
@@ -180,6 +209,8 @@ class S3Result:
     invalid_reason: str | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
     covered_domain_notes: list[str] = field(default_factory=list)
+    confidence: str = "low"
+    confidence_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -190,6 +221,8 @@ class S3Result:
             "invalid_reason": self.invalid_reason,
             "diagnostics": self.diagnostics,
             "covered_domain_notes": list(self.covered_domain_notes),
+            "confidence": self.confidence,
+            "confidence_reasons": list(self.confidence_reasons),
         }
 
 
@@ -230,7 +263,7 @@ def _optional_float(value: Any) -> float | None:
 
 
 def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
-    """Map a reference stiffened-panel CSV row into the solver input type."""
+    """Map a PULS stiffened-panel CSV row into the solver input type."""
 
     elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
     poisson_ratio = _optional_float(row.get("Poisson's ratio"))
@@ -254,20 +287,84 @@ def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
         shear_stress=_float_from_row(row, "Shear stress"),
         pressure=_float_from_row(row, "Pressure (fixed)"),
         in_plane_support=str(row.get("In-plane support", "")).strip(),
-        elastic_modulus=elastic_modulus or S3PanelInput.__dataclass_fields__["elastic_modulus"].default,
-        poisson_ratio=poisson_ratio or S3PanelInput.__dataclass_fields__["poisson_ratio"].default,
+        elastic_modulus=(
+            elastic_modulus
+            if elastic_modulus is not None
+            else S3PanelInput.__dataclass_fields__["elastic_modulus"].default
+        ),
+        poisson_ratio=(
+            poisson_ratio
+            if poisson_ratio is not None
+            else S3PanelInput.__dataclass_fields__["poisson_ratio"].default
+        ),
     )
 
 
-def _ship_section_value(section: Mapping[str, Any], key: str) -> Any:
-    value = section[key]
+def row_to_u3_input(row: Mapping[str, Any]) -> U3PanelInput:
+    """Map a PULS unstiffened-panel row/export into the solver input type."""
+
+    elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
+    poisson_ratio = _optional_float(row.get("Poisson's ratio"))
+    if poisson_ratio is None:
+        poisson_ratio = _optional_float(row.get("Poisson ratio"))
+    axial_1 = _float_from_row(row, "Axial stress")
+    axial_2 = _optional_float(row.get("Axial stress 2"))
+    transverse_1 = _optional_float(row.get("Trans. stress 1"))
+    if transverse_1 is None:
+        transverse_1 = _optional_float(row.get("Trans. Stress"))
+    if transverse_1 is None:
+        transverse_1 = _optional_float(row.get("Trans. stress"))
+    if transverse_1 is None:
+        raise ValueError("Missing numeric value for Trans. stress 1")
+    transverse_2 = _optional_float(row.get("Trans. stress 2"))
+    if transverse_2 is None:
+        transverse_2 = _optional_float(row.get("Trans. Stress 2"))
+    if transverse_2 is None:
+        transverse_2 = transverse_1
+    return U3PanelInput(
+        length=_float_from_row(row, "Plate length"),
+        width=_float_from_row(row, "Plate width"),
+        plate_thickness=_float_from_row(row, "Plate thick."),
+        yield_stress_plate=_float_from_row(row, "Yield stress plate"),
+        axial_stress_1=axial_1,
+        axial_stress_2=axial_1 if axial_2 is None else axial_2,
+        transverse_stress_1=transverse_1,
+        transverse_stress_2=transverse_2,
+        shear_stress=_float_from_row(row, "Shear stress"),
+        pressure=_float_from_row(row, "Pressure (fixed)"),
+        in_plane_support=str(row.get("In-plane support", "")).strip(),
+        rotational_support_1=str(row.get("Rotational support", "SS") or "SS").strip(),
+        rotational_support_2=str(row.get("Rotational support 2", "SS") or "SS").strip(),
+        elastic_modulus=(
+            elastic_modulus
+            if elastic_modulus is not None
+            else U3PanelInput.__dataclass_fields__["elastic_modulus"].default
+        ),
+        poisson_ratio=(
+            poisson_ratio
+            if poisson_ratio is not None
+            else U3PanelInput.__dataclass_fields__["poisson_ratio"].default
+        ),
+    )
+
+
+_MISSING = object()
+
+
+def _ship_section_value(section: Mapping[str, Any], key: str, default: Any = _MISSING) -> Any:
+    if key in section:
+        value = section[key]
+    elif default is not _MISSING:
+        value = default
+    else:
+        value = section[key]
     if isinstance(value, (list, tuple)):
         return value[0]
     return value
 
 
 def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one ANYstructure ship-section result record to CSV-like S3 fields."""
+    """Flatten one ANYstructure ship-section PULS result record to CSV-like S3 fields."""
 
     plate = record["Plate geometry"]
     stiffener = record["Primary stiffeners"]
@@ -276,6 +373,7 @@ def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
     support = record.get("Bound cond.", {})
     buckling = record.get("Buckling strength", {})
     ultimate = record.get("Ultimate capacity", {})
+    transverse_stress = _ship_section_value(loads, "Trans. stress")
 
     return {
         "_ship_line": record.get("Identification", ""),
@@ -293,8 +391,8 @@ def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "Modulus of elasticity": _ship_section_value(material, "Modulus of elasticity"),
         "Poisson's ratio": _ship_section_value(material, "Poisson's ratio"),
         "Axial stress": _ship_section_value(loads, "Axial stress"),
-        "Trans. stress 1": _ship_section_value(loads, "Trans. stress"),
-        "Trans. stress 2": _ship_section_value(loads, "Trans. stress 2"),
+        "Trans. stress 1": transverse_stress,
+        "Trans. stress 2": _ship_section_value(loads, "Trans. stress 2", transverse_stress),
         "Shear stress": _ship_section_value(loads, "Shear stress"),
         "Pressure (fixed)": _ship_section_value(loads, "Pressure (fixed)"),
         "In-plane support": _ship_section_value(support, "In-plane support") if support else "",
@@ -306,6 +404,301 @@ def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "output cl str buc": _ship_section_value(buckling, "Status") if buckling else "",
     }
+
+
+def ship_section_record_to_u3_row(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Flatten one ANYstructure ship-section PULS result record to CSV-like U3 fields."""
+
+    plate = record["Geometry"]
+    material = record["Material"]
+    loads = record["Applied loads"]
+    support = record.get("Boundary conditions", record.get("Bound cond.", {}))
+    buckling = record.get("Buckling strength", {})
+    ultimate = record.get("Ultimate capacity", {})
+    transverse_stress = _ship_section_value(loads, "Trans. Stress", _ship_section_value(loads, "Trans. stress", 0.0))
+
+    return {
+        "_ship_line": record.get("Identification", ""),
+        "Panel family": "U3",
+        "Plate length": _ship_section_value(plate, "Plate length"),
+        "Plate width": _ship_section_value(plate, "Plate width"),
+        "Plate thick.": _ship_section_value(plate, "Plate thick."),
+        "Yield stress plate": _ship_section_value(material, "Yield st. plate", _ship_section_value(material, "Yield stress plate", "")),
+        "Modulus of elasticity": _ship_section_value(material, "Modulus of elasticity"),
+        "Poisson's ratio": _ship_section_value(material, "Poisson's ratio"),
+        "Axial stress": _ship_section_value(loads, "Axial stress"),
+        "Axial stress 2": _ship_section_value(loads, "Axial stress 2", _ship_section_value(loads, "Axial stress")),
+        "Trans. stress 1": transverse_stress,
+        "Trans. stress 2": _ship_section_value(loads, "Trans. Stress 2", transverse_stress),
+        "Shear stress": _ship_section_value(loads, "Shear stress"),
+        "Pressure (fixed)": _ship_section_value(loads, "Pressure (fixed)"),
+        "In-plane support": _ship_section_value(support, "In-plane support") if support else "",
+        "Rotational support": _ship_section_value(support, "Rotational support", "SS") if support else "SS",
+        "Rotational support 2": _ship_section_value(support, "Rotational support 2", "SS") if support else "SS",
+        "Buckling Actual usage Factor inc NaN": (
+            _ship_section_value(buckling, "Actual usage Factor") if buckling else ""
+        ),
+        "Ultimate Actual usage Factor inc NaN": (
+            _ship_section_value(ultimate, "Actual usage Factor") if ultimate else ""
+        ),
+        "output cl str buc": _ship_section_value(buckling, "Status") if buckling else "",
+    }
+
+
+def _anystructure_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _anystructure_stiffener_type(value: Any) -> str:
+    return {
+        "T": "T-bar",
+        "T-bar": "T-bar",
+        "L": "Angle",
+        "Angle": "Angle",
+        "L-bulb": "L-bulb",
+        "FB": "Flatbar",
+        "F": "Flatbar",
+        "Flatbar": "Flatbar",
+    }.get(str(value), str(value))
+
+
+def _anystructure_stiffener_boundary(value: Any) -> str:
+    return {
+        "C": "Cont",
+        "Cont": "Cont",
+        "Continuous": "Cont",
+        "S": "Sniped",
+        "Sniped": "Sniped",
+    }.get(str(value), str(value))
+
+
+def _anystructure_in_plane_support(value: Any) -> str:
+    return {
+        "Int": "Integrated",
+        "Integrated": "Integrated",
+        "GL": "Girder - long",
+        "Girder - long": "Girder - long",
+        "GT": "Girder - trans",
+        "Girder - trans": "Girder - trans",
+    }.get(str(value), str(value))
+
+
+def _anystructure_rotational_supports(value: Any) -> tuple[str, str]:
+    text = str(value or "SSSS").strip().upper().replace("-", "")
+    if text in {"CCCC", "CLCL", "CC", "CL"}:
+        return "CL", "CL"
+    if text in {"FSFS", "FFFF", "FS"}:
+        return "FS", "FS"
+    return "SS", "SS"
+
+
+def _anystructure_selected_method(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text in {"1", "buckling"}:
+        return "buckling"
+    if text in {"2", "ultimate"}:
+        return "ultimate"
+    return text
+
+
+def _anystructure_material_factor(all_structure: Any) -> float | None:
+    for candidate in (
+        getattr(all_structure, "Plate", None),
+        getattr(all_structure, "Stiffener", None),
+        all_structure,
+    ):
+        if candidate is None:
+            continue
+        for name in ("mat_factor", "_mat_factor"):
+            try:
+                value = getattr(candidate, name)
+            except Exception:
+                continue
+            parsed = _optional_float(value)
+            if parsed is not None and parsed > EPS:
+                return parsed
+    return None
+
+
+def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
+    if sigma_x1 * sigma_x2 >= 0:
+        return sigma_x1 if abs(sigma_x1) > abs(sigma_x2) else sigma_x2
+    return max(sigma_x1, sigma_x2)
+
+
+def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3PanelInput | U3PanelInput | None:
+    """Build an S3/U3 input from an ANYstructure AllStructure-like object.
+
+    This is intentionally duck-typed so ANYstructure can call it without making
+    this repository import ANYstructure.  The `lat_press` convention follows
+    ANYstructure optimization: kPa in, MPa on the solver input surface.
+    """
+
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+    plate = getattr(all_structure, "Plate", None)
+    stiffener = getattr(all_structure, "Stiffener", None)
+    if plate is None:
+        return None
+
+    sp_or_up = str(plate.get_puls_sp_or_up()).strip().upper()
+    pressure_mpa = _anystructure_float(lat_press) / 1000.0
+    elastic_modulus = _anystructure_float(getattr(all_structure, "E", None), 210000.0e6) / 1.0e6
+    poisson_ratio = _anystructure_float(getattr(all_structure, "v", None), 0.3)
+
+    if sp_or_up == "SP" and stiffener is not None:
+        puls_boundary = stiffener.get_puls_boundary()
+        sigxd = _anystructure_axial_design_stress(stiffener.sigma_x1, stiffener.sigma_x2)
+        return S3PanelInput(
+            length=stiffener.span * 1000.0,
+            stiffener_spacing=stiffener.spacing,
+            plate_thickness=stiffener.t,
+            stiffener_type=_anystructure_stiffener_type(stiffener.get_stiffener_type()),
+            stiffener_boundary=_anystructure_stiffener_boundary(stiffener.get_puls_stf_end()),
+            stiffener_height=stiffener.hw,
+            web_thickness=stiffener.tw,
+            flange_width=stiffener.b,
+            flange_thickness=stiffener.tf,
+            yield_stress_plate=stiffener.mat_yield / 1.0e6,
+            yield_stress_stiffener=stiffener.mat_yield / 1.0e6,
+            axial_stress=0.0 if puls_boundary == "GT" else sigxd,
+            transverse_stress_1=0.0 if puls_boundary == "GL" else stiffener.sigma_y1,
+            transverse_stress_2=0.0 if puls_boundary == "GL" else stiffener.sigma_y2,
+            shear_stress=stiffener.tau_xy,
+            pressure=pressure_mpa,
+            in_plane_support=_anystructure_in_plane_support(puls_boundary),
+            elastic_modulus=elastic_modulus,
+            poisson_ratio=poisson_ratio,
+        )
+
+    up_boundary = plate.get_puls_up_boundary() if hasattr(plate, "get_puls_up_boundary") else "SSSS"
+    rotational_1, rotational_2 = _anystructure_rotational_supports(up_boundary)
+    puls_boundary = plate.get_puls_boundary() if hasattr(plate, "get_puls_boundary") else "GL"
+    return U3PanelInput(
+        length=plate.span * 1000.0,
+        width=plate.spacing,
+        plate_thickness=plate.t,
+        yield_stress_plate=plate.mat_yield / 1.0e6,
+        axial_stress_1=plate.sigma_x1,
+        axial_stress_2=plate.sigma_x2,
+        transverse_stress_1=plate.sigma_y1,
+        transverse_stress_2=plate.sigma_y2,
+        shear_stress=plate.tau_xy,
+        pressure=pressure_mpa,
+        in_plane_support=_anystructure_in_plane_support(puls_boundary),
+        rotational_support_1=rotational_1,
+        rotational_support_2=rotational_2,
+        elastic_modulus=elastic_modulus,
+        poisson_ratio=poisson_ratio,
+    )
+
+
+def solve_anystructure_panel(
+    calc_object: Any,
+    lat_press: float = 0.0,
+    config: S3SolverConfig | None = None,
+) -> dict[str, Any]:
+    """Return an ANYstructure-friendly SemiAnalytical result dictionary."""
+
+    config = config or S3SolverConfig()
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+    material_factor = _anystructure_material_factor(all_structure)
+    acceptance_limit = None if material_factor is None else 1.0 / material_factor
+    panel = anystructure_panel_input(calc_object, lat_press)
+    if panel is None:
+        return {
+            "panel_family": None,
+            "buckling_usage_factor": None,
+            "ultimate_usage_factor": None,
+            "material_factor": material_factor,
+            "acceptance_limit": acceptance_limit,
+            "valid": False,
+            "available": False,
+            "valid_prediction": 0,
+            "valid_label": "SemiAnalytical S3/U3 unsupported or invalid",
+            "invalid_reason": "unsupported-anystructure-input",
+            "confidence": "low",
+            "confidence_reasons": ["unsupported-anystructure-input"],
+            "diagnostics": {},
+        }
+
+    panel_family = "S3" if isinstance(panel, S3PanelInput) else "U3"
+    solved = solve_s3_panel(panel, config) if panel_family == "S3" else solve_u3_panel(panel, config)
+    valid_prediction = (
+        solved.valid
+        and solved.buckling_usage_factor is not None
+        and solved.ultimate_usage_factor is not None
+    )
+    valid_label = (
+        f"valid SemiAnalytical {panel_family} UF predicted ({solved.confidence} confidence)"
+        if valid_prediction
+        else f"SemiAnalytical {panel_family} unsupported or invalid"
+    )
+    return {
+        "panel_family": panel_family,
+        "buckling_usage_factor": solved.buckling_usage_factor,
+        "ultimate_usage_factor": solved.ultimate_usage_factor,
+        "elastic_buckling_usage_factor": solved.elastic_buckling_usage_factor,
+        "material_factor": material_factor,
+        "acceptance_limit": acceptance_limit,
+        "valid": solved.valid,
+        "available": bool(valid_prediction),
+        "valid_prediction": 1 if valid_prediction else 0,
+        "valid_label": valid_label,
+        "invalid_reason": solved.invalid_reason,
+        "confidence": solved.confidence,
+        "confidence_reasons": list(solved.confidence_reasons),
+        "diagnostics": solved.diagnostics,
+        "result": solved.to_dict(),
+    }
+
+
+def predict_anystructure_uf(
+    calc_object: Any,
+    lat_press: float = 0.0,
+    config: S3SolverConfig | None = None,
+) -> np.ndarray:
+    """Return legacy ANYstructure vector [buckling UF, ultimate UF, valid].
+
+    The factors are intentionally returned un-factored.  ANYstructure compares
+    them against a separate PULS acceptance limit, typically 1 / material factor.
+    """
+
+    result = solve_anystructure_panel(calc_object, lat_press, config)
+    if result["available"]:
+        return np.array(
+            [
+                float(result["buckling_usage_factor"]),
+                float(result["ultimate_usage_factor"]),
+                1.0,
+            ],
+            dtype=float,
+        )
+    return np.array([float("inf"), float("inf"), 0.0], dtype=float)
+
+
+def predict_anystructure_uf_with_acceptance(
+    calc_object: Any,
+    lat_press: float = 0.0,
+    config: S3SolverConfig | None = None,
+    default_acceptance: float = 0.87,
+) -> np.ndarray:
+    """Return [buckling UF, ultimate UF, valid, acceptance limit] for ANYstructure."""
+
+    result = solve_anystructure_panel(calc_object, lat_press, config)
+    acceptance = _optional_float(result.get("acceptance_limit"))
+    if acceptance is None:
+        acceptance = float(default_acceptance)
+    vector = np.array([float("inf"), float("inf"), 0.0, acceptance], dtype=float)
+    if result["available"]:
+        vector[0] = float(result["buckling_usage_factor"])
+        vector[1] = float(result["ultimate_usage_factor"])
+        vector[2] = 1.0
+    return vector
 
 
 def normalized_load_components(panel: S3PanelInput) -> dict[str, float]:
@@ -480,20 +873,28 @@ def build_orthotropic_stiffness(
     panel: S3PanelInput,
     section: S3SectionProperties,
     family: str,
+    config: S3SolverConfig | None = None,
 ) -> OrthotropicStiffness:
     """Build local-plate or distributed stiffened-strip stiffness terms."""
 
+    config = config or S3SolverConfig()
     plate_d = _plate_bending_rigidity(panel)
     if family == "local":
-        d11 = plate_d
+        restraint_factor = (
+            max(config.flanged_local_plate_restraint_factor, EPS)
+            if panel.stiffener_type != "Flatbar"
+            else 1.0
+        )
+        d11 = plate_d * restraint_factor
+        d22 = plate_d * restraint_factor
         membrane_thickness = panel.plate_thickness
     elif family == "global":
         d11 = max(panel.elastic_modulus * section.inertia_x / panel.width, plate_d)
+        d22 = plate_d
         membrane_thickness = max(section.area / panel.width, panel.plate_thickness)
     else:
         raise ValueError(f"Unknown stiffness family: {family}")
 
-    d22 = plate_d
     d12 = panel.poisson_ratio * math.sqrt(d11 * d22)
     d66 = 0.5 * (1.0 - panel.poisson_ratio) * math.sqrt(d11 * d22)
     return OrthotropicStiffness(
@@ -531,9 +932,108 @@ def _support_membrane_factor(panel: S3PanelInput) -> float:
     return 1.0
 
 
-def validate_s3_input(panel: S3PanelInput, config: S3SolverConfig) -> str | None:
-    """Validate the explicit covered domain before solving."""
+def _load_family(panel: S3PanelInput | U3PanelInput) -> str:
+    components = []
+    if panel.axial_stress > EPS:
+        components.append("axial-compression")
+    elif panel.axial_stress < -EPS:
+        components.append("axial-tension")
+    if panel.mean_transverse_stress > EPS:
+        components.append("transverse-compression")
+    elif panel.mean_transverse_stress < -EPS:
+        components.append("transverse-tension")
+    if abs(panel.shear_stress) > EPS:
+        components.append("shear")
+    if panel.pressure > EPS:
+        components.append("pressure")
+    return "+".join(components) if components else "zero-variable-load"
 
+
+def _validation_domain(
+    panel: S3PanelInput | U3PanelInput,
+    config: S3SolverConfig,
+    panel_family: str,
+    reasons: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    width = panel.width
+    plate_slenderness = width / panel.plate_thickness if panel.plate_thickness > EPS else None
+    aspect_ratio = panel.length / width if width > EPS else None
+    domain: dict[str, Any] = {
+        "panel_family": panel_family,
+        "aspect_ratio": aspect_ratio,
+        "aspect_ratio_limits": [config.min_aspect_ratio, config.max_aspect_ratio],
+        "plate_slenderness": plate_slenderness,
+        "max_plate_slenderness": config.max_plate_slenderness,
+        "in_plane_support": panel.in_plane_support,
+        "support_model": SUPPORTED_IN_PLANE_SUPPORTS.get(panel.in_plane_support),
+        "pressure": panel.pressure,
+        "pressure_category": "nonzero" if panel.pressure > EPS else "zero",
+        "load_family": _load_family(panel),
+        "reasons": list(reasons or ()),
+    }
+    if isinstance(panel, S3PanelInput):
+        domain.update(
+            {
+                "stiffener_type": panel.stiffener_type,
+                "stiffener_boundary": panel.stiffener_boundary,
+                "web_slenderness": (
+                    panel.stiffener_height / panel.web_thickness
+                    if panel.web_thickness > EPS
+                    else None
+                ),
+                "max_web_slenderness": config.max_web_slenderness,
+                "flange_slenderness": (
+                    panel.flange_width / panel.flange_thickness
+                    if panel.flange_thickness > EPS
+                    else None
+                ),
+                "max_flange_slenderness": config.max_flange_slenderness,
+                "web_to_flange_ratio": (
+                    panel.stiffener_height / max(panel.flange_width, panel.web_thickness)
+                    if max(panel.flange_width, panel.web_thickness) > EPS
+                    else None
+                ),
+                "max_web_to_flange_ratio": config.max_web_to_flange_ratio,
+            }
+        )
+    else:
+        domain.update(
+            {
+                "rotational_support": {
+                    "x_edges": panel.rotational_support_1,
+                    "y_edges": panel.rotational_support_2,
+                },
+            }
+        )
+    return domain
+
+
+def collect_s3_validation_reasons(panel: S3PanelInput, config: S3SolverConfig) -> list[str]:
+    """Return all explicit S3 domain/validity reasons in stable first-reason order."""
+
+    numeric_fields = {
+        "length": panel.length,
+        "stiffener_spacing": panel.stiffener_spacing,
+        "plate_thickness": panel.plate_thickness,
+        "stiffener_height": panel.stiffener_height,
+        "web_thickness": panel.web_thickness,
+        "flange_width": panel.flange_width,
+        "flange_thickness": panel.flange_thickness,
+        "yield_stress_plate": panel.yield_stress_plate,
+        "yield_stress_stiffener": panel.yield_stress_stiffener,
+        "elastic_modulus": panel.elastic_modulus,
+        "poisson_ratio": panel.poisson_ratio,
+        "axial_stress": panel.axial_stress,
+        "transverse_stress_1": panel.transverse_stress_1,
+        "transverse_stress_2": panel.transverse_stress_2,
+        "shear_stress": panel.shear_stress,
+        "pressure": panel.pressure,
+    }
+    reasons: list[str] = []
+    if any(not math.isfinite(value) for value in numeric_fields.values()):
+        return ["non-finite-input"]
+    if panel.poisson_ratio < 0.0 or panel.poisson_ratio >= 0.5:
+        reasons.append("unsupported-material")
     positive_fields = {
         "length": panel.length,
         "stiffener_spacing": panel.stiffener_spacing,
@@ -545,37 +1045,97 @@ def validate_s3_input(panel: S3PanelInput, config: S3SolverConfig) -> str | None
         "elastic_modulus": panel.elastic_modulus,
     }
     if any(value <= 0.0 for value in positive_fields.values()):
-        return "non-positive-geometry-or-material"
+        reasons.append("non-positive-geometry-or-material")
     if panel.pressure < 0.0:
-        return "negative-pressure-unsupported"
+        reasons.append("negative-pressure-unsupported")
     if panel.stiffener_type not in SUPPORTED_STIFFENER_TYPES:
-        return "unsupported-stiffener-type"
+        reasons.append("unsupported-stiffener-type")
     if panel.stiffener_boundary not in SUPPORTED_STIFFENER_BOUNDARIES:
-        return "unsupported-stiffener-boundary"
+        reasons.append("unsupported-stiffener-boundary")
     if panel.in_plane_support not in SUPPORTED_IN_PLANE_SUPPORTS:
-        return "unsupported-in-plane-support"
+        reasons.append("unsupported-in-plane-support")
+    if panel.width > EPS:
+        aspect_ratio = panel.length / panel.width
+        if aspect_ratio < config.min_aspect_ratio or aspect_ratio > config.max_aspect_ratio:
+            reasons.append("aspect ratio")
+    if panel.plate_thickness > EPS and panel.width / panel.plate_thickness > config.max_plate_slenderness:
+        reasons.append("slenderness")
+    if panel.web_thickness > EPS and panel.stiffener_height / panel.web_thickness > config.max_web_slenderness:
+        reasons.append("slenderness")
+    if panel.stiffener_type != "Flatbar":
+        if panel.flange_width <= 0.0 or panel.flange_thickness <= 0.0:
+            reasons.append("web-flange-ratio")
+        elif panel.flange_width / panel.flange_thickness > config.max_flange_slenderness:
+            reasons.append("web-flange-ratio")
+        if (
+            panel.stiffener_type in {"Angle", "T-bar"}
+            and panel.stiffener_height / max(panel.flange_width, panel.web_thickness, EPS)
+            > config.max_web_to_flange_ratio
+        ):
+            reasons.append("web-flange-ratio")
+    return list(dict.fromkeys(reasons))
 
-    aspect_ratio = panel.length / panel.width
-    if aspect_ratio < config.min_aspect_ratio or aspect_ratio > config.max_aspect_ratio:
-        return "aspect ratio"
-    if panel.width / panel.plate_thickness > config.max_plate_slenderness:
-        return "slenderness"
-    if panel.stiffener_height / panel.web_thickness > config.max_web_slenderness:
-        return "slenderness"
 
-    if panel.stiffener_type == "Flatbar":
-        return None
-    if panel.flange_width <= 0.0 or panel.flange_thickness <= 0.0:
-        return "web-flange-ratio"
-    if panel.flange_width / panel.flange_thickness > config.max_flange_slenderness:
-        return "web-flange-ratio"
-    if (
-        panel.stiffener_type in {"Angle", "T-bar"}
-        and panel.stiffener_height / max(panel.flange_width, panel.web_thickness)
-        > config.max_web_to_flange_ratio
-    ):
-        return "web-flange-ratio"
-    return None
+def collect_u3_validation_reasons(panel: U3PanelInput, config: S3SolverConfig) -> list[str]:
+    """Return all explicit U3 domain/validity reasons in stable first-reason order."""
+
+    numeric_fields = {
+        "length": panel.length,
+        "width": panel.width,
+        "plate_thickness": panel.plate_thickness,
+        "yield_stress_plate": panel.yield_stress_plate,
+        "elastic_modulus": panel.elastic_modulus,
+        "poisson_ratio": panel.poisson_ratio,
+        "axial_stress_1": panel.axial_stress_1,
+        "axial_stress_2": panel.axial_stress_2,
+        "transverse_stress_1": panel.transverse_stress_1,
+        "transverse_stress_2": panel.transverse_stress_2,
+        "shear_stress": panel.shear_stress,
+        "pressure": panel.pressure,
+    }
+    reasons: list[str] = []
+    if any(not math.isfinite(value) for value in numeric_fields.values()):
+        return ["non-finite-input"]
+    if panel.poisson_ratio < 0.0 or panel.poisson_ratio >= 0.5:
+        reasons.append("unsupported-material")
+    positive_fields = {
+        "length": panel.length,
+        "width": panel.width,
+        "plate_thickness": panel.plate_thickness,
+        "yield_stress_plate": panel.yield_stress_plate,
+        "elastic_modulus": panel.elastic_modulus,
+    }
+    if any(value <= 0.0 for value in positive_fields.values()):
+        reasons.append("non-positive-geometry-or-material")
+    if panel.pressure < 0.0:
+        reasons.append("negative-pressure-unsupported")
+    if panel.in_plane_support not in SUPPORTED_IN_PLANE_SUPPORTS:
+        reasons.append("unsupported-in-plane-support")
+    if panel.rotational_support_1 not in SUPPORTED_ROTATIONAL_SUPPORTS:
+        reasons.append("unsupported-rotational-support")
+    if panel.rotational_support_2 not in SUPPORTED_ROTATIONAL_SUPPORTS:
+        reasons.append("unsupported-rotational-support")
+    if panel.width > EPS:
+        aspect_ratio = panel.length / panel.width
+        if aspect_ratio < config.min_aspect_ratio or aspect_ratio > config.max_aspect_ratio:
+            reasons.append("aspect ratio")
+    if panel.plate_thickness > EPS and panel.width / panel.plate_thickness > config.max_plate_slenderness:
+        reasons.append("slenderness")
+    return list(dict.fromkeys(reasons))
+
+
+def validate_s3_input(panel: S3PanelInput, config: S3SolverConfig) -> str | None:
+    """Validate the explicit covered domain before solving."""
+
+    reasons = collect_s3_validation_reasons(panel, config)
+    return reasons[0] if reasons else None
+
+
+def validate_u3_input(panel: U3PanelInput, config: S3SolverConfig) -> str | None:
+    """Validate the explicit U3 covered domain before solving."""
+
+    reasons = collect_u3_validation_reasons(panel, config)
+    return reasons[0] if reasons else None
 
 
 def _pressure_generalized_force(panel: S3PanelInput, m: int, n: int, share: float) -> float:
@@ -692,7 +1252,7 @@ def build_ritz_modes(
         ("local", config.pressure_local_share),
         ("global", config.pressure_global_share),
     ):
-        stiffness = build_orthotropic_stiffness(panel, section, family)
+        stiffness = build_orthotropic_stiffness(panel, section, family, config)
         if family == "global":
             stiffness = _with_longitudinal_stiffness_scale(stiffness, global_stiffness_scale)
         for m in config.longitudinal_modes:
@@ -718,6 +1278,52 @@ def build_ritz_modes(
                         nonlinear_stiffness=max(nonlinear, EPS),
                     )
                 )
+    return modes
+
+
+def _isotropic_plate_stiffness(panel: U3PanelInput | S3PanelInput) -> OrthotropicStiffness:
+    d = _plate_bending_rigidity(panel)
+    return OrthotropicStiffness(
+        d11=d,
+        d12=panel.poisson_ratio * d,
+        d22=d,
+        d66=0.5 * (1.0 - panel.poisson_ratio) * d,
+        membrane_thickness=panel.plate_thickness,
+    )
+
+
+def build_u3_ritz_modes(panel: U3PanelInput, config: S3SolverConfig) -> list[RitzMode]:
+    """Return the plate-only Rayleigh-Ritz modes used by the U3 solver."""
+
+    modes: list[RitzMode] = []
+    imperfection = max(
+        config.initial_imperfection_floor_mm,
+        config.initial_imperfection_ratio * min(panel.length, panel.width),
+    )
+    stiffness = _isotropic_plate_stiffness(panel)
+    for m in config.longitudinal_modes:
+        for n in config.transverse_modes:
+            kx, ky, linear, geometric, nonlinear = _mode_linear_terms(
+                panel,
+                stiffness,
+                config,
+                m,
+                n,
+            )
+            modes.append(
+                RitzMode(
+                    family="plate",
+                    m=m,
+                    n=n,
+                    kx=kx,
+                    ky=ky,
+                    linear_stiffness=linear,
+                    geometric_stiffness=geometric,
+                    pressure_force=_pressure_generalized_force(panel, m, n, 1.0),
+                    imperfection=imperfection,
+                    nonlinear_stiffness=max(nonlinear, EPS),
+                )
+            )
     return modes
 
 
@@ -1164,7 +1770,7 @@ def _stiffener_web_local_buckling(
 
     The web is treated as a long simply supported plate strip under a reference
     web-edge compression envelope and panel shear.  The candidate keeps the
-    full web/stiffener stress redistribution out of scope, but the explicit
+    full PULS web/stiffener stress redistribution out of scope, but the explicit
     interaction avoids treating tall loaded webs as compression-only strips.
     """
 
@@ -1528,6 +2134,100 @@ def elastic_buckling_factors(
     }
 
 
+def elastic_u3_buckling_factors(
+    panel: U3PanelInput,
+    modes: Sequence[RitzMode],
+    config: S3SolverConfig | None = None,
+) -> dict[str, Any]:
+    """Return elastic buckling candidates for the U3 unstiffened plate."""
+
+    config = config or S3SolverConfig()
+    factor_rows = [
+        {
+            "factor": mode.linear_stiffness / mode.geometric_stiffness,
+            "label": mode.label,
+            "family": mode.family,
+            "failure_family": "plate",
+        }
+        for mode in modes
+        if mode.geometric_stiffness > EPS
+    ]
+    shear_factor = _plate_strip_shear_buckling(
+        panel,
+        panel.length,
+        panel.width,
+        panel.plate_thickness,
+        panel.shear_stress,
+    )
+    if shear_factor is not None:
+        factor_rows.append(
+            {
+                "factor": shear_factor["factor"],
+                "label": "plate-shear",
+                "family": "plate-shear",
+                "failure_family": "plate-shear",
+            }
+        )
+    coupled_shear = {"plate": ritz_combined_buckling_factor(panel, modes, "plate")}
+    if coupled_shear["plate"] is not None:
+        factor_rows.append(
+            {
+                "factor": coupled_shear["plate"]["factor"],
+                "label": "plate-ritz-combined-shear",
+                "family": "plate",
+                "failure_family": "plate-shear",
+            }
+        )
+    factor_rows = [
+        row
+        for row in factor_rows
+        if row["factor"] > EPS and math.isfinite(row["factor"])
+    ]
+    if not factor_rows:
+        return {
+            "critical_factor": None,
+            "critical_mode": "no-compressive-or-shear-buckling-driver",
+            "critical_failure_family": "none",
+            "local_plate_shear": shear_factor,
+            "ritz_combined_shear": coupled_shear,
+            "modeled_failure_families": {},
+            "approximate_failure_families": [],
+            "unmodeled_failure_families": ["production-U3-elasto-plastic-postbuckling-calibration"],
+        }
+
+    family_minima: dict[str, dict[str, Any]] = {}
+    for row in factor_rows:
+        failure_family = str(row["failure_family"])
+        current = family_minima.get(failure_family)
+        if current is None or row["factor"] < current["factor"]:
+            family_minima[failure_family] = dict(row)
+
+    family_usages = {
+        name: 1.0 / max(float(row["factor"]), EPS)
+        for name, row in family_minima.items()
+    }
+    usage_total = sum(family_usages.values())
+    modeled_failure_families = {
+        name: {
+            "critical_factor": row["factor"],
+            "critical_mode": row["label"],
+            "usage_share_percent": 100.0 * family_usages[name] / max(usage_total, EPS),
+        }
+        for name, row in sorted(family_minima.items())
+    }
+    critical = min(factor_rows, key=lambda item: item["factor"])
+    return {
+        "critical_factor": critical["factor"],
+        "critical_mode": critical["label"],
+        "critical_failure_family": critical["failure_family"],
+        "local_plate_shear": shear_factor,
+        "ritz_combined_shear": coupled_shear,
+        "modeled_failure_families": modeled_failure_families,
+        "approximate_failure_families": [],
+        "unmodeled_failure_families": ["production-U3-elasto-plastic-postbuckling-calibration"],
+    }
+
+
 def _limit_newton_delta(
     modes: Sequence[RitzMode],
     amplitudes: np.ndarray,
@@ -1772,12 +2472,19 @@ def _plate_yield_ratio(
     shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
     z_values = (-0.5 * panel.plate_thickness, 0.5 * panel.plate_thickness)
     max_ratio = 0.0
+    curvature_family = None if config.include_global_curvature_in_plate_yield else "local"
 
     for x_fraction in config.hot_spot_grid:
         x = panel.length * x_fraction
         for y_fraction in config.hot_spot_grid:
             y = panel.width * y_fraction
-            d2x, d2y, dxy = _mode_curvatures(modes, amplitudes, x, y)
+            d2x, d2y, dxy = _mode_curvatures(
+                modes,
+                amplitudes,
+                x,
+                y,
+                family=curvature_family,
+            )
             transverse_stress = (
                 panel.transverse_stress_1
                 + (panel.transverse_stress_2 - panel.transverse_stress_1) * y_fraction
@@ -1793,6 +2500,61 @@ def _plate_yield_ratio(
                 )
                 max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
     return max_ratio
+
+
+def _u3_plate_yield_ratio(
+    panel: U3PanelInput,
+    modes: Sequence[RitzMode],
+    amplitudes: Sequence[float],
+    load_factor: float,
+    config: S3SolverConfig,
+) -> float:
+    modulus = panel.elastic_modulus / (1.0 - panel.poisson_ratio**2)
+    shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
+    z_values = (-0.5 * panel.plate_thickness, 0.5 * panel.plate_thickness)
+    max_ratio = 0.0
+
+    for x_fraction in config.hot_spot_grid:
+        x = panel.length * x_fraction
+        axial_stress = (
+            panel.axial_stress_1
+            + (panel.axial_stress_2 - panel.axial_stress_1) * x_fraction
+        )
+        for y_fraction in config.hot_spot_grid:
+            y = panel.width * y_fraction
+            d2x, d2y, dxy = _mode_curvatures(modes, amplitudes, x, y)
+            transverse_stress = (
+                panel.transverse_stress_1
+                + (panel.transverse_stress_2 - panel.transverse_stress_1) * y_fraction
+            )
+            for z in z_values:
+                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
+                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
+                bending_tau = -2.0 * shear_modulus * z * dxy
+                vm = _stress_von_mises(
+                    load_factor * axial_stress + bending_x,
+                    load_factor * transverse_stress + bending_y,
+                    load_factor * panel.shear_stress + bending_tau,
+                )
+                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
+    return max_ratio
+
+
+def u3_yield_utilization(
+    panel: U3PanelInput,
+    modes: Sequence[RitzMode],
+    amplitudes: Sequence[float],
+    load_factor: float,
+    config: S3SolverConfig,
+) -> dict[str, Any]:
+    plate_ratio = _u3_plate_yield_ratio(panel, modes, amplitudes, load_factor, config)
+    return {
+        "max": plate_ratio,
+        "plate": plate_ratio,
+        "stiffener": None,
+        "stiffener_induced": None,
+        "plate_induced": None,
+    }
 
 
 def _stiffener_branch_stress_ratio(
@@ -2085,15 +2847,26 @@ def _interpolate_capacity(
 
 def _notes() -> list[str]:
     return [
-        "regular S3 unit strip only; U3, T1, K3, corrugation and FRP are outside this milestone",
-        "positive reference CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
-        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production reference basis",
-        "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure dominated first-yield is reported in ultimate diagnostics but excluded from buckling-strength control by default",
+        "regular S3 unit strip only; T1, K3, corrugation and FRP are outside this milestone",
+        "positive PULS CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production PULS basis",
+        "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure first-yield with material preload contribution is reported in ultimate diagnostics but excluded from buckling-strength control by default",
         "shear-normal Ritz coupling is truncated in elastic and continuation checks; classical local plate shear remains a fallback candidate",
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
         "stiffener yield exposes SI/PI section branches, lateral-deformation and sniped bending, SI-only torsional stress, and effective attached plate width",
         "global longitudinal strip stiffness degrades from local elastic utilization on the nonlinear load path",
-        "validity limits are explicit covered-domain checks because the reference user manual is not assumed",
+        "validity limits are explicit covered-domain checks because the PULS user manual is not assumed",
+    ]
+
+
+def _u3_notes() -> list[str]:
+    return [
+        "regular U3 unstiffened rectangular panels only; T1, K3, corrugation and FRP are outside this milestone",
+        "positive PULS export normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "Rayleigh-Ritz sine modes use an isotropic plate basis with simply-supported trigonometric shapes",
+        "buckling usage is the reduced buckling-strength envelope over first-yield capacity and elastic plate/shear buckling limits",
+        "U3 end stresses are interpolated in yield checks and averaged in elastic buckling checks",
+        "validity limits are explicit covered-domain checks because the PULS user manual is not assumed",
     ]
 
 
@@ -2109,6 +2882,18 @@ def _invalid_result(reason: str, diagnostics: dict[str, Any] | None = None) -> S
     )
 
 
+def _invalid_u3_result(reason: str, diagnostics: dict[str, Any] | None = None) -> S3Result:
+    return S3Result(
+        buckling_usage_factor=None,
+        ultimate_usage_factor=None,
+        valid=False,
+        elastic_buckling_usage_factor=None,
+        invalid_reason=reason,
+        diagnostics=diagnostics or {},
+        covered_domain_notes=_u3_notes(),
+    )
+
+
 def _pressure_dominated_yield_limit(
     panel: S3PanelInput,
     pressure_yield: Mapping[str, Any],
@@ -2117,21 +2902,203 @@ def _pressure_dominated_yield_limit(
 ) -> bool:
     if panel.pressure <= EPS:
         return False
-    final_max = float(final_yield.get("max") or 0.0)
-    if final_max <= EPS:
-        return False
     preload_max = float(pressure_yield.get("max") or 0.0)
-    preload_share = preload_max / final_max
+    if preload_max <= EPS:
+        return False
+    preload_share = preload_max / max(config.yield_utilization_limit, EPS)
     return preload_share >= config.pressure_dominated_yield_preload_ratio
+
+
+def _relative_drift(reference: float | None, candidate: float | None) -> float | None:
+    if reference is None or candidate is None:
+        return None
+    return abs(candidate - reference) / max(abs(reference), EPS)
+
+
+def _mode_convergence_config(
+    config: S3SolverConfig,
+    longitudinal_modes: tuple[int, ...],
+    transverse_modes: tuple[int, ...],
+) -> S3SolverConfig:
+    return replace(
+        config,
+        longitudinal_modes=longitudinal_modes,
+        transverse_modes=transverse_modes,
+        check_mode_convergence=False,
+    )
+
+
+def _summarize_mode_convergence(
+    base_result: S3Result,
+    medium_result: S3Result,
+    high_result: S3Result,
+    config: S3SolverConfig,
+) -> dict[str, Any]:
+    medium_buckling = _relative_drift(
+        base_result.buckling_usage_factor,
+        medium_result.buckling_usage_factor,
+    )
+    medium_ultimate = _relative_drift(
+        base_result.ultimate_usage_factor,
+        medium_result.ultimate_usage_factor,
+    )
+    high_buckling = _relative_drift(
+        base_result.buckling_usage_factor,
+        high_result.buckling_usage_factor,
+    )
+    high_ultimate = _relative_drift(
+        base_result.ultimate_usage_factor,
+        high_result.ultimate_usage_factor,
+    )
+    finite_drifts = [
+        value
+        for value in (
+            medium_buckling,
+            medium_ultimate,
+            high_buckling,
+            high_ultimate,
+        )
+        if value is not None and math.isfinite(value)
+    ]
+    return {
+        "enabled": True,
+        "medium_basis": {
+            "longitudinal_modes": list(config.medium_longitudinal_modes),
+            "transverse_modes": list(config.medium_transverse_modes),
+            "valid": medium_result.valid,
+            "buckling_usage_factor": medium_result.buckling_usage_factor,
+            "ultimate_usage_factor": medium_result.ultimate_usage_factor,
+            "buckling_relative_drift": medium_buckling,
+            "ultimate_relative_drift": medium_ultimate,
+        },
+        "high_basis": {
+            "longitudinal_modes": list(config.high_longitudinal_modes),
+            "transverse_modes": list(config.high_transverse_modes),
+            "valid": high_result.valid,
+            "buckling_usage_factor": high_result.buckling_usage_factor,
+            "ultimate_usage_factor": high_result.ultimate_usage_factor,
+            "buckling_relative_drift": high_buckling,
+            "ultimate_relative_drift": high_ultimate,
+        },
+        "max_relative_drift": max(finite_drifts) if finite_drifts else None,
+        "high_confidence_drift_limit": config.high_confidence_drift_limit,
+        "medium_confidence_drift_limit": config.medium_confidence_drift_limit,
+    }
+
+
+def _classify_confidence(
+    result: S3Result,
+    validation_domain: Mapping[str, Any],
+    mode_convergence: Mapping[str, Any] | None,
+    config: S3SolverConfig,
+) -> tuple[str, list[str]]:
+    if not result.valid:
+        return "low", [f"invalid:{result.invalid_reason or 'unknown'}"]
+
+    reasons: list[str] = []
+    domain_reasons = list(validation_domain.get("reasons") or [])
+    if domain_reasons:
+        reasons.extend(f"domain:{reason}" for reason in domain_reasons)
+
+    if result.ultimate_usage_factor is not None and result.buckling_usage_factor is not None:
+        if result.ultimate_usage_factor > result.buckling_usage_factor + EPS:
+            reasons.append("usage-order:ultimate-exceeds-buckling")
+
+    if mode_convergence is None or not mode_convergence.get("enabled"):
+        reasons.append("mode-convergence:not-run")
+        return ("low" if any(reason.startswith("usage-order:") for reason in reasons) else "medium", reasons)
+
+    max_drift = _optional_float(mode_convergence.get("max_relative_drift"))
+    medium = mode_convergence.get("medium_basis", {})
+    high = mode_convergence.get("high_basis", {})
+    if not medium.get("valid") or not high.get("valid"):
+        reasons.append("mode-convergence:non-valid-refined-basis")
+        return "low", reasons
+    if max_drift is None:
+        reasons.append("mode-convergence:unavailable")
+        return "low", reasons
+    reasons.append(f"mode-convergence:max-drift={max_drift:.6g}")
+    if max_drift <= config.high_confidence_drift_limit:
+        return "high", reasons
+    if max_drift <= config.medium_confidence_drift_limit:
+        return "medium", reasons
+    return "low", reasons
+
+
+def _attach_reliability(
+    result: S3Result,
+    panel: S3PanelInput | U3PanelInput,
+    config: S3SolverConfig,
+    panel_family: str,
+    solver: Any,
+    validation_reasons: Sequence[str] | None = None,
+) -> S3Result:
+    validation_domain = _validation_domain(panel, config, panel_family, validation_reasons)
+    diagnostics = dict(result.diagnostics)
+    diagnostics["validation_domain"] = validation_domain
+    mode_convergence = diagnostics.get("mode_convergence")
+    if result.valid and config.check_mode_convergence:
+        medium_result = solver(
+            panel,
+            _mode_convergence_config(
+                config,
+                config.medium_longitudinal_modes,
+                config.medium_transverse_modes,
+            ),
+        )
+        high_result = solver(
+            panel,
+            _mode_convergence_config(
+                config,
+                config.high_longitudinal_modes,
+                config.high_transverse_modes,
+            ),
+        )
+        mode_convergence = _summarize_mode_convergence(
+            result,
+            medium_result,
+            high_result,
+            config,
+        )
+    elif mode_convergence is None:
+        mode_convergence = {"enabled": False}
+    diagnostics["mode_convergence"] = mode_convergence
+    confidence, confidence_reasons = _classify_confidence(
+        result,
+        validation_domain,
+        mode_convergence,
+        config,
+    )
+    diagnostics["confidence"] = confidence
+    diagnostics["confidence_reasons"] = confidence_reasons
+    return S3Result(
+        buckling_usage_factor=result.buckling_usage_factor,
+        ultimate_usage_factor=result.ultimate_usage_factor,
+        elastic_buckling_usage_factor=result.elastic_buckling_usage_factor,
+        valid=result.valid,
+        invalid_reason=result.invalid_reason,
+        diagnostics=diagnostics,
+        covered_domain_notes=result.covered_domain_notes,
+        confidence=confidence,
+        confidence_reasons=confidence_reasons,
+    )
 
 
 def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) -> S3Result:
     """Solve the reduced S3 load path and return usage-factor diagnostics."""
 
     config = config or S3SolverConfig()
-    validation_error = validate_s3_input(panel, config)
+    validation_reasons = collect_s3_validation_reasons(panel, config)
+    validation_error = validation_reasons[0] if validation_reasons else None
     if validation_error is not None:
-        return _invalid_result(validation_error)
+        return _attach_reliability(
+            _invalid_result(validation_error),
+            panel,
+            config,
+            "S3",
+            solve_s3_panel,
+            validation_reasons,
+        )
 
     if all(
         abs(value) <= EPS
@@ -2141,7 +3108,14 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             panel.shear_stress,
         )
     ):
-        return _invalid_result("zero-variable-load")
+        return _attach_reliability(
+            _invalid_result("zero-variable-load"),
+            panel,
+            config,
+            "S3",
+            solve_s3_panel,
+            ["zero-variable-load"],
+        )
 
     section = build_section_properties(panel)
     stiffener_section, effective_width = build_effective_stiffener_section(panel, config)
@@ -2155,12 +3129,19 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         config,
     )
     if not pressure_converged:
-        return _invalid_result(
-            "non-convergence",
-            {
-                "stage": "pressure-preload",
-                "iterations": pressure_iterations,
-            },
+        return _attach_reliability(
+            _invalid_result(
+                "non-convergence",
+                {
+                    "stage": "pressure-preload",
+                    "iterations": pressure_iterations,
+                },
+            ),
+            panel,
+            config,
+            "S3",
+            solve_s3_panel,
+            validation_reasons,
         )
 
     pressure_yield = yield_utilization(panel, section, stiffener_section, modes, amplitudes, 0.0, config)
@@ -2174,14 +3155,21 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         ),
     }
     if pressure_yield["max"] >= config.pressure_yield_limit:
-        return _invalid_result(
-            "pressure",
-            {
-                "stage": "pressure-preload",
-                "yield_utilization": pressure_yield,
-                "pressure_preload_response": pressure_preload_response,
-                "pressure_iterations": pressure_iterations,
-            },
+        return _attach_reliability(
+            _invalid_result(
+                "pressure",
+                {
+                    "stage": "pressure-preload",
+                    "yield_utilization": pressure_yield,
+                    "pressure_preload_response": pressure_preload_response,
+                    "pressure_iterations": pressure_iterations,
+                },
+            ),
+            panel,
+            config,
+            "S3",
+            solve_s3_panel,
+            validation_reasons,
         )
 
     buckling = elastic_buckling_factors(panel, section, modes, config, stiffener_section)
@@ -2251,15 +3239,22 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
                 continuation["next_cutback_step"] = next_step
                 continuation["newton_iterations"] = iterations
                 continuation["cutback_exhausted"] = True
-                return _invalid_result(
-                    "non-convergence",
-                    {
-                        "stage": "in-plane-continuation",
-                        "load_factor": load_factor,
-                        "iterations": iterations,
-                        "buckling": buckling,
-                        "continuation": continuation,
-                    },
+                return _attach_reliability(
+                    _invalid_result(
+                        "non-convergence",
+                        {
+                            "stage": "in-plane-continuation",
+                            "load_factor": load_factor,
+                            "iterations": iterations,
+                            "buckling": buckling,
+                            "continuation": continuation,
+                        },
+                    ),
+                    panel,
+                    config,
+                    "S3",
+                    solve_s3_panel,
+                    validation_reasons,
                 )
             current_step = next_step
             cutbacks += 1
@@ -2277,6 +3272,11 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             if max_accepted_step is None
             else max(max_accepted_step, attempted_step)
         )
+        ultimate_yield_global_factor = (
+            global_elastic_cutoff_factor
+            if config.include_lateral_deformation_in_ultimate_yield
+            else None
+        )
         final_yield = yield_utilization(
             panel,
             section,
@@ -2285,7 +3285,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             amplitudes,
             load_factor,
             config,
-            global_elastic_cutoff_factor,
+            ultimate_yield_global_factor,
         )
         if final_yield["max"] >= config.yield_utilization_limit:
             yield_capacity_factor = _interpolate_capacity(
@@ -2314,25 +3314,31 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
     )
 
     ultimate_capacity_factor = yield_capacity_factor
-    if global_elastic_cutoff_factor is not None and (
-        ultimate_capacity_factor is None or global_elastic_cutoff_factor < ultimate_capacity_factor
-    ):
-        ultimate_capacity_factor = global_elastic_cutoff_factor
-        collapse_state = "global-elastic-cutoff"
-    if column_factor is not None and (
-        ultimate_capacity_factor is None or column_factor < ultimate_capacity_factor
-    ):
-        ultimate_capacity_factor = column_factor
-        collapse_state = "stiffener-column-cutoff"
+    if ultimate_capacity_factor is None:
+        if global_elastic_cutoff_factor is not None:
+            ultimate_capacity_factor = global_elastic_cutoff_factor
+            collapse_state = "global-elastic-cutoff"
+        if column_factor is not None and (
+            ultimate_capacity_factor is None or column_factor < ultimate_capacity_factor
+        ):
+            ultimate_capacity_factor = column_factor
+            collapse_state = "stiffener-column-cutoff"
 
     if ultimate_capacity_factor is None or ultimate_capacity_factor <= EPS:
-        return _invalid_result(
-            "no-collapse-within-load-range",
-            {
-                "max_load_factor": config.max_load_factor,
-                "buckling": buckling,
-                "yield_utilization": final_yield,
-            },
+        return _attach_reliability(
+            _invalid_result(
+                "no-collapse-within-load-range",
+                {
+                    "max_load_factor": config.max_load_factor,
+                    "buckling": buckling,
+                    "yield_utilization": final_yield,
+                },
+            ),
+            panel,
+            config,
+            "S3",
+            solve_s3_panel,
+            validation_reasons,
         )
 
     pressure_dominated_yield = _pressure_dominated_yield_limit(
@@ -2361,6 +3367,14 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         buckling_strength_limits.items(),
         key=lambda item: float(item[1]),
     )
+    raw_ultimate_capacity_factor = ultimate_capacity_factor
+    reported_ultimate_capacity_factor = max(
+        raw_ultimate_capacity_factor,
+        buckling_strength_capacity_factor,
+    )
+    ultimate_lifted_to_buckling_strength = (
+        reported_ultimate_capacity_factor > raw_ultimate_capacity_factor + EPS
+    )
     buckling_strength = {
         "capacity_factor": buckling_strength_capacity_factor,
         "usage_factor": 1.0 / max(buckling_strength_capacity_factor, EPS),
@@ -2368,14 +3382,22 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         "component_capacity_factors": buckling_strength_limits,
         "excluded_component_capacity_factors": excluded_buckling_strength_limits,
         "elastic_usage_factor": elastic_buckling_usage,
-        "ultimate_usage_factor": 1.0 / max(ultimate_capacity_factor, EPS),
+        "ultimate_usage_factor": 1.0 / max(reported_ultimate_capacity_factor, EPS),
+        "raw_ultimate_usage_factor": 1.0 / max(raw_ultimate_capacity_factor, EPS),
+        "raw_ultimate_capacity_factor": raw_ultimate_capacity_factor,
+        "reported_ultimate_capacity_factor": reported_ultimate_capacity_factor,
+        "ultimate_lifted_to_buckling_strength": ultimate_lifted_to_buckling_strength,
         "pressure_dominated_yield_limit": pressure_dominated_yield,
         "ultimate_included": include_ultimate_in_buckling_strength,
     }
     diagnostics = {
         "collapse_state": collapse_state,
-        "capacity_factor": ultimate_capacity_factor,
+        "capacity_factor": reported_ultimate_capacity_factor,
+        "raw_capacity_factor": raw_ultimate_capacity_factor,
         "yield_capacity_factor": yield_capacity_factor,
+        "ultimate_yield_includes_lateral_deformation": (
+            config.include_lateral_deformation_in_ultimate_yield
+        ),
         "global_elastic_cutoff_factor": global_elastic_cutoff_factor,
         "buckling": buckling,
         "pressure_preload_yield_utilization": pressure_yield,
@@ -2393,461 +3415,304 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         "continuation": continuation,
         "buckling_strength": buckling_strength,
     }
-    return S3Result(
-        buckling_usage_factor=buckling_strength["usage_factor"],
-        ultimate_usage_factor=1.0 / ultimate_capacity_factor,
-        elastic_buckling_usage_factor=elastic_buckling_usage,
-        valid=True,
-        invalid_reason=None,
-        diagnostics=diagnostics,
-        covered_domain_notes=_notes(),
+    return _attach_reliability(
+        S3Result(
+            buckling_usage_factor=buckling_strength["usage_factor"],
+            ultimate_usage_factor=buckling_strength["ultimate_usage_factor"],
+            elastic_buckling_usage_factor=elastic_buckling_usage,
+            valid=True,
+            invalid_reason=None,
+            diagnostics=diagnostics,
+            covered_domain_notes=_notes(),
+        ),
+        panel,
+        config,
+        "S3",
+        solve_s3_panel,
+        validation_reasons,
     )
 
 
-def _percentile(values: Sequence[float], fraction: float) -> float | None:
-    if not values:
-        return None
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * fraction
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return ordered[lower]
-    weight = position - lower
-    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) -> S3Result:
+    """Solve the reduced U3 load path and return usage-factor diagnostics."""
 
-
-def _error_summary(pairs: Sequence[tuple[float, float]]) -> dict[str, float | int | None]:
-    if not pairs:
-        return {
-            "count": 0,
-            "mean_absolute_error": None,
-            "median_absolute_error": None,
-            "p95_absolute_error": None,
-            "mean_relative_error": None,
-        }
-    absolute_errors = [abs(predicted - expected) for expected, predicted in pairs]
-    relative_errors = [
-        abs(predicted - expected) / max(abs(expected), EPS)
-        for expected, predicted in pairs
-    ]
-    return {
-        "count": len(pairs),
-        "mean_absolute_error": statistics.fmean(absolute_errors),
-        "median_absolute_error": statistics.median(absolute_errors),
-        "p95_absolute_error": _percentile(absolute_errors, 0.95),
-        "mean_relative_error": statistics.fmean(relative_errors),
-    }
-
-
-def _usage_region(usage_factor: float | None) -> str:
-    if usage_factor is None:
-        return "invalid-target"
-    if usage_factor <= 0.87:
-        return "<=0.87"
-    if usage_factor <= 0.91:
-        return "0.87..0.91"
-    if usage_factor < 1.0:
-        return "0.91..1.0"
-    return ">=1.0"
-
-
-def _dominant_failure_family_share_key(result: S3Result) -> str:
-    if not result.valid:
-        return f"invalid:{result.invalid_reason or 'unknown'}"
-    modeled_families = result.diagnostics.get("buckling", {}).get("modeled_failure_families", {})
-    if not modeled_families:
-        return "none"
-    family, summary = max(
-        modeled_families.items(),
-        key=lambda item: float(item[1].get("usage_share_percent", 0.0)),
-    )
-    share = float(summary.get("usage_share_percent", 0.0))
-    if share >= 75.0:
-        band = ">=75%"
-    elif share >= 50.0:
-        band = "50..75%"
-    else:
-        band = "<50%"
-    return f"{family}:{band}"
-
-
-def _web_local_coverage_key(result: S3Result) -> str:
-    if not result.valid:
-        return f"invalid:{result.invalid_reason or 'unknown'}"
-    buckling = result.diagnostics.get("buckling", {})
-    if buckling.get("critical_failure_family") != "web-local":
-        return "not-critical"
-    web_factor = buckling.get("stiffener_web_local") or {}
-    return str(web_factor.get("coverage") or "unknown")
-
-
-def _local_interaction_coverage_key(result: S3Result) -> str:
-    if not result.valid:
-        return f"invalid:{result.invalid_reason or 'unknown'}"
-    buckling = result.diagnostics.get("buckling", {})
-    if buckling.get("critical_failure_family") != "plate-web-local-interaction":
-        return "not-critical"
-    interaction = buckling.get("local_plate_web_interaction") or {}
-    return str(interaction.get("coverage") or "unknown")
-
-
-def _buckling_strength_control_key(result: S3Result) -> str:
-    if not result.valid:
-        return f"invalid:{result.invalid_reason or 'unknown'}"
-    buckling_strength = result.diagnostics.get("buckling_strength") or {}
-    return str(buckling_strength.get("controlling_limit") or "unknown")
-
-
-@dataclass
-class _Slice:
-    rows: int = 0
-    target_valid: int = 0
-    predicted_valid: int = 0
-    buckling_pairs: list[tuple[float, float]] = field(default_factory=list)
-    ultimate_pairs: list[tuple[float, float]] = field(default_factory=list)
-
-    def add(
-        self,
-        target_valid: bool,
-        predicted_valid: bool,
-        buckling_pair: tuple[float, float] | None,
-        ultimate_pair: tuple[float, float] | None,
-    ) -> None:
-        self.rows += 1
-        self.target_valid += int(target_valid)
-        self.predicted_valid += int(predicted_valid)
-        if buckling_pair is not None:
-            self.buckling_pairs.append(buckling_pair)
-        if ultimate_pair is not None:
-            self.ultimate_pairs.append(ultimate_pair)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "rows": self.rows,
-            "target_valid": self.target_valid,
-            "predicted_valid": self.predicted_valid,
-            "buckling": _error_summary(self.buckling_pairs),
-            "ultimate": _error_summary(self.ultimate_pairs),
-        }
-
-
-@dataclass
-class BenchmarkReport:
-    rows: int
-    target_numeric_rows: int
-    predicted_valid_rows: int
-    validity_confusion: dict[str, int]
-    invalid_reason_counts: dict[str, int]
-    target_invalid_reason_counts: dict[str, int]
-    buckling: dict[str, float | int | None]
-    elastic_buckling: dict[str, float | int | None]
-    ultimate: dict[str, float | int | None]
-    slices: dict[str, dict[str, dict[str, Any]]]
-    worst_buckling_rows: list[dict[str, Any]]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    def format_text(self) -> str:
-        lines = [
-            "Reduced S3 benchmark report",
-            f"Rows: {self.rows}",
-            f"Target numeric rows: {self.target_numeric_rows}",
-            f"Predicted valid rows: {self.predicted_valid_rows}",
-            f"Validity confusion: {self.validity_confusion}",
-            f"Buckling Strength UF errors: {self.buckling}",
-            f"Elastic buckling UF diagnostic errors: {self.elastic_buckling}",
-            f"Ultimate UF errors: {self.ultimate}",
-            f"Predicted invalid reasons: {self.invalid_reason_counts}",
-            f"Target invalid reasons: {self.target_invalid_reason_counts}",
-        ]
-        for family, family_slices in self.slices.items():
-            lines.append(f"{family} slices:")
-            for key, summary in sorted(family_slices.items()):
-                buckling = summary["buckling"]
-                lines.append(
-                    f"  {key}: rows={summary['rows']} target_valid={summary['target_valid']} "
-                    f"predicted_valid={summary['predicted_valid']} "
-                    f"buckling_mae={buckling['mean_absolute_error']}"
-                )
-        if self.worst_buckling_rows:
-            lines.append("Worst buckling UF rows:")
-            for row in self.worst_buckling_rows:
-                lines.append(f"  {row}")
-        return "\n".join(lines)
-
-
-def _benchmark_rows(
-    rows: Iterable[tuple[int, Mapping[str, Any]]],
-    config: S3SolverConfig,
-) -> BenchmarkReport:
-    buckling_pairs: list[tuple[float, float]] = []
-    elastic_buckling_pairs: list[tuple[float, float]] = []
-    ultimate_pairs: list[tuple[float, float]] = []
-    worst_rows: list[dict[str, Any]] = []
-    validity = {"true_positive": 0, "false_positive": 0, "true_negative": 0, "false_negative": 0}
-    invalid_reasons: dict[str, int] = {}
-    target_invalid_reasons: dict[str, int] = {}
-    slices: dict[str, dict[str, _Slice]] = {
-        "support": {},
-        "stiffener_type": {},
-        "pressure": {},
-        "usage_region": {},
-        "predicted_failure_family": {},
-        "dominant_failure_family_share": {},
-        "web_local_coverage": {},
-        "local_interaction_coverage": {},
-        "buckling_strength_control": {},
-    }
-    row_count = 0
-    target_numeric_rows = 0
-    predicted_valid_rows = 0
-
-    for row_index, row in rows:
-        row_count += 1
-        expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
-        expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
-        target_valid = expected_buckling is not None and expected_ultimate is not None
-        target_numeric_rows += int(target_valid)
-
-        try:
-            result = solve_s3_panel(row_to_s3_input(row), config)
-        except (TypeError, ValueError) as exc:
-            result = _invalid_result("csv-row-error", {"error": str(exc)})
-
-        predicted_valid = (
-            result.valid
-            and result.buckling_usage_factor is not None
-            and result.ultimate_usage_factor is not None
+    config = config or S3SolverConfig()
+    validation_reasons = collect_u3_validation_reasons(panel, config)
+    validation_error = validation_reasons[0] if validation_reasons else None
+    if validation_error is not None:
+        return _attach_reliability(
+            _invalid_u3_result(validation_error),
+            panel,
+            config,
+            "U3",
+            solve_u3_panel,
+            validation_reasons,
         )
-        predicted_valid_rows += int(predicted_valid)
-        if target_valid and predicted_valid:
-            validity["true_positive"] += 1
-        elif target_valid and not predicted_valid:
-            validity["false_negative"] += 1
-        elif not target_valid and predicted_valid:
-            validity["false_positive"] += 1
-        else:
-            validity["true_negative"] += 1
 
-        if not predicted_valid:
-            reason = result.invalid_reason or "invalid-without-reason"
-            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
-        if not target_valid:
-            target_reason = str(row.get("output cl str buc", "") or "invalid-without-reason").strip()
-            target_invalid_reasons[target_reason] = target_invalid_reasons.get(target_reason, 0) + 1
+    if all(
+        abs(value) <= EPS
+        for value in (
+            panel.axial_stress,
+            panel.mean_transverse_stress,
+            panel.shear_stress,
+        )
+    ):
+        return _attach_reliability(
+            _invalid_u3_result("zero-variable-load"),
+            panel,
+            config,
+            "U3",
+            solve_u3_panel,
+            ["zero-variable-load"],
+        )
 
-        buckling_pair = None
-        ultimate_pair = None
-        if target_valid and predicted_valid:
-            buckling_pair = (expected_buckling, float(result.buckling_usage_factor))
-            ultimate_pair = (expected_ultimate, float(result.ultimate_usage_factor))
-            buckling_pairs.append(buckling_pair)
-            if result.elastic_buckling_usage_factor is not None:
-                elastic_buckling_pairs.append(
-                    (expected_buckling, float(result.elastic_buckling_usage_factor))
-                )
-            ultimate_pairs.append(ultimate_pair)
-            absolute_error = abs(buckling_pair[1] - buckling_pair[0])
-            modeled_families = result.diagnostics["buckling"]["modeled_failure_families"]
-            family_shares = {
-                family: summary["usage_share_percent"]
-                for family, summary in modeled_families.items()
-            }
-            worst_rows.append(
+    modes = build_u3_ritz_modes(panel, config)
+    amplitudes = [0.0 for _ in modes]
+    amplitudes, pressure_converged, pressure_iterations = solve_equilibrium_amplitudes(
+        panel,
+        modes,
+        0.0,
+        amplitudes,
+        config,
+    )
+    if not pressure_converged:
+        return _attach_reliability(
+            _invalid_u3_result(
+                "non-convergence",
                 {
-                    "row_index": row_index,
-                    "expected_buckling": buckling_pair[0],
-                    "predicted_buckling": buckling_pair[1],
-                    "absolute_error": absolute_error,
-                    "support": row.get("In-plane support", ""),
-                    "stiffener_type": row.get("Stiffener type", ""),
-                    "pressure": row.get("Pressure (fixed)", ""),
-                    "predicted_failure_family": result.diagnostics["buckling"]["critical_failure_family"],
-                    "failure_family_shares": family_shares,
-                }
-            )
-            worst_rows.sort(key=lambda item: item["absolute_error"], reverse=True)
-            del worst_rows[10:]
-
-        keys = {
-            "support": str(row.get("In-plane support", "") or "missing"),
-            "stiffener_type": str(row.get("Stiffener type", "") or "missing"),
-            "pressure": "nonzero" if (_optional_float(row.get("Pressure (fixed)")) or 0.0) > 0.0 else "zero",
-            "usage_region": _usage_region(expected_buckling),
-            "predicted_failure_family": (
-                result.diagnostics["buckling"]["critical_failure_family"]
-                if predicted_valid
-                else f"invalid:{result.invalid_reason or 'unknown'}"
+                    "stage": "pressure-preload",
+                    "iterations": pressure_iterations,
+                },
             ),
-            "dominant_failure_family_share": _dominant_failure_family_share_key(result),
-            "web_local_coverage": _web_local_coverage_key(result),
-            "local_interaction_coverage": _local_interaction_coverage_key(result),
-            "buckling_strength_control": _buckling_strength_control_key(result),
-        }
-        for family, key in keys.items():
-            slice_accumulator = slices[family].setdefault(key, _Slice())
-            slice_accumulator.add(target_valid, predicted_valid, buckling_pair, ultimate_pair)
+            panel,
+            config,
+            "U3",
+            solve_u3_panel,
+            validation_reasons,
+        )
 
-    return BenchmarkReport(
-        rows=row_count,
-        target_numeric_rows=target_numeric_rows,
-        predicted_valid_rows=predicted_valid_rows,
-        validity_confusion=validity,
-        invalid_reason_counts=dict(sorted(invalid_reasons.items())),
-        target_invalid_reason_counts=dict(sorted(target_invalid_reasons.items())),
-        buckling=_error_summary(buckling_pairs),
-        elastic_buckling=_error_summary(elastic_buckling_pairs),
-        ultimate=_error_summary(ultimate_pairs),
-        slices={
-            family: {key: value.to_dict() for key, value in family_slices.items()}
-            for family, family_slices in slices.items()
-        },
-        worst_buckling_rows=worst_rows,
+    pressure_yield = u3_yield_utilization(panel, modes, amplitudes, 0.0, config)
+    pressure_preload_response = {
+        "iterations": pressure_iterations,
+        "amplitudes": _mode_amplitude_summary(modes, amplitudes),
+        "yield_utilization": pressure_yield,
+        "controlling_yield_branch": "plate",
+    }
+    if pressure_yield["max"] >= config.pressure_yield_limit:
+        return _attach_reliability(
+            _invalid_u3_result(
+                "pressure",
+                {
+                    "stage": "pressure-preload",
+                    "yield_utilization": pressure_yield,
+                    "pressure_preload_response": pressure_preload_response,
+                    "pressure_iterations": pressure_iterations,
+                },
+            ),
+            panel,
+            config,
+            "U3",
+            solve_u3_panel,
+            validation_reasons,
+        )
+
+    buckling = elastic_u3_buckling_factors(panel, modes, config)
+    buckling_factor = buckling["critical_factor"]
+    elastic_buckling_usage = None if buckling_factor is None else 1.0 / max(buckling_factor, EPS)
+
+    previous_load = 0.0
+    previous_yield = pressure_yield["max"]
+    yield_capacity_factor: float | None = None
+    max_iterations = pressure_iterations
+    collapse_state = "first-yield"
+    final_yield = pressure_yield
+
+    accepted_steps = 0
+    rejected_steps = 0
+    cutbacks = 0
+    min_accepted_step: float | None = None
+    max_accepted_step: float | None = None
+    current_step = min(
+        max(config.initial_load_step, config.min_load_step, EPS),
+        max(config.max_load_step, config.min_load_step, EPS),
     )
+    cutback_factor = min(max(config.load_step_cutback, EPS), 0.95)
 
-
-def iter_csv_rows(
-    csv_path: str | Path,
-    limit: int | None = None,
-    fixture: bool = False,
-) -> Iterator[tuple[int, Mapping[str, str]]]:
-    """Yield indexed CSV rows deterministically without loading the full file."""
-
-    fixture_indices = set(FIXTURE_ROW_INDICES) if fixture else None
-    emitted = 0
-    with Path(csv_path).open("r", newline="", encoding="utf-8-sig") as handle:
-        for row_index, row in enumerate(csv.DictReader(handle)):
-            if fixture_indices is not None and row_index not in fixture_indices:
-                if row_index > max(fixture_indices):
-                    break
-                continue
-            yield row_index, row
-            emitted += 1
-            if limit is not None and emitted >= limit:
-                break
-
-
-def iter_ship_section_rows(
-    path: str | Path,
-    limit: int | None = None,
-) -> Iterator[tuple[int, Mapping[str, Any]]]:
-    """Yield stiffened S3-like records from an ANYstructure ship-section export."""
-
-    with Path(path).open("r", encoding="utf-8-sig") as handle:
-        payload = json.load(handle)
-    legacy_results_key = "PU" + "LS results"
-    result_records = payload.get(legacy_results_key, {})
-    emitted = 0
-    for row_index, record in enumerate(result_records.values()):
-        if not isinstance(record, Mapping):
+    while previous_load < config.max_load_factor - EPS:
+        load_factor = min(previous_load + current_step, config.max_load_factor)
+        attempted_step = load_factor - previous_load
+        trial_amplitudes, converged, iterations = solve_equilibrium_amplitudes(
+            panel,
+            modes,
+            load_factor,
+            amplitudes,
+            config,
+        )
+        max_iterations = max(max_iterations, iterations)
+        if not converged:
+            rejected_steps += 1
+            next_step = current_step * cutback_factor
+            if (
+                next_step < max(config.min_load_step, EPS)
+                or cutbacks >= config.max_load_step_cutbacks
+            ):
+                continuation = _continuation_summary(
+                    accepted_steps,
+                    rejected_steps,
+                    cutbacks,
+                    previous_load,
+                    min_accepted_step,
+                    max_accepted_step,
+                    current_step,
+                    config,
+                )
+                continuation["attempted_load_factor"] = load_factor
+                continuation["attempted_step"] = attempted_step
+                continuation["next_cutback_step"] = next_step
+                continuation["newton_iterations"] = iterations
+                continuation["cutback_exhausted"] = True
+                return _attach_reliability(
+                    _invalid_u3_result(
+                        "non-convergence",
+                        {
+                            "stage": "in-plane-continuation",
+                            "load_factor": load_factor,
+                            "iterations": iterations,
+                            "buckling": buckling,
+                            "continuation": continuation,
+                        },
+                    ),
+                    panel,
+                    config,
+                    "U3",
+                    solve_u3_panel,
+                    validation_reasons,
+                )
+            current_step = next_step
+            cutbacks += 1
             continue
-        if "Plate geometry" not in record or "Primary stiffeners" not in record:
-            continue
-        yield row_index, ship_section_record_to_csv_row(record)
-        emitted += 1
-        if limit is not None and emitted >= limit:
+
+        amplitudes = trial_amplitudes
+        accepted_steps += 1
+        min_accepted_step = (
+            attempted_step
+            if min_accepted_step is None
+            else min(min_accepted_step, attempted_step)
+        )
+        max_accepted_step = (
+            attempted_step
+            if max_accepted_step is None
+            else max(max_accepted_step, attempted_step)
+        )
+        final_yield = u3_yield_utilization(panel, modes, amplitudes, load_factor, config)
+        if final_yield["max"] >= config.yield_utilization_limit:
+            yield_capacity_factor = _interpolate_capacity(
+                previous_load,
+                previous_yield,
+                load_factor,
+                final_yield["max"],
+                config.yield_utilization_limit,
+            )
+            previous_load = load_factor
             break
+        previous_load = load_factor
+        previous_yield = final_yield["max"]
+        if previous_load >= 2.0:
+            current_step = min(current_step * config.load_step_growth, config.max_load_step)
 
-
-def benchmark_csv(
-    csv_path: str | Path,
-    config: S3SolverConfig | None = None,
-    limit: int | None = None,
-    fixture: bool = False,
-) -> BenchmarkReport:
-    return _benchmark_rows(iter_csv_rows(csv_path, limit=limit, fixture=fixture), config or S3SolverConfig())
-
-
-def benchmark_ship_section(
-    path: str | Path,
-    config: S3SolverConfig | None = None,
-    limit: int | None = None,
-) -> BenchmarkReport:
-    return _benchmark_rows(iter_ship_section_rows(path, limit=limit), config or S3SolverConfig())
-
-
-def _benchmark_command(args: argparse.Namespace) -> int:
-    config = S3SolverConfig(
-        max_load_factor=args.max_load_factor,
-        use_effective_stiffener_width=args.effective_stiffener_width,
+    continuation = _continuation_summary(
+        accepted_steps,
+        rejected_steps,
+        cutbacks,
+        previous_load,
+        min_accepted_step,
+        max_accepted_step,
+        current_step,
+        config,
     )
-    report = benchmark_csv(args.csv, config=config, limit=args.limit, fixture=args.fixture)
-    if args.json:
-        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
-    else:
-        print(report.format_text())
-    return 0
 
+    if yield_capacity_factor is None or yield_capacity_factor <= EPS:
+        return _attach_reliability(
+            _invalid_u3_result(
+                "no-collapse-within-load-range",
+                {
+                    "max_load_factor": config.max_load_factor,
+                    "buckling": buckling,
+                    "yield_utilization": final_yield,
+                },
+            ),
+            panel,
+            config,
+            "U3",
+            solve_u3_panel,
+            validation_reasons,
+        )
 
-def _ship_section_command(args: argparse.Namespace) -> int:
-    config = S3SolverConfig(
-        max_load_factor=args.max_load_factor,
-        use_effective_stiffener_width=args.effective_stiffener_width,
+    buckling_strength_limits = {"ultimate_capacity": yield_capacity_factor}
+    if buckling_factor is not None:
+        buckling_strength_limits["elastic_buckling_envelope"] = buckling_factor
+    buckling_strength_control, buckling_strength_capacity_factor = min(
+        buckling_strength_limits.items(),
+        key=lambda item: float(item[1]),
     )
-    report = benchmark_ship_section(args.input, config=config, limit=args.limit)
-    if args.json:
-        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
-    else:
-        print(report.format_text())
-    return 0
-
-
-def _build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Reduced SemiAnalytical S3 calculations")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    benchmark = subparsers.add_parser("benchmark", help="Compare S3 results with a reference CSV export")
-    benchmark.add_argument("--csv", default="reference_s3.csv", help="reference CSV path")
-    benchmark.add_argument("--limit", type=int, default=None, help="Read only the first N selected CSV rows")
-    benchmark.add_argument("--fixture", action="store_true", help="Use the deterministic fixture row indices")
-    benchmark.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
-    benchmark.add_argument(
-        "--effective-stiffener-width",
-        action="store_true",
-        help="Apply length-based effective attached-plate width in stiffener yield and column checks",
+    raw_ultimate_capacity_factor = yield_capacity_factor
+    reported_ultimate_capacity_factor = max(
+        raw_ultimate_capacity_factor,
+        buckling_strength_capacity_factor,
     )
-    benchmark.add_argument(
-        "--max-load-factor",
-        type=float,
-        default=S3SolverConfig.max_load_factor,
-        help="Maximum continuation factor for the benchmark solve",
+    ultimate_lifted_to_buckling_strength = (
+        reported_ultimate_capacity_factor > raw_ultimate_capacity_factor + EPS
     )
-    benchmark.set_defaults(run=_benchmark_command)
-
-    ship_section = subparsers.add_parser(
-        "ship-section",
-        help="Compare S3 results with an ANYstructure ship-section dictionary export",
+    buckling_strength = {
+        "capacity_factor": buckling_strength_capacity_factor,
+        "usage_factor": 1.0 / max(buckling_strength_capacity_factor, EPS),
+        "controlling_limit": buckling_strength_control,
+        "component_capacity_factors": buckling_strength_limits,
+        "excluded_component_capacity_factors": {},
+        "elastic_usage_factor": elastic_buckling_usage,
+        "ultimate_usage_factor": 1.0 / max(reported_ultimate_capacity_factor, EPS),
+        "raw_ultimate_usage_factor": 1.0 / max(raw_ultimate_capacity_factor, EPS),
+        "raw_ultimate_capacity_factor": raw_ultimate_capacity_factor,
+        "reported_ultimate_capacity_factor": reported_ultimate_capacity_factor,
+        "ultimate_lifted_to_buckling_strength": ultimate_lifted_to_buckling_strength,
+        "pressure_dominated_yield_limit": False,
+        "ultimate_included": True,
+    }
+    diagnostics = {
+        "panel_family": "U3",
+        "collapse_state": collapse_state,
+        "capacity_factor": reported_ultimate_capacity_factor,
+        "raw_capacity_factor": raw_ultimate_capacity_factor,
+        "yield_capacity_factor": yield_capacity_factor,
+        "buckling": buckling,
+        "pressure_preload_yield_utilization": pressure_yield,
+        "pressure_preload_response": pressure_preload_response,
+        "final_yield_utilization": final_yield,
+        "max_newton_iterations": max_iterations,
+        "mode_count": len(modes),
+        "load_components": normalized_load_components(panel),
+        "support_model": SUPPORTED_IN_PLANE_SUPPORTS[panel.in_plane_support],
+        "rotational_support": {
+            "x_edges": panel.rotational_support_1,
+            "y_edges": panel.rotational_support_2,
+        },
+        "continuation_geometric_coupling": _ritz_geometric_matrix(panel, modes)[1],
+        "continuation": continuation,
+        "buckling_strength": buckling_strength,
+    }
+    return _attach_reliability(
+        S3Result(
+            buckling_usage_factor=buckling_strength["usage_factor"],
+            ultimate_usage_factor=buckling_strength["ultimate_usage_factor"],
+            elastic_buckling_usage_factor=elastic_buckling_usage,
+            valid=True,
+            invalid_reason=None,
+            diagnostics=diagnostics,
+            covered_domain_notes=_u3_notes(),
+        ),
+        panel,
+        config,
+        "U3",
+        solve_u3_panel,
+        validation_reasons,
     )
-    ship_section.add_argument(
-        "--input",
-        default=r"C:\Github\ANYstructure\anystruct\ship_section_example.txt",
-        help="ANYstructure ship-section export path",
-    )
-    ship_section.add_argument("--limit", type=int, default=None, help="Read only the first N S3 rows")
-    ship_section.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
-    ship_section.add_argument(
-        "--effective-stiffener-width",
-        action="store_true",
-        help="Apply length-based effective attached-plate width in stiffener yield and column checks",
-    )
-    ship_section.add_argument(
-        "--max-load-factor",
-        type=float,
-        default=S3SolverConfig.max_load_factor,
-        help="Maximum continuation factor for the benchmark solve",
-    )
-    ship_section.set_defaults(run=_ship_section_command)
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = _build_argument_parser()
-    args = parser.parse_args(argv)
-    return args.run(args)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

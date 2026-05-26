@@ -842,13 +842,23 @@ def _get_semi_analytical_input_for_optimization(calc_object, lat_press):
     )
 
 
-def _predict_semi_analytical_uf(calc_object, lat_press):
+def _predict_semi_analytical_uf(calc_object, lat_press, default_acceptance=0.87):
     """
-    Return [buckling_uf, ultimate_uf, valid_prediction] for the SemiAnalytical solver.
+    Return [buckling_uf, ultimate_uf, valid_prediction, acceptance_limit].
     """
-    result = np.array([float('inf'), float('inf'), 0.0], dtype=float)
+    result = np.array([float('inf'), float('inf'), 0.0, float(default_acceptance)], dtype=float)
 
     try:
+        if hasattr(semi_analytical, 'predict_anystructure_uf_with_acceptance'):
+            return semi_analytical.predict_anystructure_uf_with_acceptance(
+                calc_object,
+                lat_press,
+                default_acceptance=default_acceptance,
+            )
+        if hasattr(semi_analytical, 'predict_anystructure_uf'):
+            result[0:3] = semi_analytical.predict_anystructure_uf(calc_object, lat_press)
+            return result
+
         panel = _get_semi_analytical_input_for_optimization(calc_object, lat_press)
         if panel is None:
             return result
@@ -1523,7 +1533,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
                                              main_dict=init_stuc_obj.get_main_properties()['main dict']),
                            calc_object_pl[1]]
 
-            sort_again[idx, 0:3] = _predict_semi_analytical_uf(calc_object, lat_press)
+            sort_again[idx, 0:4] = _predict_semi_analytical_uf(calc_object, lat_press, puls_acceptance)
 
         PULSrun = None
 
@@ -2068,6 +2078,7 @@ if __name__ == '__main__':
     # print(geo_results[1][0])
     # for val in range(6):
     #     plot_optimization_results(geo_results[3][1][val])
+
 
 
 
