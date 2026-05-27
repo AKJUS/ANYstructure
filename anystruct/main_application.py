@@ -903,7 +903,7 @@ class Application():
         self._new_buckling_method = tk.StringVar()
         options = [
             'DNV-RP-C201 - prescriptive',
-            'ML-Numeric (SemiAnalytical based)',
+            'ML-Numeric (PULS based)',
             'SemiAnalytical S3/U3',
         ]
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
@@ -4076,7 +4076,7 @@ class Application():
                                     for key in ['fatigue', 'section', 'shear', 'thickness']
                                 ]) else 'red'
                         elif self._new_buckling_method.get() in [
-                            'ML-Numeric (SemiAnalytical based)',
+                            'ML-Numeric (PULS based)',
                         ]:
                             ml_color_dict = state.get('ML buckling numeric colors', {}).get(line, {})
 
@@ -4466,7 +4466,7 @@ class Application():
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                               text=this_text)
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)':
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
             numeric = state.get('ML buckling numeric', {}).get(line, {})
             numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
             numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
@@ -4627,7 +4627,7 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=this_text)
-            elif self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)':
+            elif self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
                 numeric = state.get('ML buckling numeric', {}).get(line, {})
                 numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
                 numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
@@ -4947,12 +4947,12 @@ class Application():
 
                 elif self._new_buckling_method.get() in [
                     'SemiAnalytical S3/U3',
-                    'ML-Numeric (SemiAnalytical based)',
+                    'ML-Numeric (PULS based)',
                 ]:
 
                     print_semi_analytical_results = self._new_buckling_method.get() == 'SemiAnalytical S3/U3'
                     print_class_results = False
-                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)'
+                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
 
                     self._result_canvas.create_text(
                         [x * 1, (y + (start_y + 0) * dy) * 1],

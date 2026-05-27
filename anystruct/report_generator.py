@@ -318,7 +318,7 @@ class LetterMaker(object):
                                 semi_analytical_valid.get('valid label', 'invalid/unsupported')
                             )
                         textobject.setFillColor('black')
-                    elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+                    elif self.data.buckling_method == 'ML-Numeric (PULS based)':
                         puls_method = line_structure.plate(line_bundle).get_puls_method()
                         puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                         numeric = result_state.get('ML buckling numeric', {}).get(line, {})
@@ -477,7 +477,7 @@ class LetterMaker(object):
             colors = self.data.result_state['colors']
         elif self.data.buckling_method == 'SemiAnalytical S3/U3':
             colors = self.data.result_state.get('SemiAnalytical colors', {})
-        elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+        elif self.data.buckling_method == 'ML-Numeric (PULS based)':
             colors = self.data.result_state.get('ML buckling numeric colors', {})
         else:
             colors = self.data.result_state['ML buckling colors']
@@ -547,7 +547,7 @@ class LetterMaker(object):
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                     self.c.setStrokeColor(all_line_data.get('SemiAnalytical colors', {}).get(line, {}).get(puls_method, 'black'))
-                elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+                elif self.data.buckling_method == 'ML-Numeric (PULS based)':
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                     self.c.setStrokeColor(
@@ -656,7 +656,7 @@ class LetterMaker(object):
                 this_text = 'DNV-RP-C201 Buckling Strength of Plated Structures'
             elif self.data.buckling_method == 'SemiAnalytical S3/U3':
                 this_text = 'SemiAnalytical S3/U3 utilization factors'
-            elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+            elif self.data.buckling_method == 'ML-Numeric (PULS based)':
                 this_text = 'ML-Numeric utilization factors'
             else:
                 this_text = 'ML-CL is deactivated. Use ML-Numeric or SemiAnalytical.'
@@ -668,7 +668,7 @@ class LetterMaker(object):
                 all_utils = all_line_data['color code']['utilization map']
             elif self.data.buckling_method == 'SemiAnalytical S3/U3':
                 all_utils = all_line_data['color code']['utilization map']
-            elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+            elif self.data.buckling_method == 'ML-Numeric (PULS based)':
                 all_utils = all_line_data['color code']['utilization map']
             else:
                 all_utils = list()

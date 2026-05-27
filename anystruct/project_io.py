@@ -12,7 +12,7 @@ DEACTIVATED_ML_CL_METHODS = (
     "ML-CL (" + "PU" + "LS based)",
     "ML-CL (SemiAnalytical based)",
 )
-ML_NUMERIC_METHOD = "ML-Numeric (SemiAnalytical based)"
+ML_NUMERIC_METHOD = "ML-Numeric (PULS based)"
 DEFAULT_BUCKLING_METHOD = "DNV-RP-C201 - prescriptive"
 
 

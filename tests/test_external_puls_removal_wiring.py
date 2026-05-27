@@ -72,6 +72,6 @@ def test_excel_import_and_ml_cl_buckling_option_remain_available():
         source.index("self._lab_buckling_method = ttk.Label")
     ]
     assert "'ML-CL (SemiAnalytical based)'" not in buckling_options
-    assert "'ML-Numeric (SemiAnalytical based)'" in buckling_options
+    assert "'ML-Numeric (PULS based)'" in buckling_options
     assert "'SemiAnalytical S3/U3'" in buckling_options
     assert "'DNV PULS'" not in buckling_options

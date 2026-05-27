@@ -91,7 +91,7 @@ def test_project_io_migrates_deactivated_ml_cl_to_ml_numeric():
 
     state = project_io.decode_project_mapping(legacy)
 
-    assert state.buckling_method == "ML-Numeric (SemiAnalytical based)"
+    assert state.buckling_method == "ML-Numeric (PULS based)"
 
 
 def test_project_file_codec_is_the_versioned_migration_entry_point():

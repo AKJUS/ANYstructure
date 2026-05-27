@@ -331,7 +331,7 @@ class FlatStru():
         DNV-RP-C201 Buckling strength of plated structures.\n
 
         :param calculation_method: 'DNV-RP-C201 - prescriptive', 'SemiAnalytical S3/U3',
-            or 'ML-Numeric (SemiAnalytical based)'
+            or 'ML-Numeric (PULS based)'
         :type calculation_method: str
         :param buckling_acceptance: selected UF family, either 'buckling' or 'ultimate'
         :type buckling_acceptance: str
