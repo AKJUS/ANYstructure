@@ -1,8 +1,19 @@
-"""Runtime S3/U3 semi-analytical PULS solver for ANYstructure.
+﻿"""Reduced semi-analytical PULS S3/U3 panel calculations.
 
-This file intentionally contains only the solver, validity diagnostics, and
-ANYstructure adapter functions.  Benchmarks, verification reports, CLI commands,
-and regression fixtures live in C:/Github/ANYintelligent/calculate_puls.py.
+This module is a first physics milestone for regular stiffened S3 panels and
+unstiffened U3 panels.  It keeps the PULS CSV files as benchmark data and does
+not fit corrections from them.  The implementation follows the direct
+semi-analytical shape described in DNV-CG-0128 Sec.4:
+
+* panel deflections are represented with Rayleigh-Ritz sine modes,
+* a nonlinear equilibrium residual is traced along a proportional in-plane
+  load path while lateral pressure remains fixed,
+* elastic mode factors and a major-yield collapse check are reported as
+  usage factors.
+
+The production PULS code uses a richer element library and element validity
+manual than the public guideline.  The result diagnostics therefore name the
+covered assumptions instead of presenting this reduced model as PULS parity.
 """
 
 from __future__ import annotations
@@ -23,7 +34,6 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
 SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
-
 
 @dataclass(frozen=True)
 class S3PanelInput:
@@ -111,18 +121,23 @@ class S3SolverConfig:
     nonlinear_membrane_factor: float = 0.75
     local_global_coupling_floor: float = 0.25
     local_global_coupling_gain: float = 1.0
+    global_stiffened_strip_capacity_factor: float = 0.80
     web_shear_interaction_exponent: float = 1.0
     local_plate_web_interaction_exponent: float = 2.0
     flanged_local_plate_restraint_factor: float = 1.10
+    s3_shear_buckling_capacity_factor: float = 0.75
     use_effective_stiffener_width: bool = False
     sniped_eccentricity_factor: float = 1.2
+    web_local_sniped_eccentricity_factor: float = 1.0
     torsional_imperfection_scale: float = 1.0
+    torsional_restraint_factor: float = 0.65
     pressure_local_share: float = 0.0
     pressure_global_share: float = 1.0
     include_pressure_dominated_yield_in_buckling_strength: bool = False
     include_lateral_deformation_in_ultimate_yield: bool = False
     include_global_curvature_in_plate_yield: bool = False
     pressure_dominated_yield_preload_ratio: float = 0.05
+    s3_major_yield_reserve_factor: float = 1.10
     yield_utilization_limit: float = 1.0
     pressure_yield_limit: float = 1.0
     max_load_factor: float = 100.0
@@ -1496,13 +1511,14 @@ def _stiffener_column_factor(panel: S3PanelInput, section: S3SectionProperties) 
 
 
 def _plate_strip_shear_buckling(
-    panel: S3PanelInput,
+    panel: S3PanelInput | U3PanelInput,
     length: float,
     width: float,
     thickness: float,
     shear_stress: float,
+    capacity_factor: float = 1.0,
 ) -> dict[str, float] | None:
-    """Return the classical elastic shear buckling factor for a plate strip.
+    """Return the elastic shear buckling factor for a plate strip.
 
     Notes
     -----
@@ -1512,12 +1528,13 @@ def _plate_strip_shear_buckling(
 
     where alpha = long_side / short_side >= 1.
 
-    The elastic shear buckling stress is calculated directly as
+    The classical elastic shear buckling stress is calculated directly as
 
         tau_cr = k_tau * pi^2 * E / (12 * (1 - nu^2)) * (t / short_side)^2
 
-    This is the classical elastic plate coefficient, not the DNV-CG-0128
-    Sec.3 CFM Table 3 Case 15 K_tau expression with the sqrt(3) factor.
+    The returned critical stress is then multiplied by the explicit
+    `capacity_factor`.  S3 uses this as a visible reduced shear-interaction
+    control; U3 keeps the default factor of 1.0.
     """
 
     shear = abs(shear_stress)
@@ -1537,19 +1554,26 @@ def _plate_strip_shear_buckling(
         * (thickness / max(short_side, EPS)) ** 2
     )
 
-    critical_stress = shear_coefficient * elastic_reference
+    applied_capacity_factor = max(float(capacity_factor), EPS)
+    classical_critical_stress = shear_coefficient * elastic_reference
+    critical_stress = applied_capacity_factor * classical_critical_stress
 
     return {
         "factor": critical_stress / shear,
         "critical_stress": critical_stress,
+        "classical_critical_stress": classical_critical_stress,
         "coefficient": shear_coefficient,
+        "capacity_factor": applied_capacity_factor,
         "aspect_ratio": alpha,
         "short_side": short_side,
         "long_side": long_side,
     }
 
 
-def _local_plate_shear_buckling(panel: S3PanelInput) -> dict[str, float] | None:
+def _local_plate_shear_buckling(
+    panel: S3PanelInput,
+    config: S3SolverConfig,
+) -> dict[str, float] | None:
     """Return the classical local plate shear factor for the unit bay.
 
     Same-mode diagonal sine terms are not a sound representation of plate shear
@@ -1564,6 +1588,7 @@ def _local_plate_shear_buckling(panel: S3PanelInput) -> dict[str, float] | None:
         panel.width,
         panel.plate_thickness,
         panel.shear_stress,
+        config.s3_shear_buckling_capacity_factor,
     )
 
 
@@ -1712,11 +1737,11 @@ def _stiffener_web_reference_compression(
 ) -> dict[str, Any]:
     """Return reference web-edge compression for the local web check.
 
-    The panel axial stress is the base proportional compression driver.  A
-    sniped stiffener also sees the public axial-eccentricity moment already
-    used by the SI/PI yield branches, so the local web strip uses the
-    compressive edge envelope of that section stress instead of treating the
-    web as an isolated plate under nominal panel stress only.
+    The panel axial stress is the base proportional compression driver.  The
+    SI/PI yield branches keep the public sniped-stiffener axial eccentricity
+    moment.  The reduced web branch carries that contribution as an explicit
+    sensitivity factor so the assumption remains visible in diagnostics and
+    can be disabled for comparison without changing the SI/PI yield path.
     """
 
     effective_axial = _stiffener_effective_axial_stress(
@@ -1737,7 +1762,9 @@ def _stiffener_web_reference_compression(
         "root": 0.5 * panel.plate_thickness,
         "tip": 0.5 * panel.plate_thickness + panel.stiffener_height,
     }
-    absolute_moment = abs(float(sniped["absolute"]))
+    raw_absolute_moment = abs(float(sniped["absolute"]))
+    web_local_sniped_factor = max(float(config.web_local_sniped_eccentricity_factor), 0.0)
+    absolute_moment = raw_absolute_moment * web_local_sniped_factor
     edge_bending = {
         edge: absolute_moment
         * abs(coordinate - stiffener_section.centroid_from_plate_midplane)
@@ -1751,12 +1778,14 @@ def _stiffener_web_reference_compression(
     controlling_edge = max(edge_compression, key=edge_compression.get)
     return {
         "stress": edge_compression[controlling_edge],
-        "source": "stiffener-section-axial-plus-sniped-web-edge-envelope",
+        "source": "stiffener-section-axial-plus-configured-sniped-web-edge-envelope",
         "controlling_edge": controlling_edge,
         "edge_compression": edge_compression,
         "edge_bending_stress": edge_bending,
         "effective_axial_stress": effective_axial,
         "sniped_eccentricity_moment": sniped,
+        "web_local_sniped_eccentricity_factor": web_local_sniped_factor,
+        "applied_sniped_eccentricity_moment": absolute_moment,
     }
 
 
@@ -1800,6 +1829,7 @@ def _stiffener_web_local_buckling(
         panel.stiffener_height,
         panel.web_thickness,
         panel.shear_stress,
+        config.s3_shear_buckling_capacity_factor,
     )
     web_ritz = _web_ritz_buckling(panel, config, compression_demand)
     factor_rows = [
@@ -1886,16 +1916,20 @@ def _local_plate_web_interaction(
     }
 
 
-def _stiffener_torsional_buckling(panel: S3PanelInput) -> dict[str, float] | None:
+def _stiffener_torsional_buckling(
+    panel: S3PanelInput,
+    config: S3SolverConfig | None = None,
+) -> dict[str, float] | None:
     """Return a reduced open-profile tripping/torsional stress candidate.
 
     DNV-CG-0128 uses a torsional reference stress based on St. Venant torsion,
     polar inertia, sectorial inertia, the stiffener span, and attachment
     restraint.  The reduced S3 solver uses the same ingredients in a
-    conservative gross-section estimate about the web root.  It is exposed as
-    an approximate candidate in diagnostics.
+    gross-section estimate about the web root with an explicit restraint
+    factor.  It is exposed as an approximate candidate in diagnostics.
     """
 
+    config = config or S3SolverConfig()
     compression = max(panel.axial_stress, 0.0)
     if compression <= EPS:
         return None
@@ -1924,7 +1958,7 @@ def _stiffener_torsional_buckling(panel: S3PanelInput) -> dict[str, float] | Non
 
     effective_length = panel.length * (0.70 if panel.stiffener_boundary == "Cont" else 1.0)
     wave_number = math.pi / max(effective_length, EPS)
-    critical_stress = (
+    critical_stress = config.torsional_restraint_factor * (
         shear_modulus * torsion_constant
         + panel.elastic_modulus * sectorial_inertia * wave_number**2
     ) / polar_inertia
@@ -1936,6 +1970,7 @@ def _stiffener_torsional_buckling(panel: S3PanelInput) -> dict[str, float] | Non
         "sectorial_inertia": sectorial_inertia,
         "effective_length": effective_length,
         "half_waves": 1.0,
+        "restraint_factor": config.torsional_restraint_factor,
     }
 
 
@@ -1948,16 +1983,29 @@ def elastic_buckling_factors(
 ) -> dict[str, Any]:
     config = config or S3SolverConfig()
     stiffener_section = stiffener_section or section
-    factor_rows = [
-        {
-            "factor": mode.linear_stiffness / mode.geometric_stiffness,
-            "label": mode.label,
-            "family": mode.family,
-            "failure_family": "plate" if mode.family == "local" else "global-stiffened-strip",
-        }
-        for mode in modes
-        if mode.geometric_stiffness > EPS
-    ]
+    factor_rows = []
+    for mode in modes:
+        if mode.geometric_stiffness <= EPS:
+            continue
+        raw_factor = mode.linear_stiffness / mode.geometric_stiffness
+        if mode.family == "global":
+            capacity_factor = max(config.global_stiffened_strip_capacity_factor, EPS)
+            factor = raw_factor * capacity_factor
+            failure_family = "global-stiffened-strip"
+        else:
+            capacity_factor = 1.0
+            factor = raw_factor
+            failure_family = "plate"
+        factor_rows.append(
+            {
+                "factor": factor,
+                "raw_factor": raw_factor,
+                "capacity_factor": capacity_factor,
+                "label": mode.label,
+                "family": mode.family,
+                "failure_family": failure_family,
+            }
+        )
     column_factor = _stiffener_column_factor(panel, stiffener_section)
     if column_factor is not None:
         factor_rows.append(
@@ -1968,7 +2016,7 @@ def elastic_buckling_factors(
                 "failure_family": "global-stiffener-cutoff",
             }
         )
-    shear_factor = _local_plate_shear_buckling(panel)
+    shear_factor = _local_plate_shear_buckling(panel, config)
     if shear_factor is not None:
         factor_rows.append(
             {
@@ -2013,7 +2061,7 @@ def elastic_buckling_factors(
                 "failure_family": "plate-web-local-interaction",
             }
         )
-    torsional_factor = _stiffener_torsional_buckling(panel)
+    torsional_factor = _stiffener_torsional_buckling(panel, config)
     if torsional_factor is not None:
         factor_rows.append(
             {
@@ -2056,6 +2104,8 @@ def elastic_buckling_factors(
             elastic_global_coupling_rows.append(
                 {
                     "mode": str(row["label"]),
+                    "raw_factor": float(row.get("raw_factor", uncoupled_factor)),
+                    "capacity_factor": float(row.get("capacity_factor", 1.0)),
                     "uncoupled_factor": uncoupled_factor,
                     "coupled_factor": float(row["factor"]),
                     "scale": scale,
@@ -2423,7 +2473,7 @@ def _stiffener_torsional_deformation_stress(
     """
 
     axial_compression = max(effective_axial_stress, 0.0)
-    torsional = _stiffener_torsional_buckling(panel)
+    torsional = _stiffener_torsional_buckling(panel, config)
     if axial_compression <= EPS or torsional is None:
         return {
             "stress": 0.0,
@@ -2850,7 +2900,7 @@ def _notes() -> list[str]:
         "regular S3 unit strip only; T1, K3, corrugation and FRP are outside this milestone",
         "positive PULS CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
         "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production PULS basis",
-        "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure first-yield with material preload contribution is reported in ultimate diagnostics but excluded from buckling-strength control by default",
+        "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure material preload contribution is reported in ultimate diagnostics but excluded from buckling-strength control by default",
         "shear-normal Ritz coupling is truncated in elastic and continuation checks; classical local plate shear remains a fallback candidate",
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
         "stiffener yield exposes SI/PI section branches, lateral-deformation and sniped bending, SI-only torsional stress, and effective attached plate width",
@@ -2905,8 +2955,15 @@ def _pressure_dominated_yield_limit(
     preload_max = float(pressure_yield.get("max") or 0.0)
     if preload_max <= EPS:
         return False
-    preload_share = preload_max / max(config.yield_utilization_limit, EPS)
+    preload_share = preload_max / max(_s3_major_yield_utilization_limit(config), EPS)
     return preload_share >= config.pressure_dominated_yield_preload_ratio
+
+
+def _s3_major_yield_utilization_limit(config: S3SolverConfig) -> float:
+    """Return the S3 utilization target for major yield/collapse detection."""
+
+    reserve = max(config.s3_major_yield_reserve_factor, EPS)
+    return max(config.yield_utilization_limit, EPS) * reserve
 
 
 def _relative_drift(reference: float | None, candidate: float | None) -> float | None:
@@ -3178,12 +3235,13 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
     column_factor = buckling["stiffener_column_factor"]
     global_family = buckling["modeled_failure_families"].get("global-stiffened-strip", {})
     global_elastic_cutoff_factor = _optional_float(global_family.get("critical_factor"))
+    s3_major_yield_limit = _s3_major_yield_utilization_limit(config)
 
     previous_load = 0.0
     previous_yield = pressure_yield["max"]
     yield_capacity_factor: float | None = None
     max_iterations = pressure_iterations
-    collapse_state = "first-yield"
+    collapse_state = "major-yield"
     final_yield = pressure_yield
     local_global_coupling = local_global_stiffness_scale(panel, modes, amplitudes, 0.0, config)
 
@@ -3287,13 +3345,13 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             config,
             ultimate_yield_global_factor,
         )
-        if final_yield["max"] >= config.yield_utilization_limit:
+        if final_yield["max"] >= s3_major_yield_limit:
             yield_capacity_factor = _interpolate_capacity(
                 previous_load,
                 previous_yield,
                 load_factor,
                 final_yield["max"],
-                config.yield_utilization_limit,
+                s3_major_yield_limit,
             )
             previous_load = load_factor
             break
@@ -3395,6 +3453,8 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         "capacity_factor": reported_ultimate_capacity_factor,
         "raw_capacity_factor": raw_ultimate_capacity_factor,
         "yield_capacity_factor": yield_capacity_factor,
+        "s3_major_yield_utilization_limit": s3_major_yield_limit,
+        "s3_major_yield_reserve_factor": config.s3_major_yield_reserve_factor,
         "ultimate_yield_includes_lateral_deformation": (
             config.include_lateral_deformation_in_ultimate_yield
         ),
@@ -3716,3 +3776,4 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         solve_u3_panel,
         validation_reasons,
     )
+
