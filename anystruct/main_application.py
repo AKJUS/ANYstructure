@@ -1017,7 +1017,7 @@ class Application():
 
         chk_deltax = 0.1
         chk_deltay = 0.025
-        (ttk.Label(self._tab_information, text='Labelling options. For non-cylinder structure only. ', font="Text 9")
+        (ttk.Label(self._tab_information, text='Labelling and color code options ', font="Text 9")
          .place(relx=0.02, rely=2*chk_deltay))
         self._information_gui_chk_structure = [
                                                ttk.Checkbutton(self._tab_information,
@@ -2866,6 +2866,27 @@ class Application():
         except Exception:
             return 'red'
 
+    @staticmethod
+    def _cylinder_buckling_uf(cylinder_results):
+        """Return the governing cylinder buckling UF used for GUI color coding."""
+        uf_values = []
+        for key in ['Unstiffened shell', 'Longitudinal stiffened shell',
+                    'Ring stiffened shell', 'Heavy ring frame']:
+            try:
+                if cylinder_results.get(key, None) is not None:
+                    uf_values.append(float(cylinder_results[key]))
+            except Exception:
+                pass
+
+        try:
+            if cylinder_results.get('Need to check column buckling', False) is True and \
+                    cylinder_results.get('Column stability UF', None) is not None:
+                uf_values.append(float(cylinder_results['Column stability UF']))
+        except Exception:
+            pass
+
+        return max(uf_values) if uf_values else 0.0
+
     def get_color_and_calc_state(self, current_line=None, active_line_only=False):
         ''' Return calculations and colors for line and results. '''
 
@@ -3603,14 +3624,31 @@ class Application():
                 sec_util = 0 if min(sec_mod) == 0 else min_sec_mod / min(sec_mod)
                 buc_util = 1 if float('inf') in buckling else max(all_buckling_uf_list)
                 rec_for_color[current_line]['rp buckling'] = max(all_buckling_uf_list)
+                selected_buckling_method = self._new_buckling_method.get()
                 semi_analytical_util = buc_util
                 if return_dict['SemiAnalytical valid'][current_line].get('valid prediction', None) == 1:
                     if op._puls_selected_method(obj_scnt_calc_pl.get_puls_method()) == 'ultimate':
                         semi_analytical_util = return_dict['SemiAnalytical'][current_line]['ultimate UF']
                     else:
                         semi_analytical_util = return_dict['SemiAnalytical'][current_line]['buckling UF']
+
+                numeric_util = buc_util
+                if return_dict['ML buckling numeric valid'][current_line].get('valid prediction', None) == 1:
+                    if op._puls_selected_method(obj_scnt_calc_pl.get_puls_method()) == 'ultimate':
+                        numeric_util = return_dict['ML buckling numeric'][current_line]['ultimate UF']
+                    else:
+                        numeric_util = return_dict['ML buckling numeric'][current_line]['buckling UF']
+
+                active_buckling_util = buc_util
+                if selected_buckling_method == 'SemiAnalytical S3/U3':
+                    active_buckling_util = semi_analytical_util
+                elif selected_buckling_method == 'ML-Numeric (PULS based)':
+                    active_buckling_util = numeric_util
+
                 return_dict['utilization'][current_line] = {'buckling': buc_util,
                                                             'SemiAnalytical buckling': semi_analytical_util,
+                                                            'ML-Numeric buckling': numeric_util,
+                                                            'active buckling': active_buckling_util,
                                                             'fatigue': fat_util,
                                                             'section': sec_util,
                                                             'shear': shear_util,
@@ -3683,8 +3721,17 @@ class Application():
             else:
                 press_map = all_pressures
 
-            all_utils = [max(list(return_dict['utilization'][line].values()))
-                         for line in self._line_to_struc.keys()]
+            all_utils = []
+            for line in self._line_to_struc.keys():
+                if self._line_to_struc[line][5] is not None:
+                    all_utils.append(self._cylinder_buckling_uf(return_dict['cylinder'].get(line, {})))
+                else:
+                    all_utils.append(
+                        return_dict['utilization'][line].get(
+                            'active buckling',
+                            max(list(return_dict['utilization'][line].values())),
+                        )
+                    )
             all_utils = np.unique(all_utils).tolist()
             if len(all_utils) > 1:
                 util_map = np.arange(0, 1.1, 0.1)
@@ -3736,6 +3783,7 @@ class Application():
                                          'fatigue map': fat_map,
                                          'highest pressure': highest_pressure, 'lowest pressure': lowest_pressure,
                                          'pressure map': press_map, 'all pressures': all_pressures,
+                                         'buckling method': self._new_buckling_method.get(),
                                          'all utilizations': all_utils, 'utilization map': util_map,
                                          'max sigma x': max(sig_x), 'min sigma x': min(sig_x), 'sigma x map': sig_x_map,
                                          'max sigma y1': max(sig_y1), 'min sigma y1': min(sig_y1),
@@ -3781,14 +3829,7 @@ class Application():
                     # cyl_sigma_hoop = cyl_obj.shsd / 1e6
                     cyl_results = cyl_obj.get_utilization_factors()
 
-                    cyl_uf = max([round(0 if cyl_results['Unstiffened shell'] is None else
-                                        cyl_results['Unstiffened shell'], 2),
-                                  round(0 if cyl_results['Longitudinal stiffened shell'] is None else
-                                        cyl_results['Longitudinal stiffened shell'], 2),
-                                  round(0 if cyl_results['Ring stiffened shell'] is None else
-                                        cyl_results['Ring stiffened shell'], 2),
-                                  round(0 if cyl_results['Heavy ring frame'] is None else
-                                        cyl_results['Heavy ring frame'], 2)])
+                    cyl_uf = self._cylinder_buckling_uf(cyl_results)
                 else:
                     cyl_uf = 0
                     cyl_long_str = None
@@ -3863,6 +3904,7 @@ class Application():
                     'sigma y2': matplotlib.colors.rgb2hex(cmap_sections(sig_y2_uf)),
                     'tau xy': matplotlib.colors.rgb2hex(cmap_sections(tau_xy_uf)),
                     'cylinder uf': matplotlib.colors.rgb2hex(cmap_sections(cyl_uf)),
+                    'cylinder uf value': cyl_uf,
                     'cylinder plate': matplotlib.colors.rgb2hex
                     (cmap_sections(0 if cyl_thickness is None else all_cyl_thk.index(cyl_thickness) / len(all_cyl_thk)))
 
@@ -4240,6 +4282,17 @@ class Application():
                                               anchor="nw")
         elif self._new_colorcode_utilization.get() == True and self._line_to_struc != {}:
             all_utils = cc_state['utilization map']
+            method_text = cc_state.get('buckling method', self._new_buckling_method.get())
+            if method_text == 'SemiAnalytical S3/U3':
+                title_text = 'SemiAnalytical UF'
+            elif method_text == 'ML-Numeric (PULS based)':
+                title_text = 'ML-Numeric UF'
+            else:
+                title_text = 'Buckling UF'
+            self._main_canvas.create_text(10, start_text - 20, text=title_text,
+                                          font=self._text_size["Text 10 bold"],
+                                          fill=self._color_text,
+                                          anchor="nw")
             for idx, uf in enumerate(cc_state['utilization map']):
                 self._main_canvas.create_text(11, start_text_shift + 20 * idx, text=str('UF = ' +str(round(uf,1))),
                                               font=self._text_size["Text 10 bold"],
@@ -4356,6 +4409,16 @@ class Application():
     def color_code_line(self, state, line, coord1, vector):
 
         cc_state = state['color code']
+        cmap_sections = plt.get_cmap('jet')
+
+        def utilization_color(uf):
+            try:
+                uf = float(uf)
+                max_uf = max(cc_state.get('utilization map', [uf, 1.0]))
+                max_uf = 1.0 if max_uf == 0 else float(max_uf)
+                return matplotlib.colors.rgb2hex(cmap_sections(uf / max_uf))
+            except Exception:
+                return 'black'
 
         if line not in state['color code']['lines'].keys():
             return 'black'
@@ -4424,15 +4487,10 @@ class Application():
                 color = 'black'
                 this_text = 'N/A'
             elif self._line_to_struc[line][5] is not None:
-                cyl_obj = self._line_to_struc[line][5]
-                results = cyl_obj.get_utilization_factors()
-                ufs = [round(0 if results['Unstiffened shell'] is None else results['Unstiffened shell'], 2),
-                       round(0 if results['Longitudinal stiffened shell'] is None else results['Longitudinal stiffened shell'],2),
-                       round(0 if results['Ring stiffened shell'] is None else results['Ring stiffened shell'], 2),
-                       round(0 if results['Heavy ring frame'] is None else results['Heavy ring frame'], 2)]
-
-                color = state['color code']['lines'][line]['cylinder uf']
-                this_text = str(max(ufs))
+                results = state.get('cylinder', {}).get(line, self._line_to_struc[line][5].get_utilization_factors())
+                cyl_uf = self._cylinder_buckling_uf(results)
+                color = utilization_color(cyl_uf)
+                this_text = str(round(cyl_uf, 3))
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=this_text)
@@ -4443,57 +4501,64 @@ class Application():
                                                   text=round(state['color code']['lines'][line]['rp uf'],2))
 
         elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'SemiAnalytical S3/U3':
-            semi_analytical = state.get('SemiAnalytical', {}).get(line, {})
-            semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
-            semi_analytical_colors = state.get('SemiAnalytical colors', {}).get(line, {})
-
-            if semi_analytical_valid.get('valid prediction', None) == 1:
-                puls_method = state['color code']['lines'][line].get('Buckling method', None)
-                puls_method = op._puls_selected_method(puls_method)
-
-                if puls_method == 'ultimate':
-                    uf = semi_analytical.get('ultimate UF', float('inf'))
-                    color = semi_analytical_colors.get('ultimate', 'red')
-                    this_text = 'ult UF=' + str(round(uf, 3))
-                else:
-                    uf = semi_analytical.get('buckling UF', float('inf'))
-                    color = semi_analytical_colors.get('buckling', 'red')
-                    this_text = 'buc UF=' + str(round(uf, 3))
+            if line in self._line_to_struc and self._line_to_struc[line][5] is not None:
+                results = state.get('cylinder', {}).get(line, self._line_to_struc[line][5].get_utilization_factors())
+                cyl_uf = self._cylinder_buckling_uf(results)
+                color = utilization_color(cyl_uf)
+                this_text = str(round(cyl_uf, 3))
             else:
-                color = 'red'
-                this_text = semi_analytical_valid.get('valid label', 'invalid')
+                semi_analytical = state.get('SemiAnalytical', {}).get(line, {})
+                semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
+
+                if semi_analytical_valid.get('valid prediction', None) == 1:
+                    puls_method = state['color code']['lines'][line].get('Buckling method', None)
+                    puls_method = op._puls_selected_method(puls_method)
+
+                    if puls_method == 'ultimate':
+                        uf = semi_analytical.get('ultimate UF', float('inf'))
+                        color = utilization_color(uf)
+                        this_text = 'ult UF=' + str(round(uf, 3))
+                    else:
+                        uf = semi_analytical.get('buckling UF', float('inf'))
+                        color = utilization_color(uf)
+                        this_text = 'buc UF=' + str(round(uf, 3))
+                else:
+                    color = 'red'
+                    this_text = semi_analytical_valid.get('valid label', 'invalid')
 
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                               text=this_text)
         elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
-            numeric = state.get('ML buckling numeric', {}).get(line, {})
-            numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
-            numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
-
-            if numeric_valid.get('valid prediction', None) == 1:
-                puls_method = state['color code']['lines'][line].get('Buckling method', None)
-
-                if puls_method == 'buckling':
-                    uf = numeric.get('buckling UF', float('inf'))
-                    color = numeric_colors.get('buckling', 'red')
-                    this_text = 'buc UF=' + str(round(uf, 3))
-                elif puls_method == 'ultimate':
-                    uf = numeric.get('ultimate UF', float('inf'))
-                    color = numeric_colors.get('ultimate', 'red')
-                    this_text = 'ult UF=' + str(round(uf, 3))
-                else:
-                    buc_uf = numeric.get('buckling UF', float('inf'))
-                    ult_uf = numeric.get('ultimate UF', float('inf'))
-                    uf = max(buc_uf, ult_uf)
-                    color = 'green' if all([
-                        numeric_colors.get('buckling', 'red') == 'green',
-                        numeric_colors.get('ultimate', 'red') == 'green'
-                    ]) else 'red'
-                    this_text = 'UF=' + str(round(uf, 3))
+            if line in self._line_to_struc and self._line_to_struc[line][5] is not None:
+                results = state.get('cylinder', {}).get(line, self._line_to_struc[line][5].get_utilization_factors())
+                cyl_uf = self._cylinder_buckling_uf(results)
+                color = utilization_color(cyl_uf)
+                this_text = str(round(cyl_uf, 3))
             else:
-                color = 'red'
-                this_text = numeric_valid.get('valid label', 'invalid/NaN')
+                numeric = state.get('ML buckling numeric', {}).get(line, {})
+                numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
+
+                if numeric_valid.get('valid prediction', None) == 1:
+                    puls_method = state['color code']['lines'][line].get('Buckling method', None)
+
+                    if puls_method == 'buckling':
+                        uf = numeric.get('buckling UF', float('inf'))
+                        color = utilization_color(uf)
+                        this_text = 'buc UF=' + str(round(uf, 3))
+                    elif puls_method == 'ultimate':
+                        uf = numeric.get('ultimate UF', float('inf'))
+                        color = utilization_color(uf)
+                        this_text = 'ult UF=' + str(round(uf, 3))
+                    else:
+                        buc_uf = numeric.get('buckling UF', float('inf'))
+                        ult_uf = numeric.get('ultimate UF', float('inf'))
+                        uf = max(buc_uf, ult_uf)
+                        color = utilization_color(uf)
+                        this_text = 'UF=' + str(round(uf, 3))
+                else:
+                    color = 'red'
+                    this_text = numeric_valid.get('valid label', 'invalid/NaN')
 
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
@@ -4587,15 +4652,10 @@ class Application():
 
         elif self._new_colorcode_total.get() == True:
             if self._line_to_struc[line][5] is not None:
-                cyl_obj = self._line_to_struc[line][5]
-                results = cyl_obj.get_utilization_factors()
-                ufs = [round(0 if results['Unstiffened shell'] is None else results['Unstiffened shell'], 2),
-                       round(0 if results['Longitudinal stiffened shell'] is None else results['Longitudinal stiffened shell'],2),
-                       round(0 if results['Ring stiffened shell'] is None else results['Ring stiffened shell'], 2),
-                       round(0 if results['Heavy ring frame'] is None else results['Heavy ring frame'], 2)]
-
-                color = state['color code']['lines'][line]['cylinder uf']
-                this_text = str(max(ufs))
+                results = state.get('cylinder', {}).get(line, self._line_to_struc[line][5].get_utilization_factors())
+                cyl_uf = self._cylinder_buckling_uf(results)
+                color = utilization_color(cyl_uf)
+                this_text = str(round(cyl_uf, 3))
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=this_text)
