@@ -42,7 +42,7 @@ setup(
         'Development Status :: 5 - Production/Stable',
         'Environment :: X11 Applications',
         'License :: OSI Approved :: MIT License',
-        'Programming Language :: Python :: 3.13',
+        'Programming Language :: Python :: 3.14',
         'Topic :: Scientific/Engineering'],
     keywords='dnv-gl-os-c101 dnv-rp-c202 dnv-rp-c201 naval_architecture structural_engineering steel buckling fatigue local_scantlings optimization weight',
     include_package_data=True,
