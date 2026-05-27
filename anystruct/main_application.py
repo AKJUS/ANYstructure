@@ -5085,8 +5085,8 @@ class Application():
                                                     font=self._text_size["Text 9 bold"],
                                                anchor='nw',fill=color_buckling)
 
-                    gweb = round(buckling['Local buckling']['Girder'][0],3)*1000
-                    gfl = round(buckling['Local buckling']['Girder'][1],3)*1000
+                    gweb = round(buckling['Local buckling']['Girder'][0],3)#*1000
+                    gfl = round(buckling['Local buckling']['Girder'][1],3)#*1000
                     self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+6)*dy) * 1],
                                                text=str(gweb),
                                                     font=self._text_size["Text 9"],
