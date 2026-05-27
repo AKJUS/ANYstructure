@@ -8,6 +8,11 @@ from anystruct.project_state import PROJECT_FORMAT_VERSION, ProjectState
 
 PROJECT_FORMAT_KEY = "format version"
 REMOVED_EXTERNAL_PULS_METHOD = "DNV PULS"
+DEACTIVATED_ML_CL_METHODS = (
+    "ML-CL (" + "PU" + "LS based)",
+    "ML-CL (SemiAnalytical based)",
+)
+ML_NUMERIC_METHOD = "ML-Numeric (SemiAnalytical based)"
 DEFAULT_BUCKLING_METHOD = "DNV-RP-C201 - prescriptive"
 
 
@@ -17,6 +22,8 @@ class ProjectFileCodec:
     current_version = PROJECT_FORMAT_VERSION
     format_key = PROJECT_FORMAT_KEY
     removed_external_puls_method = REMOVED_EXTERNAL_PULS_METHOD
+    deactivated_ml_cl_methods = DEACTIVATED_ML_CL_METHODS
+    ml_numeric_method = ML_NUMERIC_METHOD
     default_buckling_method = DEFAULT_BUCKLING_METHOD
     obsolete_external_puls_keys = ("PULS results",)
 
@@ -33,6 +40,8 @@ class ProjectFileCodec:
             migrated.pop(obsolete_key, None)
         if migrated.get("buckling method") == cls.removed_external_puls_method:
             migrated["buckling method"] = cls.default_buckling_method
+        if migrated.get("buckling method") in cls.deactivated_ml_cl_methods:
+            migrated["buckling method"] = cls.ml_numeric_method
         migrated[cls.format_key] = cls.current_version
         return migrated
 

@@ -80,6 +80,20 @@ def test_project_io_codec_migrates_legacy_payloads_at_the_file_boundary():
     assert "PULS results" not in payload
 
 
+def test_project_io_migrates_deactivated_ml_cl_to_ml_numeric():
+    legacy = {
+        "format version": 0,
+        "point_dict": {},
+        "line_dict": {},
+        "structure_properties": {},
+        "buckling method": "ML-CL (SemiAnalytical based)",
+    }
+
+    state = project_io.decode_project_mapping(legacy)
+
+    assert state.buckling_method == "ML-Numeric (SemiAnalytical based)"
+
+
 def test_project_file_codec_is_the_versioned_migration_entry_point():
     legacy = {
         "format version": 0,

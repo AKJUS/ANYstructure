@@ -5,4 +5,4 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = ["-ra"]
+addopts = ["-ra", "--basetemp=.pytest_tmp"]

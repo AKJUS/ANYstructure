@@ -31,7 +31,7 @@ def helper_harmonizer_multi(iterator):
     Multiprocessing helper for harmonized optimization.
 
     The ML result payload is selected from the active constraint:
-        chk[8] -> ML-CL result, expected [buckling_class, ultimate_class]
+        chk[8] -> ML-CL, deactivated
         chk[9] -> ML-Numeric result, expected [buckling_uf, ultimate_uf, valid_prediction]
     """
 
@@ -53,7 +53,7 @@ def helper_harmonizer_multi(iterator):
         elif use_ml_numeric:
             ml_result = iterator['info'][slave_line].get('ML-Numeric', [float('inf'), float('inf'), 0])
         elif use_ml_cl:
-            ml_result = iterator['info'][slave_line].get('ML-CL', [0, 0])
+            ml_result = [0, 0]
         else:
             ml_result = None
 
@@ -445,7 +445,7 @@ class CreateOptimizeMultipleWindow():
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
         tk.Label(self._frame, text='Check for buckling (SemiAnalytical S3/U3)').place(x=start_x + dx * 9.7,
                                                                             y=start_y + 11 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
+        tk.Label(self._frame, text='Check for buckling (ML-CL deactivated)').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
         tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7,
                                                                             y=start_y + 13 * dy)
         tk.Label(self._frame, text='Check to harmonize results. Same stiffener and plate dimensions '
@@ -465,8 +465,10 @@ class CreateOptimizeMultipleWindow():
                                                                                    y=start_y + 10 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_semi_analytical_buckling).place(x=start_x + dx * 12,
                                                                                      y=start_y + 11 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_ml_buckling).place(x=start_x + dx * 12,
-                                                                                y=start_y + 12 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_ml_buckling, state='disabled').place(
+            x=start_x + dx * 12,
+            y=start_y + 12 * dy,
+        )
         tk.Checkbutton(self._frame, variable=self._new_check_ml_numeric_buckling).place(x=start_x + dx * 12,
                                                                                         y=start_y + 13 * dy)
         tk.Checkbutton(self._frame, variable=self._new_harmonizer).place(x=start_x + dx * 8, y=start_y - 10.5 * dy)
@@ -730,12 +732,12 @@ class CreateOptimizeMultipleWindow():
 
         # make iterator for multiprocessing
         iterator = list()
-        to_check = (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
+        to_check = [self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                     self._new_check_shear_area.get(), self._new_check_buckling.get(),
                     self._new_check_fatigue.get(), self._new_check_slamming.get(),
                     self._new_check_local_buckling.get(), self._new_check_semi_analytical_buckling.get(),
-                    self._new_check_ml_buckling.get(),
-                    self._new_check_ml_numeric_buckling.get())
+                    False,
+                    self._new_check_ml_numeric_buckling.get()]
         iter_run_info = dict()
         selected_mat_fac = self._get_selected_material_factor()
 
@@ -745,7 +747,7 @@ class CreateOptimizeMultipleWindow():
                                          'fatigue pressure': input_pressures['fatigue pressure'],
                                          'fatigue object': input_pressures['fatigue object'],
                                          'slamming pressure': input_pressures['slamming pressure'],
-                                         'chk_calc_obj': self._opt_results[slave_line][0], 'ML-CL': [0, 0],
+                                         'chk_calc_obj': self._opt_results[slave_line][0],
                                          'SemiAnalytical': [float('inf'), float('inf'), 0, 0.87],
                                          'ML-Numeric': [float('inf'), float('inf'), 0],
                                          'fup': self._new_fup.get(), 'fdwn': self._new_fdwn.get()}
@@ -756,8 +758,8 @@ class CreateOptimizeMultipleWindow():
         for x_check in all_ok_checks:
             iterator.append({'x': x_check, 'info': iter_run_info})
 
-        if to_check[7] or to_check[8] or to_check[9]:
-            # Do SemiAnalytical, ML-CL or ML-Numeric checks for harmonized candidates
+        if to_check[7] or to_check[9]:
+            # Do SemiAnalytical or ML-Numeric checks for harmonized candidates
             to_run = list()
             to_run_owner = list()
 
@@ -811,9 +813,6 @@ class CreateOptimizeMultipleWindow():
             if to_check[7]:
                 sort_again = self._predict_semi_analytical_for_to_run(to_run)
                 result_key = 'SemiAnalytical'
-            elif to_check[8]:
-                sort_again = self._predict_ml_cl_for_to_run(to_run)
-                result_key = 'ML-CL'
             else:
                 sort_again = self._predict_ml_numeric_for_to_run(to_run)
                 result_key = 'ML-Numeric'
@@ -1057,6 +1056,9 @@ class CreateOptimizeMultipleWindow():
         """
         Predict ML-CL class results for harmonizer candidate objects.
 
+        ML-CL is deactivated; this method is retained only for compatibility
+        with older internal call sites.
+
         Returns
         -------
         np.ndarray
@@ -1247,7 +1249,7 @@ class CreateOptimizeMultipleWindow():
         selected_buckling_checks = [
             self._new_check_buckling.get(),
             self._new_check_semi_analytical_buckling.get(),
-            self._new_check_ml_buckling.get(),
+            False,
             self._new_check_ml_numeric_buckling.get(),
         ]
 
@@ -1260,8 +1262,7 @@ class CreateOptimizeMultipleWindow():
             self._new_check_ml_buckling.set(False)
             self._new_check_ml_numeric_buckling.set(False)
 
-        elif (self._new_check_semi_analytical_buckling.get() or self._new_check_ml_buckling.get()
-              or self._new_check_ml_numeric_buckling.get()):
+        elif (self._new_check_semi_analytical_buckling.get() or self._new_check_ml_numeric_buckling.get()):
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)
 

@@ -903,15 +903,14 @@ class Application():
         self._new_buckling_method = tk.StringVar()
         options = [
             'DNV-RP-C201 - prescriptive',
-            'ML-Numeric (PULS based)',
-            'ML-CL (PULS based)',
+            'ML-Numeric (SemiAnalytical based)',
             'SemiAnalytical S3/U3',
         ]
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
         self._buckling_method = ttk.OptionMenu(self._tab_prop, self._new_buckling_method, options[0], *options,
                                                command=self.update_frame)
 
-        # ML-CL and SemiAnalytical share the historic panel input parameters below.
+        # SemiAnalytical and ML-Numeric share the historic buckling panel input parameters below.
         self._ent_puls_uf = ttk.Entry(self._tab_prop, textvariable=self._new_puls_uf, width=int(ent_width * 1))
         self._new_puls_uf.trace('w', self.trace_acceptance_change)
 
@@ -2861,9 +2860,9 @@ class Application():
             return 'red'
 
     def _semi_analytical_uf_color(self, uf):
-        """SemiAnalytical S3/U3 uses the shared buckling acceptance entry."""
+        """SemiAnalytical UF is material-factored before pass/fail coloring."""
         try:
-            return 'green' if float(uf) <= float(self._new_puls_uf.get()) else 'red'
+            return 'green' if float(uf) <= 1.0 else 'red'
         except Exception:
             return 'red'
 
@@ -3478,38 +3477,70 @@ class Application():
                         }
 
                 # -------------------------------------------------------------------------
-                # Built-in semi-analytical replacement.
+                # SemiAnalytical solver.
                 #
-                # The current solver branch covers S3. U3 will reuse this same state surface
-                # when the unstiffened regular plate branch is added.
+                # Store both raw solver UF and material-factored UF. The factored UF is used
+                # for display, colors, and utilization checks, matching ML-Numeric behavior.
                 # -------------------------------------------------------------------------
                 try:
-                    semi_analytical_pred = op._predict_semi_analytical_uf([all_obj, None], design_pressure)
-                    semi_analytical_valid = int(semi_analytical_pred[2]) == 1
+                    semi_analytical_mat_fac = float(self._new_material_factor.get())
+                except Exception:
+                    semi_analytical_mat_fac = obj_scnt_calc_pl.mat_factor
+
+                try:
+                    semi_analytical_result = op.semi_analytical.solve_anystructure_panel(
+                        [all_obj, None],
+                        design_pressure,
+                    )
+                    semi_analytical_valid = int(semi_analytical_result.get('valid_prediction', 0)) == 1
                 except Exception as e:
-                    semi_analytical_pred = [float('inf'), float('inf'), 0]
+                    semi_analytical_result = {
+                        'buckling_usage_factor': float('inf'),
+                        'ultimate_usage_factor': float('inf'),
+                        'panel_family': None,
+                        'confidence': 'low',
+                    }
                     semi_analytical_valid = False
                     semi_analytical_error = str(e)
                 else:
-                    semi_analytical_error = ''
+                    semi_analytical_error = semi_analytical_result.get('invalid_reason') or ''
 
-                semi_analytical_buc_uf = float(semi_analytical_pred[0]) if semi_analytical_valid else float('inf')
-                semi_analytical_ult_uf = float(semi_analytical_pred[1]) if semi_analytical_valid else float('inf')
-                semi_analytical_acceptance = float(self._new_puls_uf.get())
+                semi_analytical_buc_raw = (
+                    float(semi_analytical_result.get('buckling_usage_factor', float('inf')))
+                    if semi_analytical_valid else float('inf')
+                )
+                semi_analytical_ult_raw = (
+                    float(semi_analytical_result.get('ultimate_usage_factor', float('inf')))
+                    if semi_analytical_valid else float('inf')
+                )
+                semi_analytical_buc_uf = semi_analytical_buc_raw * semi_analytical_mat_fac
+                semi_analytical_ult_uf = semi_analytical_ult_raw * semi_analytical_mat_fac
+                semi_analytical_acceptance = 1.0
 
                 if semi_analytical_valid:
                     semi_analytical_buc_color = self._semi_analytical_uf_color(semi_analytical_buc_uf)
                     semi_analytical_ult_color = self._semi_analytical_uf_color(semi_analytical_ult_uf)
-                    semi_analytical_valid_label = 'valid SemiAnalytical UF predicted'
+                    semi_analytical_valid_label = semi_analytical_result.get(
+                        'valid_label',
+                        'valid SemiAnalytical UF predicted',
+                    )
                 else:
                     semi_analytical_buc_color = 'red'
                     semi_analytical_ult_color = 'red'
-                    semi_analytical_valid_label = 'SemiAnalytical S3/U3 unsupported or invalid'
+                    semi_analytical_valid_label = semi_analytical_result.get(
+                        'valid_label',
+                        'SemiAnalytical S3/U3 unsupported or invalid',
+                    )
 
                 return_dict['SemiAnalytical'][current_line] = {
                     'buckling UF': semi_analytical_buc_uf,
                     'ultimate UF': semi_analytical_ult_uf,
+                    'buckling UF raw': semi_analytical_buc_raw,
+                    'ultimate UF raw': semi_analytical_ult_raw,
+                    'material factor': semi_analytical_mat_fac,
                     'acceptance': semi_analytical_acceptance,
+                    'panel family': semi_analytical_result.get('panel_family', None),
+                    'confidence': semi_analytical_result.get('confidence', None),
                     'error': semi_analytical_error,
                 }
 
@@ -4045,22 +4076,9 @@ class Application():
                                     for key in ['fatigue', 'section', 'shear', 'thickness']
                                 ]) else 'red'
                         elif self._new_buckling_method.get() in [
-                            'ML-CL (PULS based)',
-                            'ML-Numeric (PULS based)',
+                            'ML-Numeric (SemiAnalytical based)',
                         ]:
-                            ml_method = self._new_buckling_method.get()
-
-                            if ml_method == 'ML-CL (PULS based)':
-                                # Existing classification pipeline colors
-                                ml_color_dict = state.get('ML buckling colors', {}).get(line, {})
-                            else:
-                                # New numeric UF pipeline colors
-                                ml_color_dict = state.get('ML buckling numeric colors', {}).get(line, {})
-
-                                # Fallback to classification colors if numeric state is not available.
-                                # This avoids black lines if the numeric models are not loaded yet.
-                                if ml_color_dict == {}:
-                                    ml_color_dict = state.get('ML buckling colors', {}).get(line, {})
+                            ml_color_dict = state.get('ML buckling numeric colors', {}).get(line, {})
 
                             if ml_color_dict == {}:
                                 color = 'black'
@@ -4424,12 +4442,6 @@ class Application():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=round(state['color code']['lines'][line]['rp uf'],2))
 
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-CL (PULS based)':
-            color = 'black'
-            this_text = 'N/A'
-            if self._new_label_color_coding.get():
-                self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                              text=this_text)
         elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'SemiAnalytical S3/U3':
             semi_analytical = state.get('SemiAnalytical', {}).get(line, {})
             semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
@@ -4454,7 +4466,7 @@ class Application():
             if self._new_label_color_coding.get():
                 self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                               text=this_text)
-        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
+        elif self._new_colorcode_utilization.get() == True and self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)':
             numeric = state.get('ML buckling numeric', {}).get(line, {})
             numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
             numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
@@ -4593,11 +4605,6 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=round(state['color code']['lines'][line]['Total uf rp'],2))
-            elif self._new_buckling_method.get() == 'ML-CL (PULS based)':
-                color = 'black'
-                if self._new_label_color_coding.get():
-                    self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
-                                                  text='N/A')
             elif self._new_buckling_method.get() == 'SemiAnalytical S3/U3':
                 semi_analytical = state.get('SemiAnalytical', {}).get(line, {})
                 semi_analytical_valid = state.get('SemiAnalytical valid', {}).get(line, {})
@@ -4620,7 +4627,7 @@ class Application():
                 if self._new_label_color_coding.get():
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
                                                   text=this_text)
-            elif self._new_buckling_method.get() == 'ML-Numeric (PULS based)':
+            elif self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)':
                 numeric = state.get('ML buckling numeric', {}).get(line, {})
                 numeric_valid = state.get('ML buckling numeric valid', {}).get(line, {})
                 numeric_colors = state.get('ML buckling numeric colors', {}).get(line, {})
@@ -4940,13 +4947,12 @@ class Application():
 
                 elif self._new_buckling_method.get() in [
                     'SemiAnalytical S3/U3',
-                    'ML-CL (PULS based)',
-                    'ML-Numeric (PULS based)',
+                    'ML-Numeric (SemiAnalytical based)',
                 ]:
 
                     print_semi_analytical_results = self._new_buckling_method.get() == 'SemiAnalytical S3/U3'
-                    print_class_results = self._new_buckling_method.get() == 'ML-CL (PULS based)'
-                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (PULS based)'
+                    print_class_results = False
+                    print_numeric_results = self._new_buckling_method.get() == 'ML-Numeric (SemiAnalytical based)'
 
                     self._result_canvas.create_text(
                         [x * 1, (y + (start_y + 0) * dy) * 1],
@@ -4969,8 +4975,23 @@ class Application():
                         if semi_analytical is not None:
                             semi_analytical_is_valid = semi_analytical_valid.get('valid prediction', None) == 1
                             if semi_analytical_is_valid:
-                                buckling_uf_txt = f"{semi_analytical.get('buckling UF', float('inf')):.3f}"
-                                ultimate_uf_txt = f"{semi_analytical.get('ultimate UF', float('inf')):.3f}"
+                                buckling_uf = semi_analytical.get('buckling UF', float('inf'))
+                                ultimate_uf = semi_analytical.get('ultimate UF', float('inf'))
+                                buckling_uf_raw = semi_analytical.get('buckling UF raw', None)
+                                ultimate_uf_raw = semi_analytical.get('ultimate UF raw', None)
+                                semi_analytical_mat_fac = semi_analytical.get(
+                                    'material factor',
+                                    self._new_material_factor.get(),
+                                )
+
+                                buckling_uf_txt = f"{buckling_uf:.3f}"
+                                ultimate_uf_txt = f"{ultimate_uf:.3f}"
+
+                                if buckling_uf_raw is not None:
+                                    buckling_uf_txt += f"  ({buckling_uf_raw:.3f} x {semi_analytical_mat_fac:.2f})"
+
+                                if ultimate_uf_raw is not None:
+                                    ultimate_uf_txt += f"  ({ultimate_uf_raw:.3f} x {semi_analytical_mat_fac:.2f})"
                             else:
                                 buckling_uf_txt = 'invalid/unsupported'
                                 ultimate_uf_txt = 'invalid/unsupported'
@@ -4995,7 +5016,7 @@ class Application():
 
                             self._result_canvas.create_text(
                                 [x * 1, (y + (start_y + line_offset) * dy) * 1],
-                                text='SemiAnalytical acceptance limit: <= ' + str(round(semi_analytical.get('acceptance', 0.87), 3)),
+                                text='SemiAnalytical UF acceptance limit: <= 1.00',
                                 font=self._text_size["Text 9"],
                                 anchor='nw',
                                 fill=self._color_text,
@@ -5080,10 +5101,10 @@ class Application():
                                 ultimate_uf_txt = f"{ultimate_uf:.3f}"
 
                                 if buckling_uf_raw is not None:
-                                    buckling_uf_txt += f"  ({buckling_uf_raw:.3f} × {numeric_mat_fac:.2f})"
+                                    buckling_uf_txt += f"  ({buckling_uf_raw:.3f} x {numeric_mat_fac:.2f})"
 
                                 if ultimate_uf_raw is not None:
-                                    ultimate_uf_txt += f"  ({ultimate_uf_raw:.3f} × {numeric_mat_fac:.2f})"
+                                    ultimate_uf_txt += f"  ({ultimate_uf_raw:.3f} x {numeric_mat_fac:.2f})"
 
                             else:
                                 buckling_uf_txt = 'invalid/NaN'

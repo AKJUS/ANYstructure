@@ -285,23 +285,32 @@ class LetterMaker(object):
 
                         textobject.textLine(
                             'SemiAnalytical S3/U3 results using ' + str(puls_method) +
-                            ' utilization with acceptance ' + str(round(acceptance, 3))
+                            ' material-factored utilization with acceptance <= ' + str(round(acceptance, 3))
                         )
                         if semi_analytical_valid.get('valid prediction', None) == 1:
+                            mat_fac = semi_analytical.get('material factor', 1.0)
+                            buc_raw = semi_analytical.get('buckling UF raw', None)
+                            ult_raw = semi_analytical.get('ultimate UF raw', None)
+                            buc_text = str(round(semi_analytical.get('buckling UF', float('inf')), 3))
+                            ult_text = str(round(semi_analytical.get('ultimate UF', float('inf')), 3))
+                            if buc_raw is not None:
+                                buc_text += ' (' + str(round(buc_raw, 3)) + ' x ' + str(round(mat_fac, 3)) + ')'
+                            if ult_raw is not None:
+                                ult_text += ' (' + str(round(ult_raw, 3)) + ' x ' + str(round(mat_fac, 3)) + ')'
                             textobject.setFillColor(
                                 'red' if semi_analytical_colors.get('buckling', 'red') == 'red' else 'black'
                             )
                             textobject.textLine(
-                                'Buckling SemiAnalytical S3/U3 UF: ' +
-                                str(round(semi_analytical.get('buckling UF', float('inf')), 3))
+                                'Buckling SemiAnalytical S3/U3 UF: ' + buc_text
                             )
                             textobject.setFillColor(
                                 'red' if semi_analytical_colors.get('ultimate', 'red') == 'red' else 'black'
                             )
                             textobject.textLine(
-                                'Ultimate SemiAnalytical S3/U3 UF: ' +
-                                str(round(semi_analytical.get('ultimate UF', float('inf')), 3))
+                                'Ultimate SemiAnalytical S3/U3 UF: ' + ult_text
                             )
+                            textobject.setFillColor('black')
+                            textobject.textLine('SemiAnalytical UF acceptance limit: <= 1.00')
                         else:
                             textobject.setFillColor('red')
                             textobject.textLine(
@@ -309,26 +318,43 @@ class LetterMaker(object):
                                 semi_analytical_valid.get('valid label', 'invalid/unsupported')
                             )
                         textobject.setFillColor('black')
-                    else:
+                    elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
                         puls_method = line_structure.plate(line_bundle).get_puls_method()
-                        textobject.textLine('ML-CL results using '+str(puls_method) + 'utilization with acceptance 0.87')
-                        ml_buckling = result_state['ML buckling class'][line]['buckling']
-                        ml_ultimate = result_state['ML buckling class'][line]['ultimate']
-                        color_ml_buc = result_state['ML buckling colors'][line]['buckling']
-                        color_ml_ult = result_state['ML buckling colors'][line]['ultimate']
-                        color_csr = result_state['ML buckling colors'][line]['CSR requirement']
+                        puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
+                        numeric = result_state.get('ML buckling numeric', {}).get(line, {})
+                        numeric_valid = result_state.get('ML buckling numeric valid', {}).get(line, {})
+                        numeric_colors = result_state.get('ML buckling numeric colors', {}).get(line, {})
 
-                        if puls_method == 'buckling':
-                            textobject.setFillColor('red' if color_ml_buc == 'red' else 'black')
-                        textobject.textLine('Buckling ML-CL results: ' + self.data.ml_classes[ml_buckling])
+                        textobject.textLine('ML-Numeric results using ' + str(puls_method) + ' utilization')
+                        if numeric_valid.get('valid prediction', None) == 1:
+                            mat_fac = numeric.get('material factor', 1.0)
+                            buc_raw = numeric.get('buckling UF raw', None)
+                            ult_raw = numeric.get('ultimate UF raw', None)
+                            buc_text = str(round(numeric.get('buckling UF', float('inf')), 3))
+                            ult_text = str(round(numeric.get('ultimate UF', float('inf')), 3))
+                            if buc_raw is not None:
+                                buc_text += ' (' + str(round(buc_raw, 3)) + ' x ' + str(round(mat_fac, 3)) + ')'
+                            if ult_raw is not None:
+                                ult_text += ' (' + str(round(ult_raw, 3)) + ' x ' + str(round(mat_fac, 3)) + ')'
+                            textobject.setFillColor(
+                                'red' if numeric_colors.get('buckling', 'red') == 'red' else 'black'
+                            )
+                            textobject.textLine('Buckling ML-Numeric UF: ' + buc_text)
+                            textobject.setFillColor(
+                                'red' if numeric_colors.get('ultimate', 'red') == 'red' else 'black'
+                            )
+                            textobject.textLine('Ultimate ML-Numeric UF: ' + ult_text)
+                            textobject.setFillColor('black')
+                            textobject.textLine('ML-Numeric UF acceptance limit: <= 1.00')
+                        else:
+                            textobject.setFillColor('red')
+                            textobject.textLine(
+                                'ML-Numeric status: ' +
+                                numeric_valid.get('valid label', 'invalid/NaN')
+                            )
                         textobject.setFillColor('black')
-                        if puls_method == 'ultimate':
-                            textobject.setFillColor('red' if color_ml_ult == 'red' else 'black')
-                        textobject.textLine('Ultimate ML-CL result: ' + self.data.ml_classes[ml_ultimate])
-                        textobject.setFillColor('red' if color_csr == 'red' else 'black')
-                        textobject.textLine('CSR tank requirement (stiffener): ' + 'OK' if color_csr == 'green'
-                                            else 'red')
-                        textobject.setFillColor('black')
+                    else:
+                        textobject.textLine('ML-CL is deactivated. Use ML-Numeric or SemiAnalytical.')
 
                     textobject.setFillColor('black')
                     textobject.setFillColor('red') if result_state['colors'][line]['fatigue'] == 'red' \
@@ -451,7 +477,7 @@ class LetterMaker(object):
             colors = self.data.result_state['colors']
         elif self.data.buckling_method == 'SemiAnalytical S3/U3':
             colors = self.data.result_state.get('SemiAnalytical colors', {})
-        elif self.data.buckling_method == 'ML-Numeric (PULS based)':
+        elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
             colors = self.data.result_state.get('ML buckling numeric colors', {})
         else:
             colors = self.data.result_state['ML buckling colors']
@@ -521,7 +547,7 @@ class LetterMaker(object):
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                     self.c.setStrokeColor(all_line_data.get('SemiAnalytical colors', {}).get(line, {}).get(puls_method, 'black'))
-                elif self.data.buckling_method == 'ML-Numeric (PULS based)':
+                elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
                     puls_method = line_plate.get_puls_method()
                     puls_method = 'ultimate' if str(puls_method).lower() in ['2', 'ultimate'] else 'buckling'
                     self.c.setStrokeColor(
@@ -630,8 +656,10 @@ class LetterMaker(object):
                 this_text = 'DNV-RP-C201 Buckling Strength of Plated Structures'
             elif self.data.buckling_method == 'SemiAnalytical S3/U3':
                 this_text = 'SemiAnalytical S3/U3 utilization factors'
+            elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
+                this_text = 'ML-Numeric utilization factors'
             else:
-                this_text = 'ML-CL utilization factors not avaliable. ML-CLassifier only shows ok or not ok.'
+                this_text = 'ML-CL is deactivated. Use ML-Numeric or SemiAnalytical.'
 
             textobject.textLine(this_text)
             self.c.drawText(textobject)
@@ -639,6 +667,8 @@ class LetterMaker(object):
             if self.data.buckling_method == 'DNV-RP-C201 - prescriptive':
                 all_utils = all_line_data['color code']['utilization map']
             elif self.data.buckling_method == 'SemiAnalytical S3/U3':
+                all_utils = all_line_data['color code']['utilization map']
+            elif self.data.buckling_method == 'ML-Numeric (SemiAnalytical based)':
                 all_utils = all_line_data['color code']['utilization map']
             else:
                 all_utils = list()

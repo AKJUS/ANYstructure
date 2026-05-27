@@ -584,7 +584,7 @@ class CreateOptGeoWindow():
         tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
         tk.Label(self._frame, text='Check for buckling, SemiAnalytical S3/U3').place(x=start_x + dx * 9.7,
                                                                            y=start_y + 11 * dy)
-        tk.Label(self._frame, text='Check for buckling, ML-CL').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
+        tk.Label(self._frame, text='Check for buckling, ML-CL deactivated').place(x=start_x + dx * 9.7, y=start_y + 12 * dy)
         tk.Label(self._frame, text='Check for buckling, ML-Numeric').place(x=start_x + dx * 9.7,
                                                                            y=start_y + 13 * dy)
 
@@ -621,8 +621,10 @@ class CreateOptGeoWindow():
                                                                                    y=start_y + 10 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical).place(x=start_x + dx * 12,
                                                                                      y=start_y + 11 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl).place(x=start_x + dx * 12,
-                                                                                   y=start_y + 12 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl, state='disabled').place(
+            x=start_x + dx * 12,
+            y=start_y + 12 * dy,
+        )
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric).place(x=start_x + dx * 12,
                                                                                         y=start_y + 13 * dy)
 
@@ -774,7 +776,7 @@ class CreateOptGeoWindow():
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
                       self._new_check_local_buckling.get(), self._new_check_buckling_semi_analytical.get(),
-                      self._new_check_buckling_ml_cl.get(),
+                      False,
                       self._new_check_buckling_ml_numeric.get())
 
         selected_ml_algo = self._get_selected_ml_buckling()
@@ -1159,7 +1161,7 @@ class CreateOptGeoWindow():
         selected_buckling_checks = [
             self._new_check_buckling.get(),
             self._new_check_buckling_semi_analytical.get(),
-            self._new_check_buckling_ml_cl.get(),
+            False,
             self._new_check_buckling_ml_numeric.get(),
         ]
 
@@ -1173,14 +1175,10 @@ class CreateOptGeoWindow():
             if self._new_check_buckling_semi_analytical.get():
                 self._new_check_buckling_semi_analytical.set(False)
 
-            if self._new_check_buckling_ml_cl.get():
-                self._new_check_buckling_ml_cl.set(False)
-
             if self._new_check_buckling_ml_numeric.get():
                 self._new_check_buckling_ml_numeric.set(False)
 
-        elif (self._new_check_buckling_semi_analytical.get() or self._new_check_buckling_ml_cl.get()
-              or self._new_check_buckling_ml_numeric.get()):
+        elif (self._new_check_buckling_semi_analytical.get() or self._new_check_buckling_ml_numeric.get()):
             self._new_check_buckling.set(False)
             self._new_check_local_buckling.set(False)
 

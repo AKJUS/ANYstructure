@@ -17,7 +17,8 @@ CYLINDER_STRUCTURE_DOMAINS = (
 
 BUCKLING_CALCULATION_METHODS = (
     "DNV-RP-C201 - prescriptive",
-    "ML-CL (PULS based)",
+    "SemiAnalytical S3/U3",
+    "ML-Numeric (SemiAnalytical based)",
 )
 
 BUCKLING_ACCEPTANCE_TYPES = (

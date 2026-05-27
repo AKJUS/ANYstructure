@@ -88,7 +88,7 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     if puls_sheet is not None:
         raise NotImplementedError(
             "External Excel-sheet PULS optimization was removed. Use the built-in SemiAnalytical replacement, "
-            "prescriptive, ML-CL, or ML-Numeric buckling checks."
+            "prescriptive, or ML-Numeric buckling checks."
         )
 
     # Make material factor explicit for all optimizer variants.
@@ -894,9 +894,7 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
             accepted if selected UF / acceptance < 1.0
 
         chk[8]  ML-CL:
-            ml_results[0] = buckling class result
-            ml_results[1] = ultimate class result
-            accepted class is encoded as 9 in the existing optimization logic
+            deactivated; ML-Numeric has replaced this classifier path
 
         chk[9]  ML-Numeric:
             ml_results[0] = material-factored buckling UF
@@ -964,19 +962,8 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                 print('SemiAnalytical', calc_object[0].get_one_line_string(), False)
             return False, 'SemiAnalytical', x, all_checks
 
-    # Buckling ML-CL
     if chk[8]:
-        if ml_results is None:
-            return False, 'Buckling ML-CL', x, all_checks
-
-        puls_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
-        if any([puls_method == 'buckling' and ml_results[0] != 9,
-                puls_method == 'ultimate' and ml_results[1] != 9]):
-            if print_result:
-                stf_text = calc_object[0].Stiffener.get_one_line_string() if calc_object[
-                                                                                 0].Stiffener is not None else 'No stiffener'
-                print('Buckling ML-CL', stf_text, False)
-            return False, 'Buckling ML-CL', x, all_checks
+        return False, 'Buckling ML-CL deactivated', x, all_checks
 
     # Buckling ML-Numeric
     if chk[9]:
@@ -1511,9 +1498,12 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
 
     Supports:
         chk[7] = built-in SemiAnalytical replacement
-        chk[8] = ML-CL classification pipeline
+        chk[8] = ML-CL classification pipeline, deactivated
         chk[9] = ML-Numeric UF pipeline
     '''
+
+    if len(chk) > 8 and chk[8]:
+        raise NotImplementedError('ML-CL buckling is deactivated. Use ML-Numeric or SemiAnalytical.')
 
     if chk[7]:
         # Built-in SemiAnalytical replacement. Columns: buckling UF, ultimate UF,
@@ -1538,7 +1528,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
         PULSrun = None
 
     elif chk[8]:
-        # ML-CL to be used.
+        # ML-CL is deactivated.
         sp_int, sp_gl_gt, up_int, up_gl_gt = list(), list(), list(), list()
         sp_int_idx, sp_gl_gt_idx, up_int_idx, up_gl_gt_idx = list(), list(), list(), list()
 

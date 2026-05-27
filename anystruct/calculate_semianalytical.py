@@ -1,7 +1,7 @@
-﻿"""Reduced semi-analytical PULS S3/U3 panel calculations.
+"""Reduced SemiAnalytical S3/U3 panel calculations.
 
 This module is a first physics milestone for regular stiffened S3 panels and
-unstiffened U3 panels.  It keeps the PULS CSV files as benchmark data and does
+unstiffened U3 panels.  It keeps the reference CSV files as benchmark data and does
 not fit corrections from them.  The implementation follows the direct
 semi-analytical shape described in DNV-CG-0128 Sec.4:
 
@@ -11,9 +11,9 @@ semi-analytical shape described in DNV-CG-0128 Sec.4:
 * elastic mode factors and a major-yield collapse check are reported as
   usage factors.
 
-The production PULS code uses a richer element library and element validity
+The production closed-form reference code uses a richer element library and element validity
 manual than the public guideline.  The result diagnostics therefore name the
-covered assumptions instead of presenting this reduced model as PULS parity.
+covered assumptions instead of presenting this reduced model as closed-tool parity.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ class S3PanelInput:
     """Input surface for the regular stiffened S3 panel milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  CSV
-    PULS exports use positive in-plane normal stress for compression; the
+    reference exports use positive in-plane normal stress for compression; the
     helper functions in this module preserve that sign convention.
     """
 
@@ -78,7 +78,7 @@ class U3PanelInput:
     """Input surface for the regular unstiffened U3 plate milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  The
-    ANYstructure/PULS exports use two end values for longitudinal and
+    ANYstructure/reference exports use two end values for longitudinal and
     transverse stress; the current U3 Ritz path uses their linear plate-field
     interpolation in yield checks and their mean values in elastic buckling.
     """
@@ -278,7 +278,7 @@ def _optional_float(value: Any) -> float | None:
 
 
 def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
-    """Map a PULS stiffened-panel CSV row into the solver input type."""
+    """Map a reference stiffened-panel CSV row into the solver input type."""
 
     elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
     poisson_ratio = _optional_float(row.get("Poisson's ratio"))
@@ -316,7 +316,7 @@ def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
 
 
 def row_to_u3_input(row: Mapping[str, Any]) -> U3PanelInput:
-    """Map a PULS unstiffened-panel row/export into the solver input type."""
+    """Map a reference unstiffened-panel row/export into the solver input type."""
 
     elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
     poisson_ratio = _optional_float(row.get("Poisson's ratio"))
@@ -379,7 +379,7 @@ def _ship_section_value(section: Mapping[str, Any], key: str, default: Any = _MI
 
 
 def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one ANYstructure ship-section PULS result record to CSV-like S3 fields."""
+    """Flatten one ANYstructure ship-section result record to CSV-like S3 fields."""
 
     plate = record["Plate geometry"]
     stiffener = record["Primary stiffeners"]
@@ -422,7 +422,7 @@ def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def ship_section_record_to_u3_row(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one ANYstructure ship-section PULS result record to CSV-like U3 fields."""
+    """Flatten one ANYstructure ship-section result record to CSV-like U3 fields."""
 
     plate = record["Geometry"]
     material = record["Material"]
@@ -679,8 +679,9 @@ def predict_anystructure_uf(
 ) -> np.ndarray:
     """Return legacy ANYstructure vector [buckling UF, ultimate UF, valid].
 
-    The factors are intentionally returned un-factored.  ANYstructure compares
-    them against a separate PULS acceptance limit, typically 1 / material factor.
+    The factors are intentionally returned un-factored. ANYstructure can either
+    compare them against 1 / material factor or multiply by material factor and
+    compare against 1.0, matching the ML-Numeric reporting path.
     """
 
     result = solve_anystructure_panel(calc_object, lat_press, config)
@@ -1799,7 +1800,7 @@ def _stiffener_web_local_buckling(
 
     The web is treated as a long simply supported plate strip under a reference
     web-edge compression envelope and panel shear.  The candidate keeps the
-    full PULS web/stiffener stress redistribution out of scope, but the explicit
+    full web/stiffener stress redistribution out of scope, but the explicit
     interaction avoids treating tall loaded webs as compression-only strips.
     """
 
@@ -2898,25 +2899,25 @@ def _interpolate_capacity(
 def _notes() -> list[str]:
     return [
         "regular S3 unit strip only; T1, K3, corrugation and FRP are outside this milestone",
-        "positive PULS CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
-        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production PULS basis",
+        "positive reference CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production reference basis",
         "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure material preload contribution is reported in ultimate diagnostics but excluded from buckling-strength control by default",
         "shear-normal Ritz coupling is truncated in elastic and continuation checks; classical local plate shear remains a fallback candidate",
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
         "stiffener yield exposes SI/PI section branches, lateral-deformation and sniped bending, SI-only torsional stress, and effective attached plate width",
         "global longitudinal strip stiffness degrades from local elastic utilization on the nonlinear load path",
-        "validity limits are explicit covered-domain checks because the PULS user manual is not assumed",
+        "validity limits are explicit covered-domain checks because the reference user manual is not assumed",
     ]
 
 
 def _u3_notes() -> list[str]:
     return [
         "regular U3 unstiffened rectangular panels only; T1, K3, corrugation and FRP are outside this milestone",
-        "positive PULS export normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "positive reference export normal stress is compression; signed stresses scale while lateral pressure remains fixed",
         "Rayleigh-Ritz sine modes use an isotropic plate basis with simply-supported trigonometric shapes",
         "buckling usage is the reduced buckling-strength envelope over first-yield capacity and elastic plate/shear buckling limits",
         "U3 end stresses are interpolated in yield checks and averaged in elastic buckling checks",
-        "validity limits are explicit covered-domain checks because the PULS user manual is not assumed",
+        "validity limits are explicit covered-domain checks because the reference user manual is not assumed",
     ]
 
 

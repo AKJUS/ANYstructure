@@ -726,7 +726,7 @@ def test_report_request_service_runs_pdf_and_table_adapters():
 def test_report_data_snapshot_keeps_plain_report_input_data():
     snapshot = project_services.ReportDataSnapshot(
         project_information="Project text",
-        buckling_method="ML-CL (PULS based)",
+        buckling_method="ML-Numeric (SemiAnalytical based)",
         points={"point1": [0, 0]},
         lines={"line1": [1, 2]},
         line_bundles={"line1": ["bundle"]},
@@ -738,7 +738,7 @@ def test_report_data_snapshot_keeps_plain_report_input_data():
     )
 
     assert snapshot.project_information == "Project text"
-    assert snapshot.buckling_method == "ML-CL (PULS based)"
+    assert snapshot.buckling_method == "ML-Numeric (SemiAnalytical based)"
     assert snapshot.points == {"point1": [0, 0]}
     assert snapshot.lines == {"line1": [1, 2]}
     assert snapshot.line_bundles == {"line1": ["bundle"]}
@@ -783,7 +783,7 @@ def test_project_snapshot_service_serializes_domain_objects_without_tkinter():
         tanks={"comp2": DummyTank()},
         tank_grid=[[0, 1]],
         tank_search_data={"2": {"min_el": 0}},
-        buckling_method="ML-CL (PULS based)",
+        buckling_method="ML-Numeric (SemiAnalytical based)",
         shifting={"shifted checked": True, "shift hor": 1, "shift ver": 2},
         weight_and_cog={"new structure": {"weight": 3}},
     )
@@ -959,7 +959,7 @@ def test_project_open_transfer_service_normalizes_saved_view_payloads():
             "search_data": {"2": {"min_el": 0}},
             "comp2": {"tank": "properties"},
         },
-        buckling_method="ML-CL (PULS based)",
+        buckling_method="ML-Numeric (SemiAnalytical based)",
         weight_and_cog={"new structure": {"weight": [1]}},
     )
 
@@ -975,7 +975,7 @@ def test_project_open_transfer_service_normalizes_saved_view_payloads():
     assert transfer.tank_grid == [[0, 1]]
     assert transfer.tank_search_data == {2: {"min_el": 0}}
     assert transfer.tank_properties == {"comp2": {"tank": "properties"}}
-    assert transfer.buckling_method == "ML-CL (PULS based)"
+    assert transfer.buckling_method == "ML-Numeric (SemiAnalytical based)"
     assert transfer.weight_and_cog == {"new structure": {"weight": [1]}}
 
 

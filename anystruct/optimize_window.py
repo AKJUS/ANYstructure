@@ -348,7 +348,7 @@ class CreateOptimizeWindow():
                                                                                     y=start_y - 0.6 * dy)
         tk.Label(self._frame, text='--------- Number of combinations to run --------->\n'
                                    'RP-C203 can run many combinations, 1M+.\n'
-                                   'ML-CL/ML-Numeric is about as fast as RP-C203.',
+                                   'ML-Numeric is about as fast as RP-C203.',
                  font='Verdana 9 bold').place(x=start_x + 0.1 * dx, y=start_y + 2.8 * dy, anchor=tk.NW)
 
         self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 12 bold', fg='red')
@@ -630,7 +630,7 @@ class CreateOptimizeWindow():
         tk.Label(self._frame, text='Use weight filter (for speed)').place(x=start_x + dx * 9.7, y=start_y + 11 * dy)
         tk.Label(self._frame, text='Check for buckling (SemiAnalytical S3/U3)').place(x=start_x + dx * 9.7,
                                                                             y=start_y + 12 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-CL)').place(x=start_x + dx * 9.7, y=start_y + 13 * dy)
+        tk.Label(self._frame, text='Check for buckling (ML-CL deactivated)').place(x=start_x + dx * 9.7, y=start_y + 13 * dy)
         tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7, y=start_y + 14 * dy)
 
         tk.Checkbutton(self._frame, variable=self._new_check_sec_mod).place(x=start_x + dx * 12, y=start_y + 4 * dy)
@@ -645,8 +645,10 @@ class CreateOptimizeWindow():
                                                                                 y=start_y + 11 * dy)
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical).place(x=start_x + dx * 12,
                                                                                      y=start_y + 12 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl).place(x=start_x + dx * 12,
-                                                                                   y=start_y + 13 * dy)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl, state='disabled').place(
+            x=start_x + dx * 12,
+            y=start_y + 13 * dy,
+        )
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric).place(x=start_x + dx * 12,
                                                                                         y=start_y + 14 * dy)
 
@@ -789,12 +791,12 @@ class CreateOptimizeWindow():
     def _ensure_single_buckling_check(self):
         '''
         Only one buckling formulation should be active at a time:
-            RP-C201, SemiAnalytical S3/U3, ML-CL, or ML-Numeric.
+            RP-C201, SemiAnalytical S3/U3, or ML-Numeric.
         '''
         selected = [
             self._new_check_buckling.get(),
             self._new_check_buckling_semi_analytical.get(),
-            self._new_check_buckling_ml_cl.get(),
+            False,
             self._new_check_buckling_ml_numeric.get(),
         ]
 
@@ -807,9 +809,6 @@ class CreateOptimizeWindow():
 
             if self._new_check_buckling_semi_analytical.get():
                 self._new_check_buckling_semi_analytical.set(False)
-
-            if self._new_check_buckling_ml_cl.get():
-                self._new_check_buckling_ml_cl.set(False)
 
             if self._new_check_buckling_ml_numeric.get():
                 self._new_check_buckling_ml_numeric.set(False)
@@ -836,7 +835,7 @@ class CreateOptimizeWindow():
                       self._new_check_shear_area.get(), self._new_check_buckling.get(),
                       self._new_check_fatigue.get(), self._new_check_slamming.get(),
                       self._new_check_local_buckling.get(), self._new_check_buckling_semi_analytical.get(),
-                      self._new_check_buckling_ml_cl.get(), self._new_check_buckling_ml_numeric.get())
+                      False, self._new_check_buckling_ml_numeric.get())
         self._initial_calc_obj.Plate.set_span(self._new_span.get())
         selected_mat_fac = self._get_material_factor_for_optimization()
         self._initial_calc_obj.Plate.mat_factor = selected_mat_fac
