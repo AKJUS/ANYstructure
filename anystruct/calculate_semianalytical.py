@@ -189,6 +189,7 @@ class S3SolverConfig:
     high_transverse_modes: tuple[int, ...] = (1, 2, 3, 4)
     high_confidence_drift_limit: float = 0.05
     medium_confidence_drift_limit: float = 0.12
+    include_solver_diagnostics: bool = True
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,35 @@ class RitzMode:
     @property
     def label(self) -> str:
         return f"{self.family}:{self.m},{self.n}"
+
+
+@dataclass(frozen=True)
+class CurvaturePoint:
+    x_fraction: float
+    y_fraction: float
+    d2x: np.ndarray
+    d2y: np.ndarray
+    dxy: np.ndarray
+
+
+@dataclass(frozen=True)
+class RitzRuntime:
+    modes: Sequence[RitzMode]
+    linear: np.ndarray
+    geometric: np.ndarray
+    nonlinear: np.ndarray
+    pressure: np.ndarray
+    imperfection: np.ndarray
+    max_delta: np.ndarray
+    geometric_coupling: dict[str, Any]
+    plate_curvature_points: tuple[CurvaturePoint, ...]
+    global_centerline_curvature_points: tuple[CurvaturePoint, ...]
+    plate_x_fractions: np.ndarray
+    plate_y_fractions: np.ndarray
+    plate_d2x: np.ndarray
+    plate_d2y: np.ndarray
+    plate_dxy: np.ndarray
+    global_centerline_d2x: np.ndarray
 
 
 @dataclass
@@ -754,6 +784,47 @@ def solve_anystructure_panel(
     }
 
 
+def _anystructure_fast_solver_config(config: S3SolverConfig | None) -> S3SolverConfig:
+    base = config or S3SolverConfig()
+    return replace(
+        base,
+        check_mode_convergence=False,
+        include_solver_diagnostics=False,
+    )
+
+
+def _predict_anystructure_uf_core(
+    calc_object: Any,
+    lat_press: float,
+    config: S3SolverConfig | None,
+) -> tuple[float, float, float, float | None]:
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+    material_factor = _anystructure_material_factor(all_structure)
+    acceptance_limit = None if material_factor is None else 1.0 / material_factor
+    panel = anystructure_panel_input(calc_object, lat_press)
+    if panel is None:
+        return float("inf"), float("inf"), 0.0, acceptance_limit
+
+    fast_config = _anystructure_fast_solver_config(config)
+    solved = (
+        solve_s3_panel(panel, fast_config)
+        if isinstance(panel, S3PanelInput)
+        else solve_u3_panel(panel, fast_config)
+    )
+    if (
+        solved.valid
+        and solved.buckling_usage_factor is not None
+        and solved.ultimate_usage_factor is not None
+    ):
+        return (
+            float(solved.buckling_usage_factor),
+            float(solved.ultimate_usage_factor),
+            1.0,
+            acceptance_limit,
+        )
+    return float("inf"), float("inf"), 0.0, acceptance_limit
+
+
 def predict_anystructure_uf(
     calc_object: Any,
     lat_press: float = 0.0,
@@ -765,17 +836,8 @@ def predict_anystructure_uf(
     them against a separate PULS acceptance limit, typically 1 / material factor.
     """
 
-    result = solve_anystructure_panel(calc_object, lat_press, config)
-    if result["available"]:
-        return np.array(
-            [
-                float(result["buckling_usage_factor"]),
-                float(result["ultimate_usage_factor"]),
-                1.0,
-            ],
-            dtype=float,
-        )
-    return np.array([float("inf"), float("inf"), 0.0], dtype=float)
+    buckling, ultimate, valid, _ = _predict_anystructure_uf_core(calc_object, lat_press, config)
+    return np.array([buckling, ultimate, valid], dtype=float)
 
 
 def predict_anystructure_uf_with_acceptance(
@@ -786,15 +848,19 @@ def predict_anystructure_uf_with_acceptance(
 ) -> np.ndarray:
     """Return [buckling UF, ultimate UF, valid, acceptance limit] for ANYstructure."""
 
-    result = solve_anystructure_panel(calc_object, lat_press, config)
-    acceptance = _optional_float(result.get("acceptance_limit"))
+    buckling, ultimate, valid, acceptance = _predict_anystructure_uf_core(
+        calc_object,
+        lat_press,
+        config,
+    )
+    acceptance = _optional_float(acceptance)
     if acceptance is None:
         acceptance = float(default_acceptance)
     vector = np.array([float("inf"), float("inf"), 0.0, acceptance], dtype=float)
-    if result["available"]:
-        vector[0] = float(result["buckling_usage_factor"])
-        vector[1] = float(result["ultimate_usage_factor"])
-        vector[2] = 1.0
+    if valid:
+        vector[0] = buckling
+        vector[1] = ultimate
+        vector[2] = valid
     return vector
 
 
@@ -1635,7 +1701,7 @@ def ritz_combined_buckling_factor(
 
 
 def _ritz_geometric_matrix(
-    panel: S3PanelInput,
+    panel: S3PanelInput | U3PanelInput,
     modes: Sequence[RitzMode],
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Return normal-plus-shear geometric stiffness for Ritz modes.
@@ -1676,6 +1742,109 @@ def _ritz_geometric_matrix(
         "coupled_terms": coupled_terms,
         "family_terms": family_terms,
     }
+
+
+def _curvature_point(
+    modes: Sequence[RitzMode],
+    x: float,
+    y: float,
+    x_fraction: float,
+    y_fraction: float,
+    family: str | None = None,
+) -> CurvaturePoint:
+    d2x = []
+    d2y = []
+    dxy = []
+    for mode in modes:
+        if family is not None and mode.family != family:
+            d2x.append(0.0)
+            d2y.append(0.0)
+            dxy.append(0.0)
+            continue
+        sin_x = math.sin(mode.kx * x)
+        sin_y = math.sin(mode.ky * y)
+        cos_x = math.cos(mode.kx * x)
+        cos_y = math.cos(mode.ky * y)
+        d2x.append(-mode.kx * mode.kx * sin_x * sin_y)
+        d2y.append(-mode.ky * mode.ky * sin_x * sin_y)
+        dxy.append(mode.kx * mode.ky * cos_x * cos_y)
+    return CurvaturePoint(
+        x_fraction=x_fraction,
+        y_fraction=y_fraction,
+        d2x=np.asarray(d2x, dtype=float),
+        d2y=np.asarray(d2y, dtype=float),
+        dxy=np.asarray(dxy, dtype=float),
+    )
+
+
+def _build_ritz_runtime(
+    panel: S3PanelInput | U3PanelInput,
+    modes: Sequence[RitzMode],
+    config: S3SolverConfig,
+) -> RitzRuntime:
+    geometric, coupling = _ritz_geometric_matrix(panel, modes)
+    max_delta = np.asarray(
+        [
+            max(
+                1.0,
+                0.10 / max(mode.kx, mode.ky, EPS),
+            )
+            for mode in modes
+        ],
+        dtype=float,
+    )
+    curvature_family = (
+        None
+        if isinstance(panel, U3PanelInput) or config.include_global_curvature_in_plate_yield
+        else "local"
+    )
+    plate_points = tuple(
+        _curvature_point(
+            modes,
+            panel.length * x_fraction,
+            panel.width * y_fraction,
+            x_fraction,
+            y_fraction,
+            family=curvature_family,
+        )
+        for x_fraction in config.hot_spot_grid
+        for y_fraction in config.hot_spot_grid
+    )
+    global_centerline_points = tuple(
+        _curvature_point(
+            modes,
+            panel.length * x_fraction,
+            0.5 * panel.width,
+            x_fraction,
+            0.5,
+            family="global",
+        )
+        for x_fraction in config.hot_spot_grid
+    )
+    plate_x_fractions = np.asarray([point.x_fraction for point in plate_points], dtype=float)
+    plate_y_fractions = np.asarray([point.y_fraction for point in plate_points], dtype=float)
+    return RitzRuntime(
+        modes=modes,
+        linear=np.diag([mode.linear_stiffness for mode in modes]),
+        geometric=geometric,
+        nonlinear=np.asarray([mode.nonlinear_stiffness for mode in modes], dtype=float),
+        pressure=np.asarray([mode.pressure_force for mode in modes], dtype=float),
+        imperfection=np.asarray([mode.imperfection for mode in modes], dtype=float),
+        max_delta=max_delta,
+        geometric_coupling=coupling,
+        plate_curvature_points=plate_points,
+        global_centerline_curvature_points=global_centerline_points,
+        plate_x_fractions=plate_x_fractions,
+        plate_y_fractions=plate_y_fractions,
+        plate_d2x=np.vstack([point.d2x for point in plate_points]) if plate_points else np.zeros((0, len(modes))),
+        plate_d2y=np.vstack([point.d2y for point in plate_points]) if plate_points else np.zeros((0, len(modes))),
+        plate_dxy=np.vstack([point.dxy for point in plate_points]) if plate_points else np.zeros((0, len(modes))),
+        global_centerline_d2x=(
+            np.vstack([point.d2x for point in global_centerline_points])
+            if global_centerline_points
+            else np.zeros((0, len(modes)))
+        ),
+    )
 
 
 def _local_amplitude_ratio(panel: S3PanelInput, modes: Sequence[RitzMode], amplitudes: Sequence[float]) -> float:
@@ -2663,8 +2832,15 @@ def _limit_newton_delta(
     modes: Sequence[RitzMode],
     amplitudes: np.ndarray,
     delta: np.ndarray,
+    runtime: RitzRuntime | None = None,
 ) -> np.ndarray:
     limited = delta.copy()
+    if runtime is not None:
+        max_delta_values = np.maximum(runtime.max_delta, 0.5 * np.abs(amplitudes))
+        mask = np.abs(limited) > max_delta_values
+        if np.any(mask):
+            limited[mask] = np.sign(limited[mask]) * max_delta_values[mask]
+        return limited
     for index, mode in enumerate(modes):
         max_delta = max(
             1.0,
@@ -2677,11 +2853,12 @@ def _limit_newton_delta(
 
 
 def solve_equilibrium_amplitudes(
-    panel: S3PanelInput,
+    panel: S3PanelInput | U3PanelInput,
     modes: Sequence[RitzMode],
     load_factor: float,
     previous_amplitudes: Sequence[float],
     config: S3SolverConfig,
+    runtime: RitzRuntime | None = None,
 ) -> tuple[list[float], bool, int]:
     """Solve the coupled reduced Ritz continuation equilibrium.
 
@@ -2694,15 +2871,16 @@ def solve_equilibrium_amplitudes(
     if not modes:
         return [], True, 0
 
+    runtime = runtime or _build_ritz_runtime(panel, modes, config)
     q = np.asarray(previous_amplitudes, dtype=float)
     if q.shape != (len(modes),):
         q = np.zeros(len(modes), dtype=float)
 
-    linear = np.diag([mode.linear_stiffness for mode in modes])
-    geometric, _ = _ritz_geometric_matrix(panel, modes)
-    nonlinear = np.asarray([mode.nonlinear_stiffness for mode in modes], dtype=float)
-    pressure = np.asarray([mode.pressure_force for mode in modes], dtype=float)
-    imperfection = np.asarray([mode.imperfection for mode in modes], dtype=float)
+    linear = runtime.linear
+    geometric = runtime.geometric
+    nonlinear = runtime.nonlinear
+    pressure = runtime.pressure
+    imperfection = runtime.imperfection
     force = pressure + load_factor * (geometric @ imperfection)
     tangent_linear = linear - load_factor * geometric
     if np.max(np.abs(force)) <= EPS and np.max(np.abs(q)) <= EPS:
@@ -2725,7 +2903,7 @@ def solve_equilibrium_amplitudes(
             delta = np.linalg.solve(tangent, -residual)
         except np.linalg.LinAlgError:
             delta = np.linalg.lstsq(tangent, -residual, rcond=None)[0]
-        delta = _limit_newton_delta(modes, q, delta)
+        delta = _limit_newton_delta(modes, q, delta, runtime)
         q += delta
         if not np.all(np.isfinite(q)):
             return list(previous_amplitudes), False, iteration
@@ -2780,6 +2958,14 @@ def _mode_curvatures(
         d2y -= amplitude * mode.ky * mode.ky * sin_x * sin_y
         dxy += amplitude * mode.kx * mode.ky * cos_x * cos_y
     return d2x, d2y, dxy
+
+
+def _runtime_curvatures(point: CurvaturePoint, amplitudes: np.ndarray) -> tuple[float, float, float]:
+    return (
+        float(point.d2x @ amplitudes),
+        float(point.d2y @ amplitudes),
+        float(point.dxy @ amplitudes),
+    )
 
 
 def _pressure_stiffener_bending_moment(panel: S3PanelInput) -> float:
@@ -2898,12 +3084,38 @@ def _plate_yield_ratio(
     amplitudes: Sequence[float],
     load_factor: float,
     config: S3SolverConfig,
+    runtime: RitzRuntime | None = None,
 ) -> float:
     modulus = panel.elastic_modulus / (1.0 - panel.poisson_ratio**2)
     shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
     z_values = (-0.5 * panel.plate_thickness, 0.5 * panel.plate_thickness)
     max_ratio = 0.0
     curvature_family = None if config.include_global_curvature_in_plate_yield else "local"
+    amplitude_array = np.asarray(amplitudes, dtype=float)
+
+    if runtime is not None:
+        d2x_values = runtime.plate_d2x @ amplitude_array
+        d2y_values = runtime.plate_d2y @ amplitude_array
+        dxy_values = runtime.plate_dxy @ amplitude_array
+        for index, y_fraction in enumerate(runtime.plate_y_fractions):
+            d2x = float(d2x_values[index])
+            d2y = float(d2y_values[index])
+            dxy = float(dxy_values[index])
+            transverse_stress = (
+                panel.transverse_stress_1
+                + (panel.transverse_stress_2 - panel.transverse_stress_1) * float(y_fraction)
+            )
+            for z in z_values:
+                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
+                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
+                bending_tau = -2.0 * shear_modulus * z * dxy
+                vm = _stress_von_mises(
+                    load_factor * panel.axial_stress + bending_x,
+                    load_factor * transverse_stress + bending_y,
+                    load_factor * panel.shear_stress + bending_tau,
+                )
+                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
+        return max_ratio
 
     for x_fraction in config.hot_spot_grid:
         x = panel.length * x_fraction
@@ -2939,11 +3151,43 @@ def _u3_plate_yield_ratio(
     amplitudes: Sequence[float],
     load_factor: float,
     config: S3SolverConfig,
+    runtime: RitzRuntime | None = None,
 ) -> float:
     modulus = panel.elastic_modulus / (1.0 - panel.poisson_ratio**2)
     shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
     z_values = (-0.5 * panel.plate_thickness, 0.5 * panel.plate_thickness)
     max_ratio = 0.0
+    amplitude_array = np.asarray(amplitudes, dtype=float)
+
+    if runtime is not None:
+        d2x_values = runtime.plate_d2x @ amplitude_array
+        d2y_values = runtime.plate_d2y @ amplitude_array
+        dxy_values = runtime.plate_dxy @ amplitude_array
+        for index, (x_fraction, y_fraction) in enumerate(
+            zip(runtime.plate_x_fractions, runtime.plate_y_fractions)
+        ):
+            axial_stress = (
+                panel.axial_stress_1
+                + (panel.axial_stress_2 - panel.axial_stress_1) * float(x_fraction)
+            )
+            d2x = float(d2x_values[index])
+            d2y = float(d2y_values[index])
+            dxy = float(dxy_values[index])
+            transverse_stress = (
+                panel.transverse_stress_1
+                + (panel.transverse_stress_2 - panel.transverse_stress_1) * float(y_fraction)
+            )
+            for z in z_values:
+                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
+                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
+                bending_tau = -2.0 * shear_modulus * z * dxy
+                vm = _stress_von_mises(
+                    load_factor * axial_stress + bending_x,
+                    load_factor * transverse_stress + bending_y,
+                    load_factor * panel.shear_stress + bending_tau,
+                )
+                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
+        return max_ratio
 
     for x_fraction in config.hot_spot_grid:
         x = panel.length * x_fraction
@@ -2977,8 +3221,9 @@ def u3_yield_utilization(
     amplitudes: Sequence[float],
     load_factor: float,
     config: S3SolverConfig,
+    runtime: RitzRuntime | None = None,
 ) -> dict[str, Any]:
-    plate_ratio = _u3_plate_yield_ratio(panel, modes, amplitudes, load_factor, config)
+    plate_ratio = _u3_plate_yield_ratio(panel, modes, amplitudes, load_factor, config, runtime)
     return {
         "max": plate_ratio,
         "plate": plate_ratio,
@@ -3115,6 +3360,7 @@ def _stiffener_yield_ratios(
     load_factor: float,
     config: S3SolverConfig,
     global_elastic_factor: float | None = None,
+    runtime: RitzRuntime | None = None,
 ) -> dict[str, Any]:
     pressure_moment = _pressure_stiffener_bending_moment(panel)
     sniped_moments = _sniped_stiffener_eccentricity_moments(
@@ -3143,15 +3389,20 @@ def _stiffener_yield_ratios(
         global_elastic_factor,
     )
     max_curvature = 0.0
-    for x_fraction in config.hot_spot_grid:
-        d2x, _, _ = _mode_curvatures(
-            modes,
-            amplitudes,
-            panel.length * x_fraction,
-            0.5 * panel.width,
-            family="global",
-        )
-        max_curvature = max(max_curvature, abs(d2x))
+    if runtime is not None:
+        amplitude_array = np.asarray(amplitudes, dtype=float)
+        if runtime.global_centerline_d2x.size:
+            max_curvature = float(np.max(np.abs(runtime.global_centerline_d2x @ amplitude_array)))
+    else:
+        for x_fraction in config.hot_spot_grid:
+            d2x, _, _ = _mode_curvatures(
+                modes,
+                amplitudes,
+                panel.length * x_fraction,
+                0.5 * panel.width,
+                family="global",
+            )
+            max_curvature = max(max_curvature, abs(d2x))
     si_deflection_stress = panel.elastic_modulus * stiffener_section.top_distance * max_curvature
     pi_deflection_stress = panel.elastic_modulus * stiffener_section.bottom_distance * max_curvature
     axial_stress = effective_axial["stress"]
@@ -3206,8 +3457,9 @@ def yield_utilization(
     load_factor: float,
     config: S3SolverConfig,
     global_elastic_factor: float | None = None,
+    runtime: RitzRuntime | None = None,
 ) -> dict[str, Any]:
-    plate_ratio = _plate_yield_ratio(panel, modes, amplitudes, load_factor, config)
+    plate_ratio = _plate_yield_ratio(panel, modes, amplitudes, load_factor, config, runtime)
     stiffener_ratios = _stiffener_yield_ratios(
         panel,
         section,
@@ -3217,6 +3469,7 @@ def yield_utilization(
         load_factor,
         config,
         global_elastic_factor,
+        runtime,
     )
     return {
         "max": max(plate_ratio, stiffener_ratios["max"]),
@@ -3471,6 +3724,22 @@ def _attach_reliability(
     solver: Any,
     validation_reasons: Sequence[str] | None = None,
 ) -> S3Result:
+    if not config.include_solver_diagnostics and not config.check_mode_convergence:
+        confidence = "medium" if result.valid else "low"
+        confidence_reasons = [] if result.valid else list(validation_reasons or ())
+        diagnostics = dict(result.diagnostics)
+        diagnostics.setdefault("mode_convergence", {"enabled": False})
+        return S3Result(
+            buckling_usage_factor=result.buckling_usage_factor,
+            ultimate_usage_factor=result.ultimate_usage_factor,
+            elastic_buckling_usage_factor=result.elastic_buckling_usage_factor,
+            valid=result.valid,
+            invalid_reason=result.invalid_reason,
+            diagnostics=diagnostics,
+            covered_domain_notes=result.covered_domain_notes,
+            confidence=confidence,
+            confidence_reasons=confidence_reasons,
+        )
     validation_domain = _validation_domain(panel, config, panel_family, validation_reasons)
     diagnostics = dict(result.diagnostics)
     diagnostics["validation_domain"] = validation_domain
@@ -3558,6 +3827,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
     section = build_section_properties(panel)
     stiffener_section, effective_width = build_effective_stiffener_section(panel, config)
     modes = build_ritz_modes(panel, section, config)
+    runtime = _build_ritz_runtime(panel, modes, config)
     amplitudes = [0.0 for _ in modes]
     amplitudes, pressure_converged, pressure_iterations = solve_equilibrium_amplitudes(
         panel,
@@ -3565,6 +3835,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         0.0,
         amplitudes,
         config,
+        runtime,
     )
     if not pressure_converged:
         return _attach_reliability(
@@ -3582,7 +3853,16 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             validation_reasons,
         )
 
-    pressure_yield = yield_utilization(panel, section, stiffener_section, modes, amplitudes, 0.0, config)
+    pressure_yield = yield_utilization(
+        panel,
+        section,
+        stiffener_section,
+        modes,
+        amplitudes,
+        0.0,
+        config,
+        runtime=runtime,
+    )
     pressure_preload_response = {
         "iterations": pressure_iterations,
         "amplitudes": _mode_amplitude_summary(modes, amplitudes),
@@ -3665,12 +3945,14 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
                 config,
                 global_stiffness_scale=local_global_coupling["scale"],
             )
+            runtime = _build_ritz_runtime(panel, modes, config)
         trial_amplitudes, converged, iterations = solve_equilibrium_amplitudes(
             panel,
             modes,
             load_factor,
             amplitudes,
             config,
+            runtime,
         )
         max_iterations = max(max_iterations, iterations)
         if not converged:
@@ -3742,6 +4024,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             load_factor,
             config,
             ultimate_yield_global_factor,
+            runtime,
         )
         if final_yield["max"] >= s3_major_yield_limit:
             yield_capacity_factor = _interpolate_capacity(
@@ -3869,7 +4152,17 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         "load_components": normalized_load_components(panel),
         "support_model": SUPPORTED_IN_PLANE_SUPPORTS[panel.in_plane_support],
         "local_global_coupling": local_global_coupling,
-        "continuation_geometric_coupling": _ritz_geometric_matrix(panel, modes)[1],
+        "continuation_geometric_coupling": runtime.geometric_coupling,
+        "continuation": continuation,
+        "buckling_strength": buckling_strength,
+    } if config.include_solver_diagnostics else {
+        "collapse_state": collapse_state,
+        "capacity_factor": reported_ultimate_capacity_factor,
+        "raw_capacity_factor": raw_ultimate_capacity_factor,
+        "yield_capacity_factor": yield_capacity_factor,
+        "global_elastic_cutoff_factor": global_elastic_cutoff_factor,
+        "max_newton_iterations": max_iterations,
+        "mode_count": len(modes),
         "continuation": continuation,
         "buckling_strength": buckling_strength,
     }
@@ -3925,6 +4218,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         )
 
     modes = build_u3_ritz_modes(panel, config)
+    runtime = _build_ritz_runtime(panel, modes, config)
     amplitudes = [0.0 for _ in modes]
     amplitudes, pressure_converged, pressure_iterations = solve_equilibrium_amplitudes(
         panel,
@@ -3932,6 +4226,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         0.0,
         amplitudes,
         config,
+        runtime,
     )
     if not pressure_converged:
         return _attach_reliability(
@@ -3949,7 +4244,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
             validation_reasons,
         )
 
-    pressure_yield = u3_yield_utilization(panel, modes, amplitudes, 0.0, config)
+    pressure_yield = u3_yield_utilization(panel, modes, amplitudes, 0.0, config, runtime)
     pressure_preload_response = {
         "iterations": pressure_iterations,
         "amplitudes": _mode_amplitude_summary(modes, amplitudes),
@@ -4005,6 +4300,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
             load_factor,
             amplitudes,
             config,
+            runtime,
         )
         max_iterations = max(max_iterations, iterations)
         if not converged:
@@ -4062,7 +4358,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
             if max_accepted_step is None
             else max(max_accepted_step, attempted_step)
         )
-        final_yield = u3_yield_utilization(panel, modes, amplitudes, load_factor, config)
+        final_yield = u3_yield_utilization(panel, modes, amplitudes, load_factor, config, runtime)
         if final_yield["max"] >= config.yield_utilization_limit:
             yield_capacity_factor = _interpolate_capacity(
                 previous_load,
@@ -4154,7 +4450,17 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
             "x_edges": panel.rotational_support_1,
             "y_edges": panel.rotational_support_2,
         },
-        "continuation_geometric_coupling": _ritz_geometric_matrix(panel, modes)[1],
+        "continuation_geometric_coupling": runtime.geometric_coupling,
+        "continuation": continuation,
+        "buckling_strength": buckling_strength,
+    } if config.include_solver_diagnostics else {
+        "panel_family": "U3",
+        "collapse_state": collapse_state,
+        "capacity_factor": reported_ultimate_capacity_factor,
+        "raw_capacity_factor": raw_ultimate_capacity_factor,
+        "yield_capacity_factor": yield_capacity_factor,
+        "max_newton_iterations": max_iterations,
+        "mode_count": len(modes),
         "continuation": continuation,
         "buckling_strength": buckling_strength,
     }
