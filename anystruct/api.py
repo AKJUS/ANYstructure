@@ -14,6 +14,16 @@ try:
     import anystruct.stresses_window as stress
     import anystruct.fatigue_window as fatigue
     import anystruct.load_factor_window as load_factors
+    import anystruct.api_helpers as api_helpers
+    from anystruct.project_application import (
+        ProjectFileCodec,
+        ProjectHydrationDefaults,
+        ProjectOpenService,
+        ProjectPersistenceService,
+        ProjectSaveInput,
+        ProjectSaveService,
+    )
+    from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
 except ModuleNotFoundError:
@@ -33,8 +43,40 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.stresses_window as stress
     import ANYstructure.anystruct.fatigue_window as fatigue
     import ANYstructure.anystruct.load_factor_window as load_factors
+    import ANYstructure.anystruct.api_helpers as api_helpers
+    from ANYstructure.anystruct.project_application import (
+        ProjectFileCodec,
+        ProjectHydrationDefaults,
+        ProjectOpenService,
+        ProjectPersistenceService,
+        ProjectSaveInput,
+        ProjectSaveService,
+    )
+    from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
+
+
+def load_project_state(path):
+    """Load an ANYstructure project file into canonical project state."""
+    return ProjectPersistenceService.load_state_from_path(path)
+
+
+def save_project_state(project_state, path):
+    """Save canonical project state using the supported project-file codec."""
+    return ProjectPersistenceService.save_state_to_path(project_state, path)
+
+
+def open_project(path, hydration_defaults=None):
+    """Load and hydrate an ANYstructure project through the application service facade."""
+    if hydration_defaults is None:
+        hydration_defaults = ProjectHydrationDefaults()
+    return ProjectOpenService.open_path(path, hydration_defaults)
+
+
+def save_project(path, save_input):
+    """Create and save project state from a public project save input."""
+    return ProjectSaveService.save_path(path, save_input)
 
 
 class FlatStru():
@@ -52,12 +94,7 @@ class FlatStru():
         :type calculation_domain: str
         '''
         super().__init__()
-        assert calculation_domain in ["Flat plate, unstiffened", "Flat plate, stiffened",
-                                      "Flat plate, stiffened with girder"], ('Calculation domain missing!\n '
-                                                'Alternatives:'
-                                                '\n    "Flat plate, unstiffened"'
-                                                '\n    "Flat plate, stiffened"'
-                                                '\n    "Flat plate, stiffened with girder"')
+        api_helpers.assert_choice(calculation_domain, api_helpers.FLAT_STRUCTURE_DOMAINS, 'calculation_domain')
 
         self._Plate = CalcScantlings()
         self._Stiffeners = CalcScantlings()
@@ -108,15 +145,15 @@ class FlatStru():
         :return:
         :rtype:
         '''
-        self._FlatStructure.mat_yield = mat_yield*1e6
-        self._FlatStructure.E = emodule*1e6
+        self._FlatStructure.mat_yield = api_helpers.mpa_to_pa(mat_yield)
+        self._FlatStructure.E = api_helpers.mpa_to_pa(emodule)
         self._FlatStructure.v = poisson
         self._FlatStructure.mat_factor = material_factor
 
         for sub_cls in [self.Plate, self.Stiffeners, self.Girder]:
             if sub_cls is not None:
-                sub_cls.mat_yield = mat_yield * 1e6
-                sub_cls.E = emodule * 1e6
+                sub_cls.mat_yield = api_helpers.mpa_to_pa(mat_yield)
+                sub_cls.E = api_helpers.mpa_to_pa(emodule)
                 sub_cls.v = poisson
                 sub_cls.mat_factor = material_factor
 
@@ -181,7 +218,7 @@ class FlatStru():
 
         self._FlatStructure.Plate.t = thickness
         self._FlatStructure.Plate.spacing = spacing
-        self._FlatStructure.Plate.span = span/1000
+        self._FlatStructure.Plate.span = api_helpers.mm_to_m(span)
         self._FlatStructure.Plate.girder_lg = 10 # placeholder value
 
     
@@ -246,7 +283,7 @@ class FlatStru():
         self._FlatStructure.Stiffener.tw = tw
         self._FlatStructure.Stiffener.b = bf
         self._FlatStructure.Stiffener.tf = tf
-        self._FlatStructure.Stiffener.stiffener_type = 'L-bulb' if stf_type in ['hp HP HP-bulb bulb'] else stf_type
+        self._FlatStructure.Stiffener.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
         self._FlatStructure.Stiffener.spacing = spacing
         self._FlatStructure.Stiffener.girder_lg = 10
         self._FlatStructure.Stiffener.t = self._FlatStructure.Plate.t
@@ -293,9 +330,10 @@ class FlatStru():
         Various buckling realted parameters are set here. For details, see\n
         DNV-RP-C201 Buckling strength of plated structures.\n
 
-        :param calculation_method: 'DNV-RP-C201 - prescriptive', 'ML-CL (PULS based)'
+        :param calculation_method: 'DNV-RP-C201 - prescriptive', 'SemiAnalytical S3/U3',
+            or 'ML-Numeric (PULS based)'
         :type calculation_method: str
-        :param buckling_acceptance: for ML-CL calculations, either 'buckling' or 'ultimate'
+        :param buckling_acceptance: selected UF family, either 'buckling' or 'ultimate'
         :type buckling_acceptance: str
         :param stiffened_plate_effective_aginst_sigy:
         :type stiffened_plate_effective_aginst_sigy:
@@ -318,12 +356,10 @@ class FlatStru():
         :return:
         :rtype:
         '''
-        assert calculation_method in ['DNV-RP-C201 - prescriptive', 'ML-CL (PULS based)']
-        assert buckling_acceptance in ['buckling', 'ultimate']
-        assert stiffener_support in ['Continuous', 'Sniped']
-        assert girder_support in ['Continuous', 'Sniped']
-        if calculation_method == 'ML-CL (PULS based)':
-            raise NotImplementedError('ML-CL (PULS based) not yet implemented')
+        api_helpers.assert_choice(calculation_method, api_helpers.BUCKLING_CALCULATION_METHODS, 'calculation_method')
+        api_helpers.assert_choice(buckling_acceptance, api_helpers.BUCKLING_ACCEPTANCE_TYPES, 'buckling_acceptance')
+        api_helpers.assert_choice(stiffener_support, api_helpers.SUPPORT_TYPES, 'stiffener_support')
+        api_helpers.assert_choice(girder_support, api_helpers.SUPPORT_TYPES, 'girder_support')
         sigy_mapper = {True: 'Stf. pl. effective against sigma y', False:'All sigma y to girder'}
         self._FlatStructure._stiffened_plate_effective_aginst_sigy = sigy_mapper[stiffened_plate_effective_aginst_sigy]
         self._FlatStructure.method = buckling_acceptance
@@ -375,10 +411,7 @@ class CylStru():
     8.  'Orthogonally Stiffened panel'\n
      '''
 
-    geotypes = ['Unstiffened shell', 'Unstiffened panel',
-                'Longitudinal Stiffened shell', 'Longitudinal Stiffened panel',
-                'Ring Stiffened shell', 'Ring Stiffened panel',
-                'Orthogonally Stiffened shell', 'Orthogonally Stiffened panel']
+    geotypes = api_helpers.CYLINDER_STRUCTURE_DOMAINS
     def __init__(self, calculation_domain: str = 'Unstiffened shell'):
         '''
         :param calculation_domain:   calculation domain, 'Unstiffened shell', 'Unstiffened panel',
@@ -387,12 +420,12 @@ class CylStru():
         :type calculation_domain: str
         '''
         super().__init__()
-        assert calculation_domain in self.geotypes, 'Geometry type must be either of: ' + str(self.geotypes)
-        self._load_type = 'Stress' if 'panel' in calculation_domain else 'Force'
+        api_helpers.assert_choice(calculation_domain, self.geotypes, 'calculation_domain')
+        self._load_type = api_helpers.cylinder_input_mode(calculation_domain)
 
-        self._calculation_domain = calculation_domain + ' (' + self._load_type + ' input)'
+        self._calculation_domain = api_helpers.cylinder_domain_with_input_mode(calculation_domain)
         self._CylinderMain = CylinderAndCurvedPlate()
-        self._CylinderMain.geometry = CylinderAndCurvedPlate.geomeries_map_no_input_spec[calculation_domain]
+        self._CylinderMain.geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
         self._CylinderMain.ShellObj = Shell()
         if  calculation_domain in ['Unstiffened shell', 'Unstiffened panel']:
             self._CylinderMain.LongStfObj = None
@@ -432,12 +465,12 @@ class CylStru():
         :rtype:
         '''
 
-        self._CylinderMain.sasd = sasd*1e6
-        self._CylinderMain.smsd = smsd*1e6
-        self._CylinderMain.tTsd = abs(tTsd*1e6)
-        self._CylinderMain.tQsd = abs(tQsd*1e6)
-        self._CylinderMain.psd = psd*1e6
-        self._CylinderMain.shsd = shsd*1e6
+        self._CylinderMain.sasd = api_helpers.mpa_to_pa(sasd)
+        self._CylinderMain.smsd = api_helpers.mpa_to_pa(smsd)
+        self._CylinderMain.tTsd = abs(api_helpers.mpa_to_pa(tTsd))
+        self._CylinderMain.tQsd = abs(api_helpers.mpa_to_pa(tQsd))
+        self._CylinderMain.psd = api_helpers.mpa_to_pa(psd)
+        self._CylinderMain.shsd = api_helpers.mpa_to_pa(shsd)
 
     def set_forces(self, Nsd: float = 0, Msd: float = 0, Tsd: float = 0, Qsd: float = 0, psd: float = 0):
         '''
@@ -452,16 +485,7 @@ class CylStru():
 
         :return:
         '''
-        geomeries = {11: 'Flat plate, stiffened', 10: 'Flat plate, unstiffened',
-                     12: 'Flat plate, stiffened with girder',
-                     1: 'Unstiffened shell (Force input)', 2: 'Unstiffened panel (Stress input)',
-                     3: 'Longitudinal Stiffened shell  (Force input)', 4: 'Longitudinal Stiffened panel (Stress input)',
-                     5: 'Ring Stiffened shell (Force input)', 6: 'Ring Stiffened panel (Stress input)',
-                     7: 'Orthogonally Stiffened shell (Force input)', 8: 'Orthogonally Stiffened panel (Stress input)'}
-        geomeries_map = dict()
-        for key, value in geomeries.items():
-            geomeries_map[value] = key
-        geometry = geomeries_map[self._calculation_domain]
+        geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
         forces = [Nsd, Msd, Tsd, Qsd]
         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
             stresses=None, forces=forces, geometry=geometry, shell_t=self._CylinderMain.ShellObj.thk,
@@ -496,8 +520,8 @@ class CylStru():
         :return:
         :rtype:
         '''
-        self._CylinderMain.mat_yield = mat_yield*1e6
-        self._CylinderMain.E = emodule*1e6
+        self._CylinderMain.mat_yield = api_helpers.mpa_to_pa(mat_yield)
+        self._CylinderMain.E = api_helpers.mpa_to_pa(emodule)
         self._CylinderMain.v = poisson
         self._CylinderMain.mat_factor = material_factor
     def set_imperfection(self, delta_0 = 0.005):
@@ -523,8 +547,8 @@ class CylStru():
         :return:
         :rtype:
         '''
-        options = ['Fabricated', 'Cold formed']
-        assert stiffener in options, 'Method must be either of: ' + str(options)
+        api_helpers.assert_choice(stiffener, api_helpers.FABRICATION_METHODS, 'stiffener fabrication method')
+        api_helpers.assert_choice(girder, api_helpers.FABRICATION_METHODS, 'girder fabrication method')
         self._CylinderMain.fab_method_ring_stf = stiffener
         self._CylinderMain.fab_method_ring_girder = girder
     def set_end_cap_pressure_included_in_stress(self, is_included: bool = True):
@@ -549,7 +573,7 @@ class CylStru():
         :return:
         :rtype:
         '''
-        assert kind in ['ULS', 'ALS'], 'Must be either of: ' + str(kind)
+        api_helpers.assert_choice(kind, api_helpers.LIMIT_STATE_TYPES, 'limit state')
         self._CylinderMain.uls_or_als = kind
     def set_exclude_ring_stiffener(self, is_excluded: bool = True):
         '''
@@ -593,7 +617,7 @@ class CylStru():
         :return:
         :rtype:
         '''
-        self._CylinderMain.panel_spacing = val/1000
+        self._CylinderMain.panel_spacing = api_helpers.mm_to_m(val)
 
     def set_shell_geometry(self, radius: float = 0, thickness: float = 0,distance_between_rings: float = 0,
                            tot_length_of_shell: float = 0):
@@ -612,15 +636,15 @@ class CylStru():
         :rtype:
         '''
 
-        self._CylinderMain.ShellObj.radius = radius/1000
-        self._CylinderMain.ShellObj.thk = thickness/1000
-        self._CylinderMain.ShellObj.dist_between_rings = distance_between_rings/1000
+        self._CylinderMain.ShellObj.radius = api_helpers.mm_to_m(radius)
+        self._CylinderMain.ShellObj.thk = api_helpers.mm_to_m(thickness)
+        self._CylinderMain.ShellObj.dist_between_rings = api_helpers.mm_to_m(distance_between_rings)
         if tot_length_of_shell == 0:
             # Setting a default.
-            self._CylinderMain.ShellObj.length_of_shell = distance_between_rings * 10/1000
-            self._CylinderMain.ShellObj.tot_cyl_length = distance_between_rings * 10/1000
+            self._CylinderMain.ShellObj.length_of_shell = api_helpers.mm_to_m(distance_between_rings * 10)
+            self._CylinderMain.ShellObj.tot_cyl_length = api_helpers.mm_to_m(distance_between_rings * 10)
         else:
-            self._CylinderMain.ShellObj.tot_cyl_length = tot_length_of_shell/1000
+            self._CylinderMain.ShellObj.tot_cyl_length = api_helpers.mm_to_m(tot_length_of_shell)
 
     def set_shell_buckling_parmeters(self, eff_buckling_length_factor: float = 1.0):
         '''
@@ -656,7 +680,7 @@ class CylStru():
         self._CylinderMain.LongStfObj.tw = tw
         self._CylinderMain.LongStfObj.b = bf
         self._CylinderMain.LongStfObj.tf = tf
-        self._CylinderMain.LongStfObj.stiffener_type = 'L-bulb' if stf_type in ['hp HP HP-bulb bulb'] else stf_type
+        self._CylinderMain.LongStfObj.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
         self._CylinderMain.LongStfObj.spacing = spacing
         self._CylinderMain.LongStfObj.t = self._CylinderMain.ShellObj.thk
 
@@ -686,7 +710,7 @@ class CylStru():
         self._CylinderMain.RingStfObj.tw = tw
         self._CylinderMain.RingStfObj.b = bf
         self._CylinderMain.RingStfObj.tf = tf
-        self._CylinderMain.RingStfObj.stiffener_type = 'L-bulb' if stf_type in ['hp HP HP-bulb bulb'] else stf_type
+        self._CylinderMain.RingStfObj.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
         self._CylinderMain.RingStfObj.s = spacing
         self._CylinderMain.RingStfObj.t = self._CylinderMain.ShellObj.thk
 
@@ -715,7 +739,7 @@ class CylStru():
         self._CylinderMain.RingFrameObj.tw = tw
         self._CylinderMain.RingFrameObj.b = bf
         self._CylinderMain.RingFrameObj.tf = tf
-        self._CylinderMain.RingFrameObj.stiffener_type = 'L-bulb' if stf_type in ['hp HP HP-bulb bulb'] else stf_type
+        self._CylinderMain.RingFrameObj.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
         self._CylinderMain.RingFrameObj.s = spacing
         self._CylinderMain.RingFrameObj.t = self._CylinderMain.ShellObj.thk
 
@@ -761,9 +785,6 @@ if __name__ == '__main__':
     #     print(key, val)
     #
     # print(my_flat.get_special_provisions_results())
-
-
-
 
 
 

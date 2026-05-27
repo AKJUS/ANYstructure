@@ -1,6 +1,7 @@
 matplotlib
 numpy
+Pillow
 reportlab
+scikit-learn
 scipy
 xlwings
-sklearn

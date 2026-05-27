@@ -1,0 +1,311 @@
+from pathlib import Path
+import re
+
+
+def test_main_application_uses_shared_geometry_menu_helpers():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT" in source
+    assert "api_helpers.FLAT_GEOMETRY_IDS" in source
+    assert "api_helpers.CYLINDER_GEOMETRY_IDS" in source
+    assert "CylinderAndCurvedPlate.geomeries.values()" not in source
+    assert "CylinderAndCurvedPlate.geomeries_map" not in source
+    assert "Longitudinal Stiffened shell  (Force input)" not in source
+
+
+def test_main_application_uses_geometry_helpers_for_active_lookups():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "api_helpers.geometry_id_for_domain(self._new_calculation_domain.get())" in source
+    assert "api_helpers.domain_for_geometry_id(main_dict_cyl['geometry'][0])" in source
+    assert "api_helpers.domain_for_geometry_id(self._line_to_struc[self._active_line][5].geometry)" in source
+    assert "self._shell_geometries_map[self._new_calculation_domain.get()]" not in source
+    assert "CylinderAndCurvedPlate.geomeries[main_dict_cyl['geometry'][0]]" not in source
+    assert "CylinderAndCurvedPlate\n                                                 .geomeries[" not in source
+
+
+def test_main_application_uses_helpers_for_structure_property_unit_conversions():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    services_source = (Path(__file__).resolve().parents[1] / "anystruct" / "project_services.py").read_text(
+        encoding="utf-8"
+    )
+    source = main_source.read_text(encoding="utf-8")
+    flat_builder = source[
+        source.index("def _build_flat_structure_properties"):
+        source.index("def _build_cylinder_structure_property_request")
+    ]
+    cylinder_builder = source[
+        source.index("def _build_cylinder_structure_properties"):
+        source.index("def new_structure")
+    ]
+    property_block = flat_builder + cylinder_builder
+
+    assert "FlatStructurePropertyService.build(" in flat_builder
+    assert "CylinderStructurePropertyService.build(" in cylinder_builder
+    assert "api_helpers.mpa_to_pa" in services_source
+    assert "api_helpers.mm_to_m" in services_source
+    assert "helper_cylinder_stress_to_force_to_stress(" in services_source
+    assert "api_helpers.mpa_to_pa" not in property_block
+    assert "api_helpers.mm_to_m" not in property_block
+    assert "helper_cylinder_stress_to_force_to_stress(" not in property_block
+    assert not re.search(r"[\w.)\]]\s*\*\s*1e6", property_block)
+    assert not re.search(r"[\w.)\]]\s*/\s*1000", property_block)
+
+
+def test_main_application_uses_shared_ml_model_loader():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    ml_loader_block = source[
+        source.index("self._ML_buckling ="):
+        source.index("# Used to select parameter")
+    ]
+
+    assert "ml_models.load_buckling_models((self._root_dir,))" in ml_loader_block
+    assert "pickle.load(" not in ml_loader_block
+
+
+def test_new_structure_delegates_property_building():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    new_structure = source[
+        source.index("def new_structure"):
+        source.index("def option_meny_structure_type_trace")
+    ]
+    resolver = source[
+        source.index("def _resolve_new_structure_properties"):
+        source.index("def _add_structure_to_active_line")
+    ]
+    flat_builder = source[
+        source.index("def _build_flat_structure_property_request"):
+        source.index("def _build_cylinder_structure_property_request")
+    ]
+    cylinder_builder = source[
+        source.index("def _build_cylinder_structure_property_request"):
+        source.index("def _structure_input_is_missing")
+    ]
+    add_structure = source[
+        source.index("def _add_structure_to_active_line"):
+        source.index("def _scale_existing_flat_structure_if_needed")
+    ]
+    update_structure = source[
+        source.index("def _update_existing_active_line_structure"):
+        source.index("def _calculate_load_combinations_after_structure_update")
+    ]
+
+    assert "self._build_flat_structure_properties()" in resolver
+    assert "elif isinstance(toggle_multi, tuple):" in resolver
+    assert "prop_dict, obj_dict_stf = toggle_multi" in resolver
+    assert "if cylinder_return is not None:" in resolver
+    assert "CylinderObj = cylinder_return" in resolver
+    assert "FlatStructurePropertyRequest(" in flat_builder
+    assert "FlatStructurePropertyService.build(" in flat_builder
+    assert "api_helpers.mpa_to_pa" not in flat_builder
+    assert "api_helpers.mm_to_m" not in flat_builder
+    assert "CylinderStructurePropertyRequest(" in cylinder_builder
+    assert "CylinderStructurePropertyService.build(" in cylinder_builder
+    assert "helper_cylinder_stress_to_force_to_stress(" not in cylinder_builder
+    assert "api_helpers.mpa_to_pa" not in cylinder_builder
+    assert "api_helpers.mm_to_m" not in cylinder_builder
+    assert "self._build_cylinder_structure_properties()" in resolver
+    assert "self._structure_input_is_missing()" in new_structure
+    assert "self._create_all_structure_from_properties(prop_dict)" in add_structure
+    assert "self._create_cylinder_structure_from_properties(" in add_structure
+    assert "self._clear_tanks_and_grid()" in add_structure
+    assert "self._clear_tanks_and_grid()" in update_structure
+    assert "self._refresh_after_structure_change(suspend_recalc)" in new_structure
+    assert "self._resolve_new_structure_properties(" in new_structure
+    assert "self._add_structure_to_active_line(" in new_structure
+    assert "self._update_existing_active_line_structure(" in new_structure
+    assert "self._calculate_load_combinations_after_structure_update()" in new_structure
+    assert "obj_dict = {" not in new_structure
+    assert "shell_dict = {" not in new_structure
+    assert "AllStructure(" not in new_structure
+    assert "CylinderAndCurvedPlate(" not in new_structure
+    assert "self._tank_dict = {}" not in new_structure
+    assert "self.update_frame()" not in new_structure
+    assert "set_main_properties(prop_dict)" not in new_structure
+    assert "calculate_all_load_combinations_for_line_all_lines()" not in new_structure
+
+
+def test_savefile_delegates_save_command_assembly_and_persistence():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    save_no_dialogue = source[
+        source.index("def save_no_dialogue"):
+        source.index("def savefile")
+    ]
+    savefile = source[
+        source.index("def savefile"):
+        source.index("def _build_project_save_input")
+    ]
+    save_input_builder = source[
+        source.index("def _build_project_save_input"):
+        source.index("def openfile")
+    ]
+
+    assert "ProjectFileDialogService.backup_save_target(" in save_no_dialogue
+    assert "ProjectFileDialogService.remembered_save_target(" in save_no_dialogue
+    assert "ProjectSaveService.save_path(" in savefile
+    assert "ProjectFileDialogService.selected_save_target(" in savefile
+    assert "self._build_project_save_input()" in savefile
+    assert "ProjectSnapshotService.create_state(" not in savefile
+    assert "save_state_to_path(" not in savefile
+    assert "ProjectSaveInput(" in save_input_builder
+
+
+def test_openfile_delegates_project_open_application_steps():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    openfile = source[
+        source.index("def openfile"):
+        source.index("def restore_previous")
+    ]
+
+    assert "ProjectOpenService.open_path(" in openfile
+    assert "ProjectFileDialogService.selected_open_target(" in openfile
+    assert "self._build_project_hydration_defaults()" in openfile
+    assert "self._apply_open_project_text_and_theme(open_transfer)" in openfile
+    assert "self._apply_open_project_geometry_and_objects(open_transfer, hydration)" in openfile
+    assert "self._apply_open_project_accelerations(open_transfer)" in openfile
+    assert "self._apply_open_project_load_combinations(open_transfer)" in openfile
+    assert "self._apply_open_project_tanks(open_transfer)" in openfile
+    assert "self._apply_open_project_canvas_scale()" in openfile
+    assert "self._finalize_open_project(open_transfer, target.path)" in openfile
+    assert "ProjectHydrationDefaults(" not in openfile
+    assert "load_state_from_path(" not in source
+    assert "json.load(" not in source
+
+
+def test_restore_and_example_open_delegate_file_target_resolution():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    restore_block = source[
+        source.index("def restore_previous"):
+        source.index("def open_example")
+    ]
+    example_block = source[
+        source.index("def open_example"):
+        source.index("def open_example_excel_file")
+    ]
+
+    assert "ProjectFileDialogService.restore_target(" in restore_block
+    assert "ProjectPersistenceService.backup_exists(" not in restore_block
+    assert "ProjectPersistenceService.backup_path(" not in restore_block
+    assert "ProjectFileDialogService.example_open_target(" in example_block
+    assert "os.path.isfile(file_name)" not in example_block
+    assert "self._root_dir + '/' + file_name" not in example_block
+
+
+def test_example_excel_open_delegates_file_target_resolution():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    example_excel_block = source[
+        source.index("def open_example_excel_file"):
+        source.index("def _sync_excel_import_geometry")
+    ]
+
+    assert "ProjectFileDialogService.example_open_target(" in example_excel_block
+    assert "ExcelProjectImportService.open_example_path(target.path)" in example_excel_block
+    assert "os.path.isfile(file_name)" not in example_excel_block
+    assert "self._root_dir + '/' + file_name" not in example_excel_block
+
+
+def test_line_pressure_calculation_delegates_to_project_service():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    calculation_block = source[
+        source.index("def calculate_all_load_combinations_for_line"):
+        source.index("def run_optimizer_for_line")
+    ]
+    pressure_block = source[
+        source.index("def get_highest_pressure"):
+        source.index("def get_fatigue_pressures")
+    ]
+
+    assert "LinePressureService.calculate_combinations(" in calculation_block
+    assert "LinePressureService.calculate_one(" in calculation_block
+    assert "LinePressureInput(" in calculation_block
+    assert not re.search(r"\bone_load_combination\(", calculation_block)
+    assert "LinePressureService.highest_pressure(" in pressure_block
+
+
+def test_report_and_sesam_callbacks_delegate_request_orchestration():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    report_block = source[
+        source.index("def _build_report_data_snapshot"):
+        source.index("def create_accelerations")
+    ]
+    export_block = source[
+        source.index("def export_to_js"):
+        source.index("if __name__ == '__main__':")
+    ]
+
+    assert "ReportRequestService.create_pdf(" in report_block
+    assert "ReportRequestService.create_table(" in report_block
+    assert "def _build_report_data_snapshot" in report_block
+    assert "def _get_ml_classes" in source
+    assert "ReportDataSnapshot(" in report_block
+    assert "self._build_report_data_snapshot()" in report_block
+    assert "ml_classes=self._get_ml_classes()" in report_block
+    assert "ml_classes=self._ML_classes" not in report_block
+    assert 'ReportRequest(filename, "Section results", 10, self)' not in report_block
+    assert "LetterMaker" not in source
+    assert "SimpleDocTemplate" not in source
+    assert "reportlab" not in source
+    assert "ProjectFileDialogService.selected_output_target(" in report_block
+    assert "filedialog.asksaveasfilename(defaultextension=\".pdf\")" in report_block
+    assert not re.search(r"filedialog\.asksaveasfile\(", report_block)
+    assert "SesamExportService.write_js_path(" in export_block
+    assert "sesam.JSfile(" not in export_block
+    assert "save_file.writelines(" not in export_block
+    assert not re.search(r"filedialog\.asksaveasfile\(", export_block)
+    assert "ProjectFileDialogService.selected_output_target(" in export_block
+
+
+def test_excel_callbacks_delegate_workbook_adapter_access():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    excel_block = source[
+        source.index("def open_example_excel_file"):
+        source.index("def on_open_structure_window")
+    ]
+
+    assert "ExcelProjectImportService.open_example_path(" in excel_block
+    assert "ExcelProjectImportService.read_path(" in excel_block
+    assert "ProjectFileDialogService.selected_open_target(" in excel_block
+    assert "ExcelProjectGeometryImportService.add_records(" in excel_block
+    assert "def _sync_excel_import_geometry" in excel_block
+    assert "def _build_flat_structure_property_request_from_excel_record" in source
+    assert "def _build_flat_structure_property_request_from_cylinder_excel_record" in source
+    assert "def _build_cylinder_excel_import_defaults" in source
+    assert "FlatStructurePropertyService.build(flat_request)" in excel_block
+    assert "CylinderExcelImportPropertyService.build_request(" in excel_block
+    assert "CylinderStructurePropertyService.build(cylinder_request)" in excel_block
+    assert "cylinder_return=cylinder_obj" in excel_block
+    assert "flat_plate_records" in excel_block
+    assert "cylinder_records" in excel_block
+    assert "row_data[" not in excel_block
+    assert "self.new_point()" not in excel_block
+    assert "this_line = self.new_line()" not in excel_block
+    assert "ExcelInterface(" not in source
+    assert "excel_inteface" not in source
+
+    flat_import_block = excel_block[
+        excel_block.index("# Flat"):
+        excel_block.index("# Cylinders")
+    ]
+    assert "_new_plate_thk.set(" not in flat_import_block
+    assert "_new_sigma_x1.set(" not in flat_import_block
+    assert "_new_girder_web_h.set(" not in flat_import_block
+
+    cylinder_import_block = excel_block[
+        excel_block.index("# Cylinders"):
+        excel_block.index("def button_load_info_click")
+    ]
+    assert "_new_shell_thk.set(" not in cylinder_import_block
+    assert "_new_shell_radius.set(" not in cylinder_import_block
+    assert "_new_shell_Nsd.set(" not in cylinder_import_block
+    assert "_new_shell_end_cap_pressure_included.set(shell_yield)" not in cylinder_import_block

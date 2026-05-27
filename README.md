@@ -1,70 +1,62 @@
+![picture](https://github.com/audunarn/ANYstructure/blob/master/anystruct/images/ANYstructure_logo.jpg)
+
 # ANYstructure #
 ANYstructure is the ultimate steel structure design tool for plate fields and cylinders! 
 Weight optimization for all structures with machine learning capabilities. 
 Calculations are based on DNV standards and rules
-### What's new in 5.3.1 ###
-* Force to stress to force conversion fix for cylinders.
-### What's new in 5.3.0 ###
-* Fixed critical caluculation bug in column buckling
-* Some minor bug fixing
-* Changed some text
-### What's new in 5.2.0 ###
-* Support for python 3.13
-* Some bug fixing
-### What's new in 5.1.4 ###
-* Excel input option
-* Add load factor 1.1 for Machine Learning buckling (PULS based)
-* Continuous update of Utilization Factor when updating pressure loads
-### What's new in 5.0.2 ###
-* API introduced
-* API documenatation at readthedocs (anystructure.readthedocs.io)
-* GUI modifications
-* Import of python package set to "anystruct"
-### What's new in 4.10 ###
-* Corrected minor bug on membrane stresses for unstiffened cylinder.
-### What's new in 4.9.1 ###
-* Corrected bug in loading old save files
-* Corrected error on buckling flat plate calculation
-### What's new in 4.8 ###
-* Reporting table on cylinders.
-* Color coding on come cylinder properties.
-* Corrected error on additional hoop stress input for cylinders.
-### What's new in 4.7 ###
-* Corrected error on girder caluculation for cylinder buckling.
-* Added 1.10 load factor option for cylinder buckling.
-* Better compability with linux.
-* Python 3.11 based.
-### What's new in 4.4 ###
-* Backup and restore feature added.
-### What's new in 4.3 ###
-* General stability.
-* User friendliness.
-### What's new in 4.2 ###
-* Bug fixing.
-* Ukraininan theme.
-### What's new in 4.0 ###
-* Cylinder design and optimization!
-* Flat plate prescriptive buckling improved. Girder calculation added.
-* Updated GUI with color themes.
-### What's new in 3.3 ###
-* Extremely efficient Machine Learning version of PULS called ML-CL. Implemented for all optimizer options.
-* Calculation of Center of Gravity and Center of Buoyancy.
-* Reporting of weights and COG.
-* Lots of bug fixes.
+### What's new in 6.0.0 ###
+* New buckling method: Semi-analytical buckling for flat plates.
+* Updated ML buckling to numerical instead of classification. Improved accurancy of the neural network.
+* Updated color coding option.
+* Implemented extended testing regime.
+* Started work on separating calculation code from the GUI.
 
 ------------------------------------------------------------------------
 
-For documnetation:
+For documentation:
 
 https://anystructure.readthedocs.io/en/latest/
+
+## Development setup ##
+
+ANYstructure is currently maintained as a Python package named `anystruct`. The GUI can still be launched through the `ANYstructure` console command after an editable install.
+
+Recommended local setup:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+python -m pip install -e .
+python -m pytest
+```
+
+Launch the desktop app after installation:
+
+```powershell
+ANYstructure
+```
+
+Dependency groups are also available for focused installs:
+
+```powershell
+python -m pip install -r requirements-core.txt
+python -m pip install -r requirements-ml.txt
+python -m pip install -r requirements-excel.txt
+```
+
+Equivalent package extras are exposed as `core`, `ml`, `excel`, `dev`, and `all`. The default package install still includes Excel and ML dependencies for backwards compatibility.
+
+Excel project import requires a local Excel installation and is not expected to run in basic automated tests.
+The external Excel-sheet DNV PULS calculation workflow has been removed from this release; ML-CL remains available.
 
 ## The following is calculated: ##
 * Minimum plate thickness (DNV-OS-C101)
 * Minimum section modulus of stiffener/plate (DNVGL-OS-C101)
 * Minimum shear area (DNVGL-OS-C101)
-* Buckling (DNVGL-RP-C201)or PULS (licenced DNV software)
+* Buckling (DNVGL-RP-C201)
 * Buckling strength of shells DNV-RP-C202
-* PULS buckling (DNV license needed)
 * Machine learning buckling, PULS based
 * Fatigue for plate/stiffener connection (DNVGL-RP-C203)
 
@@ -83,4 +75,4 @@ Please like, share or comment on LinkedIn: https://www.linkedin.com/in/audun-arn
 
 Screenshot (this example can be loaded from file "ship_section_example.txt"):
 
-![picture](https://docs.google.com/uc?id=1HJeT50bNJTLJbcHTfRke4iySV8zNOAl_)
+![picture](https://github.com/audunarn/ANYstructure/blob/master/anystruct/images/ANYstructure%20screenshot.png)

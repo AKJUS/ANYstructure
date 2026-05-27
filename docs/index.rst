@@ -8,7 +8,7 @@ This page mainly document the API.
 
 For GUI documentation, see the following link:
 
-`ANYstructure GUI documentation <https://sites.google.com/view/anystructure/documentation>`_
+`ANYstructure GUI documentation <https://sites.google.com/view/anystructure/start>`_
 
 Python
 ------

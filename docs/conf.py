@@ -18,7 +18,7 @@ sys.path.insert(0, "..")
 # -- Project information -----------------------------------------------------
 
 project = 'ANYstructure'
-copyright = '2023, Audun Arnesen Nyhus'
+copyright = '2026, Audun Arnesen Nyhus'
 author = 'Audun Arnesen Nyhus'
 
 

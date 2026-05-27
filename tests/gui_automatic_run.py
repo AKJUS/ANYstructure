@@ -1,12 +1,94 @@
-from anystruct import main_application
-import multiprocessing, ctypes, os, pickle
+from anystruct import calc_structure, example_data, main_application, ml_models
+import multiprocessing, ctypes, os
+from pathlib import Path
 import tkinter as tk
+from tkinter import messagebox
+from matplotlib import pyplot as plt
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXTERNAL_ML_FILES = Path(r"C:\python_projects\ANYstructure\anystruct\ml_files")
+
+
+def get_ml_file_directories():
+    directories = []
+    env_dir = os.environ.get("ANYSTRUCTURE_ML_FILES")
+    if env_dir:
+        directories.append(Path(env_dir))
+    directories.extend([REPO_ROOT / "anystruct" / "ml_files", DEFAULT_EXTERNAL_ML_FILES])
+    return directories
+
+
+def configure_noninteractive_dialogs():
+    tk.messagebox = messagebox
+    messagebox.askquestion = lambda *args, **kwargs: "no"
+    messagebox.showerror = lambda *args, **kwargs: "ok"
+    messagebox.showinfo = lambda *args, **kwargs: "ok"
+    messagebox.showwarning = lambda *args, **kwargs: "ok"
+
+
+def configure_noninteractive_plots():
+    plt.show = lambda *args, **kwargs: None
+
+
+def checkpoint(name):
+    print(f"gui_automatic_run: {name}", flush=True)
+
+
+def close_child_windows():
+    root.update_idletasks()
+    for child in list(root.winfo_children()):
+        if isinstance(child, tk.Toplevel):
+            child.destroy()
+    root.update_idletasks()
+    plt.close("all")
+
+
+def assert_window_opens(action, name):
+    before = len([child for child in root.winfo_children() if isinstance(child, tk.Toplevel)])
+    action()
+    root.update_idletasks()
+    after = len([child for child in root.winfo_children() if isinstance(child, tk.Toplevel)])
+    if after <= before:
+        raise RuntimeError(f"{name} did not open a Toplevel window")
+    checkpoint(f"{name} opened")
+    close_child_windows()
+
+
+def make_smoke_cylinder():
+    return calc_structure.CylinderAndCurvedPlate(
+        main_dict=example_data.shell_main_dict,
+        shell=calc_structure.Shell(example_data.shell_dict),
+        long_stf=calc_structure.Structure(example_data.obj_dict_cyl_long2),
+        ring_stf=None,
+        ring_frame=None)
+
+
+def exercise_optimizer_windows():
+    my_dict["_active_line"] = "line1"
+    my_dict["_line_is_active"] = True
+    assert_window_opens(my_app.on_optimize, "single optimizer")
+
+    my_dict["_active_line"] = "line2"
+    my_dict["_line_is_active"] = True
+    my_dict["_line_to_struc"]["line2"][5] = make_smoke_cylinder()
+    assert_window_opens(my_app.on_optimize_cylinder, "cylinder optimizer")
+    my_dict["_line_to_struc"]["line2"][5] = None
+
+    my_dict["_multiselect_lines"] = ["line1", "line2"]
+    assert_window_opens(my_app.on_optimize_multiple, "multiple optimizer")
+    assert_window_opens(my_app.on_geometry_optimize, "span optimizer")
 
 
 multiprocessing.freeze_support()
-errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(2)
+configure_noninteractive_dialogs()
+configure_noninteractive_plots()
+if os.name == "nt":
+    errorCode = ctypes.windll.shcore.SetProcessDpiAwareness(2)
 root = tk.Tk()
+checkpoint("root created")
 my_app = main_application.Application(root)
+checkpoint("application created")
 my_dict = my_app.__dict__
 
 my_dict["_new_field_len"].set(4000)
@@ -34,56 +116,7 @@ def run_cc_chks():
         my_dict[chks].set(False)
 
 
-my_dict['_ML_buckling'] = {1.1: dict(), 1.15: dict()}
-
-for mat_fac in [1.1, 1.15]:
-    for name, file_base in zip(['cl SP buc int predictor', 'cl SP buc int scaler',
-                                'cl SP ult int predictor', 'cl SP ult int scaler',
-                                'cl SP buc GLGT predictor', 'cl SP buc GLGT scaler',
-                                'cl SP ult GLGT predictor', 'cl SP ult GLGT scaler',
-                                'cl UP buc int predictor', 'cl UP buc int scaler',
-                                'cl UP ult int predictor', 'cl UP ult int scaler',
-                                'cl UP buc GLGT predictor', 'cl UP buc GLGT scaler',
-                                'cl UP ult GLGT predictor', 'cl UP ult GLGT scaler',
-                                'CSR predictor UP', 'CSR scaler UP',
-                                'CSR predictor SP', 'CSR scaler SP'
-                                ],
-                               ["ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_UP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                                "ml_files\\CL_CSR-Tank_req_cl_predictor",
-                                "ml_files\\CL_CSR-Tank_req_cl_scaler",
-                                "ml_files\\CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor",
-                                "ml_files\\CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler"]):
-
-        mat_fac_str = [str(round(mat_fac, 2)).replace('.', '') + '0'][0][0:3]
-        file_base = file_base.replace('XXX', mat_fac_str)
-        my_dict['_ML_buckling'][mat_fac][name] = None
-
-        if os.path.isfile(file_base + '.pickle'):
-            file = open(file_base + '.pickle', 'rb')
-            my_dict['_ML_buckling'][mat_fac][name] = pickle.load(file)
-            file.close()
-        else:
-            # file = open(self._root_dir +'\\' + file_base + '.pickle', 'rb')
-
-            ml_file = os.path.join('C:\\Github\\ANYstructure\\anystruct\\'+file_base + '.pickle')
-            file = open(ml_file, 'rb')
-            my_dict['_ML_buckling'][mat_fac][name] = pickle.load(file)
-            file.close()
+my_dict['_ML_buckling'] = ml_models.load_buckling_models(get_ml_file_directories())
 
 
 my_dict['_ML_classes'] = {0: 'N/A',
@@ -102,35 +135,54 @@ for x,y in [[0,0],[3000,0],[6000,0],[8000,0],[0,2500],[3000,2500],[6000,2500],[8
     my_dict['_new_point_y'].set(y)
     my_app.new_point()
 
+checkpoint("points created")
 print(my_dict['_point_dict'])
 run_cc_chks()
+checkpoint("point color checks run")
 
 for p1, p2 in [[1,2],[2,3],[3,4],[5,6],[6,7],[7,8], [1,5], [2,6], [3,7], [4, 8], [9,10], [5,9], [8,10]]:
     my_dict['_new_line_p1'].set(p1)
     my_dict['_new_line_p2'].set(p2)
     my_app.new_line()
 
+checkpoint("lines created")
 print(my_dict['_line_dict'])
 run_cc_chks()
+checkpoint("line color checks run")
 
 for key in my_dict['_line_dict'].keys():
     my_dict['_active_line'] = key
     my_dict['_line_is_active'] = True
     my_app.new_structure()
 
+checkpoint("structures created")
 run_cc_chks()
+checkpoint("structure color checks run")
 my_dict['_active_line'] = 'line3'
 my_dict['_line_is_active'] = True
 my_app.delete_line(line='line3')
 my_dict['_new_line_p1'].set(3)
 my_dict['_new_line_p2'].set(4)
 
+checkpoint("line deleted")
 print(my_dict['_line_dict'])
 
 my_app.gui_load_combinations(None)
+checkpoint("load combinations opened")
 my_app.grid_find_tanks()
+checkpoint("tank search complete")
 my_app.grid_display_tanks()
+plt.close("all")
+checkpoint("tanks displayed")
 run_cc_chks()
 print(my_dict['_tank_dict'])
 my_app.on_show_loads()
+checkpoint("loads shown")
+exercise_optimizer_windows()
+checkpoint("optimizer windows exercised")
+my_app.open_example()
+checkpoint("example project opened")
+root.update_idletasks()
+root.destroy()
+checkpoint("root destroyed")
 
