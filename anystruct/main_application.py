@@ -8262,11 +8262,11 @@ class Application():
         Open a about messagebox.
         :return:
         '''
-        messagebox.showinfo(title='Information', message='ANYstructure 5.x.x (Stable/Production)'
+        messagebox.showinfo(title='Information', message='ANYstructure 6.x.x (Stable/Production)'
                                                          '\n'
                                                          '\n'
                                                          'By Audun Arnesen Nyhus \n'
-                                                         '2023/2024\n\n'
+                                                         '2026\n\n'
                                                          'All technical calculation based on \n'
                                                          'DNV RPs and standards')
 
