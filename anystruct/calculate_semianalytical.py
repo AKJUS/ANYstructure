@@ -1,7 +1,7 @@
-"""Reduced SemiAnalytical S3/U3 panel calculations.
+﻿"""Reduced semi-analytical PULS S3/U3 panel calculations.
 
 This module is a first physics milestone for regular stiffened S3 panels and
-unstiffened U3 panels.  It keeps the reference CSV files as benchmark data and does
+unstiffened U3 panels.  It keeps the PULS CSV files as benchmark data and does
 not fit corrections from them.  The implementation follows the direct
 semi-analytical shape described in DNV-CG-0128 Sec.4:
 
@@ -11,16 +11,22 @@ semi-analytical shape described in DNV-CG-0128 Sec.4:
 * elastic mode factors and a major-yield collapse check are reported as
   usage factors.
 
-The production closed-form reference code uses a richer element library and element validity
+The production PULS code uses a richer element library and element validity
 manual than the public guideline.  The result diagnostics therefore name the
-covered assumptions instead of presenting this reduced model as closed-tool parity.
+covered assumptions instead of presenting this reduced model as PULS parity.
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
+import json
 import math
+import random
+import statistics
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -34,13 +40,54 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
 SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
+CSV_SAMPLE_METHOD_FIRST_N = "first-n"
+CSV_SAMPLE_METHOD_STRATIFIED = "stratified-shuffle"
+CSV_SAMPLE_METHOD_FULL = "full"
+DEFAULT_CSV_SAMPLE_SIZE = 1200
+DEFAULT_CSV_FIXTURE_SAMPLE_SIZE = 64
+DEFAULT_CSV_SAMPLE_SEED = 128
+DEFAULT_CSV_MODE_CONVERGENCE_SAMPLE_SIZE = 200
+CSV_STRATIFICATION_KEYS = (
+    "target_validity",
+    "stiffener_type",
+    "support",
+    "stiffener_boundary",
+    "pressure_state",
+    "pressure_band",
+    "usage_region",
+)
+DEFAULT_SHIP_SECTION_INPUTS = (
+    r"C:\Github\ANYstructure\anystruct\ship_section_example.txt",
+    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA side section.txt",
+    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA mid section.txt",
+    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA transversal section.txt",
+)
+DEFAULT_RELIABILITY_BASELINE = Path("reports/puls_reliability_baseline.json")
+PULS_MANUAL_S3_LIMITS = {
+    "source": r"C:\Program Files\DNV\NauticusHull 20.36.2508\Manuals\UserManual PULS.pdf",
+    "manual_file_date": "2025-08-05",
+    "plate_slenderness_max": 200.0,
+    "aspect_ratio_min": 0.17,
+    "aspect_ratio_max": 20.0,
+    "flatbar_web_slenderness_max": 35.0,
+    "open_profile_web_slenderness_max": 90.0,
+    "free_flange_slenderness_max": 15.0,
+    "min_flange_width_to_web_height": 0.22,
+}
+PULS_MANUAL_U3_LIMITS = {
+    "source": PULS_MANUAL_S3_LIMITS["source"],
+    "manual_file_date": PULS_MANUAL_S3_LIMITS["manual_file_date"],
+    "plate_slenderness_max": 200.0,
+    "long_to_short_aspect_ratio_max": 20.0,
+}
+
 
 @dataclass(frozen=True)
 class S3PanelInput:
     """Input surface for the regular stiffened S3 panel milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  CSV
-    reference exports use positive in-plane normal stress for compression; the
+    PULS exports use positive in-plane normal stress for compression; the
     helper functions in this module preserve that sign convention.
     """
 
@@ -78,7 +125,7 @@ class U3PanelInput:
     """Input surface for the regular unstiffened U3 plate milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  The
-    ANYstructure/reference exports use two end values for longitudinal and
+    ANYstructure/PULS exports use two end values for longitudinal and
     transverse stress; the current U3 Ritz path uses their linear plate-field
     interpolation in yield checks and their mean values in elastic buckling.
     """
@@ -121,7 +168,7 @@ class S3SolverConfig:
     nonlinear_membrane_factor: float = 0.75
     local_global_coupling_floor: float = 0.25
     local_global_coupling_gain: float = 1.0
-    global_stiffened_strip_capacity_factor: float = 0.80
+    global_stiffened_strip_capacity_factor: float | None = None
     web_shear_interaction_exponent: float = 1.0
     local_plate_web_interaction_exponent: float = 2.0
     flanged_local_plate_restraint_factor: float = 1.10
@@ -133,6 +180,8 @@ class S3SolverConfig:
     torsional_restraint_factor: float = 0.65
     pressure_local_share: float = 0.0
     pressure_global_share: float = 1.0
+    use_separate_s3_pressure_modes: bool = True
+    s3_pressure_mode_stiffness_factor: float = 5.0
     include_pressure_dominated_yield_in_buckling_strength: bool = False
     include_lateral_deformation_in_ultimate_yield: bool = False
     include_global_curvature_in_plate_yield: bool = False
@@ -278,7 +327,7 @@ def _optional_float(value: Any) -> float | None:
 
 
 def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
-    """Map a reference stiffened-panel CSV row into the solver input type."""
+    """Map a PULS stiffened-panel CSV row into the solver input type."""
 
     elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
     poisson_ratio = _optional_float(row.get("Poisson's ratio"))
@@ -316,7 +365,7 @@ def row_to_s3_input(row: Mapping[str, Any]) -> S3PanelInput:
 
 
 def row_to_u3_input(row: Mapping[str, Any]) -> U3PanelInput:
-    """Map a reference unstiffened-panel row/export into the solver input type."""
+    """Map a PULS unstiffened-panel row/export into the solver input type."""
 
     elastic_modulus = _optional_float(row.get("Modulus of elasticity"))
     poisson_ratio = _optional_float(row.get("Poisson's ratio"))
@@ -378,8 +427,19 @@ def _ship_section_value(section: Mapping[str, Any], key: str, default: Any = _MI
     return value
 
 
+def _ship_section_optional_value(
+    section: Mapping[str, Any],
+    *keys: str,
+    default: Any = "",
+) -> Any:
+    for key in keys:
+        if key in section:
+            return _ship_section_value(section, key)
+    return default
+
+
 def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one ANYstructure ship-section result record to CSV-like S3 fields."""
+    """Flatten one ANYstructure ship-section PULS result record to CSV-like S3 fields."""
 
     plate = record["Plate geometry"]
     stiffener = record["Primary stiffeners"]
@@ -388,6 +448,9 @@ def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
     support = record.get("Bound cond.", {})
     buckling = record.get("Buckling strength", {})
     ultimate = record.get("Ultimate capacity", {})
+    global_elastic = record.get("Global elastic buckling", {})
+    local_elastic = record.get("Local elastic buckling", {})
+    failure_modes = record.get("Failure modes", {})
     transverse_stress = _ship_section_value(loads, "Trans. stress")
 
     return {
@@ -418,11 +481,53 @@ def ship_section_record_to_csv_row(record: Mapping[str, Any]) -> dict[str, Any]:
             _ship_section_value(ultimate, "Actual usage Factor") if ultimate else ""
         ),
         "output cl str buc": _ship_section_value(buckling, "Status") if buckling else "",
+        "PULS global axial stress": _ship_section_optional_value(
+            global_elastic,
+            "Axial stress",
+        ),
+        "PULS global trans stress": _ship_section_optional_value(
+            global_elastic,
+            "Trans. Stress",
+            "Trans. stress",
+        ),
+        "PULS global shear stress": _ship_section_optional_value(
+            global_elastic,
+            "Shear stress",
+        ),
+        "PULS local axial stress": _ship_section_optional_value(
+            local_elastic,
+            "Axial stress",
+        ),
+        "PULS local trans stress": _ship_section_optional_value(
+            local_elastic,
+            "Trans. Stress",
+            "Trans. stress",
+        ),
+        "PULS local shear stress": _ship_section_optional_value(
+            local_elastic,
+            "Shear stress",
+        ),
+        "PULS failure plate buckling percent": _ship_section_optional_value(
+            failure_modes,
+            "Plate buckling",
+        ),
+        "PULS failure global stiffener buckling percent": _ship_section_optional_value(
+            failure_modes,
+            "Global stiffener buckling",
+        ),
+        "PULS failure torsional stiffener buckling percent": _ship_section_optional_value(
+            failure_modes,
+            "Torsional stiffener buckling",
+        ),
+        "PULS failure web stiffener buckling percent": _ship_section_optional_value(
+            failure_modes,
+            "Web stiffener buckling",
+        ),
     }
 
 
 def ship_section_record_to_u3_row(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one ANYstructure ship-section result record to CSV-like U3 fields."""
+    """Flatten one ANYstructure ship-section PULS result record to CSV-like U3 fields."""
 
     plate = record["Geometry"]
     material = record["Material"]
@@ -679,9 +784,8 @@ def predict_anystructure_uf(
 ) -> np.ndarray:
     """Return legacy ANYstructure vector [buckling UF, ultimate UF, valid].
 
-    The factors are intentionally returned un-factored. ANYstructure can either
-    compare them against 1 / material factor or multiply by material factor and
-    compare against 1.0, matching the ML-Numeric reporting path.
+    The factors are intentionally returned un-factored.  ANYstructure compares
+    them against a separate PULS acceptance limit, typically 1 / material factor.
     """
 
     result = solve_anystructure_panel(calc_object, lat_press, config)
@@ -965,6 +1069,113 @@ def _load_family(panel: S3PanelInput | U3PanelInput) -> str:
     return "+".join(components) if components else "zero-variable-load"
 
 
+def _limit_check(value: float | None, *, maximum: float | None = None, minimum: float | None = None) -> bool | None:
+    if value is None:
+        return None
+    if maximum is not None and value > maximum:
+        return False
+    if minimum is not None and value < minimum:
+        return False
+    return True
+
+
+def _puls_manual_reference_domain(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
+    """Return source-backed PULS manual limit diagnostics without gating solves."""
+
+    if isinstance(panel, S3PanelInput):
+        limits = PULS_MANUAL_S3_LIMITS
+        aspect_ratio = panel.length / panel.width if panel.width > EPS else None
+        plate_slenderness = panel.width / panel.plate_thickness if panel.plate_thickness > EPS else None
+        web_slenderness = (
+            panel.stiffener_height / panel.web_thickness
+            if panel.web_thickness > EPS
+            else None
+        )
+        web_limit = (
+            limits["flatbar_web_slenderness_max"]
+            if panel.stiffener_type == "Flatbar"
+            else limits["open_profile_web_slenderness_max"]
+        )
+        flange_slenderness = None
+        flange_width_to_web_height = None
+        if panel.stiffener_type != "Flatbar" and panel.flange_width > EPS and panel.flange_thickness > EPS:
+            flange_slenderness = panel.flange_width / panel.flange_thickness
+            flange_width_to_web_height = panel.flange_width / max(panel.stiffener_height, EPS)
+        checks = {
+            "plate_slenderness": _limit_check(plate_slenderness, maximum=limits["plate_slenderness_max"]),
+            "aspect_ratio": _limit_check(
+                aspect_ratio,
+                minimum=limits["aspect_ratio_min"],
+                maximum=limits["aspect_ratio_max"],
+            ),
+            "web_slenderness": _limit_check(web_slenderness, maximum=web_limit),
+            "free_flange_slenderness": (
+                True
+                if panel.stiffener_type == "Flatbar"
+                else _limit_check(flange_slenderness, maximum=limits["free_flange_slenderness_max"])
+            ),
+            "flange_width_to_web_height": (
+                True
+                if panel.stiffener_type == "Flatbar"
+                else _limit_check(
+                    flange_width_to_web_height,
+                    minimum=limits["min_flange_width_to_web_height"],
+                )
+            ),
+        }
+        failed = [name for name, passed in checks.items() if passed is False]
+        unknown = [name for name, passed in checks.items() if passed is None]
+        return {
+            "source": limits["source"],
+            "manual_file_date": limits["manual_file_date"],
+            "panel_family": "S3",
+            "note": "manual reference limits are diagnostic only; solver covered-domain gates are unchanged",
+            "limits": {key: value for key, value in limits.items() if key not in {"source", "manual_file_date"}},
+            "values": {
+                "aspect_ratio": aspect_ratio,
+                "plate_slenderness": plate_slenderness,
+                "web_slenderness": web_slenderness,
+                "web_slenderness_limit": web_limit,
+                "free_flange_slenderness": flange_slenderness,
+                "flange_width_to_web_height": flange_width_to_web_height,
+            },
+            "checks": checks,
+            "failed": failed,
+            "unknown": unknown,
+            "within_manual_limits": not failed and not unknown,
+        }
+
+    limits = PULS_MANUAL_U3_LIMITS
+    short_side = min(panel.length, panel.width)
+    long_side = max(panel.length, panel.width)
+    long_to_short = long_side / max(short_side, EPS)
+    plate_slenderness = short_side / panel.plate_thickness if panel.plate_thickness > EPS else None
+    checks = {
+        "plate_slenderness": _limit_check(plate_slenderness, maximum=limits["plate_slenderness_max"]),
+        "long_to_short_aspect_ratio": _limit_check(
+            long_to_short,
+            maximum=limits["long_to_short_aspect_ratio_max"],
+        ),
+    }
+    failed = [name for name, passed in checks.items() if passed is False]
+    unknown = [name for name, passed in checks.items() if passed is None]
+    return {
+        "source": limits["source"],
+        "manual_file_date": limits["manual_file_date"],
+        "panel_family": "U3",
+        "note": "manual reference limits are diagnostic only; solver covered-domain gates are unchanged",
+        "limits": {key: value for key, value in limits.items() if key not in {"source", "manual_file_date"}},
+        "values": {
+            "long_to_short_aspect_ratio": long_to_short,
+            "plate_slenderness": plate_slenderness,
+        },
+        "checks": checks,
+        "failed": failed,
+        "unknown": unknown,
+        "within_manual_limits": not failed and not unknown,
+    }
+
+
 def _validation_domain(
     panel: S3PanelInput | U3PanelInput,
     config: S3SolverConfig,
@@ -986,6 +1197,7 @@ def _validation_domain(
         "pressure_category": "nonzero" if panel.pressure > EPS else "zero",
         "load_family": _load_family(panel),
         "reasons": list(reasons or ()),
+        "puls_manual_reference": _puls_manual_reference_domain(panel),
     }
     if isinstance(panel, S3PanelInput):
         domain.update(
@@ -1264,9 +1476,14 @@ def build_ritz_modes(
         config.initial_imperfection_floor_mm,
         config.initial_imperfection_ratio * min(panel.length, panel.width),
     )
+    global_pressure_share = (
+        0.0
+        if config.use_separate_s3_pressure_modes
+        else config.pressure_global_share
+    )
     for family, pressure_share in (
         ("local", config.pressure_local_share),
-        ("global", config.pressure_global_share),
+        ("global", global_pressure_share),
     ):
         stiffness = build_orthotropic_stiffness(panel, section, family, config)
         if family == "global":
@@ -1294,6 +1511,38 @@ def build_ritz_modes(
                         nonlinear_stiffness=max(nonlinear, EPS),
                     )
                 )
+    if config.use_separate_s3_pressure_modes and config.pressure_global_share > EPS:
+        stiffness = build_orthotropic_stiffness(panel, section, "global", config)
+        stiffness = _with_longitudinal_stiffness_scale(stiffness, global_stiffness_scale)
+        stiffness = OrthotropicStiffness(
+            d11=stiffness.d11 * max(config.s3_pressure_mode_stiffness_factor, EPS),
+            d12=stiffness.d12 * max(config.s3_pressure_mode_stiffness_factor, EPS),
+            d22=stiffness.d22 * max(config.s3_pressure_mode_stiffness_factor, EPS),
+            d66=stiffness.d66 * max(config.s3_pressure_mode_stiffness_factor, EPS),
+            membrane_thickness=stiffness.membrane_thickness,
+        )
+        m = config.longitudinal_modes[0] if config.longitudinal_modes else 1
+        n = config.transverse_modes[0] if config.transverse_modes else 1
+        kx, ky, linear, _, nonlinear = _mode_linear_terms(panel, stiffness, config, m, n)
+        modes.append(
+            RitzMode(
+                family="global-pressure",
+                m=m,
+                n=n,
+                kx=kx,
+                ky=ky,
+                linear_stiffness=linear,
+                geometric_stiffness=0.0,
+                pressure_force=_pressure_generalized_force(
+                    panel,
+                    m,
+                    n,
+                    config.pressure_global_share,
+                ),
+                imperfection=0.0,
+                nonlinear_stiffness=max(nonlinear, EPS),
+            )
+        )
     return modes
 
 
@@ -1800,7 +2049,7 @@ def _stiffener_web_local_buckling(
 
     The web is treated as a long simply supported plate strip under a reference
     web-edge compression envelope and panel shear.  The candidate keeps the
-    full web/stiffener stress redistribution out of scope, but the explicit
+    full PULS web/stiffener stress redistribution out of scope, but the explicit
     interaction avoids treating tall loaded webs as compression-only strips.
     """
 
@@ -1975,6 +2224,139 @@ def _stiffener_torsional_buckling(
     }
 
 
+def _global_stiffened_strip_capacity_adjustment(
+    panel: S3PanelInput,
+    section: S3SectionProperties,
+    raw_factor: float,
+    local_reference_factor: float | None,
+    config: S3SolverConfig,
+) -> dict[str, Any]:
+    """Return the reduced global-strip capacity adjustment and diagnostics."""
+
+    plate_reference_inertia = panel.width * panel.plate_thickness**3 / 12.0
+    section_inertia_ratio = section.inertia_x / max(plate_reference_inertia, EPS)
+    section_area_ratio = section.area / max(panel.width * panel.plate_thickness, EPS)
+    aspect_ratio = panel.length / max(panel.width, EPS)
+    plate_slenderness = panel.width / max(panel.plate_thickness, EPS)
+    local_interaction_ratio = (
+        raw_factor / max(local_reference_factor, EPS)
+        if local_reference_factor is not None and local_reference_factor > EPS
+        else None
+    )
+    load_family = _load_family(panel)
+
+    if config.global_stiffened_strip_capacity_factor is not None:
+        fixed_factor = max(float(config.global_stiffened_strip_capacity_factor), EPS)
+        return {
+            "raw_factor": raw_factor,
+            "local_reference_factor": local_reference_factor,
+            "local_interaction_ratio": local_interaction_ratio,
+            "capacity_factor": fixed_factor,
+            "mode": "fixed-override",
+            "section": {
+                "inertia_ratio": section_inertia_ratio,
+                "area_ratio": section_area_ratio,
+                "plate_slenderness": plate_slenderness,
+                "aspect_ratio": aspect_ratio,
+            },
+            "modifiers": {
+                "base": fixed_factor,
+                "support": 1.0,
+                "pressure": 1.0,
+                "load": 1.0,
+                "aspect": 1.0,
+                "slenderness": 1.0,
+                "section": 1.0,
+                "local_interaction": 1.0,
+            },
+            "notes": ["fixed global-stiffened-strip capacity override"],
+        }
+
+    notes = ["computed reduced global-stiffened-strip capacity adjustment"]
+    base = 0.55
+    support_modifier = {
+        "Integrated": 0.88,
+        "Girder - long": 0.95,
+        "Girder - trans": 0.85,
+    }.get(panel.in_plane_support, 1.0)
+    pressure_modifier = 0.92 if panel.pressure > EPS else 1.0
+
+    load_modifier = 1.0
+    if "shear" in load_family:
+        load_modifier *= 0.95
+    if "axial-tension" in load_family and "transverse-compression" in load_family:
+        load_modifier *= 0.95
+    if "pressure" in load_family and "shear" not in load_family:
+        load_modifier *= 0.95
+
+    if aspect_ratio >= 6.0:
+        aspect_modifier = 0.90
+    elif aspect_ratio >= 3.0:
+        aspect_modifier = 0.96
+    else:
+        aspect_modifier = 1.05
+
+    if plate_slenderness >= 80.0:
+        slenderness_modifier = 1.15
+        notes.append("very slender plate: global-strip reduction relaxed")
+    elif plate_slenderness >= 50.0:
+        slenderness_modifier = 1.00
+    else:
+        slenderness_modifier = 0.95
+
+    if section_inertia_ratio >= 1.0e5:
+        section_modifier = 0.95
+    elif section_inertia_ratio >= 1.0e4:
+        section_modifier = 0.98
+    else:
+        section_modifier = 0.92
+
+    if local_interaction_ratio is None:
+        local_modifier = 1.0
+    elif local_interaction_ratio >= 4.0:
+        local_modifier = 0.90
+    elif local_interaction_ratio >= 2.0:
+        local_modifier = 0.95
+    else:
+        local_modifier = 1.0
+
+    capacity_factor = (
+        base
+        * support_modifier
+        * pressure_modifier
+        * load_modifier
+        * aspect_modifier
+        * slenderness_modifier
+        * section_modifier
+        * local_modifier
+    )
+    capacity_factor = min(0.95, max(0.30, capacity_factor))
+    return {
+        "raw_factor": raw_factor,
+        "local_reference_factor": local_reference_factor,
+        "local_interaction_ratio": local_interaction_ratio,
+        "capacity_factor": capacity_factor,
+        "mode": "computed",
+        "section": {
+            "inertia_ratio": section_inertia_ratio,
+            "area_ratio": section_area_ratio,
+            "plate_slenderness": plate_slenderness,
+            "aspect_ratio": aspect_ratio,
+        },
+        "modifiers": {
+            "base": base,
+            "support": support_modifier,
+            "pressure": pressure_modifier,
+            "load": load_modifier,
+            "aspect": aspect_modifier,
+            "slenderness": slenderness_modifier,
+            "section": section_modifier,
+            "local_interaction": local_modifier,
+        },
+        "notes": notes,
+    }
+
+
 def elastic_buckling_factors(
     panel: S3PanelInput,
     section: S3SectionProperties,
@@ -1990,8 +2372,8 @@ def elastic_buckling_factors(
             continue
         raw_factor = mode.linear_stiffness / mode.geometric_stiffness
         if mode.family == "global":
-            capacity_factor = max(config.global_stiffened_strip_capacity_factor, EPS)
-            factor = raw_factor * capacity_factor
+            capacity_factor = 1.0
+            factor = raw_factor
             failure_family = "global-stiffened-strip"
         else:
             capacity_factor = 1.0
@@ -2034,12 +2416,14 @@ def elastic_buckling_factors(
     for family, factor in coupled_shear_factors.items():
         if factor is None:
             continue
-        factor_rows.append(
-            {
-                "factor": factor["factor"],
-                "label": f"{family}-ritz-combined-shear",
-                "family": family,
-                "failure_family": "plate-shear" if family == "local" else "global-stiffened-strip",
+            factor_rows.append(
+                {
+                    "factor": factor["factor"],
+                    "raw_factor": factor["factor"],
+                    "capacity_factor": 1.0,
+                    "label": f"{family}-ritz-combined-shear",
+                    "family": family,
+                    "failure_family": "plate-shear" if family == "local" else "global-stiffened-strip",
             }
         )
     web_factor = _stiffener_web_local_buckling(panel, section, stiffener_section, config)
@@ -2092,21 +2476,34 @@ def elastic_buckling_factors(
         for row in factor_rows:
             if row["failure_family"] != "global-stiffened-strip":
                 continue
-            uncoupled_factor = float(row["factor"])
+            raw_factor = float(row.get("raw_factor", row["factor"]))
+            adjustment = _global_stiffened_strip_capacity_adjustment(
+                panel,
+                section,
+                raw_factor,
+                local_reference_factor,
+                config,
+            )
+            capacity_factor = float(adjustment["capacity_factor"])
+            uncoupled_factor = raw_factor * capacity_factor
             interaction_driver = uncoupled_factor / max(local_reference_factor, EPS)
             scale = 1.0 / (
                 1.0
                 + config.local_global_coupling_gain * max(interaction_driver - 1.0, 0.0)
             )
             scale = min(1.0, max(config.local_global_coupling_floor, scale))
+            row["raw_factor"] = raw_factor
+            row["capacity_factor"] = capacity_factor
+            row["global_capacity_adjustment"] = adjustment
             row["uncoupled_factor"] = uncoupled_factor
             row["elastic_coupling_scale"] = scale
             row["factor"] = uncoupled_factor * scale
             elastic_global_coupling_rows.append(
                 {
                     "mode": str(row["label"]),
-                    "raw_factor": float(row.get("raw_factor", uncoupled_factor)),
-                    "capacity_factor": float(row.get("capacity_factor", 1.0)),
+                    "raw_factor": raw_factor,
+                    "capacity_factor": capacity_factor,
+                    "capacity_adjustment": adjustment,
                     "uncoupled_factor": uncoupled_factor,
                     "coupled_factor": float(row["factor"]),
                     "scale": scale,
@@ -2159,6 +2556,10 @@ def elastic_buckling_factors(
         if "uncoupled_factor" in row:
             family_summary["uncoupled_factor"] = row["uncoupled_factor"]
             family_summary["elastic_coupling_scale"] = row["elastic_coupling_scale"]
+        if "global_capacity_adjustment" in row:
+            family_summary["raw_factor"] = row["raw_factor"]
+            family_summary["capacity_factor"] = row["capacity_factor"]
+            family_summary["global_capacity_adjustment"] = row["global_capacity_adjustment"]
         modeled_failure_families[name] = family_summary
     critical = min(factor_rows, key=lambda item: item["factor"])
     return {
@@ -2899,25 +3300,25 @@ def _interpolate_capacity(
 def _notes() -> list[str]:
     return [
         "regular S3 unit strip only; T1, K3, corrugation and FRP are outside this milestone",
-        "positive reference CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
-        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production reference basis",
+        "positive PULS CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production PULS basis",
         "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure material preload contribution is reported in ultimate diagnostics but excluded from buckling-strength control by default",
         "shear-normal Ritz coupling is truncated in elastic and continuation checks; classical local plate shear remains a fallback candidate",
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
         "stiffener yield exposes SI/PI section branches, lateral-deformation and sniped bending, SI-only torsional stress, and effective attached plate width",
         "global longitudinal strip stiffness degrades from local elastic utilization on the nonlinear load path",
-        "validity limits are explicit covered-domain checks because the reference user manual is not assumed",
+        "PULS user manual S3 limits are reported as diagnostics; covered-domain gates remain controlled by solver config",
     ]
 
 
 def _u3_notes() -> list[str]:
     return [
         "regular U3 unstiffened rectangular panels only; T1, K3, corrugation and FRP are outside this milestone",
-        "positive reference export normal stress is compression; signed stresses scale while lateral pressure remains fixed",
+        "positive PULS export normal stress is compression; signed stresses scale while lateral pressure remains fixed",
         "Rayleigh-Ritz sine modes use an isotropic plate basis with simply-supported trigonometric shapes",
         "buckling usage is the reduced buckling-strength envelope over first-yield capacity and elastic plate/shear buckling limits",
         "U3 end stresses are interpolated in yield checks and averaged in elastic buckling checks",
-        "validity limits are explicit covered-domain checks because the reference user manual is not assumed",
+        "PULS user manual U3 limits are reported as diagnostics; covered-domain gates remain controlled by solver config",
     ]
 
 
@@ -3211,6 +3612,23 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             ("plate", "stiffener_induced", "plate_induced"),
             key=lambda branch: float(pressure_yield[branch]),
         ),
+        "pressure_mode_model": {
+            "separate_symmetric_pressure_modes": config.use_separate_s3_pressure_modes,
+            "pressure_family": (
+                "global-pressure"
+                if config.use_separate_s3_pressure_modes
+                else "global"
+            ),
+            "pressure_mode_stiffness_factor": (
+                config.s3_pressure_mode_stiffness_factor
+                if config.use_separate_s3_pressure_modes
+                else 1.0
+            ),
+            "manual_basis": (
+                "S3 user manual separates symmetric/clamped pressure modes from "
+                "asymmetric simply supported buckling modes"
+            ),
+        },
     }
     if pressure_yield["max"] >= config.pressure_yield_limit:
         return _attach_reliability(
@@ -3777,4 +4195,6 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         solve_u3_panel,
         validation_reasons,
     )
+
+
 
