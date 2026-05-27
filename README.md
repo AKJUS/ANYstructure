@@ -59,6 +59,7 @@ The external Excel-sheet DNV PULS calculation workflow has been removed from thi
 * Buckling strength of shells DNV-RP-C202
 * Machine learning buckling, PULS based
 * Fatigue for plate/stiffener connection (DNVGL-RP-C203)
+* Improved Linux compability.
 
 Compartments (tank pressures) are created automatically.
 
