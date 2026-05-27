@@ -32,7 +32,7 @@ setup(
     name='ANYstructure',  # Required
     url = 'https://github.com/audunarn/ANYstructure',
     entry_points={"console_scripts": ['ANYstructure = anystruct.__main__:main']},
-    version='6.0.0',  # Required
+    version='6.0.1',  # Required
     license='MIT',
     description='A plate field optimization tool for offshore structures calculated according to DNV standards',
     long_description = readme(),

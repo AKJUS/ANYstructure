@@ -18,14 +18,8 @@ covered assumptions instead of presenting this reduced model as PULS parity.
 
 from __future__ import annotations
 
-import argparse
-import csv
-import json
 import math
-import random
-import statistics
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
@@ -40,29 +34,12 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
 SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
-CSV_SAMPLE_METHOD_FIRST_N = "first-n"
-CSV_SAMPLE_METHOD_STRATIFIED = "stratified-shuffle"
-CSV_SAMPLE_METHOD_FULL = "full"
-DEFAULT_CSV_SAMPLE_SIZE = 1200
-DEFAULT_CSV_FIXTURE_SAMPLE_SIZE = 64
-DEFAULT_CSV_SAMPLE_SEED = 128
-DEFAULT_CSV_MODE_CONVERGENCE_SAMPLE_SIZE = 200
-CSV_STRATIFICATION_KEYS = (
-    "target_validity",
-    "stiffener_type",
-    "support",
-    "stiffener_boundary",
-    "pressure_state",
-    "pressure_band",
-    "usage_region",
-)
 DEFAULT_SHIP_SECTION_INPUTS = (
     r"C:\Github\ANYstructure\anystruct\ship_section_example.txt",
     r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA side section.txt",
     r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA mid section.txt",
     r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA transversal section.txt",
 )
-DEFAULT_RELIABILITY_BASELINE = Path("reports/puls_reliability_baseline.json")
 PULS_MANUAL_S3_LIMITS = {
     "source": r"C:\Program Files\DNV\NauticusHull 20.36.2508\Manuals\UserManual PULS.pdf",
     "manual_file_date": "2025-08-05",
@@ -170,7 +147,7 @@ class S3SolverConfig:
     local_global_coupling_gain: float = 1.0
     global_stiffened_strip_capacity_factor: float | None = None
     web_shear_interaction_exponent: float = 1.0
-    local_plate_web_interaction_exponent: float = 2.0
+    local_plate_web_interaction_exponent: float = 1.20
     flanged_local_plate_restraint_factor: float = 1.10
     s3_shear_buckling_capacity_factor: float = 0.75
     use_effective_stiffener_width: bool = False
@@ -2128,7 +2105,9 @@ def _local_plate_web_interaction(
     first reduced solver still has separate plate-shear and web-local
     candidates, so this explicit interaction candidate keeps those concurrent
     local shear usages visible while the full coupled displacement family is
-    not yet implemented.
+    not yet implemented.  The default exponent is intentionally below the
+    quadratic von-Mises-like value because the reduced candidates are already
+    post-processed local capacities rather than independent stress components.
     """
 
     if plate_shear is None or web_local is None:
@@ -4195,6 +4174,4 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         solve_u3_panel,
         validation_reasons,
     )
-
-
 
