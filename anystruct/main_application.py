@@ -5047,8 +5047,8 @@ class Application():
                                                     font=self._text_size["Text 9 bold"],
                                                anchor='nw',fill=color_buckling)
 
-                    stfweb = round(buckling['Local buckling']['Stiffener'][0],3)*1000
-                    stffl = round(buckling['Local buckling']['Stiffener'][1],3)*1000
+                    stfweb = round(buckling['Local buckling']['Stiffener'][0],3)#*1000
+                    stffl = round(buckling['Local buckling']['Stiffener'][1],3)#*1000
 
                     self._result_canvas.create_text([x + dx*x_mult, (y+(start_y+4)*dy) * 1],
                                                text=str(round(buckling['Stiffener']['Resistance between stiffeners'],3))
