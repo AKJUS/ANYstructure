@@ -1726,6 +1726,13 @@ class Application():
         self._weight_button.place(relx=0.875,rely=0.7, relwidth = 0.038)
         self.gui_structural_properties()  # Initiating the flat panel structural properties
         self.set_colors('default')  # Setting colors theme
+
+        # Minimum practical size for the current Tkinter layout
+        parent.minsize(1200, 750)
+
+        self._resize_after_id = None
+        self._last_resize_size = (0, 0)
+
         # self._current_theme = 'default'
 
     def set_colors(self, theme):
@@ -1807,8 +1814,14 @@ class Application():
         vert_start = 0.04
         hor_start = 0.02
 
-        delta_y = 0.024
-        delta_x = 0.13
+        width = max(self._parent.winfo_width(), 1)
+
+        if width < 1350:
+            delta_y = 0.028
+            delta_x = 0.12
+        else:
+            delta_y = 0.024
+            delta_x = 0.13
 
         ent_relx = hor_start + 6*delta_x
 
@@ -2327,21 +2340,108 @@ class Application():
         else:
             self._ent_puls_up_boundary.place_forget()
 
-    def resize(self, event):
-        self.text_scale = 1#self._main_fr.winfo_width()/1920
-        self._text_size = {'Text 14 bold': 'Verdana '+str(int(14*self.text_scale))+' bold',
-                           'Text 16 bold': 'Verdana ' + str(int(16 * self.text_scale)) + ' bold',
-                           'Text 18 bold': 'Verdana ' + str(int(18 * self.text_scale)) + ' bold',
-                           'Text 12 bold': 'Verdana ' + str(int(12 * self.text_scale)) + ' bold',
-                           'Text 10 bold': 'Verdana '+str(int(10*self.text_scale))+' bold',
-                           'Text 9 bold': 'Verdana ' + str(int(9 * self.text_scale)) + ' bold',
-                           'Text 8 bold': 'Verdana ' + str(int(8 * self.text_scale)) + ' bold',
-                           'Text 8': 'Verdana ' + str(int(8 * self.text_scale)),
-                           'Text 9': 'Verdana ' + str(int(8 * self.text_scale)),
-                           'Text 7': 'Verdana ' + str(int(7 * self.text_scale)),
-                           'Text 10': 'Verdana ' + str(int(10 * self.text_scale)),
-                           'Text 7 bold': 'Verdana ' + str(int(7 * self.text_scale)) + ' bold'}
-        #self.update_frame()
+    def resize(self, event=None):
+        """
+        Responsive GUI scaling.
+
+        The old implementation kept text_scale = 1 and did not call update_frame().
+        On small laptop screens, relative widget placement shrinks the available
+        widget area while the text remains full size, causing overlap.
+        """
+
+        if event is not None and event.widget is not self._parent:
+            return
+
+        width = max(self._parent.winfo_width(), 1)
+        height = max(self._parent.winfo_height(), 1)
+
+        if (width, height) == self._last_resize_size:
+            return
+
+        self._last_resize_size = (width, height)
+
+        # Scale against a comfortable reference layout.
+        # Clamp to avoid unreadably small or unnecessarily large fonts.
+        scale_w = width / 1600.0
+        scale_h = height / 900.0
+        self.text_scale = max(0.78, min(1.05, min(scale_w, scale_h)))
+
+        self._text_size = {
+            'Text 14 bold': 'Verdana ' + str(max(9, int(14 * self.text_scale))) + ' bold',
+            'Text 16 bold': 'Verdana ' + str(max(10, int(16 * self.text_scale))) + ' bold',
+            'Text 18 bold': 'Verdana ' + str(max(11, int(18 * self.text_scale))) + ' bold',
+            'Text 12 bold': 'Verdana ' + str(max(8, int(12 * self.text_scale))) + ' bold',
+            'Text 10 bold': 'Verdana ' + str(max(7, int(10 * self.text_scale))) + ' bold',
+            'Text 9 bold': 'Verdana ' + str(max(7, int(9 * self.text_scale))) + ' bold',
+            'Text 8 bold': 'Verdana ' + str(max(6, int(8 * self.text_scale))) + ' bold',
+            'Text 8': 'Verdana ' + str(max(6, int(8 * self.text_scale))),
+            'Text 9': 'Verdana ' + str(max(6, int(9 * self.text_scale))),
+            'Text 7': 'Verdana ' + str(max(6, int(7 * self.text_scale))),
+            'Text 10': 'Verdana ' + str(max(7, int(10 * self.text_scale))),
+            'Text 7 bold': 'Verdana ' + str(max(6, int(7 * self.text_scale))) + ' bold',
+            'Text 6 bold': 'Verdana ' + str(max(6, int(6 * self.text_scale))) + ' bold',
+        }
+
+        self._apply_responsive_main_layout(width, height)
+
+        # Throttle redraws while user drags/resizes the window.
+        if self._resize_after_id is not None:
+            self._parent.after_cancel(self._resize_after_id)
+
+        self._resize_after_id = self._parent.after(150, self._finish_resize)
+
+    def _finish_resize(self):
+        self._resize_after_id = None
+
+        try:
+            self.update_frame()
+        except Exception:
+            # Avoid crashing during early initialization.
+            pass
+
+    def _apply_responsive_main_layout(self, width, height):
+        """
+        Adjust the major GUI regions for smaller laptop screens.
+
+        The old layout used:
+            tab width  = 0.2585
+            main canvas start x = 0.26
+
+        That leaves too little room for the input notebook on small screens.
+        """
+
+        if width < 1350:
+            left_width = 0.34
+        elif width < 1600:
+            left_width = 0.30
+        else:
+            left_width = 0.2585
+
+        x_canvas_place = left_width + 0.005
+        remaining_width = 1.0 - x_canvas_place
+
+        self._tabControl.place(relwidth=left_width, relheight=1)
+
+        self._main_canvas.place(
+            relx=x_canvas_place,
+            rely=0,
+            relwidth=remaining_width * 0.70,
+            relheight=0.73,
+        )
+
+        self._prop_canvas.place(
+            relx=x_canvas_place,
+            rely=0.73,
+            relwidth=remaining_width * 0.52,
+            relheight=0.27,
+        )
+
+        self._result_canvas.place(
+            relx=x_canvas_place + remaining_width * 0.52,
+            rely=0.73,
+            relwidth=remaining_width * 0.48,
+            relheight=0.27,
+        )
 
     def toggle_select_multiple(self, event = None):
         if self._toggle_btn.config('relief')[-1] == 'sunken':
