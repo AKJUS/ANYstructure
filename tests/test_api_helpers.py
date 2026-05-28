@@ -91,6 +91,45 @@ def test_normalize_bulb_stiffener_type(raw, expected):
     assert api_helpers.normalize_bulb_stiffener_type(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Fabricated", "welded"),
+        ("Cold formed", "cold formed"),
+        ("welded", "welded"),
+    ],
+)
+def test_normalize_flat_fabrication_method(raw, expected):
+    assert api_helpers.normalize_flat_fabrication_method(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Integrated", "Int"),
+        ("Girder - long", "GL"),
+        ("Girder - trans", "GT"),
+        ("Int", "Int"),
+    ],
+)
+def test_normalize_puls_boundary(raw, expected):
+    assert api_helpers.normalize_puls_boundary(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("C", "Continuous"),
+        ("Cont", "Continuous"),
+        ("Continuous", "Continuous"),
+        ("S", "Sniped"),
+        ("Sniped", "Sniped"),
+    ],
+)
+def test_normalize_puls_stiffener_end(raw, expected):
+    assert api_helpers.normalize_puls_stiffener_end(raw) == expected
+
+
 def test_domain_constants_include_public_api_values():
     assert "Flat plate, stiffened" in api_helpers.FLAT_STRUCTURE_DOMAINS
     assert "Orthogonally Stiffened shell" in api_helpers.CYLINDER_STRUCTURE_DOMAINS
