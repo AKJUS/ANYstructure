@@ -495,15 +495,21 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
                                               hw = 0, tw = 0, b = 0, tf = 0, CylinderAndCurvedPlate = None,
                                               conical = False, psd = 0, cone_r1 = 0, cone_r2 = 0, cone_alpha = 0,
                                               shell_lenght_l = 0):
-    
-    
-    A = 0 if geometry in [1, 2] else hw * tw + b * tf
-    eq_thk = shell_t if geometry in [1, 2] else shell_t + A/shell_spacing
 
-    Itot = CylinderAndCurvedPlate.get_Itot(hw=0 if geometry in [1, 2] else hw,
-                                           tw=0 if geometry in [1, 2] else tw,
-                                           b=0 if geometry in [1, 2] else b,
-                                           tf=0 if geometry in [1, 2] else tf,
+    hw = 0 if hw is None else hw
+    tw = 0 if tw is None else tw
+    b = 0 if b is None else b
+    tf = 0 if tf is None else tf
+    has_longitudinal_stiffener = geometry in [3, 4, 7, 8] and shell_spacing not in [None, 0] and \
+        hw * tw + b * tf > 0
+
+    A = hw * tw + b * tf if has_longitudinal_stiffener else 0
+    eq_thk = shell_t + A/shell_spacing if has_longitudinal_stiffener else shell_t
+
+    Itot = CylinderAndCurvedPlate.get_Itot(hw=hw if has_longitudinal_stiffener else 0,
+                                           tw=tw if has_longitudinal_stiffener else 0,
+                                           b=b if has_longitudinal_stiffener else 0,
+                                           tf=tf if has_longitudinal_stiffener else 0,
                                            r=shell_radius,
                                            s=shell_spacing,
                                            t=shell_t)

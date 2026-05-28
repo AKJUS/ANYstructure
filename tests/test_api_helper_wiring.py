@@ -16,7 +16,7 @@ def test_api_uses_shared_stiffener_normalizer():
     api_source = Path(__file__).resolve().parents[1] / "anystruct" / "api.py"
     source = api_source.read_text(encoding="utf-8")
 
-    assert source.count("api_helpers.normalize_bulb_stiffener_type") == 4
+    assert source.count("api_helpers.normalize_bulb_stiffener_type") == 5
 
 
 def test_api_uses_shared_cylinder_domain_helpers():
@@ -34,7 +34,7 @@ def test_api_uses_shared_unit_conversions():
     api_source = Path(__file__).resolve().parents[1] / "anystruct" / "api.py"
     source = api_source.read_text(encoding="utf-8")
 
-    assert source.count("api_helpers.mpa_to_pa") == 12
+    assert source.count("api_helpers.mpa_to_pa") == 13
     assert source.count("api_helpers.mm_to_m") == 8
 
 

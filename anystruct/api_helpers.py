@@ -26,6 +26,33 @@ BUCKLING_ACCEPTANCE_TYPES = (
     "ultimate",
 )
 
+FLAT_PRESSURE_SIDES = (
+    "stiffener side",
+    "plate side",
+    "both sides",
+)
+
+FLAT_FABRICATION_METHODS = (
+    "welded",
+    "cold formed",
+    "Fabricated",
+    "Cold formed",
+)
+
+PULS_PANEL_TYPES = (
+    "SP",
+    "UP",
+)
+
+PULS_BOUNDARY_TYPES = (
+    "Int",
+    "GL",
+    "GT",
+    "Integrated",
+    "Girder - long",
+    "Girder - trans",
+)
+
 SUPPORT_TYPES = (
     "Continuous",
     "Sniped",
@@ -118,3 +145,29 @@ def mm_to_m(value):
 
 def normalize_bulb_stiffener_type(stiffener_type):
     return "L-bulb" if stiffener_type in ["hp", "HP", "HP-bulb", "bulb"] else stiffener_type
+
+
+def normalize_flat_fabrication_method(method):
+    if method == "Fabricated":
+        return "welded"
+    if method == "Cold formed":
+        return "cold formed"
+    return method
+
+
+def normalize_puls_boundary(boundary):
+    return {
+        "Integrated": "Int",
+        "Girder - long": "GL",
+        "Girder - trans": "GT",
+    }.get(boundary, boundary)
+
+
+def normalize_puls_stiffener_end(support):
+    return {
+        "C": "Continuous",
+        "Cont": "Continuous",
+        "Continuous": "Continuous",
+        "S": "Sniped",
+        "Sniped": "Sniped",
+    }.get(support, support)

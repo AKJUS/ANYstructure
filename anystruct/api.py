@@ -1,11 +1,15 @@
+import math
+
 try:
     from anystruct.calc_structure import *
     from anystruct.calc_loads import *
     import anystruct.load_window as load_window
     import anystruct.make_grid_numpy as grid
     import anystruct.grid_window as grid_window
+    import anystruct.helper as hlp
     from anystruct.helper import *
     import anystruct.optimize as op
+    import anystruct.calculate_semianalytical as semi_analytical
     import anystruct.optimize_window as opw
     import anystruct.optimize_cylinder as opc
     import anystruct.optimize_multiple_window as opwmult
@@ -33,8 +37,10 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.load_window as load_window
     import ANYstructure.anystruct.make_grid_numpy as grid
     import ANYstructure.anystruct.grid_window as grid_window
+    import ANYstructure.anystruct.helper as hlp
     from ANYstructure.anystruct.helper import *
     import ANYstructure.anystruct.optimize as op
+    import ANYstructure.anystruct.calculate_semianalytical as semi_analytical
     import ANYstructure.anystruct.optimize_window as opw
     import ANYstructure.anystruct.optimize_cylinder as opc
     import ANYstructure.anystruct.optimize_multiple_window as opwmult
@@ -104,6 +110,9 @@ class FlatStru():
                            Stiffener=None if calculation_domain == 'Flat plate, unstiffened' else self._Stiffeners,
                            Girder=None if calculation_domain in ['Flat plate, unstiffened', 'Flat plate, stiffened']
                            else self._Girder, calculation_domain=calculation_domain)
+        self._buckling_method = "DNV-RP-C201 - prescriptive"
+        self._buckling_acceptance = "ultimate"
+        self._ml_buckling_model = None
     
     @property
     def calculation_domain(self):
@@ -183,21 +192,194 @@ class FlatStru():
                 sub_cls._km2 = km2
                 sub_cls._km3 = km3
 
+    def _active_flat_objects(self):
+        return [
+            sub_cls for sub_cls in [
+                self._FlatStructure.Plate,
+                self._FlatStructure.Stiffener,
+                self._FlatStructure.Girder,
+            ] if sub_cls is not None
+        ]
 
+    def _default_puls_panel_type(self):
+        return "UP" if self._FlatStructure.Stiffener is None else "SP"
 
+    def _set_puls_field(self, field_name, value):
+        for sub_cls in self._active_flat_objects():
+            setattr(sub_cls, field_name, value)
 
-    def get_buckling_results(self):
+    def _ensure_puls_defaults(self):
+        plate = self._FlatStructure.Plate
+        if plate.get_puls_sp_or_up() not in api_helpers.PULS_PANEL_TYPES:
+            self._set_puls_field("_puls_sp_or_up", self._default_puls_panel_type())
+        if plate.get_puls_boundary() not in ("Int", "GL", "GT"):
+            self._set_puls_field("_puls_boundary", "Int")
+        if plate.get_puls_stf_end() not in api_helpers.SUPPORT_TYPES:
+            self._set_puls_field("_puls_stf_end", "Continuous")
+        if plate.get_puls_up_boundary() in (None, ""):
+            self._set_puls_field("_puls_up_boundary", "SSSS")
+        if plate.get_puls_method() not in api_helpers.BUCKLING_ACCEPTANCE_TYPES:
+            self._set_puls_field("_puls_method", self._buckling_acceptance)
+
+    def _design_pressure_kpa(self):
+        return self._FlatStructure.lat_press * 1000
+
+    def _selected_buckling_uf(self, results):
+        if self._buckling_acceptance == "ultimate":
+            return results.get("ultimate UF", float("inf"))
+        return results.get("buckling UF", float("inf"))
+
+    def _semi_analytical_buckling_results(self):
+        self._ensure_puls_defaults()
+        mat_fac = float(self._FlatStructure.Plate.mat_factor)
+        try:
+            result = semi_analytical.solve_anystructure_panel(
+                self._FlatStructure,
+                self._design_pressure_kpa(),
+            )
+            valid_prediction = int(result.get("valid_prediction", 0)) == 1
+        except Exception as err:
+            result = {
+                "buckling_usage_factor": float("inf"),
+                "ultimate_usage_factor": float("inf"),
+                "panel_family": None,
+                "confidence": "low",
+                "valid_label": "SemiAnalytical S3/U3 error",
+                "invalid_reason": str(err),
+            }
+            valid_prediction = False
+
+        buckling_raw = float(result.get("buckling_usage_factor", float("inf"))) if valid_prediction else float("inf")
+        ultimate_raw = float(result.get("ultimate_usage_factor", float("inf"))) if valid_prediction else float("inf")
+        api_result = {
+            "method": "SemiAnalytical S3/U3",
+            "buckling UF": buckling_raw * mat_fac,
+            "ultimate UF": ultimate_raw * mat_fac,
+            "buckling UF raw": buckling_raw,
+            "ultimate UF raw": ultimate_raw,
+            "material factor": mat_fac,
+            "acceptance": 1.0,
+            "panel family": result.get("panel_family", None),
+            "confidence": result.get("confidence", None),
+            "error": result.get("invalid_reason") or "",
+            "available": valid_prediction,
+            "valid prediction": 1 if valid_prediction else 0,
+            "valid label": result.get("valid_label", "SemiAnalytical S3/U3 unsupported or invalid"),
+        }
+        api_result["selected UF"] = self._selected_buckling_uf(api_result)
+        return api_result
+
+    def _numeric_ml_required_keys(self, prefix):
+        return [
+            f"{prefix} validity predictor",
+            f"{prefix} validity xscaler",
+            f"{prefix} UF reg predictor",
+            f"{prefix} UF reg xscaler",
+            f"{prefix} UF reg yscaler",
+        ]
+
+    def _numeric_ml_buckling_results(self, ml_algo=None):
+        self._ensure_puls_defaults()
+        ml_algo = self._ml_buckling_model if ml_algo is None else ml_algo
+        mat_fac = float(self._FlatStructure.Plate.mat_factor)
+        prefix = op._get_numeric_pipeline_prefix(self._FlatStructure)
+        input_row = op._get_ml_input_for_optimization(self._FlatStructure, self._design_pressure_kpa())
+        required_keys = self._numeric_ml_required_keys(prefix)
+        missing = [key for key in required_keys if ml_algo is None or key not in ml_algo or ml_algo[key] is None]
+
+        if missing:
+            return {
+                "method": "ML-Numeric (PULS based)",
+                "buckling UF": float("inf"),
+                "ultimate UF": float("inf"),
+                "buckling UF raw": float("inf"),
+                "ultimate UF raw": float("inf"),
+                "material factor": mat_fac,
+                "pipeline prefix": prefix,
+                "input": input_row,
+                "error": "Missing numeric ML model(s): " + ", ".join(missing),
+                "available": False,
+                "valid prediction": None,
+                "valid label": "numeric ML unavailable",
+                "selected UF": float("inf"),
+            }
+
+        try:
+            numeric_result = op._predict_numeric_uf_group(
+                ml_algo=ml_algo,
+                input_rows=[input_row],
+                prefix=prefix,
+                mat_fac=mat_fac,
+            )[0]
+            buckling_uf = float(numeric_result[0])
+            ultimate_uf = float(numeric_result[1])
+            valid_prediction = int(numeric_result[2])
+        except Exception as err:
+            return {
+                "method": "ML-Numeric (PULS based)",
+                "buckling UF": float("inf"),
+                "ultimate UF": float("inf"),
+                "buckling UF raw": float("inf"),
+                "ultimate UF raw": float("inf"),
+                "material factor": mat_fac,
+                "pipeline prefix": prefix,
+                "input": input_row,
+                "error": str(err),
+                "available": False,
+                "valid prediction": None,
+                "valid label": "numeric ML error",
+                "selected UF": float("inf"),
+            }
+
+        valid_result = valid_prediction == 1 and math.isfinite(buckling_uf) and math.isfinite(ultimate_uf)
+        api_result = {
+            "method": "ML-Numeric (PULS based)",
+            "buckling UF": buckling_uf if valid_result else float("inf"),
+            "ultimate UF": ultimate_uf if valid_result else float("inf"),
+            "buckling UF raw": buckling_uf / mat_fac if valid_result else float("inf"),
+            "ultimate UF raw": ultimate_uf / mat_fac if valid_result else float("inf"),
+            "material factor": mat_fac,
+            "pipeline prefix": prefix,
+            "input": input_row,
+            "error": "",
+            "available": True,
+            "valid prediction": valid_prediction,
+            "valid label": "valid numeric UF predicted" if valid_result else "invalid/NaN UF predicted",
+        }
+        api_result["selected UF"] = self._selected_buckling_uf(api_result)
+        return api_result
+
+    def set_ml_buckling_model(self, ml_algo):
+        """
+        Set the numeric ML model/scaler bundle used by the ``ML-Numeric (PULS based)`` method.
+        """
+        self._ml_buckling_model = ml_algo
+
+    def get_available_buckling_methods(self):
+        return api_helpers.BUCKLING_CALCULATION_METHODS
+
+    def get_buckling_results(self, calculation_method: str = None, ml_algo=None):
         '''
-        Return a dictionary of all buckling results. UF - Utilization Factor.\n
+        Return buckling results for the active calculation method. UF - Utilization Factor.\n
+        DNV-RP-C201 returns the legacy result dictionary:\n
         Plate : {'Plate buckling': UF}\n
         Stiffener: {'Overpressure plate side': UF, 'Overpressure stiffener side': UF,\n
                     'Resistance between stiffeners': UF, 'Shear capacity': UF}\n
         Girder: {'Overpressure plate side': UF, 'Overpressure girder side': UF, 'Shear capacity': UF}\n
         Local buckling {'Stiffener': [UF web, UF flange], 'Girder': [UF web, UF flange]}\n
-        :return: Results for plate, stiffener, girder and a separate local check for stiffeners/girders\n
+        SemiAnalytical and ML-Numeric return a method result dictionary with buckling/ultimate UF,\n
+        raw UF, validity, and selected UF fields.\n
+        :return: Buckling results for the selected method\n
         :rtype: dict
         '''
-        return  self._FlatStructure.plate_buckling()
+        calculation_method = self._buckling_method if calculation_method is None else calculation_method
+        api_helpers.assert_choice(calculation_method, api_helpers.BUCKLING_CALCULATION_METHODS, 'calculation_method')
+
+        if calculation_method == "DNV-RP-C201 - prescriptive":
+            return  self._FlatStructure.plate_buckling()
+        if calculation_method == "SemiAnalytical S3/U3":
+            return self._semi_analytical_buckling_results()
+        return self._numeric_ml_buckling_results(ml_algo=ml_algo)
 
     def set_plate_geometry(self, spacing: float = 700, thickness: float = 20, span: float = 4000):
 
@@ -220,6 +402,10 @@ class FlatStru():
         self._FlatStructure.Plate.spacing = spacing
         self._FlatStructure.Plate.span = api_helpers.mm_to_m(span)
         self._FlatStructure.Plate.girder_lg = 10 # placeholder value
+        for sub_cls in [self._FlatStructure.Stiffener, self._FlatStructure.Girder]:
+            if sub_cls is not None:
+                sub_cls.t = thickness
+                sub_cls.span = self._FlatStructure.Plate.span
 
     
     def set_stresses(self, pressure: float = 0, sigma_x1: float = 0,sigma_x2: float = 0, sigma_y1: float = 0,
@@ -252,11 +438,13 @@ class FlatStru():
         self._FlatStructure.Plate.sigma_x2 = sigma_x2
         self._FlatStructure.Plate.sigma_y1 = sigma_y1
         self._FlatStructure.Plate.sigma_y2 = sigma_y2
-        self._FlatStructure.Stiffener.tau_xy = tau_xy
-        self._FlatStructure.Stiffener.sigma_x1 = sigma_x1
-        self._FlatStructure.Stiffener.sigma_x2 = sigma_x2
-        self._FlatStructure.Stiffener.sigma_y1 = sigma_y1
-        self._FlatStructure.Stiffener.sigma_y2 = sigma_y2
+        for sub_cls in [self._FlatStructure.Stiffener, self._FlatStructure.Girder]:
+            if sub_cls is not None:
+                sub_cls.tau_xy = tau_xy
+                sub_cls.sigma_x1 = sigma_x1
+                sub_cls.sigma_x2 = sigma_x2
+                sub_cls.sigma_y1 = sigma_y1
+                sub_cls.sigma_y2 = sigma_y2
         self._FlatStructure.lat_press = pressure
 
     def set_stiffener(self, hw: float = 260, tw: float = 12, bf: float = 49,
@@ -289,6 +477,14 @@ class FlatStru():
         self._FlatStructure.Stiffener.t = self._FlatStructure.Plate.t
         self._FlatStructure.Stiffener.span = self._FlatStructure.Plate.span
         self._FlatStructure.Stiffener.mat_yield = self._FlatStructure.Plate.mat_yield
+        self._FlatStructure.Stiffener.E = self._FlatStructure.Plate.E
+        self._FlatStructure.Stiffener.v = self._FlatStructure.Plate.v
+        self._FlatStructure.Stiffener.mat_factor = self._FlatStructure.Plate.mat_factor
+        self._FlatStructure.Stiffener.tau_xy = self._FlatStructure.Plate.tau_xy
+        self._FlatStructure.Stiffener.sigma_x1 = self._FlatStructure.Plate.sigma_x1
+        self._FlatStructure.Stiffener.sigma_x2 = self._FlatStructure.Plate.sigma_x2
+        self._FlatStructure.Stiffener.sigma_y1 = self._FlatStructure.Plate.sigma_y1
+        self._FlatStructure.Stiffener.sigma_y2 = self._FlatStructure.Plate.sigma_y2
 
 
     def set_girder(self, hw: float = 500, tw: float = 15, bf: float = 200,
@@ -315,8 +511,45 @@ class FlatStru():
         self._FlatStructure.Girder.tw = tw
         self._FlatStructure.Girder.b = bf
         self._FlatStructure.Girder.tf = tf
+        self._FlatStructure.Girder.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
+        self._FlatStructure.Girder.spacing = spacing
         self._FlatStructure.Girder.girder_lg = 10
         self._FlatStructure.Girder.t = self._FlatStructure.Plate.t
+        self._FlatStructure.Girder.span = self._FlatStructure.Plate.span
+        self._FlatStructure.Girder.mat_yield = self._FlatStructure.Plate.mat_yield
+        self._FlatStructure.Girder.E = self._FlatStructure.Plate.E
+        self._FlatStructure.Girder.v = self._FlatStructure.Plate.v
+        self._FlatStructure.Girder.mat_factor = self._FlatStructure.Plate.mat_factor
+        self._FlatStructure.Girder.tau_xy = self._FlatStructure.Plate.tau_xy
+        self._FlatStructure.Girder.sigma_x1 = self._FlatStructure.Plate.sigma_x1
+        self._FlatStructure.Girder.sigma_x2 = self._FlatStructure.Plate.sigma_x2
+        self._FlatStructure.Girder.sigma_y1 = self._FlatStructure.Plate.sigma_y1
+        self._FlatStructure.Girder.sigma_y2 = self._FlatStructure.Plate.sigma_y2
+
+    def set_puls_parameters(self, sp_or_up: str = None, puls_boundary: str = "Int",
+                            stiffener_end: str = "Continuous", up_boundary: str = "SSSS"):
+        """
+        Set the PULS-style panel metadata used by SemiAnalytical and ML-Numeric buckling methods.
+        """
+        if sp_or_up is None:
+            sp_or_up = self._default_puls_panel_type()
+        sp_or_up = str(sp_or_up).strip().upper()
+        api_helpers.assert_choice(sp_or_up, api_helpers.PULS_PANEL_TYPES, 'sp_or_up')
+        api_helpers.assert_choice(puls_boundary, api_helpers.PULS_BOUNDARY_TYPES, 'puls_boundary')
+
+        puls_boundary = api_helpers.normalize_puls_boundary(puls_boundary)
+        stiffener_end = api_helpers.normalize_puls_stiffener_end(stiffener_end)
+        api_helpers.assert_choice(stiffener_end, api_helpers.SUPPORT_TYPES, 'stiffener_end')
+
+        up_boundary = str(up_boundary).strip().upper()
+        assert len(up_boundary) == 4 and set(up_boundary).issubset({"S", "C"}), \
+            "up_boundary must contain four S/C support letters, for example 'SSSS' or 'SCSC'"
+
+        self._set_puls_field("_puls_sp_or_up", sp_or_up)
+        self._set_puls_field("_puls_boundary", puls_boundary)
+        self._set_puls_field("_puls_stf_end", stiffener_end)
+        self._set_puls_field("_puls_up_boundary", up_boundary)
+        self._set_puls_field("_puls_method", self._buckling_acceptance)
 
     def set_buckling_parameters(self, calculation_method: str= None, buckling_acceptance: str = None,
                                 stiffened_plate_effective_aginst_sigy = True,
@@ -325,7 +558,13 @@ class FlatStru():
                                 stf_dist_between_lateral_supp: float = None,
                                 girder_dist_between_lateral_supp: float = None,
                                 panel_length_Lp: float = None, stiffener_support: str = 'Continuous',
-                                girder_support: str = 'Continuous'):
+                                girder_support: str = 'Continuous',
+                                pressure_side: str = 'both sides',
+                                load_factor_stresses: float = 1.0,
+                                load_factor_pressure: float = 1.0,
+                                fabrication_method_stiffener: str = 'welded',
+                                fabrication_method_girder: str = 'welded',
+                                ml_algo=None):
         '''
         Various buckling realted parameters are set here. For details, see\n
         DNV-RP-C201 Buckling strength of plated structures.\n
@@ -353,16 +592,54 @@ class FlatStru():
         :type stiffener_support: str
         :param girder_support: continuous or sniped at ends
         :type girder_support: str
+        :param pressure_side: side receiving overpressure, 'plate side', 'stiffener side' or 'both sides'
+        :type pressure_side: str
+        :param load_factor_stresses: load factor applied to in-plane stresses
+        :type load_factor_stresses: float
+        :param load_factor_pressure: load factor applied to lateral pressure
+        :type load_factor_pressure: float
+        :param fabrication_method_stiffener: flat stiffener fabrication method, 'welded' or 'cold formed'
+        :type fabrication_method_stiffener: str
+        :param fabrication_method_girder: flat girder fabrication method, 'welded' or 'cold formed'
+        :type fabrication_method_girder: str
+        :param ml_algo: optional numeric ML model/scaler bundle for 'ML-Numeric (PULS based)'
+        :type ml_algo: dict
         :return:
         :rtype:
         '''
+        calculation_method = self._buckling_method if calculation_method is None else calculation_method
+        buckling_acceptance = self._buckling_acceptance if buckling_acceptance is None else buckling_acceptance
         api_helpers.assert_choice(calculation_method, api_helpers.BUCKLING_CALCULATION_METHODS, 'calculation_method')
         api_helpers.assert_choice(buckling_acceptance, api_helpers.BUCKLING_ACCEPTANCE_TYPES, 'buckling_acceptance')
         api_helpers.assert_choice(stiffener_support, api_helpers.SUPPORT_TYPES, 'stiffener_support')
         api_helpers.assert_choice(girder_support, api_helpers.SUPPORT_TYPES, 'girder_support')
+        api_helpers.assert_choice(pressure_side, api_helpers.FLAT_PRESSURE_SIDES, 'pressure_side')
+        api_helpers.assert_choice(
+            fabrication_method_stiffener,
+            api_helpers.FLAT_FABRICATION_METHODS,
+            'fabrication_method_stiffener',
+        )
+        api_helpers.assert_choice(
+            fabrication_method_girder,
+            api_helpers.FLAT_FABRICATION_METHODS,
+            'fabrication_method_girder',
+        )
         sigy_mapper = {True: 'Stf. pl. effective against sigma y', False:'All sigma y to girder'}
+        self._buckling_method = calculation_method
+        self._buckling_acceptance = buckling_acceptance
+        if ml_algo is not None:
+            self._ml_buckling_model = ml_algo
         self._FlatStructure._stiffened_plate_effective_aginst_sigy = sigy_mapper[stiffened_plate_effective_aginst_sigy]
         self._FlatStructure.method = buckling_acceptance
+        self._FlatStructure._overpressure_side = pressure_side
+        self._FlatStructure._stress_load_factor = load_factor_stresses
+        self._FlatStructure._lat_load_factor = load_factor_pressure
+        self._FlatStructure._fab_method_stiffener = api_helpers.normalize_flat_fabrication_method(
+            fabrication_method_stiffener
+        )
+        self._FlatStructure._fab_method_girder = api_helpers.normalize_flat_fabrication_method(
+            fabrication_method_girder
+        )
         self._FlatStructure._min_lat_press_adj_span = min_lat_press_adj_span
         self._FlatStructure._buckling_length_factor_stf = buckling_length_factor_stf
         self._FlatStructure._buckling_length_factor_girder = buckling_length_factor_girder
@@ -371,6 +648,8 @@ class FlatStru():
         self._FlatStructure._panel_length_Lp = panel_length_Lp
         self._FlatStructure._stf_end_support = stiffener_support
         self._FlatStructure._girder_end_support = girder_support
+        self._set_puls_field("_puls_method", buckling_acceptance)
+        self._ensure_puls_defaults()
 
     def get_special_provisions_results(self):
         '''
@@ -487,21 +766,22 @@ class CylStru():
         '''
         geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
         forces = [Nsd, Msd, Tsd, Qsd]
+        longitudinal_stiffener = self._CylinderMain.LongStfObj
         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
             stresses=None, forces=forces, geometry=geometry, shell_t=self._CylinderMain.ShellObj.thk,
             shell_radius=self._CylinderMain.ShellObj.radius,
-            shell_spacing= None if self._CylinderMain.LongStfObj is None else self._CylinderMain.LongStfObj.s,
-            hw=None if self._CylinderMain.LongStfObj is None else self._CylinderMain.LongStfObj.hw,
-            tw=None if self._CylinderMain.LongStfObj is None else self._CylinderMain.LongStfObj.tw,
-            b=None if self._CylinderMain.LongStfObj is None else self._CylinderMain.LongStfObj.b,
-            tf=None if self._CylinderMain.LongStfObj is None else self._CylinderMain.LongStfObj.tf,
+            shell_spacing=None if longitudinal_stiffener is None else longitudinal_stiffener.spacing / 1000,
+            hw=None if longitudinal_stiffener is None else longitudinal_stiffener.hw / 1000,
+            tw=None if longitudinal_stiffener is None else longitudinal_stiffener.tw / 1000,
+            b=None if longitudinal_stiffener is None else longitudinal_stiffener.b / 1000,
+            tf=None if longitudinal_stiffener is None else longitudinal_stiffener.tf / 1000,
             CylinderAndCurvedPlate=CylinderAndCurvedPlate)
 
         self._CylinderMain.sasd = sasd
         self._CylinderMain.smsd = smsd
         self._CylinderMain.tTsd = abs(tTsd)
         self._CylinderMain.tQsd = abs(tQsd)
-        self._CylinderMain.psd = psd
+        self._CylinderMain.psd = api_helpers.mpa_to_pa(psd)
         self._CylinderMain.shsd = shsd
 
 
@@ -779,8 +1059,8 @@ if __name__ == '__main__':
     # my_flat.set_stiffener()
     # my_flat.set_girder()
     # my_flat.set_fixation_parameters()
-    # my_flat.set_buckling_parameters(calculation_method='DNV-RP-C201 - prescriptive', buckling_acceptance='buckling',
-    #                                 stiffened_plate_effective_aginst_sigy=True)
+    my_flat.set_buckling_parameters(calculation_method='DNV-RP-C201 - prescriptive', buckling_acceptance='buckling',
+                                    stiffened_plate_effective_aginst_sigy=True)
     # for key, val in my_flat.get_buckling_results().items():
     #     print(key, val)
     #
