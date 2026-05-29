@@ -538,7 +538,7 @@ class CreateOptimizeMultipleWindow():
         self._toggle_btn = tk.Button(self._frame, text="Iterate predefiened stiffeners", relief="raised",
                                      command=self.toggle, bg='salmon')
 
-        self._toggle_btn.place(x=800, y=170)
+        self._toggle_btn.place(x=820, y=170)
         self._toggle_object, self._filez = None, None
 
         # Stress scaling

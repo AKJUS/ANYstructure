@@ -145,6 +145,55 @@ class CreateOptGeoWindow():
         except Exception:
             pass
 
+
+    def _show_weight_figure(self, xplot=None, yplot=None):
+        """
+        Show the geometric optimization summary figure.
+
+        The latest x/y data is stored so the figure can be re-opened after
+        the original run has completed.
+        """
+        if xplot is None or yplot is None:
+            if self._last_weight_plot_data is None:
+                messagebox.showinfo(
+                    title='No figure data',
+                    message='No optimization figure data is available. Run the optimization first.'
+                )
+                return
+            xplot, yplot = self._last_weight_plot_data
+
+        if xplot is None or yplot is None or len(xplot) == 0 or len(yplot) == 0:
+            messagebox.showinfo(
+                title='No figure data',
+                message='No valid optimization points are available to plot.'
+            )
+            return
+
+        self._last_weight_plot_data = (list(xplot), list(yplot))
+
+        plt.figure()
+        plt.axes(facecolor='lightslategray')
+        plt.plot(
+            xplot,
+            yplot,
+            color='yellow',
+            linestyle='solid',
+            marker='o',
+            markerfacecolor='white',
+            markersize=6,
+        )
+        plt.xlabel('Length of plate fields [m]')
+        plt.ylabel('Weight / max weight')
+        plt.title('Length of plate fields vs. total weight')
+        plt.grid()
+        plt.show()
+
+    def reshow_weight_figure(self):
+        """
+        Re-open the last geometric optimization summary figure.
+        """
+        self._show_weight_figure()
+
     def __init__(self, master, app=None):
         super(CreateOptGeoWindow, self).__init__()
         if __name__ == '__main__':
@@ -321,6 +370,7 @@ class CreateOptGeoWindow():
 
         self._opt_resutls = {}
         self._geo_results = None
+        self._last_weight_plot_data = None
         self._opt_actual_running_time = tk.Label(self._frame, text='')
         self._running_time_after_id = None
 
@@ -713,6 +763,16 @@ class CreateOptGeoWindow():
                                      font='Verdana 10', fg='black')
         self.run_results.place(x=start_x + dx * 13, y=start_y - dy * 18)
 
+        self.reshow_figure_button = tk.Button(
+            self._frame,
+            text='re-show figure',
+            command=self.reshow_weight_figure,
+            bg='white',
+            font='Verdana 10',
+            fg='black',
+        )
+        self.reshow_figure_button.place(x=start_x + dx * 13, y=start_y - dy * 16.7)
+
         self.run_results_prev = tk.Button(self._frame, text='Show previous\n'
                                                             'results', command=self.show_previous_results, bg='white',
                                           font='Verdana 10', fg='black')
@@ -1074,13 +1134,7 @@ class CreateOptGeoWindow():
         save_file, xplot, yplot = self.draw_result_text(self._geo_results, save_to_file=filename)
         self.draw_select_canvas(opt_results=self._geo_results, save_file=save_file)
 
-        plt.axes(facecolor='lightslategray')
-        plt.plot(xplot, yplot, color='yellow', linestyle='solid', marker='o', markerfacecolor='white', markersize=6)
-        plt.xlabel('Length of plate fields [m]')
-        plt.ylabel('Weight / max weight')
-        plt.title('Length of plate fields vs. total weight')
-        plt.grid()
-        plt.show()
+        self._show_weight_figure(xplot, yplot)
 
     def opt_get_fractions(self):
         ''' Finding initial number of fractions '''
@@ -2025,19 +2079,101 @@ class CreateOptGeoWindow():
             os.startfile(self._root_dir + '/' + 'sections.csv')
 
     def plot_results(self):
-        'Plotting a selected panel'
-        if self._geo_results is not None \
-                and type(self._new_option_fraction.get()) == int and type(self._new_option_panel.get()) == int:
-            op.plot_optimization_results(self._geo_results[int(self._new_option_fraction.get() / 2)][1]
-                                         [self._new_option_panel.get()])
+        """
+        Plot optimization details for a selected panel.
+
+        Handles the default OptionMenu value 'None' safely and verifies that
+        the selected panel result has the detailed iteration payload expected
+        by op.plot_optimization_results().
+        """
+        if self._geo_results is None:
+            messagebox.showinfo(
+                title='No results',
+                message='No optimization results are available. Run the optimization first.'
+            )
+            return
+
+        try:
+            fraction_value = self._new_option_fraction.get()
+            panel_value = self._new_option_panel.get()
+        except TclError:
+            messagebox.showinfo(
+                title='No panel selected',
+                message='Select a valid number of panels and panel index first.'
+            )
+            return
+
+        try:
+            fraction_key = int(fraction_value / 2)
+            panel_idx = int(panel_value)
+        except (TypeError, ValueError, TclError):
+            messagebox.showinfo(
+                title='No panel selected',
+                message='Select a valid number of panels and panel index first.'
+            )
+            return
+
+        try:
+            panel_result = self._geo_results[fraction_key][1][panel_idx]
+        except (KeyError, IndexError, TypeError):
+            messagebox.showinfo(
+                title='Invalid selection',
+                message='The selected panel result could not be found.'
+            )
+            return
+
+        # op.plot_optimization_results expects the detailed optimization tuple,
+        # where item[3] is an iterable of detailed check results.
+        try:
+            detailed_checks = panel_result[3]
+        except (IndexError, TypeError):
+            detailed_checks = None
+
+        if not isinstance(detailed_checks, (list, tuple)):
+            messagebox.showinfo(
+                title='No detailed plot data',
+                message=(
+                    'This geometric result does not contain detailed iteration '
+                    'data for the selected panel. Use the summary figure or '
+                    'the textual result table instead.'
+                )
+            )
+            return
+
+        try:
+            op.plot_optimization_results(panel_result)
+        except Exception as err:
+            messagebox.showinfo(
+                title='Could not plot selected panel',
+                message='The selected panel could not be plotted:\n' + str(err)
+            )
 
     def get_plate_field_options(self, event):
 
-        if self._geo_results is not None:
-            self._ent_option_field.destroy()
-            to_add = tuple([val for val in range(len(self._geo_results[int(self._new_option_fraction.get() / 2)][1]))])
-            self._ent_option_field = tk.OptionMenu(self._frame, self._new_option_panel, *to_add)
-            self._ent_option_field.place(x=self._options_panels_place[0], y=self._options_panels_place[1])
+        if self._geo_results is None:
+            return
+
+        try:
+            fraction_value = self._new_option_fraction.get()
+            fraction_key = int(fraction_value / 2)
+        except (TypeError, ValueError, TclError):
+            return
+
+        if fraction_key not in self._geo_results:
+            return
+
+        self._ent_option_field.destroy()
+        to_add = tuple([val for val in range(len(self._geo_results[fraction_key][1]))])
+        if len(to_add) == 0:
+            to_add = (None,)
+
+        self._new_option_panel.set(None)
+        self._ent_option_field = tk.OptionMenu(
+            self._frame,
+            self._new_option_panel,
+            *to_add,
+        )
+        self._ent_option_field.place(x=self._options_panels_place[0], y=self._options_panels_place[1])
 
     def mouse_scroll(self, event):
         self._canvas_scale += event.delta / 50
