@@ -161,7 +161,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                         tot_len=tot_len, frame_distance=frame_distance,
                                         algorithm='anysmart', predefiened_stiffener_iter=predefined_stiffener_iter,
                                         slamming_press=slamming_press, load_pre=load_pre,
-                                        opt_girder_prop=opt_girder_prop, ml_algo=ml_algo)
+                                        opt_girder_prop=opt_girder_prop, ml_algo=ml_algo,
+                                        weld_bias=weld_bias, builtup_stiffener=builtup_stiffener)
     elif algorithm == 'anydetail' and not is_geometric:
         return any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, init_filter_weight,
                                  side=side, const_chk=const_chk, fat_dict=fat_dict, fat_press=fat_press_ext_int,
@@ -482,7 +483,8 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
 def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, lateral_pressure,
                              init_filter=float('inf'),
                              side='p', const_chk=(True, True, True, True, True, True), fat_obj=None, fat_press=None,
-                             slamming_press=None, predefiened_stiffener_iter=None, processes=None, ml_algo=None):
+                             slamming_press=None, predefiened_stiffener_iter=None, processes=None, ml_algo=None,
+                             weld_bias=0.0, builtup_stiffener=False):
     ''' Searching multiple sections using the smart loop. '''
 
     all_obj = []
@@ -502,7 +504,8 @@ def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, la
                                  fat_press=None if fatigue_press is None else fatigue_press,
                                  slamming_press=0 if slam_press is None else slam_press,
                                  predefiened_stiffener_iter=this_predefiened_objects, processes=processes,
-                                 ml_algo=ml_algo)
+                                 ml_algo=ml_algo, weld_bias=weld_bias,
+                                 builtup_stiffener=builtup_stiffener)
 
         all_obj.append(opt_obj)
         idx += 1
@@ -516,8 +519,15 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                              min_max_span=(2, 6), tot_len=None, frame_distance=None,
                              algorithm='anysmart', predefiened_stiffener_iter=None, reiterate=True,
                              processes=None, slamming_press=None, load_pre=False, opt_girder_prop=None,
-                             ml_algo=None):
+                             ml_algo=None, weld_bias=0.0, builtup_stiffener=False):
     '''Geometric optimization of all relevant sections. '''
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    builtup_stiffener = bool(builtup_stiffener)
+
     # Checking the number of initial objects and adding if number of fraction is to be changed.
     # print('Min/max span is', min_max_span)
     found_max, found_min = False, False
@@ -647,13 +657,16 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                                                            slamming_press=working_slamming[no_of_fractions],
                                                            fat_press=working_fatigue_press[no_of_fractions],
                                                            predefiened_stiffener_iter=predefiened_stiffener_iter,
-                                                           ml_algo=ml_algo)
+                                                           ml_algo=ml_algo,
+                                                           weld_bias=weld_bias,
+                                                           builtup_stiffener=builtup_stiffener)
 
             # Finding weight of this solution.
 
-            tot_weight, frame_spacings, valid, width, weight_details = 0, [None for dummy in range(len(opt_objects))], \
+            tot_weight, tot_weld, frame_spacings, valid, width, weight_details = \
+                0, 0, [None for dummy in range(len(opt_objects))], \
                 True, 10, {'frames': list(), 'objects': list(),
-                           'scales': list()}
+                           'scales': list(), 'weld_objects': list(), 'weld_frames': list()}
 
             # print('Weight for', no_of_fractions)
             for count, opt in enumerate(opt_objects):
@@ -666,6 +679,19 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                                                  obj.Plate.span, width), prt=False)
                     tot_weight += weigth_to_add
                     weight_details['objects'].append(weigth_to_add)
+
+                    if weld_bias > 0.0:
+                        panel_x = (obj.Plate.get_s(), obj.Plate.get_pl_thk(), obj.Stiffener.get_web_h(),
+                                   obj.Stiffener.get_web_thk(), obj.Stiffener.get_fl_w(),
+                                   obj.Stiffener.get_fl_thk(), obj.Plate.span, width)
+                        weld_to_add = calc_weld_consumable(
+                            panel_x,
+                            stiffener_type=obj.Stiffener.get_stiffener_type(),
+                            include_web_to_flange=builtup_stiffener,
+                        )
+                        tot_weld += weld_to_add
+                        weight_details['weld_objects'].append(weld_to_add)
+
                     if frame_spacings[count // 2] is None:
                         frame_spacings[count // 2] = obj.Plate.get_s()
                     # print('added normal weight', weigth_to_add)
@@ -696,13 +722,28 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                     # print('added frame weight', this_weight * this_scale)
                     weight_details['frames'].append(this_weight * this_scale)
                     weight_details['scales'].append(this_scale)
+
+                    if weld_bias > 0.0:
+                        frame_weld = calc_weld_consumable(
+                            this_x,
+                            include_web_to_flange=builtup_stiffener,
+                        ) * this_scale
+                        tot_weld += frame_weld
+                        weight_details['weld_frames'].append(frame_weld)
             elif iterations == 2:
                 solution_found = True  # Only iterate once.
 
             if predefiened_stiffener_iter is not None or not reiterate:
                 solution_found = True  # Noe solution may be found, but in this case no more iteations.
 
-        results[no_of_fractions] = tot_weight, opt_objects, weight_details
+        if weld_bias > 0.0:
+            total_objective = (1.0 - weld_bias) * tot_weight + weld_bias * tot_weld
+            weight_details['total_weight'] = tot_weight
+            weight_details['total_weld_consumables'] = tot_weld
+            weight_details['objective'] = total_objective
+            results[no_of_fractions] = total_objective, opt_objects, weight_details
+        else:
+            results[no_of_fractions] = tot_weight, opt_objects, weight_details
     # for key, val in results.items():
     #     print(key)
     #     print(val)
@@ -1131,15 +1172,29 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                 print('Section modulus', calc_object[0].get_one_line_string(), False)
             return False, 'Section modulus', x, all_checks
 
-    # Local stiffener buckling
+    # Local stiffener / CSR geometry check.
+    #
+    # Controlled only by chk[6].
+    # For RP-C201 prescriptive buckling, this gives the RP-C201/CSR
+    # web/flange geometry restrictions.
+    #
+    # For SemiAnalytical / ML-Numeric, no extra check is added here. If the GUI
+    # keeps chk[6] enabled, the existing CSR requirement is applied through this
+    # same check.
     if chk[6] and calc_object[0].Stiffener is not None:
         buckling_local = calc_object[0].local_buckling(optimizing=True)
-        check = all([buckling_local['Stiffener'][0] < calc_object[0].Stiffener.hw,
-                     buckling_local['Stiffener'][1] < calc_object[0].Stiffener.b])
-        all_checks[2] = max([0 if buckling_local['Stiffener'][0] == 0 else
-                             calc_object[0].Stiffener.hw / buckling_local['Stiffener'][0],
-                             0 if buckling_local['Stiffener'][1] == 0 else
-                             calc_object[0].Stiffener.b / buckling_local['Stiffener'][1]])
+        max_web_height = buckling_local['Stiffener'][0]
+        max_flange_width = buckling_local['Stiffener'][1]
+
+        web_ok = True if max_web_height == 0 else calc_object[0].Stiffener.hw <= max_web_height
+        flange_ok = True if max_flange_width == 0 else calc_object[0].Stiffener.b <= max_flange_width
+        check = all([web_ok, flange_ok])
+
+        all_checks[2] = max([
+            0 if max_web_height == 0 else calc_object[0].Stiffener.hw / max_web_height,
+            0 if max_flange_width == 0 else calc_object[0].Stiffener.b / max_flange_width,
+        ])
+
         if not check:
             if print_result:
                 print('Local stiffener buckling', calc_object[0].get_one_line_string(), False)
@@ -1496,7 +1551,7 @@ def calc_weld_consumable(x, stiffener_type='T', density=7850.0, weld_area_factor
     if web_h <= 0.0 or web_thk <= 0.0:
         return 0.0
     stf_type = _get_stiffener_type_from_x(x, default=stiffener_type)
-    number_of_stiffeners = width // spacing
+    number_of_stiffeners = estimate_number_of_stiffeners(width, spacing)
     weld_mass = 0.0
     if include_plate_to_stiffener:
         weld_lines_to_plate = 1.0 if stf_type in ('L', 'L-bulb', 'Bulb') else 2.0
@@ -1585,6 +1640,25 @@ def calc_weld_consumable_cylinder(x, density=7850.0, weld_area_factor=0.5,
     return weld_mass
 
 
+
+def estimate_number_of_stiffeners(width, spacing):
+    """
+    Estimate number of stiffeners across Lg/field width.
+
+    Uses round(width / spacing) rather than floor division to avoid systematic
+    under-counting when Lg is not an exact multiple of stiffener spacing.
+    """
+    try:
+        width = float(width)
+        spacing = float(spacing)
+    except Exception:
+        return 0
+
+    if width <= 0.0 or spacing <= 0.0:
+        return 0
+
+    return max(int(round(width / spacing)), 1)
+
 def get_field_tot_area(x):
     ''' Total area of a plate field. '''
 
@@ -1593,7 +1667,7 @@ def get_field_tot_area(x):
     else:
         width = x[7]
     plate_area = width * x[1]
-    stiff_area = (x[2] * x[3] + x[4] * x[5]) * (width // x[0])
+    stiff_area = (x[2] * x[3] + x[4] * x[5]) * estimate_number_of_stiffeners(width, x[0])
 
     return plate_area, stiff_area
 
@@ -1624,7 +1698,7 @@ def calc_weight_pso(x, *args):
     span = args[6]
 
     plate_area = width * x[1]
-    stiff_area = (x[2] * x[3] + x[4] * x[5]) * (width // x[0])
+    stiff_area = (x[2] * x[3] + x[4] * x[5]) * estimate_number_of_stiffeners(width, x[0])
     return span * 7850 * (plate_area + stiff_area)
 
 
@@ -1960,6 +2034,62 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
     return check_ok, check_not_ok
 
 
+
+def _is_defined_number(value):
+    """
+    Return True for usable numeric optimizer values.
+
+    None and NaN are treated as not defined. Some stiffener tuples use NaN
+    for unused fields.
+    """
+    if value is None:
+        return False
+    try:
+        return not np.isnan(float(value))
+    except Exception:
+        return False
+
+
+def _candidate_value_within_bounds(value, lower, upper, tol=1e-12):
+    """
+    Check one numeric candidate value against optional lower/upper bounds.
+    """
+    if not _is_defined_number(value):
+        return True
+
+    value = float(value)
+
+    if _is_defined_number(lower) and value < float(lower) - tol:
+        return False
+
+    if _is_defined_number(upper) and value > float(upper) + tol:
+        return False
+
+    return True
+
+
+def _predefined_stiffener_within_bounds(predef_tuple, min_var, max_var):
+    """
+    Check whether a predefined stiffener respects the optimizer bounds.
+
+    In the predefined-stiffener branch, spacing and plate thickness are still
+    iterated from the GUI bounds. The predefined section itself must still
+    respect the GUI limits for:
+        web height
+        web thickness
+        flange width
+        flange thickness
+    """
+    for idx in (2, 3, 4, 5):
+        if idx >= len(predef_tuple) or idx >= len(min_var) or idx >= len(max_var):
+            continue
+
+        if not _candidate_value_within_bounds(predef_tuple[idx], min_var[idx], max_var[idx]):
+            return False
+
+    return True
+
+
 def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef_stiffeners=None, stf_type=None):
     '''
     Calulating initial values.
@@ -2000,7 +2130,13 @@ def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef
 
     if predef_stiffeners is not None:
         predef_iterable = list()
-        for pre_str in predef_stiffeners:
+
+        filtered_predef_stiffeners = [
+            pre_str for pre_str in predef_stiffeners
+            if _predefined_stiffener_within_bounds(pre_str, min_var, max_var)
+        ]
+
+        for pre_str in filtered_predef_stiffeners:
             for spacing in spacing_array:
 
                 for pl_thk in pl_thk_array:
