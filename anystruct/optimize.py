@@ -72,24 +72,32 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                      min_max_span=(2, 6), tot_len=None, frame_height=2.5, frame_distance=None,
                      slamming_press=0, predefined_stiffener_iter=None, processes=None, use_weight_filter=True,
                      load_pre=False, opt_girder_prop=None, puls_sheet=None, puls_acceptance=0.87,
-                     fdwn=1, fup=0.5, ml_algo=None, cylinder=False, material_factor=None):
-    '''
-    The optimazation is initiated here. It is called from optimize_window.
-    :param initial_structure_obj:
-    :param min_var:
-    :param max_var:
-    :param lateral_pressure:
-    :param deltas:
-    :param algorithm:
-    :param init_weigth:
-    :param pso_options:
-    :return:
-    '''
+                     fdwn=1, fup=0.5, ml_algo=None, cylinder=False, material_factor=None,
+                     weld_bias=0.0, builtup_stiffener=False):
+    """
+    The optimization is initiated here. It is called from optimize_window / optimize_cylinder.
+
+    weld_bias:
+        0.0 = pure weight optimization. Existing behaviour is preserved and no weld
+              consumable objective is used downstream.
+        1.0 = pure estimated weld consumable optimization.
+        Between 0 and 1 = mixed normalized objective.
+
+    builtup_stiffener:
+        If True, include web-to-flange weld consumables for built-up stiffeners.
+    """
     if puls_sheet is not None:
         raise NotImplementedError(
             "External Excel-sheet PULS optimization was removed. Use the built-in SemiAnalytical replacement, "
             "prescriptive, or ML-Numeric buckling checks."
         )
+
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    builtup_stiffener = bool(builtup_stiffener)
 
     # Make material factor explicit for all optimizer variants.
     # Single optimization receives one structure object; geometric optimization receives a list.
@@ -102,7 +110,9 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     else:
         fat_dict = None if fatigue_obj is None else fatigue_obj.get_fatigue_properties()
 
-    if use_weight_filter and not cylinder:
+    # Initial weight filtering is only safe for pure weight optimization.
+    # With weld_bias > 0, a heavier candidate may have lower weld consumables.
+    if use_weight_filter and not cylinder and weld_bias <= 0.0:
 
         if is_geometric or algorithm == 'pso':
             init_filter_weight = float('inf')
@@ -121,10 +131,17 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                                     ml_algo=ml_algo)
 
     if cylinder:
-        to_return = any_smart_loop_cylinder(min_var=min_var, max_var=max_var, deltas=deltas,
-                                            initial_structure_obj=initial_structure_obj,
-                                            use_weight_filter=use_weight_filter,
-                                            predefiened_stiffener_iter=predefined_stiffener_iter)
+        to_return = any_smart_loop_cylinder(
+            min_var=min_var,
+            max_var=max_var,
+            deltas=deltas,
+            initial_structure_obj=initial_structure_obj,
+            use_weight_filter=use_weight_filter,
+            predefiened_stiffener_iter=predefined_stiffener_iter,
+            processes=processes,
+            weld_bias=weld_bias,
+            builtup_stiffener=builtup_stiffener,
+        )
         return to_return
 
     elif algorithm == 'anysmart' and not is_geometric:
@@ -132,7 +149,9 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                    init_filter_weight, side=side, const_chk=const_chk, fat_dict=fat_dict,
                                    fat_press=fat_press_ext_int, slamming_press=slamming_press,
                                    predefiened_stiffener_iter=predefined_stiffener_iter, puls_sheet=puls_sheet,
-                                   puls_acceptance=puls_acceptance, fdwn=fdwn, fup=fup, ml_algo=ml_algo)
+                                   puls_acceptance=puls_acceptance, fdwn=fdwn, fup=fup, ml_algo=ml_algo,
+                                   weld_bias=weld_bias,
+                                   builtup_stiffener=builtup_stiffener)
         return to_return
     elif algorithm == 'anysmart' and is_geometric:
         return geometric_summary_search(min_var=min_var, max_var=max_var, deltas=deltas,
@@ -160,7 +179,6 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     #                                     min_max_span,tot_len,frame_height,frame_cross_a, 'pso')
     else:
         return None
-
 
 def any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, init_filter=float('inf'),
                       side='p', const_chk=(True, True, True, True, True, False), fat_dict=None, fat_press=None,
@@ -212,25 +230,40 @@ def any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_p
 
 
 def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, init_filter=float('inf'),
-                   side='p', const_chk=(True, True, True, True, True, True, True, False, False, False), fat_dict=None,
-                   fat_press=None,
+                   side='p', const_chk=(True, True, True, True, True, True, True, False, False, False),
+                   fat_dict=None, fat_press=None,
                    slamming_press=0, predefiened_stiffener_iter=None, processes=None,
-                   puls_sheet=None, puls_acceptance=0.87, fdwn=1, fup=0.5, ml_algo=None):
-    '''
-    Trying to be smart
-    :param min_var:
-    :param max_var:
-    :param initial_structure:
-    :return:
-    '''
+                   puls_sheet=None, puls_acceptance=0.87, fdwn=1, fup=0.5, ml_algo=None,
+                   weld_bias=0.0, builtup_stiffener=False):
+    """
+    Trying to be smart.
+
+    weld_bias:
+        0.0 = pure weight optimization.
+              IMPORTANT: no weld consumable calculations are performed.
+        1.0 = pure weld consumable optimization.
+        Between 0 and 1 = normalized mixed objective.
+
+    builtup_stiffener:
+        If True, include web-to-flange weld consumables in addition to
+        plate-to-stiffener weld consumables.
+    """
     initial_structure_obj.lat_press = lateral_pressure
+
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
 
     if predefiened_stiffener_iter is None:
         structure_to_check = any_get_all_combs(min_var, max_var, deltas)
     else:
-        structure_to_check = any_get_all_combs(min_var, max_var, deltas, predef_stiffeners=[item.get_tuple() for item
-                                                                                            in
-                                                                                            predefiened_stiffener_iter])
+        structure_to_check = any_get_all_combs(
+            min_var,
+            max_var,
+            deltas,
+            predef_stiffeners=[item.get_tuple() for item in predefiened_stiffener_iter],
+        )
 
     main_result = get_filtered_results(structure_to_check, initial_structure_obj, lateral_pressure,
                                        init_filter_weight=init_filter, side=side, chk=const_chk, fat_dict=fat_dict,
@@ -241,13 +274,57 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
     main_fail = main_result[1]
 
     ass_var = None
-    current_weight = float('inf')
-    for item in main_iter:
-        main_fail.append(item)
-        item_weight = calc_weight(item[2])
-        if item_weight < current_weight:
-            ass_var = item[2]
-            current_weight = item_weight
+
+    if weld_bias <= 0.0:
+        current_weight = float('inf')
+        for item in main_iter:
+            main_fail.append(item)
+            item_weight = calc_weight(item[2])
+            if item_weight < current_weight:
+                ass_var = item[2]
+                current_weight = item_weight
+    else:
+        if len(main_iter) == 0:
+            return None, None, None, False, main_fail
+
+        try:
+            stiffener_type = (
+                initial_structure_obj.Stiffener.get_stiffener_type()
+                if initial_structure_obj.Stiffener is not None
+                else 'T'
+            )
+        except Exception:
+            stiffener_type = 'T'
+
+        valid_x = [item[2] for item in main_iter]
+        weight_values = [calc_weight(x) for x in valid_x]
+        weld_values = [
+            calc_weld_consumable(
+                x,
+                stiffener_type=stiffener_type,
+                include_web_to_flange=builtup_stiffener,
+            )
+            for x in valid_x
+        ]
+
+        positive_weight_values = [val for val in weight_values if val > 0.0]
+        positive_weld_values = [val for val in weld_values if val > 0.0]
+
+        weight_ref = min(positive_weight_values) if len(positive_weight_values) > 0 else 1.0
+        weld_ref = min(positive_weld_values) if len(positive_weld_values) > 0 else 1.0
+
+        weight_bias = 1.0 - weld_bias
+        current_score = float('inf')
+
+        for item, item_weight, item_weld in zip(main_iter, weight_values, weld_values):
+            main_fail.append(item)
+            weight_score = item_weight / weight_ref
+            weld_score = item_weld / weld_ref
+            objective_score = weight_bias * weight_score + weld_bias * weld_score
+
+            if objective_score < current_score:
+                ass_var = item[2]
+                current_score = objective_score
 
     if ass_var == None:
         return None, None, None, False, main_fail
@@ -256,11 +333,6 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
         ass_var = [round(item, 10) for item in ass_var[0:8]]
     else:
         ass_var = [round(item, 10) for item in ass_var[0:8]] + [ass_var[8]]
-
-    # initial_structure_obj.Plate = create_new_structure_obj(initial_structure_obj.Plate, ass_var,
-    #                                                        fdwn = fdwn, fup = fup)
-    # initial_structure_obj.Stiffener = create_new_structure_obj(initial_structure_obj.Stiffener, ass_var,
-    #                                                            fdwn=fdwn, fup=fup)
 
     calc_object_stf = None if initial_structure_obj.Stiffener is None \
         else create_new_calc_obj(initial_structure_obj.Stiffener, ass_var,
@@ -275,49 +347,68 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
 
     return calc_object, fat_dict, True, main_fail
 
-
 def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lateral_pressure=None,
                             init_filter=float('inf'),
                             side='p', const_chk=(True, True, True, True, True, True, True, False, False, False),
                             fat_dict=None,
                             fat_press=None, slamming_press=0, predefiened_stiffener_iter=None, processes=None,
-                            fdwn=1, fup=0.5, ml_algo=None, use_weight_filter=True):
+                            fdwn=1, fup=0.5, ml_algo=None, use_weight_filter=True,
+                            weld_bias=0.0, builtup_stiffener=False):
+    """
+    Cylinder optimization.
+
+    weld_bias:
+        0.0 = pure weight optimization. Existing behaviour is preserved and no
+              weld consumable calculations are performed.
+        1.0 = pure estimated weld consumable optimization.
+        Between 0 and 1 = mixed normalized objective.
+
+    builtup_stiffener:
+        If True, include web-to-flange welds for built-up stiffeners.
+    """
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    builtup_stiffener = bool(builtup_stiffener)
+
     combs = list()
-    # TODO first optmize for long then ring components. Find the overall smallest weight.
-    # Creating the individual combinations for Shell, LongStf, RingStf and RingFrame
+
     for idx, str_type in enumerate(range(len(min_var))):
         if sum(min_var[idx]) == 0:
             structure_to_check = [(0, 0, 0, 0, 0, 0, 0, 0), ]
         else:
             if any([predefiened_stiffener_iter is None, idx == 0]):
-                initial_structure_obj.LongStfObj.stiffener_type = 'T'
+                if initial_structure_obj.LongStfObj is not None:
+                    initial_structure_obj.LongStfObj.stiffener_type = 'T'
                 structure_to_check = any_get_all_combs(min_var[idx], max_var[idx], deltas[idx])
-
             else:
-                structure_to_check = any_get_all_combs(min_var[idx], max_var[idx], deltas[idx],
-                                                       predef_stiffeners=[item.get_tuple() for item in
-                                                                          predefiened_stiffener_iter])
-            # TODO add stifffener type
-
-        # [list(item).append('T') for item in structure_to_check]
-        # [tuple(item) for item in structure_to_check]
+                structure_to_check = any_get_all_combs(
+                    min_var[idx],
+                    max_var[idx],
+                    deltas[idx],
+                    predef_stiffeners=[item.get_tuple() for item in predefiened_stiffener_iter],
+                )
         combs.append(structure_to_check)
 
-    # Combining the individual components.
-    final_comb, iter_vals = list(), list()
+    final_comb = list()
     for shell in combs[0]:
         for long in combs[1]:
             for ring_stf in combs[2]:
                 for ring_frame in combs[3]:
                     final_comb.append([[shell, long, ring_stf, ring_frame], initial_structure_obj])
-    # print('All combs', len(combs[0]),len(combs[1]),len(combs[2]),len(combs[3]),len(final_comb))
-    # quit()
-    # Weight filter
+
     min_weight = float('inf')
-    if use_weight_filter:
+    if use_weight_filter and weld_bias <= 0.0:
         to_check = [random.choice(final_comb) + [float('inf')] for dummy in range(10000)]
-        with Pool(processes=max(cpu_count() - 1, 1)) as my_process:
-            res_pre = my_process.starmap(any_constraints_cylinder, to_check)
+        pool_processes = max(cpu_count() - 1, 1) if processes is None else int(processes)
+        if pool_processes == 1:
+            res_pre = [any_constraints_cylinder(*args) for args in to_check]
+        else:
+            with Pool(processes=pool_processes) as my_process:
+                res_pre = my_process.starmap(any_constraints_cylinder, to_check)
+
         for chk_res in res_pre:
             if chk_res[0]:
                 current_weight = calc_weight_cylinder(chk_res[2])
@@ -330,9 +421,12 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
     for val in final_comb:
         final_comb_inc_weight.append(val + [min_weight])
 
-    t1 = time.time()
-    with Pool(processes=max(cpu_count() - 1, 1)) as my_process:
-        res_pre = my_process.starmap(any_constraints_cylinder, final_comb_inc_weight)
+    pool_processes = max(cpu_count() - 1, 1) if processes is None else int(processes)
+    if pool_processes == 1:
+        res_pre = [any_constraints_cylinder(*args) for args in final_comb_inc_weight]
+    else:
+        with Pool(processes=pool_processes) as my_process:
+            res_pre = my_process.starmap(any_constraints_cylinder, final_comb_inc_weight)
 
     check_ok, check_not_ok = list(), list()
     for item in res_pre:
@@ -343,26 +437,47 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
 
     main_iter = check_ok
     main_fail = check_not_ok
-
     ass_var = None
-    current_weight = float('inf')
-    for item in main_iter:
-        main_fail.append(item)
-        item_weight = calc_weight_cylinder(item[2])
-        if item_weight < current_weight:
-            ass_var = item[2]
-            current_weight = item_weight
+
+    if weld_bias <= 0.0:
+        current_weight = float('inf')
+        for item in main_iter:
+            main_fail.append(item)
+            item_weight = calc_weight_cylinder(item[2])
+            if item_weight < current_weight:
+                ass_var = item[2]
+                current_weight = item_weight
+    else:
+        if len(main_iter) == 0:
+            return None, None, None, False, main_fail
+
+        valid_x = [item[2] for item in main_iter]
+        weight_values = [calc_weight_cylinder(x) for x in valid_x]
+        weld_values = [
+            calc_weld_consumable_cylinder(x, include_web_to_flange=builtup_stiffener)
+            for x in valid_x
+        ]
+
+        positive_weight_values = [val for val in weight_values if val > 0.0]
+        positive_weld_values = [val for val in weld_values if val > 0.0]
+        weight_ref = min(positive_weight_values) if len(positive_weight_values) > 0 else 1.0
+        weld_ref = min(positive_weld_values) if len(positive_weld_values) > 0 else 1.0
+
+        weight_bias = 1.0 - weld_bias
+        current_score = float('inf')
+
+        for item, item_weight, item_weld in zip(main_iter, weight_values, weld_values):
+            main_fail.append(item)
+            objective_score = weight_bias * (item_weight / weight_ref) + weld_bias * (item_weld / weld_ref)
+            if objective_score < current_score:
+                ass_var = item[2]
+                current_score = objective_score
 
     if ass_var == None:
         return None, None, None, False, main_fail
 
     new_cylinder_obj = create_new_cylinder_obj(initial_structure_obj, ass_var)
-
-    # Checking ring stiffeners and frames
-
-    # return new_struc_obj, new_calc_obj, fat_dict, True, main_fail
     return new_cylinder_obj, main_fail
-
 
 def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, lateral_pressure,
                              init_filter=float('inf'),
@@ -1094,55 +1209,94 @@ def pso_constraint_geometric(x, *args):
     return 1 - sum(x)
 
 
-def create_new_cylinder_obj(init_obj, x_new):
-    '''
-    shell       (0.02, 2.5, 5, 5, 10, nan, nan, nan),
-    long        (0.875, nan, 0.3, 0.01, 0.1, 0.01, nan, nan),
-    ring        (nan, nan, 0.3, 0.01, 0.1, 0.01, nan, nan),
-    ring        (nan, nan, 0.7, 0.02, 0.2, 0.02, nan, nan)]
-    '''
+def _get_mm_attr(obj, attr_name, default=0.0):
+    """Return object attribute in mm."""
+    if obj is None:
+        return default
+    try:
+        value = getattr(obj, attr_name)
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
 
+
+def _set_mm_attr(obj, attr_name, value_mm):
+    """Set object attribute in mm if possible."""
+    if obj is None:
+        return
+    try:
+        setattr(obj, attr_name, float(value_mm))
+    except Exception:
+        pass
+
+
+def _get_longitudinal_spacing_mm(long_obj, panel_spacing_m):
+    """Return longitudinal stiffener spacing in mm."""
+    if long_obj is None:
+        return float(panel_spacing_m) * 1000.0
+    try:
+        return float(long_obj.spacing)
+    except Exception:
+        pass
+    try:
+        return float(long_obj.s)
+    except Exception:
+        pass
+    return float(panel_spacing_m) * 1000.0
+
+
+def create_new_cylinder_obj(init_obj, x_new):
+    """
+    Create a new cylinder object for a candidate geometry.
+
+    Optimizer tuple values are in meters. Structure stiffener properties are
+    exposed as mm properties: spacing, hw, tw, b, tf. Older objects may use .s.
+    """
     stress_press = [init_obj.sasd, init_obj.smsd, init_obj.tTsd, init_obj.tQsd, init_obj.shsd]
     shell_obj = init_obj.ShellObj
     long_obj = init_obj.LongStfObj
-    '''
-    t1, r1, s1, hw1, tw1, b1, tf1 = x1
-    t1, r1, s2, hw2, tw2, b2, tf2 = x2
-    '''
 
-    x_old = shell_obj.thk, shell_obj.radius, \
-        init_obj.panel_spacing if long_obj is None else long_obj.s / 1000, \
-        0 if long_obj is None else long_obj.hw / 1000, \
-        0 if long_obj is None else long_obj.tw / 1000, \
-        0 if long_obj is None else long_obj.b / 1000, \
-        0 if long_obj is None else long_obj.tf / 1000,
+    old_long_spacing_mm = _get_longitudinal_spacing_mm(long_obj, init_obj.panel_spacing)
+    x_old = (
+        shell_obj.thk,
+        shell_obj.radius,
+        old_long_spacing_mm / 1000.0,
+        0.0 if long_obj is None else _get_mm_attr(long_obj, 'hw') / 1000.0,
+        0.0 if long_obj is None else _get_mm_attr(long_obj, 'tw') / 1000.0,
+        0.0 if long_obj is None else _get_mm_attr(long_obj, 'b') / 1000.0,
+        0.0 if long_obj is None else _get_mm_attr(long_obj, 'tf') / 1000.0,
+    )
 
-    x_new_stress_scaling = x_new[0][0] if not np.isnan(x_new[0][0]) else shell_obj.thk, \
-        x_new[0][1] if not np.isnan(x_new[0][1]) else shell_obj.radius, \
-        x_new[0][5] if long_obj is None else x_new[1][0], \
-        0 if long_obj is None else x_new[1][2], \
-        0 if long_obj is None else x_new[1][3], \
-        0 if long_obj is None else x_new[1][4], \
-        0 if long_obj is None else x_new[1][5]
+    x_new_stress_scaling = (
+        x_new[0][0] if not np.isnan(x_new[0][0]) else shell_obj.thk,
+        x_new[0][1] if not np.isnan(x_new[0][1]) else shell_obj.radius,
+        x_new[0][5] if long_obj is None else x_new[1][0],
+        0.0 if long_obj is None else x_new[1][2],
+        0.0 if long_obj is None else x_new[1][3],
+        0.0 if long_obj is None else x_new[1][4],
+        0.0 if long_obj is None else x_new[1][5],
+    )
 
     new_stresses = stress_scaling_cylinder(x_old, x_new_stress_scaling, stress_press)
     new_obj = copy.deepcopy(init_obj)
     new_obj.sasd, new_obj.smsd, new_obj.tTsd, new_obj.tQsd, new_obj.shsd = new_stresses
     new_obj.ShellObj.radius = x_new[0][1]
     new_obj.ShellObj.thk = x_new[0][0]
+
     if long_obj is None:
         new_obj.panel_spacing = x_new[0][5]
     else:
-        new_obj.LongStfObj.s = x_new[1][0] * 1000
-        new_obj.LongStfObj.hw = x_new[1][2] * 1000
-        new_obj.LongStfObj.tw = x_new[1][3] * 1000
-        new_obj.LongStfObj.b = x_new[1][4] * 1000
-        new_obj.LongStfObj.tf = x_new[1][5] * 1000
-
-        # new_obj.LongStfObj.stiffener_type = x_new[1][7] # TODO should be 8
+        _set_mm_attr(new_obj.LongStfObj, 'spacing', x_new[1][0] * 1000.0)
+        _set_mm_attr(new_obj.LongStfObj, 'hw', x_new[1][2] * 1000.0)
+        _set_mm_attr(new_obj.LongStfObj, 'tw', x_new[1][3] * 1000.0)
+        _set_mm_attr(new_obj.LongStfObj, 'b', x_new[1][4] * 1000.0)
+        _set_mm_attr(new_obj.LongStfObj, 'tf', x_new[1][5] * 1000.0)
+        if hasattr(new_obj.LongStfObj, 's'):
+            _set_mm_attr(new_obj.LongStfObj, 's', x_new[1][0] * 1000.0)
 
     return new_obj
-
 
 def create_new_calc_obj(init_obj, x, fat_dict=None, fdwn=1, fup=0.5):
     '''
@@ -1306,6 +1460,129 @@ def create_new_structure_obj(init_obj, x, fat_dict=None, fdwn=1, fup=0.5):
 
     # if fat_dict == None:
     return calc.Structure(main_dict)
+
+
+
+def _get_stiffener_type_from_x(x, default='T'):
+    try:
+        return x[8]
+    except Exception:
+        return default
+
+
+def estimate_fillet_weld_leg(thickness_1, thickness_2,
+                             min_leg=0.003,
+                             max_leg=0.012,
+                             thickness_factor=0.7):
+    """Estimate fillet weld leg length [m] from connected material thickness."""
+    try:
+        t_min = min(float(thickness_1), float(thickness_2))
+    except Exception:
+        return min_leg
+    leg = thickness_factor * t_min
+    return min(max(leg, min_leg), max_leg)
+
+
+def calc_weld_consumable(x, stiffener_type='T', density=7850.0, weld_area_factor=0.5,
+                         include_plate_to_stiffener=True, include_web_to_flange=False):
+    """Estimate weld consumable mass [kg] for one stiffened plate field."""
+    try:
+        spacing = float(x[0]); plate_thk = float(x[1]); web_h = float(x[2]); web_thk = float(x[3])
+        fl_w = float(x[4]); fl_thk = float(x[5]); span = float(x[6]); width = float(x[7])
+    except Exception:
+        return float('inf')
+    if spacing <= 0.0 or span <= 0.0 or width <= 0.0:
+        return float('inf')
+    if web_h <= 0.0 or web_thk <= 0.0:
+        return 0.0
+    stf_type = _get_stiffener_type_from_x(x, default=stiffener_type)
+    number_of_stiffeners = width // spacing
+    weld_mass = 0.0
+    if include_plate_to_stiffener:
+        weld_lines_to_plate = 1.0 if stf_type in ('L', 'L-bulb', 'Bulb') else 2.0
+        plate_web_leg = estimate_fillet_weld_leg(plate_thk, web_thk)
+        plate_web_area = weld_area_factor * plate_web_leg ** 2
+        weld_mass += number_of_stiffeners * span * weld_lines_to_plate * plate_web_area * density
+    if include_web_to_flange and fl_w > 0.0 and fl_thk > 0.0:
+        flange_leg = estimate_fillet_weld_leg(web_thk, fl_thk)
+        flange_area = weld_area_factor * flange_leg ** 2
+        weld_mass += number_of_stiffeners * span * 2.0 * flange_area * density
+    return weld_mass
+
+
+def _safe_float(value, default=0.0):
+    try:
+        value = float(value)
+        if math.isnan(value):
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _component_has_stiffener_geometry(component):
+    if component is None:
+        return False
+    try:
+        web_h = _safe_float(component[2]); web_thk = _safe_float(component[3])
+    except Exception:
+        return False
+    return web_h > 0.0 and web_thk > 0.0
+
+
+def calc_weld_consumable_cylinder(x, density=7850.0, weld_area_factor=0.5,
+                                  include_web_to_flange=False):
+    """Estimate weld consumable mass [kg] for a stiffened cylinder candidate."""
+    try:
+        shell = x[0]; long_stf = x[1]; ring_stf = x[2]; ring_frame = x[3]
+    except Exception:
+        return float('inf')
+    shell_thk = _safe_float(shell[0]); radius = _safe_float(shell[1])
+    ring_stf_spacing = _safe_float(shell[2]); ring_frame_spacing = _safe_float(shell[3])
+    cylinder_length = _safe_float(shell[4])
+    if shell_thk <= 0.0 or radius <= 0.0 or cylinder_length <= 0.0:
+        return float('inf')
+    circumference = 2.0 * math.pi * radius
+    weld_mass = 0.0
+    if _component_has_stiffener_geometry(long_stf):
+        long_spacing = _safe_float(long_stf[0]); long_web_thk = _safe_float(long_stf[3])
+        long_fl_w = _safe_float(long_stf[4]); long_fl_thk = _safe_float(long_stf[5])
+        if long_spacing > 0.0:
+            num_long_stf = circumference / long_spacing
+            leg = estimate_fillet_weld_leg(shell_thk, long_web_thk)
+            weld_area = weld_area_factor * leg ** 2
+            weld_mass += num_long_stf * cylinder_length * 2.0 * weld_area * density
+            if include_web_to_flange and long_fl_w > 0.0 and long_fl_thk > 0.0:
+                flange_leg = estimate_fillet_weld_leg(long_web_thk, long_fl_thk)
+                flange_area = weld_area_factor * flange_leg ** 2
+                weld_mass += num_long_stf * cylinder_length * 2.0 * flange_area * density
+    if _component_has_stiffener_geometry(ring_stf) and ring_stf_spacing > 0.0:
+        ring_web_h = _safe_float(ring_stf[2]); ring_web_thk = _safe_float(ring_stf[3])
+        ring_fl_w = _safe_float(ring_stf[4]); ring_fl_thk = _safe_float(ring_stf[5])
+        num_ring_stf = cylinder_length / ring_stf_spacing
+        leg = estimate_fillet_weld_leg(shell_thk, ring_web_thk)
+        weld_area = weld_area_factor * leg ** 2
+        weld_mass += num_ring_stf * circumference * 2.0 * weld_area * density
+        if include_web_to_flange and ring_fl_w > 0.0 and ring_fl_thk > 0.0:
+            flange_radius = max(radius - ring_web_h, 0.0)
+            flange_circumference = 2.0 * math.pi * flange_radius
+            flange_leg = estimate_fillet_weld_leg(ring_web_thk, ring_fl_thk)
+            flange_area = weld_area_factor * flange_leg ** 2
+            weld_mass += num_ring_stf * flange_circumference * 2.0 * flange_area * density
+    if _component_has_stiffener_geometry(ring_frame) and ring_frame_spacing > 0.0:
+        frame_web_h = _safe_float(ring_frame[2]); frame_web_thk = _safe_float(ring_frame[3])
+        frame_fl_w = _safe_float(ring_frame[4]); frame_fl_thk = _safe_float(ring_frame[5])
+        num_ring_frames = cylinder_length / ring_frame_spacing
+        leg = estimate_fillet_weld_leg(shell_thk, frame_web_thk)
+        weld_area = weld_area_factor * leg ** 2
+        weld_mass += num_ring_frames * circumference * 2.0 * weld_area * density
+        if include_web_to_flange and frame_fl_w > 0.0 and frame_fl_thk > 0.0:
+            flange_radius = max(radius - frame_web_h, 0.0)
+            flange_circumference = 2.0 * math.pi * flange_radius
+            flange_leg = estimate_fillet_weld_leg(frame_web_thk, frame_fl_thk)
+            flange_area = weld_area_factor * flange_leg ** 2
+            weld_mass += num_ring_frames * flange_circumference * 2.0 * flange_area * density
+    return weld_mass
 
 
 def get_field_tot_area(x):

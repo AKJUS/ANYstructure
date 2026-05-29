@@ -175,10 +175,11 @@ class CreateOptimizeWindow():
 
         self._frame = master
         self._frame.wm_title("Optimize structure")
-        self._frame.geometry('1400x900')
+        self._frame.geometry('1600x1000')
         self._frame.grab_set()
 
         self._opt_runned = False
+        self._running_time_after_id = None
         self._opt_results = ()
         self._opt_actual_running_time = tk.Label(self._frame, text='', font='Verdana 12 bold')
 
@@ -326,6 +327,17 @@ class CreateOptimizeWindow():
 
         self._new_processes = tk.IntVar()
         self._new_processes.set(max(cpu_count() - 1, 1))
+
+        # Weld consumable optimization bias.
+        # 0.0 = pure weight optimization. No weld consumable calculations shall be performed.
+        # 1.0 = pure estimated weld consumable optimization.
+        self._new_weld_bias = tk.DoubleVar()
+        self._new_weld_bias.set(0.0)
+
+        # Optional addition for built-up welded stiffeners.
+        # Keep False by default because many stiffeners may be rolled/profile sections.
+        self._new_include_builtup_weld = tk.BooleanVar()
+        self._new_include_builtup_weld.set(False)
         tk.Label(self._frame, text='Processes\n (CPUs)', font='Verdana 9 bold', bg='silver') \
             .place(x=start_x + 8.3 * dx, y=start_y - 1.1 * dy)
         tk.Entry(self._frame, textvariable=self._new_processes, width=12, bg='silver') \
@@ -354,7 +366,13 @@ class CreateOptimizeWindow():
         self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 12 bold', fg='red')
         self._runnig_time_label.place(x=start_x + 4.3 * dx, y=start_y + 2.8 * dy)
         # tk.Label(self._frame, text='seconds ',font='Verdana 9 bold').place(x=start_x+6*dx, y=start_y + 2.8 * dy)
-        self._result_label = tk.Label(self._frame, text='', font='Verdana 9 bold')
+        self._result_label = tk.Label(
+            self._frame,
+            text='',
+            font='Verdana 9 bold',
+            wraplength=780,
+            justify=tk.LEFT,
+        )
         self._result_label.place(x=start_x, y=start_y + 4.2 * dy)
 
         self._ent_spacing_upper.place(x=start_x + dx * 2, y=start_y)
@@ -440,7 +458,7 @@ class CreateOptimizeWindow():
         tk.Label(self._frame, text='kPa', font='Verdana 9') \
             .place(x=start_x + dx * 9, y=start_y + 15.5 * dy)
         tk.Label(self._frame, text='Plate or stiffener side (p/s): ', font='Verdana 9 bold') \
-            .place(x=start_x + dx * 9.5, y=start_y + 15.5 * dy)
+            .place(x=start_x + dx * 5, y=start_y + 19.5 * dy)
 
         tk.Label(self._frame, text='Span: ', font='Verdana 9') \
             .place(x=start_x + dx * 5, y=start_y + 16.5 * dy)
@@ -460,19 +478,21 @@ class CreateOptimizeWindow():
         if self._fatigue_pressure is not None:
             tk.Label(self._frame,
                      text='Fatigue pressure: internal= ' + str(self._fatigue_pressure['p_int']) + ' external= '
-                          + str(self._fatigue_pressure['p_ext']), font='Verdana 7') \
-                .place(x=start_x + dx * 5, y=start_y + 19.3 * dy)
+                          + str(self._fatigue_pressure['p_ext']),
+                     font='Verdana 7', wraplength=520, justify=tk.LEFT) \
+                .place(x=start_x + dx * 5, y=start_y + 20.6 * dy)
         else:
             tk.Label(self._frame, text='Fatigue pressure: internal= ' + str(0) + ' external= '
-                                       + str(0), font='Verdana 7') \
-                .place(x=start_x + dx * 5, y=start_y + 19.3 * dy)
+                                       + str(0),
+                     font='Verdana 7', wraplength=520, justify=tk.LEFT) \
+                .place(x=start_x + dx * 5, y=start_y + 20.6 * dy)
 
         self._ent_trans_stress_high.place(x=start_x + dx * 8, y=start_y + 11.5 * dy)
         self._ent_trans_stress_low.place(x=start_x + dx * 8, y=start_y + 12.5 * dy)
         self._ent_axial_stress.place(x=start_x + dx * 8, y=start_y + 13.5 * dy)
         self._ent_shear_stress.place(x=start_x + dx * 8, y=start_y + 14.5 * dy)
         self._ent_design_pressure.place(x=start_x + dx * 8, y=start_y + 15.5 * dy)
-        self._ent_design_pressure_side.place(x=start_x + dx * 12, y=start_y + 15.5 * dy)
+        self._ent_design_pressure_side.place(x=start_x + dx * 8, y=start_y + 19.35 * dy)
         self._ent_span.place(x=start_x + dx * 8, y=start_y + 16.5 * dy)
         self._ent_width_lg.place(x=start_x + dx * 8, y=start_y + 17.5 * dy)
         self._ent_slamming_pressure.place(x=start_x + dx * 8, y=start_y + 18.5 * dy)
@@ -534,26 +554,28 @@ class CreateOptimizeWindow():
         self._new_minstep.set(1e-8)
         self._new_minfunc.set(1e-8)
 
-        self._new_delta_spacing.trace('w', self.update_running_time)
-        self._new_delta_pl_thk.trace('w', self.update_running_time)
-        self._new_delta_web_h.trace('w', self.update_running_time)
-        self._new_delta_web_thk.trace('w', self.update_running_time)
-        self._new_delta_fl_w.trace('w', self.update_running_time)
-        self._new_delta_fl_thk.trace('w', self.update_running_time)
-        self._new_spacing_upper.trace('w', self.update_running_time)
-        self._new_spacing_lower.trace('w', self.update_running_time)
-        self._new_pl_thk_upper.trace('w', self.update_running_time)
-        self._new_pl_thk_lower.trace('w', self.update_running_time)
-        self._new_web_h_upper.trace('w', self.update_running_time)
-        self._new_web_h_lower.trace('w', self.update_running_time)
-        self._new_web_thk_upper.trace('w', self.update_running_time)
-        self._new_web_thk_lower.trace('w', self.update_running_time)
-        self._new_fl_w_upper.trace('w', self.update_running_time)
-        self._new_fl_w_lower.trace('w', self.update_running_time)
-        self._new_fl_thk_upper.trace('w', self.update_running_time)
-        self._new_fl_thk_lower.trace('w', self.update_running_time)
-        self._new_algorithm_random_trials.trace('w', self.update_running_time)
-        self._new_algorithm.trace('w', self.update_running_time)
+        self._new_delta_spacing.trace('w', self.schedule_running_time_update)
+        self._new_delta_pl_thk.trace('w', self.schedule_running_time_update)
+        self._new_delta_web_h.trace('w', self.schedule_running_time_update)
+        self._new_delta_web_thk.trace('w', self.schedule_running_time_update)
+        self._new_delta_fl_w.trace('w', self.schedule_running_time_update)
+        self._new_delta_fl_thk.trace('w', self.schedule_running_time_update)
+
+        self._new_spacing_upper.trace('w', self.schedule_running_time_update)
+        self._new_spacing_lower.trace('w', self.schedule_running_time_update)
+        self._new_pl_thk_upper.trace('w', self.schedule_running_time_update)
+        self._new_pl_thk_lower.trace('w', self.schedule_running_time_update)
+        self._new_web_h_upper.trace('w', self.schedule_running_time_update)
+        self._new_web_h_lower.trace('w', self.schedule_running_time_update)
+        self._new_web_thk_upper.trace('w', self.schedule_running_time_update)
+        self._new_web_thk_lower.trace('w', self.schedule_running_time_update)
+        self._new_fl_w_upper.trace('w', self.schedule_running_time_update)
+        self._new_fl_w_lower.trace('w', self.schedule_running_time_update)
+        self._new_fl_thk_upper.trace('w', self.schedule_running_time_update)
+        self._new_fl_thk_lower.trace('w', self.schedule_running_time_update)
+
+        self._new_algorithm_random_trials.trace('w', self.schedule_running_time_update)
+        self._new_algorithm.trace('w', self.schedule_running_time_update)
 
         self.running_time_per_item = {'RP': 1.009943181818182e-5}
         self.initial_weight = op.calc_weight([self._spacing, self._pl_thk, self._stf_web_h, self._stf_web_thk,
@@ -569,20 +591,86 @@ class CreateOptimizeWindow():
         label.image = photo  # keep a reference!
         label.place(x=550, y=300)
 
-        tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=start_x + dx * 11,
-                                                                                    y=start_y + 0.5 * dy)
-        self._ent_algorithm.place(x=start_x + dx * 11, y=start_y + dy)
+        tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=1120, y=125)
+        self._ent_algorithm.place(x=1120, y=150)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
 
         tk.Button(self._frame, text='algorith information', command=self.algorithm_info, bg='white') \
-            .place(x=start_x + dx * 11, y=start_y + dy * 2)
+            .place(x=1120, y=195)
+
+        # ---------------------------------------------------------------------
+        # Optimization objective bias
+        # ---------------------------------------------------------------------
+        objective_x = 1220
+        objective_y = 250
+
+        tk.Label(
+            self._frame,
+            text='Optimization objective',
+            font='Verdana 8 bold',
+        ).place(x=objective_x, y=objective_y)
+
+        tk.Label(
+            self._frame,
+            text='Weight',
+            font='Verdana 7',
+        ).place(x=objective_x - 35, y=objective_y + 38)
+
+        self._weld_bias_slider = tk.Scale(
+            self._frame,
+            variable=self._new_weld_bias,
+            from_=0.0,
+            to=1.0,
+            resolution=0.05,
+            orient=tk.HORIZONTAL,
+            length=170,
+            showvalue=False,
+            command=self._update_weld_bias_label,
+        )
+        self._weld_bias_slider.place(x=objective_x + 28, y=objective_y + 20)
+
+        tk.Label(
+            self._frame,
+            text='Weld',
+            font='Verdana 7',
+        ).place(x=objective_x + 205, y=objective_y + 38)
+
+        self._weld_bias_value_label = tk.Label(
+            self._frame,
+            text='Weld bias: 0.0',
+            font='Verdana 8 bold',
+        )
+        self._weld_bias_value_label.place(x=objective_x, y=objective_y + 70)
+
+        self._weld_bias_info_label = tk.Label(
+            self._frame,
+            text=self._get_weld_bias_text(),
+            font='Verdana 7',
+            wraplength=270,
+            justify=tk.LEFT,
+        )
+        self._weld_bias_info_label.place(x=objective_x, y=objective_y + 92)
+
+        tk.Checkbutton(
+            self._frame,
+            variable=self._new_include_builtup_weld,
+        ).place(x=objective_x + 175, y=objective_y + 68)
+
+        tk.Label(
+            self._frame,
+            text='Built-up weld',
+            font='Verdana 7',
+        ).place(x=objective_x + 200, y=objective_y + 72)
+
+        self._new_weld_bias.trace('w', self._update_weld_bias_label)
+
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
                                     font='Verdana 10 bold', fg='Yellow', relief="raised")
-        self.run_button.place(x=start_x + dx * 8, y=start_y + dy * 0.5, relwidth=0.15)
+        self.run_button.place(x=815, y=145, width=250)
         self.run_results = tk.Button(self._frame, text='show calculated', command=self.plot_results, bg='white',
                                      font='Verdana 10', fg='black')
-        self.run_results.place(x=start_x + dx * 8, y=start_y + dy * 1.5)
-        self._opt_actual_running_time.place(x=start_x + dx * 9.5, y=start_y - dy)
+        self.run_results.place(x=815, y=190)
+        self._opt_actual_running_time.place(x=970, y=75)
 
         self.close_and_save = tk.Button(self._frame, text='Return and replace initial structure with optimized',
                                         command=self.save_and_close, bg='green', font='Verdana 10', fg='yellow')
@@ -590,7 +678,7 @@ class CreateOptimizeWindow():
 
         tk.Button(self._frame, text='Open predefined stiffeners example',
                   command=self.open_example_file, bg='white', font='Verdana 10') \
-            .place(x=start_x + dx * 10, y=10)
+            .place(x=1010, y=10)
 
         # Selection of constraints
         self._new_check_sec_mod = tk.BooleanVar()
@@ -619,38 +707,64 @@ class CreateOptimizeWindow():
         self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
         self._new_check_buckling_ml_numeric.trace('w', self.update_running_time)
 
-        start_y = 140
-        tk.Label(self._frame, text='Check for minimum section mofdulus').place(x=start_x + dx * 9.7, y=start_y + 4 * dy)
-        tk.Label(self._frame, text='Check for minimum plate thk.').place(x=start_x + dx * 9.7, y=start_y + 5 * dy)
-        tk.Label(self._frame, text='Check for minimum shear area').place(x=start_x + dx * 9.7, y=start_y + 6 * dy)
-        tk.Label(self._frame, text='Check for buckling (RP-C201)').place(x=start_x + dx * 9.7, y=start_y + 7 * dy)
-        tk.Label(self._frame, text='Check for fatigue (RP-C203)').place(x=start_x + dx * 9.7, y=start_y + 8 * dy)
-        tk.Label(self._frame, text='Check for bow slamming').place(x=start_x + dx * 9.7, y=start_y + 9 * dy)
-        tk.Label(self._frame, text='Check for local stf. buckling').place(x=start_x + dx * 9.7, y=start_y + 10 * dy)
-        tk.Label(self._frame, text='Use weight filter (for speed)').place(x=start_x + dx * 9.7, y=start_y + 11 * dy)
-        tk.Label(self._frame, text='Check for buckling (SemiAnalytical S3/U3)').place(x=start_x + dx * 9.7,
-                                                                            y=start_y + 12 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-CL deactivated)').place(x=start_x + dx * 9.7, y=start_y + 13 * dy)
-        tk.Label(self._frame, text='Check for buckling (ML-Numeric)').place(x=start_x + dx * 9.7, y=start_y + 14 * dy)
+        # ---------------------------------------------------------------------
+        # Right-hand constraint and stress-scaling panel.
+        # Keep this independent of the main start_y used above.  This avoids
+        # overlap with the pressure-side selector and fatigue pressure text.
+        # ---------------------------------------------------------------------
+        constraint_x = 980
+        constraint_chk_x = 1210
+        constraint_y = 380
+        constraint_dy = 34
 
-        tk.Checkbutton(self._frame, variable=self._new_check_sec_mod).place(x=start_x + dx * 12, y=start_y + 4 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_min_pl_thk).place(x=start_x + dx * 12, y=start_y + 5 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_shear_area).place(x=start_x + dx * 12, y=start_y + 6 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling).place(x=start_x + dx * 12, y=start_y + 7 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_fatigue).place(x=start_x + dx * 12, y=start_y + 8 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_slamming).place(x=start_x + dx * 12, y=start_y + 9 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_local_buckling).place(x=start_x + dx * 12,
-                                                                                   y=start_y + 10 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_use_weight_filter).place(x=start_x + dx * 12,
-                                                                                y=start_y + 11 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical).place(x=start_x + dx * 12,
-                                                                                     y=start_y + 12 * dy)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl, state='disabled').place(
-            x=start_x + dx * 12,
-            y=start_y + 13 * dy,
-        )
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric).place(x=start_x + dx * 12,
-                                                                                        y=start_y + 14 * dy)
+        tk.Label(self._frame, text='Constraint checks', font='Verdana 9 bold') \
+            .place(x=constraint_x, y=constraint_y - 28)
+
+        tk.Label(self._frame, text='Check for minimum section modulus') \
+            .place(x=constraint_x, y=constraint_y + 0 * constraint_dy)
+        tk.Label(self._frame, text='Check for minimum plate thk.') \
+            .place(x=constraint_x, y=constraint_y + 1 * constraint_dy)
+        tk.Label(self._frame, text='Check for minimum shear area') \
+            .place(x=constraint_x, y=constraint_y + 2 * constraint_dy)
+        tk.Label(self._frame, text='Check for buckling (RP-C201)') \
+            .place(x=constraint_x, y=constraint_y + 3 * constraint_dy)
+        tk.Label(self._frame, text='Check for fatigue (RP-C203)') \
+            .place(x=constraint_x, y=constraint_y + 4 * constraint_dy)
+        tk.Label(self._frame, text='Check for bow slamming') \
+            .place(x=constraint_x, y=constraint_y + 5 * constraint_dy)
+        tk.Label(self._frame, text='Check for local stf. buckling') \
+            .place(x=constraint_x, y=constraint_y + 6 * constraint_dy)
+        tk.Label(self._frame, text='Use weight filter (for speed)') \
+            .place(x=constraint_x, y=constraint_y + 7 * constraint_dy)
+        tk.Label(self._frame, text='Check for buckling (SemiAnalytical S3/U3)') \
+            .place(x=constraint_x, y=constraint_y + 8 * constraint_dy)
+        tk.Label(self._frame, text='Check for buckling (ML-CL deactivated)') \
+            .place(x=constraint_x, y=constraint_y + 9 * constraint_dy)
+        tk.Label(self._frame, text='Check for buckling (ML-Numeric)') \
+            .place(x=constraint_x, y=constraint_y + 10 * constraint_dy)
+
+        tk.Checkbutton(self._frame, variable=self._new_check_sec_mod) \
+            .place(x=constraint_chk_x, y=constraint_y + 0 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_min_pl_thk) \
+            .place(x=constraint_chk_x, y=constraint_y + 1 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_shear_area) \
+            .place(x=constraint_chk_x, y=constraint_y + 2 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling) \
+            .place(x=constraint_chk_x, y=constraint_y + 3 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_fatigue) \
+            .place(x=constraint_chk_x, y=constraint_y + 4 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_slamming) \
+            .place(x=constraint_chk_x, y=constraint_y + 5 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_local_buckling) \
+            .place(x=constraint_chk_x, y=constraint_y + 6 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_use_weight_filter) \
+            .place(x=constraint_chk_x, y=constraint_y + 7 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical) \
+            .place(x=constraint_chk_x, y=constraint_y + 8 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl, state='disabled') \
+            .place(x=constraint_chk_x, y=constraint_y + 9 * constraint_dy - 4)
+        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric) \
+            .place(x=constraint_chk_x, y=constraint_y + 10 * constraint_dy - 4)
 
         # Stress scaling
         self._new_fup = tk.DoubleVar()
@@ -658,20 +772,23 @@ class CreateOptimizeWindow():
         self._new_fdwn = tk.DoubleVar()
         self._new_fdwn.set(1)
 
+        scaling_y = constraint_y + 12 * constraint_dy
+        tk.Label(self._frame, text='Stress scaling', font='Verdana 9 bold') \
+            .place(x=constraint_x, y=scaling_y - 28)
         tk.Label(self._frame, text='Factor when scaling stresses up, fup') \
-            .place(x=start_x + dx * 9.7, y=start_y + 16 * dy)
+            .place(x=constraint_x, y=scaling_y)
         ent_fup = tk.Entry(self._frame, textvariable=self._new_fup, width=10)
-        ent_fup.place(x=start_x + dx * 12, y=start_y + 16 * dy)
+        ent_fup.place(x=constraint_chk_x, y=scaling_y)
         tk.Label(self._frame, text='Factor when scaling stresses up, fdown') \
-            .place(x=start_x + dx * 9.7, y=start_y + 17 * dy)
+            .place(x=constraint_x, y=scaling_y + constraint_dy)
         ent_fdwn = tk.Entry(self._frame, textvariable=self._new_fdwn, width=10)
-        ent_fdwn.place(x=start_x + dx * 12, y=start_y + 17 * dy)
+        ent_fdwn.place(x=constraint_chk_x, y=scaling_y + constraint_dy)
 
         # tk.Button(self._frame,text='Iterate predefiened stiffeners',command=self.open_multiple_files ,bg='yellow')\
         #     .place(x=start_x, y=start_y - dy * 2)
         self._toggle_btn = tk.Button(self._frame, text="Iterate predefiened stiffeners", relief="raised",
                                      command=self.toggle, bg='salmon')
-        self._toggle_btn.place(x=start_x, y=start_y - dy * 2)
+        self._toggle_btn.place(x=start_x, y=60)
         self._toggle_object, self._filez = self._initial_calc_obj, None
         self.draw_properties()
         self.update_running_time()
@@ -699,8 +816,8 @@ class CreateOptimizeWindow():
             self._ent_maxiter.place_forget()
             self._ent_minstep.place_forget()
             self._ent_minfunc.place_forget()
-            self._ent_random_trials.place(x=start_x + dx * 11.3, y=start_y + 1.2 * dy)
-            self.algorithm_random_label.place(x=start_x + dx * 11.3, y=start_y + 0.5 * dy)
+            self.algorithm_random_label.place(x=1120, y=230)
+            self._ent_random_trials.place(x=1120, y=255, width=120)
         elif self._new_algorithm.get() == 'anysmart' or self._new_algorithm.get() == 'anydetail':
             self._ent_random_trials.place_forget()
             self.algorithm_random_label.place_forget()
@@ -720,25 +837,25 @@ class CreateOptimizeWindow():
             self._ent_minfunc.place_forget()
 
         elif self._new_algorithm.get() == 'pso':
-            y_place_label = 11.2
-            y_place = 12.2
+            y_label_x = 1120
+            y_entry_x = 1220
             self._ent_random_trials.place_forget()
 
-            self._lb_swarm_size.place(x=start_x + dx * y_place_label, y=start_y - 2 * dy)
-            self._lb_omega.place(x=start_x + dx * y_place_label, y=start_y - 1 * dy)
-            self._lb_phip.place(x=start_x + dx * y_place_label, y=start_y - 0 * dy)
-            self._lb_phig.place(x=start_x + dx * y_place_label, y=start_y + 1 * dy)
-            self._lb_maxiter.place(x=start_x + dx * y_place_label, y=start_y + 2 * dy)
-            self._lb_minstep.place(x=start_x + dx * y_place_label, y=start_y + 3 * dy)
-            self._lb_minfunc.place(x=start_x + dx * y_place_label, y=start_y + 4 * dy)
+            self._lb_swarm_size.place(x=y_label_x, y=230)
+            self._lb_omega.place(x=y_label_x, y=260)
+            self._lb_phip.place(x=y_label_x, y=290)
+            self._lb_phig.place(x=y_label_x, y=320)
+            self._lb_maxiter.place(x=y_label_x, y=350)
+            self._lb_minstep.place(x=y_label_x, y=380)
+            self._lb_minfunc.place(x=y_label_x, y=410)
 
-            self._ent_swarm_size.place(x=start_x + dx * y_place, y=start_y - 2 * dy)
-            self._ent_omega.place(x=start_x + dx * y_place, y=start_y - 1 * dy)
-            self._ent_phip.place(x=start_x + dx * y_place, y=start_y + 0 * dy)
-            self._ent_phig.place(x=start_x + dx * y_place, y=start_y + 1 * dy)
-            self._ent_maxiter.place(x=start_x + dx * y_place, y=start_y + 2 * dy)
-            self._ent_minstep.place(x=start_x + dx * y_place, y=start_y + 3 * dy)
-            self._ent_minfunc.place(x=start_x + dx * y_place, y=start_y + 4 * dy)
+            self._ent_swarm_size.place(x=y_entry_x, y=230)
+            self._ent_omega.place(x=y_entry_x, y=260)
+            self._ent_phip.place(x=y_entry_x, y=290)
+            self._ent_phig.place(x=y_entry_x, y=320)
+            self._ent_maxiter.place(x=y_entry_x, y=350)
+            self._ent_minstep.place(x=y_entry_x, y=380)
+            self._ent_minfunc.place(x=y_entry_x, y=410)
 
     def modify_structure_object(self):
         ''' Chaning parameters in the structure object before running. '''
@@ -759,6 +876,25 @@ class CreateOptimizeWindow():
                 return float(self._initial_calc_obj.Plate.mat_factor)
             except Exception:
                 return 1.15
+
+    def schedule_running_time_update(self, *args):
+        """
+        Debounce running-time updates.
+
+        Tkinter variable traces fire on every keystroke. Without debouncing,
+        the GUI repeatedly recomputes the number of combinations while the user
+        is still typing, which makes the window feel frozen.
+        """
+        try:
+            if self._running_time_after_id is not None:
+                self._frame.after_cancel(self._running_time_after_id)
+        except Exception:
+            pass
+
+        self._running_time_after_id = self._frame.after(
+            500,
+            self.update_running_time,
+        )
 
     def _get_ml_algo_for_optimization(self):
         '''
@@ -812,6 +948,53 @@ class CreateOptimizeWindow():
 
             if self._new_check_buckling_ml_numeric.get():
                 self._new_check_buckling_ml_numeric.set(False)
+
+    def _get_weld_bias_for_optimization(self):
+        '''
+        Return weld consumable bias in range [0, 1].
+
+        0.0 = pure weight optimization.
+              optimize.py shall preserve the old weight-only branch and avoid
+              weld consumable calculations.
+        1.0 = pure estimated weld consumable optimization.
+        '''
+        try:
+            return min(max(float(self._new_weld_bias.get()), 0.0), 1.0)
+        except Exception:
+            return 0.0
+
+    def _get_weld_bias_text(self):
+        '''
+        User-readable explanation for the current weld consumable bias.
+        '''
+        weld_bias = self._get_weld_bias_for_optimization()
+        weight_bias = 1.0 - weld_bias
+
+        if weld_bias <= 0.0:
+            return 'Pure weight optimization - no weld consumable calculations'
+
+        if weld_bias >= 1.0:
+            return 'Pure estimated weld consumable optimization'
+
+        return (
+            'Mixed objective: '
+            + str(round(100.0 * weight_bias, 0)) + '% weight / '
+            + str(round(100.0 * weld_bias, 0)) + '% weld consumables'
+        )
+
+    def _update_weld_bias_label(self, *args):
+        '''
+        Refresh labels when the weld-bias slider changes.
+        '''
+        try:
+            self._weld_bias_value_label.config(
+                text='Weld bias: ' + str(round(self._get_weld_bias_for_optimization(), 2))
+            )
+            self._weld_bias_info_label.config(
+                text=self._get_weld_bias_text()
+            )
+        except Exception:
+            pass
 
     def run_optimizaion(self):
         '''
@@ -867,7 +1050,9 @@ class CreateOptimizeWindow():
                                                 use_weight_filter=self._new_use_weight_filter.get(),
                                                 fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
                                                 ml_algo=self._get_ml_algo_for_optimization(),
-                                                material_factor=selected_mat_fac)
+                                                material_factor=selected_mat_fac,
+                                                weld_bias=self._get_weld_bias_for_optimization(),
+                                                builtup_stiffener=self._new_include_builtup_weld.get())
 
         if self._opt_results is not None and self._opt_results[0] is not None:
             self._opt_actual_running_time.config(text='Actual running time: \n'
@@ -884,6 +1069,41 @@ class CreateOptimizeWindow():
             else:
                 text = 'Optimization result | Spacing: ' + str(round(self._opt_results[0].Plate.get_s(), 10) * 1000) + \
                        ' Plate thickness: ' + str(round(self._opt_results[0].Plate.get_pl_thk() * 1000, 10))
+
+            result_x = [
+                self._opt_results[0].Plate.get_s(),
+                self._opt_results[0].Plate.get_pl_thk(),
+                0.0 if self._opt_results[0].Stiffener is None else self._opt_results[0].Stiffener.get_web_h(),
+                0.0 if self._opt_results[0].Stiffener is None else self._opt_results[0].Stiffener.get_web_thk(),
+                0.0 if self._opt_results[0].Stiffener is None else self._opt_results[0].Stiffener.get_fl_w(),
+                0.0 if self._opt_results[0].Stiffener is None else self._opt_results[0].Stiffener.get_fl_thk(),
+                self._new_span.get(),
+                self._new_width_lg.get(),
+            ]
+
+            try:
+                result_weight = op.calc_weight(result_x)
+                text += ' | Weight: ' + str(round(result_weight, 1)) + ' kg'
+            except Exception:
+                pass
+
+            # Only show weld consumables when the weld objective is active.
+            # This mirrors optimize.py, where weld_bias == 0.0 shall avoid weld calculations.
+            if self._get_weld_bias_for_optimization() > 0.0:
+                try:
+                    result_weld_consumable = op.calc_weld_consumable(
+                        result_x,
+                        stiffener_type=self._opt_results[0].Stiffener.get_stiffener_type()
+                        if self._opt_results[0].Stiffener is not None else 'T',
+                        include_web_to_flange=self._new_include_builtup_weld.get(),
+                    )
+                    text += (
+                        ' | Est. weld consumables: '
+                        + str(round(result_weld_consumable, 3))
+                        + ' kg'
+                    )
+                except Exception:
+                    pass
 
             self._result_label.config(text=text)
 
@@ -904,40 +1124,90 @@ class CreateOptimizeWindow():
         self.run_button.config(text='RUN OPTIMIZATION')
         self.run_button.config(relief="raised")
 
+    def _count_steps(self, lower, upper, delta):
+        """
+        Fast count equivalent to np.arange(lower, upper + delta, delta),
+        without actually creating the array.
+
+        Inputs are already in SI units.
+        """
+        try:
+            lower = float(lower)
+            upper = float(upper)
+            delta = float(delta)
+        except Exception:
+            return 1
+
+        if delta <= 0:
+            return 1
+
+        if upper < lower:
+            return 0
+
+        if abs(upper - lower) < 1e-12:
+            return 1
+
+        return int(np.floor((upper - lower) / delta + 1.0 + 1e-9))
+
     def get_running_time(self):
-        '''
-        Estimate the running time of the algorithm.
-        :return:
-        '''
+        """
+        Estimate running time without generating all combinations.
 
-        if self._new_algorithm.get() in ['anysmart', 'anydetail']:
-            all_combs = op.any_get_all_combs(self.get_lower_bounds(), self.get_upper_bounds(), self.get_deltas(),
-                                             predef_stiffeners=None if self._predefined_stiffener_iter is None else
-                                             [item.get_tuple() for item in self._predefined_stiffener_iter])
-            number_of_combinations = len([val for val in all_combs])
-            return int(number_of_combinations * self.running_time_per_item['RP']), number_of_combinations
+        This must stay lightweight because it is called from GUI callbacks.
+        """
+        try:
+            algorithm = self._new_algorithm.get()
+        except TclError:
+            return 0, 0
 
-        elif self._new_algorithm.get() in ['pso', 'random', 'random_no_delta']:
+        if algorithm in ['random', 'random_no_delta']:
             try:
-                number_of_combinations = \
-                    max((self._new_spacing_upper.get() - self._new_spacing_lower.get()) / self._new_delta_spacing.get(),
-                        1) * \
-                    max((self._new_pl_thk_upper.get() - self._new_pl_thk_lower.get()) / self._new_delta_pl_thk.get(),
-                        1) * \
-                    max((self._new_web_h_upper.get() - self._new_web_h_lower.get()) / self._new_delta_web_h.get(), 1) * \
-                    max((self._new_web_thk_upper.get() - self._new_web_thk_lower.get()) / self._new_delta_web_thk.get(),
-                        1) * \
-                    max((self._new_fl_w_upper.get() - self._new_fl_w_lower.get()) / self._new_delta_fl_w.get(), 1) * \
-                    max((self._new_fl_thk_upper.get() - self._new_fl_thk_lower.get()) / self._new_delta_fl_thk.get(), 1)
-                return int(number_of_combinations * self.running_time_per_item['RP']), number_of_combinations
+                number_of_combinations = int(self._new_algorithm_random_trials.get())
+                return (
+                    int(number_of_combinations * self.running_time_per_item['RP']),
+                    number_of_combinations,
+                )
             except TclError:
                 return 0, 0
+
+        try:
+            lower = self.get_lower_bounds()
+            upper = self.get_upper_bounds()
+            deltas = self.get_deltas()
+        except TclError:
+            return 0, 0
+        except Exception:
+            return 0, 0
+
+        # If predefined stiffeners are used, only spacing and plate thickness
+        # are iterated in any_get_all_combs(), multiplied by number of sections.
+        if self._predefined_stiffener_iter is not None:
+            n_spacing = self._count_steps(lower[0], upper[0], deltas[0])
+            n_plate = self._count_steps(lower[1], upper[1], deltas[1])
+            n_predef = len(self._predefined_stiffener_iter)
+            number_of_combinations = n_spacing * n_plate * n_predef
+
         else:
-            try:
-                return int(self._new_algorithm_random_trials.get() * self.running_time_per_item['RP']), \
-                    self._new_algorithm_random_trials.get()
-            except TclError:
-                return 0, 0
+            n_spacing = self._count_steps(lower[0], upper[0], deltas[0])
+            n_plate = self._count_steps(lower[1], upper[1], deltas[1])
+            n_web_h = self._count_steps(lower[2], upper[2], deltas[2])
+            n_web_thk = self._count_steps(lower[3], upper[3], deltas[3])
+            n_fl_w = self._count_steps(lower[4], upper[4], deltas[4])
+            n_fl_thk = self._count_steps(lower[5], upper[5], deltas[5])
+
+            number_of_combinations = (
+                    n_spacing
+                    * n_plate
+                    * n_web_h
+                    * n_web_thk
+                    * n_fl_w
+                    * n_fl_thk
+            )
+
+        return (
+            int(number_of_combinations * self.running_time_per_item['RP']),
+            int(number_of_combinations),
+        )
 
     def get_deltas(self):
         '''
@@ -949,19 +1219,27 @@ class CreateOptimizeWindow():
                          float(self._new_delta_fl_w.get()) / 1000, float(self._new_delta_fl_thk.get()) / 1000])
 
     def update_running_time(self, *args):
-        '''
+        """
         Estimate the running time of the algorithm.
-        :return:
-        '''
+
+        This is called through schedule_running_time_update(), not directly
+        from every keypress.
+        """
+        self._running_time_after_id = None
 
         try:
-            self._runnig_time_label.config(text=str(int(self.get_running_time()[1])) + ' (about ' +
-                                                str(max(round(self.get_running_time()[1] *
-                                                              self.running_time_per_item['RP'] / 60, 2), 0.1)) +
-                                                ' min.)')
+            seconds, number_of_combinations = self.get_running_time()
+
+            self._runnig_time_label.config(
+                text=str(int(number_of_combinations)) + ' (about '
+                     + str(max(round(seconds / 60, 2), 0.1))
+                     + ' min.)'
+            )
 
         except (ZeroDivisionError, TclError):
-            pass  # _tkinter.TclError: pass
+            pass
+        except Exception:
+            pass
 
         self._ensure_single_buckling_check()
 
