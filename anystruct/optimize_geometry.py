@@ -106,6 +106,45 @@ class CreateOptGeoWindow():
                     return pickle.load(file)
         return None
 
+
+    def _get_weld_bias_for_optimization(self):
+        """
+        Return weld consumable bias in range [0, 1].
+
+        0.0 = pure weight optimization.
+              optimize.py should preserve old behaviour and skip weld calculations.
+        1.0 = pure estimated weld consumable optimization.
+        """
+        try:
+            return min(max(float(self._new_weld_bias.get()), 0.0), 1.0)
+        except Exception:
+            return 0.0
+
+    def _get_weld_bias_text(self):
+        weld_bias = self._get_weld_bias_for_optimization()
+        weight_bias = 1.0 - weld_bias
+
+        if weld_bias <= 0.0:
+            return 'Pure weight optimization - no weld consumable calculations'
+
+        if weld_bias >= 1.0:
+            return 'Pure weld consumable optimization'
+
+        return (
+            'Mixed objective: '
+            + str(round(100.0 * weight_bias, 0)) + '% weight / '
+            + str(round(100.0 * weld_bias, 0)) + '% weld consumables'
+        )
+
+    def _update_weld_bias_label(self, *args):
+        try:
+            self._weld_bias_value_label.config(
+                text='Weld bias: ' + str(round(self._get_weld_bias_for_optimization(), 2))
+            )
+            self._weld_bias_info_label.config(text=self._get_weld_bias_text())
+        except Exception:
+            pass
+
     def __init__(self, master, app=None):
         super(CreateOptGeoWindow, self).__init__()
         if __name__ == '__main__':
@@ -264,7 +303,7 @@ class CreateOptGeoWindow():
         self._opt_frames_obj = []
         self._frame = master
         self._frame.wm_title("Optimize structure")
-        self._frame.geometry('1800x950')
+        self._frame.geometry('1800x1050')
         self._frame.grab_set()
         self._canvas_origo = (50, 720 - 50)
 
@@ -283,6 +322,7 @@ class CreateOptGeoWindow():
         self._opt_resutls = {}
         self._geo_results = None
         self._opt_actual_running_time = tk.Label(self._frame, text='')
+        self._running_time_after_id = None
 
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=95)
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=135)
@@ -335,6 +375,8 @@ class CreateOptGeoWindow():
         self._new_opt_span_min = tk.DoubleVar()
         self._new_option_fraction = tk.IntVar()
         self._new_option_panel = tk.IntVar()
+        self._new_weld_bias = tk.DoubleVar()
+        self._new_include_builtup_weld = tk.BooleanVar()
 
         ent_w = 10
         self._ent_spacing_upper = tk.Entry(self._frame, textvariable=self._new_spacing_upper, width=ent_w)
@@ -401,12 +443,12 @@ class CreateOptGeoWindow():
         self._draw_scale = 500
         self._canvas_opt = tk.Canvas(self._frame, width=self._prop_canvas_dim[0], height=self._prop_canvas_dim[1],
                                      background='azure', relief='groove', borderwidth=2)
-        self._canvas_opt.place(x=start_x + 10.5 * dx, y=start_y + 3.5 * dy)
+        self._canvas_opt.place(x=start_x + 10.5 * dx, y=start_y + 5.0 * dy)
         self._select_canvas_dim = (1000, 720)
         self._canvas_select = tk.Canvas(self._frame, width=self._select_canvas_dim[0],
                                         height=self._select_canvas_dim[1],
                                         background='azure', relief='groove', borderwidth=2)
-        self._canvas_select.place(x=start_x + 0 * dx, y=start_y + 3.5 * dy)
+        self._canvas_select.place(x=start_x + 0 * dx, y=start_y + 5.0 * dy)
 
         # Labels for the pso
         self._lb_swarm_size = tk.Label(self._frame, text='swarm size')
@@ -565,16 +607,19 @@ class CreateOptGeoWindow():
         self._new_check_local_buckling.set(True)
         self._new_option_fraction.set(None)
         self._new_option_panel.set(None)
+        self._new_weld_bias.set(0.0)
+        self._new_include_builtup_weld.set(False)
         self._new_harmonize_spacing.set(False)
         self._new_check_buckling_semi_analytical.set(False)
         self._new_check_buckling_ml_cl.set(False)
         self._new_check_buckling_ml_numeric.set(False)
 
-        self._new_check_buckling_semi_analytical.trace('w', self.update_running_time)
-        self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
-        self._new_check_buckling_ml_numeric.trace('w', self.update_running_time)
+        self._new_check_buckling_semi_analytical.trace_add('write', self.schedule_running_time_update)
+        self._new_check_buckling_ml_cl.trace_add('write', self.schedule_running_time_update)
+        self._new_check_buckling_ml_numeric.trace_add('write', self.schedule_running_time_update)
+        self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
 
-        start_y, start_x, dy = 570, 100, 25
+        start_y, start_x, dy = 620, 100, 25
         tk.Label(self._frame, text='Check for minimum section modulus').place(x=start_x + dx * 9.7, y=start_y + 4 * dy)
         tk.Label(self._frame, text='Check for minimum plate thk.').place(x=start_x + dx * 9.7, y=start_y + 5 * dy)
         tk.Label(self._frame, text='Check for minimum shear area').place(x=start_x + dx * 9.7, y=start_y + 6 * dy)
@@ -652,14 +697,15 @@ class CreateOptGeoWindow():
 
         self._options_fractions = (None,)
         self._options_panels = (None,)
-        tk.Label(self._frame, text='Select number of panels:').place(x=start_x + dx * 12, y=start_y - dy * 20.5)
-        tk.Label(self._frame, text='Select panel to plot:   ').place(x=start_x + dx * 12, y=start_y - dy * 19.5)
+
+        tk.Label(self._frame, text='Select number of panels:').place(x=start_x + dx * 12, y=start_y - dy * 20)
+        tk.Label(self._frame, text='Select panel to plot:   ').place(x=start_x + dx * 12, y=start_y - dy * 19)
         self._ent_option_fractions = tk.OptionMenu(self._frame, self._new_option_fraction, *self._options_fractions,
                                                    command=self.get_plate_field_options)
         self._ent_option_field = tk.OptionMenu(self._frame, self._new_option_panel, *self._options_panels,
                                                command=self.get_plate_field_options)
-        self._option_fractions_place = [start_x + dx * 13.5, start_y - dy * 20.5]
-        self._options_panels_place = [start_x + dx * 13.5, start_y - dy * 19.5]
+        self._option_fractions_place = [start_x + dx * 13.5, start_y - dy * 20]
+        self._options_panels_place = [start_x + dx * 13.5, start_y - dy * 19]
         self._ent_option_fractions.place(x=self._option_fractions_place[0], y=self._option_fractions_place[1])
         self._ent_option_field.place(x=self._options_panels_place[0], y=self._options_panels_place[1])
 
@@ -671,6 +717,64 @@ class CreateOptGeoWindow():
                                                             'results', command=self.show_previous_results, bg='white',
                                           font='Verdana 10', fg='black')
         self.run_results_prev.place(x=start_x + dx * 15, y=start_y - dy * 20)
+
+        # Optimization objective bias.
+        # For geometric optimization this is forwarded to optimize.py.
+        # optimize.py must skip weld calculations when weld_bias == 0.0.
+        obj_x, obj_y = start_x + dx * 12.4, start_y - dy * 25
+
+        tk.Label(
+            self._frame,
+            text='Optimization objective',
+            font='Verdana 9 bold',
+        ).place(x=obj_x, y=obj_y)
+
+        self._weld_bias_slider = tk.Scale(
+            self._frame,
+            variable=self._new_weld_bias,
+            from_=0.0,
+            to=1.0,
+            resolution=0.05,
+            orient=tk.HORIZONTAL,
+            length=250,
+            showvalue=False,
+            command=self._update_weld_bias_label,
+        )
+        self._weld_bias_slider.place(x=obj_x, y=obj_y + 18)
+
+        tk.Label(self._frame, text='Weight', font='Verdana 7').place(x=obj_x, y=obj_y + 52)
+        tk.Label(self._frame, text='Weld consumables', font='Verdana 7').place(x=obj_x + 185, y=obj_y + 52)
+
+        self._weld_bias_value_label = tk.Label(
+            self._frame,
+            text='Weld bias: 0.0',
+            font='Verdana 8 bold',
+        )
+        self._weld_bias_value_label.place(x=obj_x, y=obj_y + 75)
+
+        self._weld_bias_info_label = tk.Label(
+            self._frame,
+            text=self._get_weld_bias_text(),
+            font='Verdana 7',
+            wraplength=370,
+            justify=tk.LEFT,
+        )
+        self._weld_bias_info_label.place(x=obj_x, y=obj_y + 98)
+
+        tk.Checkbutton(
+            self._frame,
+            variable=self._new_include_builtup_weld,
+        ).place(x=obj_x + 300, y=obj_y + 72)
+
+        tk.Label(
+            self._frame,
+            text='Include web-to-flange weld for built-up stiffeners',
+            font='Verdana 7',
+            wraplength=260,
+            justify=tk.LEFT,
+        ).place(x=obj_x + 325, y=obj_y + 76)
+
+
 
         # ----------------------------------END OF OPTIMIZE SINGLE COPY-----------------------------------------------
         self.progress_count = tk.IntVar()
@@ -684,6 +788,21 @@ class CreateOptGeoWindow():
         self.draw_select_canvas()
         # if __name__ == '__main__':
         #     self.run_optimizaion(load_pre = True, save_results=True)
+
+
+    def schedule_running_time_update(self, *args):
+        """
+        Debounce GUI updates from variable traces.
+
+        This avoids slow or repeated work while the user is typing.
+        """
+        try:
+            if getattr(self, '_running_time_after_id', None) is not None:
+                self._frame.after_cancel(self._running_time_after_id)
+        except Exception:
+            pass
+
+        self._running_time_after_id = self._frame.after(350, self.update_running_time)
 
     def selected_algorithm(self, event):
         '''
@@ -886,7 +1005,9 @@ class CreateOptGeoWindow():
                                                       slamming_press=slamming_press, opt_girder_prop=opt_girder_prop,
                                                       fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
                                                       ml_algo=selected_ml_algo,
-                                                      material_factor=selected_mat_fac)
+                                                      material_factor=selected_mat_fac,
+                                                      weld_bias=self._get_weld_bias_for_optimization(),
+                                                      builtup_stiffener=self._new_include_builtup_weld.get())
                     resulting_geo.append(geo_results)
 
                 # need to find the lowest
@@ -915,7 +1036,9 @@ class CreateOptGeoWindow():
                                                   slamming_press=slamming_press, opt_girder_prop=opt_girder_prop,
                                                   fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
                                                   ml_algo=selected_ml_algo,
-                                                  material_factor=selected_mat_fac)
+                                                  material_factor=selected_mat_fac,
+                                                  weld_bias=self._get_weld_bias_for_optimization(),
+                                                  builtup_stiffener=self._new_include_builtup_weld.get())
 
             self._geo_results = geo_results
 
@@ -1152,6 +1275,8 @@ class CreateOptGeoWindow():
         Estimate the running time of the algorithm.
         :return:
         '''
+
+        self._running_time_after_id = None
 
         # try:
         #     self._runnig_time_label.config(text=str(self.get_running_time()))
