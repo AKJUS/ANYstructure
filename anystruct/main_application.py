@@ -12,7 +12,7 @@ import ctypes
 from matplotlib import pyplot as plt
 import matplotlib
 import numpy as np
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
@@ -276,6 +276,11 @@ class Application():
         self._new_show_prop_3d.set(False)
         self._prop_3d_canvas_widget = None
         self._prop_3d_fig_canvas = None
+        self._prop_3d_frame = None
+        self._prop_3d_toolbar = None
+        self._prop_3d_axes = None
+        self._prop_3d_default_view = (22, -55)
+        self._prop_3d_resize_after_id = None
 
         # Point frame
         self._pt_frame = tk.Frame(self._main_canvas, width=100, height=100, bg="black", relief='raised')
@@ -5688,14 +5693,229 @@ class Application():
                     y_location += 1
 
     def clear_prop_3d(self):
-        """Remove any embedded Matplotlib 3D preview from the property canvas."""
-        if getattr(self, '_prop_3d_canvas_widget', None) is not None:
+        """Remove any embedded Matplotlib 3D preview from the lower drawing area."""
+        if getattr(self, '_prop_3d_resize_after_id', None) is not None:
+            try:
+                self._parent.after_cancel(self._prop_3d_resize_after_id)
+            except Exception:
+                pass
+            self._prop_3d_resize_after_id = None
+
+        if getattr(self, '_prop_3d_frame', None) is not None:
+            try:
+                self._prop_3d_frame.destroy()
+            except Exception:
+                pass
+        elif getattr(self, '_prop_3d_canvas_widget', None) is not None:
             try:
                 self._prop_3d_canvas_widget.destroy()
             except Exception:
                 pass
-            self._prop_3d_canvas_widget = None
-            self._prop_3d_fig_canvas = None
+
+        self._prop_3d_canvas_widget = None
+        self._prop_3d_fig_canvas = None
+        self._prop_3d_frame = None
+        self._prop_3d_toolbar = None
+        self._prop_3d_axes = None
+        self._prop_3d_default_view = (22, -55)
+
+    def _place_info_float(self, widget, key, default=0.0):
+        """Return a numeric place() value, handling Tk's string values safely."""
+        try:
+            value = widget.place_info().get(key, default)
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _get_prop_3d_bottom_place(self):
+        """Return placement for the 3D preview inside the property drawing area.
+
+        Keep the 3D preview in the same lower-left area as the 2D property sketch.
+        The result canvas on the lower-right must remain visible for result text.
+        """
+        try:
+            prop_relx = self._place_info_float(self._prop_canvas, 'relx', 0.26)
+            prop_rely = self._place_info_float(self._prop_canvas, 'rely', 0.73)
+            prop_relw = self._place_info_float(self._prop_canvas, 'relwidth', 0.38)
+            prop_relh = self._place_info_float(self._prop_canvas, 'relheight', 0.27)
+
+            return {
+                'relx': prop_relx,
+                'rely': prop_rely,
+                'relwidth': prop_relw,
+                'relheight': prop_relh,
+            }
+        except Exception:
+            return {'relx': 0.26, 'rely': 0.73, 'relwidth': 0.38, 'relheight': 0.27}
+
+    def _resize_prop_3d_figure(self, event=None):
+        """Resize the Matplotlib figure to the actual available Tk frame size."""
+        if getattr(self, '_prop_3d_fig_canvas', None) is None:
+            return
+        try:
+            frame = self._prop_3d_frame
+            fig = self._prop_3d_fig_canvas.figure
+            dpi = float(fig.get_dpi())
+            width_px = max(frame.winfo_width(), 300)
+            toolbar_height = 0
+            if getattr(self, '_prop_3d_toolbar', None) is not None:
+                toolbar_height = max(self._prop_3d_toolbar.winfo_height(), 30)
+            height_px = max(frame.winfo_height() - toolbar_height, 160)
+            fig.set_size_inches(width_px / dpi, height_px / dpi, forward=True)
+            # Use almost the full Tk drawing frame for the 3D axes.  The 3D
+            # model itself is still protected from clipping by the data-limit
+            # padding in _apply_prop_3d_layout(); using a small axes rectangle
+            # here was the reason only about half of the available width was
+            # visually used.
+            fig.subplots_adjust(left=0.015, right=0.985, bottom=0.08, top=0.94)
+            if getattr(self, '_prop_3d_axes', None) is not None:
+                self._prop_3d_axes.set_position([0.015, 0.08, 0.97, 0.84])
+            self._prop_3d_fig_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _schedule_resize_prop_3d_figure(self, event=None):
+        """Throttle figure resizing while the Tk frame is being laid out."""
+        if getattr(self, '_prop_3d_resize_after_id', None) is not None:
+            try:
+                self._parent.after_cancel(self._prop_3d_resize_after_id)
+            except Exception:
+                pass
+        self._prop_3d_resize_after_id = self._parent.after(80, self._resize_prop_3d_figure)
+
+    def _embed_prop_3d_figure(self, fig, ax, default_view=(22, -55)):
+        """Embed a Matplotlib 3D figure with navigation tools.
+
+        In 3D mode the preview fills the lower-left property drawing area while
+        leaving the lower-right result canvas visible.
+        """
+        self._prop_3d_axes = ax
+        self._prop_3d_default_view = default_view
+
+        # Hide only the old 2D property sketch.
+        # Do NOT clear _result_canvas here: update_frame() draws the result text
+        # before draw_prop(), so clearing _result_canvas from the 3D preview removes
+        # the buckling/result text on the right-hand side.
+        try:
+            self._prop_canvas.delete('all')
+        except Exception:
+            pass
+
+        place = self._get_prop_3d_bottom_place()
+        self._prop_3d_frame = tk.Frame(
+            self._main_fr,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        self._prop_3d_frame.place(**place)
+        tk.Misc.lift(self._prop_3d_frame)
+
+        toolbar_row = tk.Frame(
+            self._prop_3d_frame,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        toolbar_row.pack(side=tk.TOP, fill=tk.X)
+
+        # Matplotlib 3D can clip Poly3DCollection artists at the axes
+        # rectangle when set_box_aspect(..., zoom=...) is used to make the
+        # drawing wider.  Disable artist clipping before the first draw so
+        # the model can use the available white plot area without being cut
+        # by the internal axes boundary.
+        self._disable_prop_3d_artist_clipping(ax)
+
+        self._prop_3d_fig_canvas = FigureCanvasTkAgg(fig, master=self._prop_3d_frame)
+        self._prop_3d_fig_canvas.draw()
+
+        self._prop_3d_toolbar = NavigationToolbar2Tk(
+            self._prop_3d_fig_canvas,
+            toolbar_row,
+            pack_toolbar=False,
+        )
+        self._prop_3d_toolbar.update()
+        self._prop_3d_toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        view_row = tk.Frame(
+            toolbar_row,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        view_row.pack(side=tk.RIGHT)
+
+        ttk.Button(view_row, text='Iso', width=4,
+                   command=lambda: self._set_prop_3d_view(default_view[0], default_view[1])).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Top', width=4,
+                   command=lambda: self._set_prop_3d_view(90, -90)).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Side', width=5,
+                   command=lambda: self._set_prop_3d_view(0, -90)).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='End', width=4,
+                   command=lambda: self._set_prop_3d_view(0, 0)).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Reset', width=6,
+                   command=self._reset_prop_3d_view).pack(side=tk.LEFT)
+
+        self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
+        self._prop_3d_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self._prop_3d_frame.bind('<Configure>', self._schedule_resize_prop_3d_figure)
+        self._prop_3d_frame.after(50, self._resize_prop_3d_figure)
+
+    def _set_prop_3d_view(self, elev, azim):
+        """Set the active 3D preview to a predefined view angle."""
+        if getattr(self, '_prop_3d_axes', None) is None:
+            return
+        self._prop_3d_axes.view_init(elev=elev, azim=azim)
+        if getattr(self, '_prop_3d_fig_canvas', None) is not None:
+            self._prop_3d_fig_canvas.draw_idle()
+
+    def _reset_prop_3d_view(self):
+        """Reset the Matplotlib navigation history / zoom for the 3D preview."""
+        if getattr(self, '_prop_3d_toolbar', None) is not None:
+            try:
+                self._prop_3d_toolbar.home()
+                return
+            except Exception:
+                pass
+        if getattr(self, '_prop_3d_fig_canvas', None) is not None:
+            self._prop_3d_fig_canvas.draw_idle()
+
+    @staticmethod
+    def _disable_prop_3d_artist_clipping(ax):
+        """Allow 3D preview artists to draw outside the internal axes box.
+
+        The Tk frame may be wide enough, but mplot3d clips surfaces and
+        Poly3DCollections at the axes rectangle.  This is especially visible
+        when set_box_aspect(..., zoom=...) is increased: the model becomes
+        wider, but vertical cut lines appear inside the available white plot
+        area.  Turning clipping off for the model artists keeps the result
+        text area untouched while letting the 3D preview use the property
+        canvas width.
+        """
+        try:
+            ax.set_clip_on(False)
+        except Exception:
+            pass
+
+        for artist_list_name in ('collections', 'lines', 'patches'):
+            try:
+                artists = getattr(ax, artist_list_name, [])
+            except Exception:
+                artists = []
+            for artist in list(artists):
+                try:
+                    artist.set_clip_on(False)
+                except Exception:
+                    pass
+                try:
+                    artist.set_clip_box(None)
+                except Exception:
+                    pass
+                try:
+                    artist.set_clip_path(None)
+                except Exception:
+                    pass
 
     @staticmethod
     def _set_axes_equal_3d(ax):
@@ -5718,6 +5938,44 @@ class Application():
             pass
 
     @staticmethod
+    def _apply_prop_3d_layout(fig, ax, x_span, y_span, z_span, zoom=1.55):
+        """Make the 3D axes use the full available Tk plot area.
+
+        The lower Tk frame can be wide while Matplotlib still draws the 3D box
+        in a small central part of the figure.  The important part is to make
+        the *axes rectangle* full width, then use set_box_aspect(..., zoom=...)
+        to enlarge the 3D box inside that rectangle.  Data limits are padded by
+        the caller, so this can be wider without clipping the model. Keep a small figure margin; true full-bleed axes clip 3D artists in Tk.
+        """
+        x_span = max(float(x_span), 1e-6)
+        y_span = max(float(y_span), 1e-6)
+        z_span = max(float(z_span), 1e-6)
+
+        try:
+            # Orthographic projection uses the horizontal space more predictably
+            # for engineering previews and avoids the perspective shrink that
+            # made long panels look narrow in the middle of a wide canvas.
+            ax.set_proj_type('ortho')
+        except Exception:
+            pass
+
+        try:
+            ax.set_box_aspect((x_span, y_span, z_span), zoom=zoom)
+        except TypeError:
+            try:
+                ax.set_box_aspect((x_span, y_span, z_span))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        try:
+            fig.subplots_adjust(left=0.015, right=0.985, bottom=0.08, top=0.94)
+            ax.set_position([0.015, 0.08, 0.97, 0.84])
+        except Exception:
+            pass
+
+    @staticmethod
     def _add_box_3d(ax, x0, x1, y0, y1, z0, z1, facecolor='lightgrey', alpha=0.75):
         """Add a rectangular solid to a Matplotlib 3D axis."""
         vertices = [
@@ -5730,6 +5988,12 @@ class Application():
         ]
         poly = Poly3DCollection(vertices, alpha=alpha, facecolor=facecolor,
                                 edgecolor='black', linewidths=0.35)
+        try:
+            poly.set_clip_on(False)
+            poly.set_clip_box(None)
+            poly.set_clip_path(None)
+        except Exception:
+            pass
         ax.add_collection3d(poly)
         return poly
 
@@ -5776,6 +6040,91 @@ class Application():
                     return section_obj.stf_type
                 except Exception:
                     return 'T'
+
+    @staticmethod
+    def _normalise_preview_length_to_m(value, default=0.0):
+        """Return a preview length in metres.
+
+        Stored ANYstructure objects normally use metres, while GUI entries use mm.
+        This helper accepts both so the 3D preview can use line-object values first
+        and safely fall back to GUI values.
+        """
+        try:
+            value = float(value)
+        except Exception:
+            return float(default)
+        if value <= 0.0:
+            return float(default)
+        # Values from GUI fields are normally mm, e.g. LG = 10000.
+        # Object values are normally m, e.g. girder_lg = 10.
+        return value / 1000.0 if value > 100.0 else value
+
+    @staticmethod
+    def _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80):
+        """Create member positions based on actual length and spacing.
+
+        This is used by the 3D preview only.  The count is governed by the
+        physical length (for example LG) and the specified spacing.  The final
+        span is adjusted slightly by using linspace so the preview ends exactly
+        at the panel/cylinder boundary instead of leaving an odd visual gap.
+        """
+        try:
+            length = float(length)
+            spacing = float(spacing)
+        except Exception:
+            return [0.0]
+        if length <= 0.0:
+            return [0.0]
+        if spacing <= 1e-9:
+            return [0.0, length] if include_ends else [length / 2.0]
+
+        n_intervals = max(1, int(math.ceil(length / spacing)))
+        n_intervals = min(n_intervals, max(1, max_count - 1))
+        positions = np.linspace(0.0, length, n_intervals + 1).tolist()
+        if include_ends:
+            return positions
+        if len(positions) <= 2:
+            return [length / 2.0]
+        return positions[1:-1]
+
+    def _flat_preview_lg_from_objects(self, girder, stiffener, spacing):
+        """Return LG in metres, preferring the selected line object over GUI defaults."""
+        for obj in (girder, stiffener):
+            if obj is None:
+                continue
+            for attr_name in ('girder_lg', 'lg', 'LG'):
+                try:
+                    value = getattr(obj, attr_name)
+                    lg = self._normalise_preview_length_to_m(value, 0.0)
+                    if lg > 1e-9:
+                        return lg
+                except Exception:
+                    pass
+            for getter_name in ('get_girder_lg', 'get_lg', 'get_LG'):
+                try:
+                    value = getattr(obj, getter_name)()
+                    lg = self._normalise_preview_length_to_m(value, 0.0)
+                    if lg > 1e-9:
+                        return lg
+                except Exception:
+                    pass
+        try:
+            lg = self._normalise_preview_length_to_m(self._new_girder_length_LG.get(), 0.0)
+            if lg > 1e-9:
+                return lg
+        except Exception:
+            pass
+        return max(4.0 * spacing, 0.8)
+
+    def _flat_preview_lp_from_gui(self, span, spacing):
+        """Return Lp in metres.  Lp=0 means fallback to two stiffener spans."""
+        try:
+            lp = self._normalise_preview_length_to_m(self._new_panel_length_Lp.get(), 0.0)
+            if lp > 1e-9:
+                return lp
+        except Exception:
+            pass
+        return max(2.0 * span, 2.0 * spacing, 0.8)
 
     def _draw_section_web_and_flange_3d(self, ax, orientation, x_center, y_center, length,
                                         plate_thk, dims, x_limits=None, y_limits=None,
@@ -5870,8 +6219,8 @@ class Application():
         plate_thk = max(float(plate.get_pl_thk()), 1e-6)
         span = self._safe_obj_float(plate, ('get_span',), ('span',), 2.0)
 
-        fig = plt.Figure(figsize=(5.9, 2.05), dpi=100)
-        ax = fig.add_subplot(111, projection='3d')
+        fig = plt.Figure(figsize=(7.2, 2.35), dpi=100)
+        ax = fig.add_axes([0.035, 0.11, 0.94, 0.81], projection='3d')
 
         max_z = plate_thk
 
@@ -5887,8 +6236,8 @@ class Application():
             except Exception:
                 girder_lg = 0.0
 
-            width = panel_length_lp if panel_length_lp > 1e-9 else max(2.0 * span, 2.0 * spacing, 0.8)
-            length = girder_lg if girder_lg > 1e-9 else max(4.0 * spacing, 0.8)
+            width = self._flat_preview_lp_from_gui(span, spacing)
+            length = self._flat_preview_lg_from_objects(girder, stiffener, spacing)
             x_mid = width / 2.0
 
             gdims = self._get_section_3d_dimensions(girder)
@@ -5906,8 +6255,9 @@ class Application():
 
             # Stiffeners run between panel edges/girder. Draw both fields separately.
             if sdims is not None:
-                n_bays = max(2, min(10, int(round(length / spacing))))
-                stiffener_ys = [idx * length / n_bays for idx in range(n_bays + 1)]
+                stiffener_ys = self._positions_from_length_and_spacing(
+                    length, spacing, include_ends=True, max_count=80
+                )
                 left_x0, left_x1 = 0.0, max(x_mid - girder_gap / 2.0, 0.0)
                 right_x0, right_x1 = min(x_mid + girder_gap / 2.0, width), width
                 for y in stiffener_ys:
@@ -5924,13 +6274,21 @@ class Application():
                 max_z = max(max_z, plate_thk + sdims['web_h'] + sdims['flange_thk'])
 
             title = '3D stiffened panel with girder'
-            ax.set_xlabel('panel length, Lp [m]', fontsize=7)
-            ax.set_ylabel('girder length, LG [m]', fontsize=7)
+            ax.set_xlabel('panel length, Lp [m]', fontsize=7, labelpad=-1)
+            ax.set_ylabel('girder length, LG [m]', fontsize=7, labelpad=-1)
         else:
-            # Original stiffened/unstiffened panel orientation.
-            n_spaces = 3 if stiffener is not None else 1
-            width = max(spacing * n_spaces, spacing, 0.1)
-            length = max(min(max(span, width * 0.9), 3.5), 0.8)
+            # Flat plate/stiffened panel without explicit girder.
+            # Use the same physical convention as the girder preview:
+            #   x = stiffener span / panel length l
+            #   y = girder length LG / repeated stiffener fields
+            # The number of stiffeners is therefore governed by LG / stiffener spacing,
+            # not by a hard-coded preview count.
+            if stiffener is not None:
+                width = max(span, spacing, 0.8)
+                length = self._flat_preview_lg_from_objects(None, stiffener, spacing)
+            else:
+                width = max(spacing, 0.8)
+                length = max(span, 0.8)
 
             self._add_box_3d(ax, 0.0, width, 0.0, length, 0.0, plate_thk,
                              facecolor='lightgrey', alpha=0.55)
@@ -5938,37 +6296,41 @@ class Application():
             if stiffener is not None:
                 dims = self._get_section_3d_dimensions(stiffener)
                 max_z = max(max_z, plate_thk + dims['web_h'] + dims['flange_thk'])
-                for i in range(n_spaces + 1):
-                    x = i * dims['spacing']
-                    if x < -1e-9 or x > width + 1e-9:
-                        continue
+                stiffener_ys = self._positions_from_length_and_spacing(
+                    length, spacing, include_ends=True, max_count=80
+                )
+                for y in stiffener_ys:
                     self._draw_section_web_and_flange_3d(
-                        ax, 'y', x, length / 2.0, length, plate_thk, dims,
-                        y_limits=(0.0, length), facecolor_web='silver', facecolor_flange='darkgrey')
+                        ax, 'x', width / 2.0, y, width, plate_thk, dims,
+                        x_limits=(0.0, width), facecolor_web='silver', facecolor_flange='darkgrey')
 
             title = '3D stiffened panel' if stiffener is not None else '3D plate preview'
-            ax.set_xlabel('spacing [m]', fontsize=7)
-            ax.set_ylabel('span direction [m]', fontsize=7)
+            if stiffener is not None:
+                ax.set_xlabel('stiffener span, l [m]', fontsize=7, labelpad=-1)
+                ax.set_ylabel('girder length, LG [m]', fontsize=7, labelpad=-1)
+            else:
+                ax.set_xlabel('plate width [m]', fontsize=7, labelpad=-1)
+                ax.set_ylabel('span direction [m]', fontsize=7, labelpad=-1)
 
         ax.text2D(0.02, 0.92, 'SELECTED: ' + str(self._active_line), transform=ax.transAxes,
                   fontsize=8, color='red')
         ax.set_title(title, fontsize=8)
-        ax.set_zlabel('height [m]', fontsize=7)
+        ax.set_zlabel('height [m]', fontsize=7, labelpad=-2)
         ax.tick_params(labelsize=6)
-        ax.set_xlim(-0.05 * width, width * 1.05)
-        ax.set_ylim(-0.03 * length, length * 1.03)
-        ax.set_zlim(0.0, max(max_z * 1.15, plate_thk * 6.0, 0.05))
-        try:
-            ax.set_box_aspect((max(width, 1e-6), max(length, 1e-6), max(max_z, 1e-6)))
-        except Exception:
-            pass
+        # Give the 3D box enough data-limit padding to avoid clipping when the
+        # axes itself is made wide.  Without this, a high set_box_aspect zoom
+        # fills the available width but cuts the model at the left/right axes
+        # boundaries.
+        x_pad = max(0.14 * width, 0.08)
+        y_pad = max(0.08 * length, 0.08)
+        z_top = max(max_z * 1.28, plate_thk * 7.0, 0.08)
+        ax.set_xlim(-x_pad, width + x_pad)
+        ax.set_ylim(-y_pad, length + y_pad)
+        ax.set_zlim(-0.02 * z_top, z_top)
+        self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top, zoom=1.52)
         ax.view_init(elev=22, azim=-55)
-        fig.tight_layout(pad=0.1)
 
-        self._prop_3d_fig_canvas = FigureCanvasTkAgg(fig, master=self._prop_canvas)
-        self._prop_3d_fig_canvas.draw()
-        self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
-        self._prop_3d_canvas_widget.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+        self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
 
     def _add_cylinder_longitudinal_stiffener_3d(self, ax, radius, length, angle, dims):
         """Draw a simplified longitudinal stiffener on a shell as radial web + outer flange."""
@@ -6038,8 +6400,8 @@ class Application():
         x_grid = radius * np.cos(theta_grid)
         y_grid = radius * np.sin(theta_grid)
 
-        fig = plt.Figure(figsize=(5.9, 2.05), dpi=100)
-        ax = fig.add_subplot(111, projection='3d')
+        fig = plt.Figure(figsize=(7.2, 2.35), dpi=100)
+        ax = fig.add_axes([0.035, 0.11, 0.94, 0.81], projection='3d')
         ax.plot_surface(x_grid, y_grid, z_grid, alpha=0.30, linewidth=0.12,
                         edgecolor='grey', color='lightgrey')
 
@@ -6066,54 +6428,60 @@ class Application():
             ring_dims = self._get_section_3d_dimensions(cyl_obj.RingStfObj)
             radial_extension = max(radial_extension, ring_dims['web_h'] + ring_dims['flange_thk'])
             try:
-                ring_spacing = max(float(shell._dist_between_rings), 1e-6)
+                ring_spacing = self._normalise_preview_length_to_m(shell._dist_between_rings, 0.0)
             except Exception:
-                ring_spacing = max(self._safe_obj_float(shell, (), ('dist_between_rings',), 0.0), 1e-6)
-            if ring_spacing > 0.0:
-                num_ring_stiff = max(1, min(24, int(length / ring_spacing)))
-            else:
-                num_ring_stiff = 0
-            for ring_idx in range(1, num_ring_stiff + 1):
-                zz = length * ring_idx / (num_ring_stiff + 1)
+                ring_spacing = self._normalise_preview_length_to_m(
+                    self._safe_obj_float(shell, (), ('dist_between_rings',), 0.0), 0.0
+                )
+            if ring_spacing <= 1e-9:
+                try:
+                    ring_spacing = self._normalise_preview_length_to_m(self._new_shell_dist_rings.get(), 0.0)
+                except Exception:
+                    ring_spacing = 0.0
+            for zz in self._positions_from_length_and_spacing(
+                    length, ring_spacing, include_ends=False, max_count=30):
                 self._add_cylinder_ring_stiffener_3d(ax, radius, zz, ring_dims, is_frame=False)
 
         if cyl_obj.RingFrameObj is not None:
             frame_dims = self._get_section_3d_dimensions(cyl_obj.RingFrameObj)
             radial_extension = max(radial_extension, frame_dims['web_h'] + frame_dims['flange_thk'])
             try:
-                girder_spacing = max(float(cyl_obj.length_between_girders), 1e-6)
+                girder_spacing = self._normalise_preview_length_to_m(cyl_obj.length_between_girders, 0.0)
             except Exception:
-                girder_spacing = self._safe_obj_float(cyl_obj, (), ('length_between_girders',), 0.0)
-            if girder_spacing > 0.0:
-                num_ring_girder = max(1, min(12, int(length / girder_spacing)))
+                girder_spacing = self._normalise_preview_length_to_m(
+                    self._safe_obj_float(cyl_obj, (), ('length_between_girders',), 0.0), 0.0
+                )
+            if girder_spacing <= 1e-9:
+                try:
+                    girder_spacing = self._normalise_preview_length_to_m(
+                        self._new_shell_ring_frame_length_between_girders.get(), 0.0
+                    )
+                except Exception:
+                    girder_spacing = 0.0
+            if girder_spacing <= 1e-9:
+                girder_positions = [length / 2.0]
             else:
-                num_ring_girder = 1
-            for ring_idx in range(1, num_ring_girder + 1):
-                zz = length * ring_idx / (num_ring_girder + 1)
+                girder_positions = self._positions_from_length_and_spacing(
+                    length, girder_spacing, include_ends=False, max_count=16
+                )
+            for zz in girder_positions:
                 self._add_cylinder_ring_stiffener_3d(ax, radius, zz, frame_dims, is_frame=True)
 
         ax.text2D(0.02, 0.92, 'SELECTED: ' + str(self._active_line), transform=ax.transAxes,
                   fontsize=8, color='red')
         ax.set_title('3D cylinder / curved plate preview', fontsize=8)
-        ax.set_xlabel('x [m]', fontsize=7)
-        ax.set_ylabel('y [m]', fontsize=7)
-        ax.set_zlabel('length [m]', fontsize=7)
+        ax.set_xlabel('x [m]', fontsize=7, labelpad=-1)
+        ax.set_ylabel('y [m]', fontsize=7, labelpad=-1)
+        ax.set_zlabel('length [m]', fontsize=7, labelpad=-2)
         ax.tick_params(labelsize=6)
         lim = radius + radial_extension * 1.25 + max(thk, 0.01)
         ax.set_xlim(-lim, lim)
         ax.set_ylim(-lim, lim)
         ax.set_zlim(0.0, length)
-        try:
-            ax.set_box_aspect((2.0 * lim, 2.0 * lim, max(length, 1e-6)))
-        except Exception:
-            self._set_axes_equal_3d(ax)
+        self._apply_prop_3d_layout(fig, ax, 2.0 * lim, 2.0 * lim, max(length, 1e-6), zoom=1.32)
         ax.view_init(elev=20, azim=-45)
-        fig.tight_layout(pad=0.1)
 
-        self._prop_3d_fig_canvas = FigureCanvasTkAgg(fig, master=self._prop_canvas)
-        self._prop_3d_fig_canvas.draw()
-        self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
-        self._prop_3d_canvas_widget.place(relx=0.0, rely=0.0, relwidth=1.0, relheight=1.0)
+        self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
 
     def draw_prop(self, event=None):
         '''
