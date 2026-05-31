@@ -110,9 +110,10 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     else:
         fat_dict = None if fatigue_obj is None else fatigue_obj.get_fatigue_properties()
 
-    # Initial weight filtering is only safe for pure weight optimization.
-    # With weld_bias > 0, a heavier candidate may have lower weld consumables.
-    if use_weight_filter and not cylinder and weld_bias <= 0.0:
+    # Initial filtering is only safe when the objective is a single monotonic
+    # quantity: pure weight or pure weld consumables. Mixed normalized
+    # objectives need the full valid set before a candidate can be rejected.
+    if use_weight_filter and not cylinder and (weld_bias <= 0.0 or weld_bias >= 1.0):
 
         if is_geometric or algorithm == 'pso':
             init_filter_weight = float('inf')
@@ -128,7 +129,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                                     fat_press=None if fat_press_ext_int is None else fat_press_ext_int,
                                                     predefined_stiffener_iter=predefined_stiffener_iter,
                                                     slamming_press=slamming_press, fdwn=fdwn, fup=fup,
-                                                    ml_algo=ml_algo)
+                                                    ml_algo=ml_algo, weld_bias=weld_bias,
+                                                    builtup_stiffener=builtup_stiffener)
 
     if cylinder:
         to_return = any_smart_loop_cylinder(
@@ -151,7 +153,7 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                    predefiened_stiffener_iter=predefined_stiffener_iter, puls_sheet=puls_sheet,
                                    puls_acceptance=puls_acceptance, fdwn=fdwn, fup=fup, ml_algo=ml_algo,
                                    weld_bias=weld_bias,
-                                   builtup_stiffener=builtup_stiffener)
+                                   builtup_stiffener=builtup_stiffener, processes=processes)
         return to_return
     elif algorithm == 'anysmart' and is_geometric:
         return geometric_summary_search(min_var=min_var, max_var=max_var, deltas=deltas,
@@ -269,7 +271,8 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
     main_result = get_filtered_results(structure_to_check, initial_structure_obj, lateral_pressure,
                                        init_filter_weight=init_filter, side=side, chk=const_chk, fat_dict=fat_dict,
                                        fat_press=fat_press, slamming_press=slamming_press, processes=processes,
-                                       puls_sheet=puls_sheet, puls_acceptance=puls_acceptance, ml_algo=ml_algo)
+                                       puls_sheet=puls_sheet, puls_acceptance=puls_acceptance, ml_algo=ml_algo,
+                                       weld_bias=weld_bias, builtup_stiffener=builtup_stiffener)
 
     main_iter = main_result[0]
     main_fail = main_result[1]
@@ -1037,7 +1040,8 @@ def _predict_semi_analytical_uf(calc_object, lat_press, default_acceptance=0.87)
 def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, True, True, True, True, True, True, False,
                                                                        False, False),
                         fat_dict=None, fat_press=None, slamming_press=0, PULSrun: calc.PULSpanel = None,
-                        print_result=False, fdwn=1, fup=0.5, ml_results=None, random_result_return=False):
+                        print_result=False, fdwn=1, fup=0.5, ml_results=None, random_result_return=False,
+                        weld_bias=0.0, builtup_stiffener=False):
     '''
     Checking all constraints defined.
 
@@ -1152,14 +1156,37 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                 print('Buckling ML-Numeric', stf_text, False)
             return False, 'Buckling ML-Numeric', x, all_checks
 
-    this_weight = calc_weight(x)
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
 
-    if this_weight > init_weight:
-        weigt_frac = this_weight / init_weight
-        if print_result:
-            pass
-        all_checks[0] = weigt_frac
-        return False, 'Weight filter', x, all_checks
+    if init_weight != float('inf'):
+        if weld_bias >= 1.0:
+            try:
+                stiffener_type = (
+                    obj.Stiffener.get_stiffener_type()
+                    if obj.Stiffener is not None
+                    else 'T'
+                )
+            except Exception:
+                stiffener_type = 'T'
+            filter_value = calc_weld_consumable(
+                x,
+                stiffener_type=stiffener_type,
+                include_web_to_flange=builtup_stiffener,
+            )
+            filter_name = 'Weld filter'
+        else:
+            filter_value = calc_weight(x)
+            filter_name = 'Weight filter'
+
+        if filter_value > init_weight:
+            if init_weight == 0:
+                all_checks[0] = float('inf')
+            else:
+                all_checks[0] = filter_value / init_weight
+            return False, filter_name, x, all_checks
 
     # Section modulus
     if chk[0] and calc_object[0].Stiffener is not None:
@@ -1843,7 +1870,7 @@ def x_to_string(x):
 def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_weight, side='p',
                          chk=(True, True, True, True, True, True, True, False), fat_dict=None, fat_press=None,
                          slamming_press=None, processes=None, puls_sheet=None, puls_acceptance=0.87,
-                         fdwn=1, fup=0.5, ml_algo=None):
+                         fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False):
     '''
     Using multiprocessing to return list of applicable results.
 
@@ -2011,7 +2038,8 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
             this_ml_result = None
 
         iter_var.append((item, init_stuc_obj, lat_press, init_filter_weight, side, chk, fat_dict, fat_press,
-                         slamming_press, PULSrun, False, fdwn, fup, this_ml_result))
+                         slamming_press, PULSrun, False, fdwn, fup, this_ml_result, False, weld_bias,
+                         builtup_stiffener))
 
     iter_var = tuple(iter_var)
 
@@ -2185,13 +2213,18 @@ def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef
 
 
 def get_initial_weight(obj, lat_press, min_var, max_var, deltas, trials, fat_dict, fat_press, predefined_stiffener_iter,
-                       slamming_press, fdwn=1, fup=0.5, ml_algo=None):
+                       slamming_press, fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False):
     '''
-    Return a guess of the initial weight used to filter the constraints.
+    Return a guess of the initial objective used to filter constraints.
     Only aim is to reduce running time of the algorithm.
     '''
 
-    min_weight = float('inf')
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    min_value = float('inf')
     if predefined_stiffener_iter is None:
         combs = any_get_all_combs(min_var, max_var, deltas)
     else:
@@ -2201,13 +2234,30 @@ def get_initial_weight(obj, lat_press, min_var, max_var, deltas, trials, fat_dic
     trial_selection = random_product(combs, repeat=trials)
     obj.lat_press = lat_press
     for x in trial_selection:
-        if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=min_weight,
+        if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=min_value,
                                fat_dict=fat_dict, fat_press=fat_press, slamming_press=slamming_press,
-                               fdwn=fdwn, fup=fup)[0]:
-            current_weight = calc_weight(x)
-            if current_weight < min_weight:
-                min_weight = current_weight
-    return min_weight
+                               fdwn=fdwn, fup=fup, weld_bias=weld_bias,
+                               builtup_stiffener=builtup_stiffener)[0]:
+            if weld_bias >= 1.0:
+                try:
+                    stiffener_type = (
+                        obj.Stiffener.get_stiffener_type()
+                        if obj.Stiffener is not None
+                        else 'T'
+                    )
+                except Exception:
+                    stiffener_type = 'T'
+                current_value = calc_weld_consumable(
+                    x,
+                    stiffener_type=stiffener_type,
+                    include_web_to_flange=builtup_stiffener,
+                )
+            else:
+                current_value = calc_weight(x)
+
+            if current_value < min_value:
+                min_value = current_value
+    return min_value
 
 
 def get_random_result(obj, lat_press, min_var, max_var, deltas, trials=10000, side='p',

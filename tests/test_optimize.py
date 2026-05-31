@@ -37,7 +37,78 @@ def test_optimization(opt_input):
     assert results[3] in (True, False)
 
 def test_weight_calc(opt_input):
-    assert opt.calc_weight(opt_input[-1]) == pytest.approx(8125.711486965601)
+    assert opt.calc_weight(opt_input[-1]) == pytest.approx(8243.530164606)
+
+
+def test_weld_bias_filter_does_not_use_panel_weight(opt_input):
+    obj, _, _, lat_press, _, _, _, _ = opt_input
+    x = [0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10]
+    weld_limit = opt.calc_weld_consumable(x) * 1.01
+
+    result = opt.any_constraints_all(
+        x=x,
+        obj=obj,
+        lat_press=lat_press,
+        init_weight=weld_limit,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+    )
+
+    assert result[0] is True
+    assert opt.calc_weight(x) > weld_limit
+
+
+def test_weld_bias_filter_rejects_by_weld_consumables(opt_input):
+    obj, _, _, lat_press, _, _, _, _ = opt_input
+    x = [0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10]
+    weld_limit = opt.calc_weld_consumable(x) * 0.99
+
+    result = opt.any_constraints_all(
+        x=x,
+        obj=obj,
+        lat_press=lat_press,
+        init_weight=weld_limit,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Weld filter'
+
+
+def test_mixed_weld_bias_skips_initial_filter(monkeypatch, opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
+    captured = {}
+
+    def fail_get_initial_weight(**kwargs):
+        raise AssertionError('mixed weld bias should not use the initial filter')
+
+    def fake_any_smart_loop(*args, **kwargs):
+        captured['init_filter'] = args[5]
+        captured['processes'] = kwargs['processes']
+        captured['weld_bias'] = kwargs['weld_bias']
+        return None, None, None, False, []
+
+    monkeypatch.setattr(opt, 'get_initial_weight', fail_get_initial_weight)
+    monkeypatch.setattr(opt, 'any_smart_loop', fake_any_smart_loop)
+
+    opt.run_optmizataion(
+        obj,
+        upper_bounds,
+        lower_bounds,
+        lat_press,
+        deltas,
+        algorithm='anysmart',
+        use_weight_filter=True,
+        weld_bias=0.5,
+        processes=1,
+    )
+
+    assert captured == {
+        'init_filter': float('inf'),
+        'processes': 1,
+        'weld_bias': 0.5,
+    }
 
 
 def test_external_excel_puls_sheet_argument_is_removed(opt_input):
