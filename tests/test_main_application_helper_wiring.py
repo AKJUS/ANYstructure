@@ -14,6 +14,16 @@ def test_main_application_uses_shared_geometry_menu_helpers():
     assert "Longitudinal Stiffened shell  (Force input)" not in source
 
 
+def test_functional_modes_keep_3d_section_checkbox_visible():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _place_3d_section_view_checkbox(self):" in source
+    assert "self._chk_show_prop_3d.place(relx=0.637, rely=0.705)" in source
+    assert "self._chk_show_prop_3d.lift()" in source
+    assert source.count("self._place_3d_section_view_checkbox()") >= 3
+
+
 def test_main_application_uses_geometry_helpers_for_active_lookups():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")

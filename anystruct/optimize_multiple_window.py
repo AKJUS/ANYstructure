@@ -81,6 +81,9 @@ def helper_harmonizer_multi(iterator):
             fdwn=fdwn,
             fup=fup,
             ml_results=ml_result,
+            weld_bias=iterator['info'].get('weld bias', 0.0),
+            builtup_stiffener=iterator['info'].get('builtup stiffener', False),
+            weld_metric=iterator['info'].get('weld metric', 'weld_consumables'),
         )
         this_check.append(chk_any[0])
 
@@ -212,6 +215,7 @@ class CreateOptimizeMultipleWindow():
         self._new_algorithm = tk.StringVar()
         self._new_algorithm_random_trials = tk.IntVar()
         self._new_weld_bias = tk.DoubleVar()
+        self._new_weld_metric = tk.StringVar()
         self._new_include_builtup_weld = tk.BooleanVar()
         self._running_time_after_id = None
         self._new_delta_spacing = tk.DoubleVar()
@@ -357,6 +361,7 @@ class CreateOptimizeMultipleWindow():
         self._new_algorithm.set('anysmart')
         self._new_algorithm_random_trials.set(10000)
         self._new_weld_bias.set(0.0)
+        self._new_weld_metric.set('Weld consumables')
         self._new_include_builtup_weld.set(False)
         # Selection of constraints
         self._new_check_sec_mod = tk.BooleanVar()
@@ -418,6 +423,7 @@ class CreateOptimizeMultipleWindow():
         self._new_check_ml_buckling.trace_add('write', self.schedule_running_time_update)
         self._new_check_ml_numeric_buckling.trace_add('write', self.schedule_running_time_update)
         self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
+        self._new_weld_metric.trace_add('write', self._update_weld_bias_label)
 
         self.running_time_per_item = 1.009943181818182e-5
         self._runnig_time_label.config(text=str(self.get_running_time()))
@@ -483,7 +489,7 @@ class CreateOptimizeMultipleWindow():
 
         # Optimization objective bias. 0.0 keeps the old weight-only behaviour.
         objective_x = 1070
-        objective_y = 205
+        objective_y = 185
 
         tk.Label(self._frame, text='Optimization objective', font='Verdana 9 bold') \
             .place(x=objective_x, y=objective_y)
@@ -521,6 +527,15 @@ class CreateOptimizeMultipleWindow():
             justify=tk.LEFT,
         )
         self._weld_bias_info_label.place(x=objective_x, y=objective_y + 105)
+
+        self._weld_metric_menu = tk.OptionMenu(
+            self._frame,
+            self._new_weld_metric,
+            'Weld consumables',
+            'Weld length',
+            command=self._update_weld_bias_label,
+        )
+        self._weld_metric_menu.place(x=objective_x, y=objective_y + 128, width=150)
 
         tk.Checkbutton(
             self._frame,
@@ -582,20 +597,32 @@ class CreateOptimizeMultipleWindow():
         except Exception:
             return 0.0
 
+    def _get_weld_metric_for_optimization(self):
+        try:
+            return op.normalize_weld_metric(self._new_weld_metric.get())
+        except Exception:
+            return 'weld_consumables'
+
+    def _get_weld_metric_text(self):
+        return 'weld length' if self._get_weld_metric_for_optimization() == 'weld_length' else 'weld consumables'
+
+    def _get_weld_metric_unit(self):
+        return 'm' if self._get_weld_metric_for_optimization() == 'weld_length' else 'kg'
+
     def _get_weld_bias_text(self):
         weld_bias = self._get_weld_bias_for_optimization()
         weight_bias = 1.0 - weld_bias
 
         if weld_bias <= 0.0:
-            return 'Pure weight optimization - no weld consumable calculations'
+            return 'Pure weight optimization - no weld metric calculations'
 
         if weld_bias >= 1.0:
-            return 'Pure weld-consumable optimization'
+            return 'Pure ' + self._get_weld_metric_text() + ' optimization'
 
         return (
             'Mixed objective: '
             + str(round(100.0 * weight_bias, 0)) + '% weight / '
-            + str(round(100.0 * weld_bias, 0)) + '% weld consumables'
+            + str(round(100.0 * weld_bias, 0)) + '% ' + self._get_weld_metric_text()
         )
 
     def _update_weld_bias_label(self, *args):
@@ -606,6 +633,23 @@ class CreateOptimizeMultipleWindow():
             self._weld_bias_info_label.config(text=self._get_weld_bias_text())
         except Exception:
             pass
+
+        try:
+            self.schedule_running_time_update()
+        except Exception:
+            pass
+
+    def _get_objective_warning_text(self):
+        weld_bias = self._get_weld_bias_for_optimization()
+
+        if 0.0 < weld_bias < 1.0:
+            return '\nWARNING: mixed weight/weld combination disables the initial filter.'
+
+        if weld_bias >= 1.0:
+            return '\nPure weld objective: multi-line filter is disabled to preserve harmonizing candidates for ' \
+                   + self._get_weld_metric_text() + '.'
+
+        return ''
 
     def schedule_running_time_update(self, *args):
         """
@@ -632,16 +676,17 @@ class CreateOptimizeMultipleWindow():
         except Exception:
             return 1
 
-        if delta <= 0.0:
-            return 1
-
         if upper < lower:
             return 0
+
+        if delta <= 0.0:
+            return 1 if abs(upper - lower) < 1e-12 else 0
 
         if abs(upper - lower) < 1e-12:
             return 1
 
-        return int(np.floor((upper - lower) / delta + 1.0 + 1e-9))
+        values = np.arange(lower, upper + delta, delta)
+        return int(np.count_nonzero(values <= upper))
 
     def _objective_for_x(self, x, line_structure_obj=None):
         """
@@ -668,10 +713,11 @@ class CreateOptimizeMultipleWindow():
                 line_structure_obj.Stiffener.get_stiffener_type()
                 if line_structure_obj.Stiffener is not None else 'T'
             )
-            weld = op.calc_weld_consumable(
+            weld = op.calc_weld_objective(
                 x,
                 stiffener_type=stiffener_type,
                 include_web_to_flange=self._new_include_builtup_weld.get(),
+                weld_metric=self._get_weld_metric_for_optimization(),
             )
         except Exception:
             weld = float('inf')
@@ -861,7 +907,8 @@ class CreateOptimizeMultipleWindow():
                                                                ml_algo=self._get_selected_ml_algo(),
                                                                material_factor=selected_mat_fac,
                                                                weld_bias=self._get_weld_bias_for_optimization(),
-                                                               builtup_stiffener=self._new_include_builtup_weld.get()))
+                                                               builtup_stiffener=self._new_include_builtup_weld.get(),
+                                                               weld_metric=self._get_weld_metric_for_optimization()))
             self._harmonizer_data[line] = {}
             counter += 1
             self.progress_count.set(counter)
@@ -926,6 +973,9 @@ class CreateOptimizeMultipleWindow():
         iter_run_info['lines'] = list(self._opt_results.keys())
         iter_run_info['checks'] = to_check
         iter_run_info['keep spacing'] = self._keep_spacing.get()
+        iter_run_info['weld bias'] = self._get_weld_bias_for_optimization()
+        iter_run_info['builtup stiffener'] = self._new_include_builtup_weld.get()
+        iter_run_info['weld metric'] = self._get_weld_metric_for_optimization()
 
         for x_check in all_ok_checks:
             iterator.append({'x': x_check, 'info': iter_run_info})
@@ -1097,7 +1147,8 @@ class CreateOptimizeMultipleWindow():
                                                       use_weight_filter=True,
                                                       fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
                                                       weld_bias=self._get_weld_bias_for_optimization(),
-                                                      builtup_stiffener=self._new_include_builtup_weld.get()))[0:4]
+                                                      builtup_stiffener=self._new_include_builtup_weld.get(),
+                                                      weld_metric=self._get_weld_metric_for_optimization()))[0:4]
                 print('Master:', master_line, 'Slave', slave_line, 'Check', chk_result[-1])
                 harm_res[master_line].append(chk_result)
 
@@ -1474,7 +1525,7 @@ class CreateOptimizeMultipleWindow():
         self._running_time_after_id = None
 
         try:
-            self._runnig_time_label.config(text=str(self.get_running_time()))
+            self._runnig_time_label.config(text=str(self.get_running_time()) + self._get_objective_warning_text())
         except (ZeroDivisionError, TclError):
             pass
         except Exception:
@@ -1993,7 +2044,7 @@ class CreateOptimizeMultipleWindow():
         '''
         if iterating:
             if found_files is not None:
-                predefined_structure = hlp.helper_read_section_file(files=found_files, obj=obj.Plate)
+                predefined_structure = hlp.helper_read_section_file(files=found_files, obj=obj.Stiffener)
         else:
             predefined_structure = None
             if self._toggle_btn.config('relief')[-1] == 'sunken':

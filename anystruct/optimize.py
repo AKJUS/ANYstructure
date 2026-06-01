@@ -73,7 +73,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                      slamming_press=0, predefined_stiffener_iter=None, processes=None, use_weight_filter=True,
                      load_pre=False, opt_girder_prop=None, puls_sheet=None, puls_acceptance=0.87,
                      fdwn=1, fup=0.5, ml_algo=None, cylinder=False, material_factor=None,
-                     weld_bias=0.0, builtup_stiffener=False):
+                     weld_bias=0.0, builtup_stiffener=False, weld_metric='weld_consumables',
+                     cost_factors=None):
     """
     The optimization is initiated here. It is called from optimize_window / optimize_cylinder.
 
@@ -98,6 +99,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
         weld_bias = 0.0
 
     builtup_stiffener = bool(builtup_stiffener)
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
 
     # Make material factor explicit for all optimizer variants.
     # Single optimization receives one structure object; geometric optimization receives a list.
@@ -113,7 +116,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     # Initial filtering is only safe when the objective is a single monotonic
     # quantity: pure weight or pure weld consumables. Mixed normalized
     # objectives need the full valid set before a candidate can be rejected.
-    if use_weight_filter and not cylinder and (weld_bias <= 0.0 or weld_bias >= 1.0):
+    if use_weight_filter and not cylinder and (
+            cost_factors is not None or weld_bias <= 0.0 or weld_bias >= 1.0):
 
         if is_geometric or algorithm == 'pso':
             init_filter_weight = float('inf')
@@ -130,7 +134,9 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                                     predefined_stiffener_iter=predefined_stiffener_iter,
                                                     slamming_press=slamming_press, fdwn=fdwn, fup=fup,
                                                     ml_algo=ml_algo, weld_bias=weld_bias,
-                                                    builtup_stiffener=builtup_stiffener)
+                                                    builtup_stiffener=builtup_stiffener,
+                                                    weld_metric=weld_metric,
+                                                    cost_factors=cost_factors)
 
     if cylinder:
         to_return = any_smart_loop_cylinder(
@@ -143,6 +149,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
             processes=processes,
             weld_bias=weld_bias,
             builtup_stiffener=builtup_stiffener,
+            weld_metric=weld_metric,
+            cost_factors=cost_factors,
         )
         return to_return
 
@@ -153,7 +161,9 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                    predefiened_stiffener_iter=predefined_stiffener_iter, puls_sheet=puls_sheet,
                                    puls_acceptance=puls_acceptance, fdwn=fdwn, fup=fup, ml_algo=ml_algo,
                                    weld_bias=weld_bias,
-                                   builtup_stiffener=builtup_stiffener, processes=processes)
+                                   builtup_stiffener=builtup_stiffener,
+                                   weld_metric=weld_metric, processes=processes,
+                                   cost_factors=cost_factors)
         return to_return
     elif algorithm == 'anysmart' and is_geometric:
         return geometric_summary_search(min_var=min_var, max_var=max_var, deltas=deltas,
@@ -163,18 +173,26 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                         tot_len=tot_len, frame_distance=frame_distance,
                                         algorithm='anysmart', predefiened_stiffener_iter=predefined_stiffener_iter,
                                         slamming_press=slamming_press, load_pre=load_pre,
-                                        opt_girder_prop=opt_girder_prop, ml_algo=ml_algo,
-                                        weld_bias=weld_bias, builtup_stiffener=builtup_stiffener)
+                                        opt_girder_prop=opt_girder_prop, processes=processes, ml_algo=ml_algo,
+                                        weld_bias=weld_bias, builtup_stiffener=builtup_stiffener,
+                                        weld_metric=weld_metric, cost_factors=cost_factors)
     elif algorithm == 'anydetail' and not is_geometric:
         return any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, init_filter_weight,
                                  side=side, const_chk=const_chk, fat_dict=fat_dict, fat_press=fat_press_ext_int,
-                                 slamming_press=slamming_press)
+                                 slamming_press=slamming_press, weld_bias=weld_bias,
+                                 builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                                 cost_factors=cost_factors)
     elif algorithm == 'random' and not is_geometric:
         return get_random_result(initial_structure_obj, lateral_pressure, min_var, max_var, deltas, trials=trials,
-                                 side=side, const_chk=const_chk, fat_dict=fat_dict, fat_press=fat_press_ext_int)
+                                 side=side, const_chk=const_chk, fat_dict=fat_dict, fat_press=fat_press_ext_int,
+                                 weld_bias=weld_bias, builtup_stiffener=builtup_stiffener,
+                                 weld_metric=weld_metric, cost_factors=cost_factors)
     elif algorithm == 'random_no_delta' and not is_geometric:
         return get_random_result_no_bounds(initial_structure_obj, lateral_pressure, min_var, max_var, trials=trials,
-                                           side=side, const_chk=const_chk)
+                                           side=side, const_chk=const_chk, fat_dict=fat_dict,
+                                           fat_press=fat_press_ext_int, weld_bias=weld_bias,
+                                           builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                                           cost_factors=cost_factors)
 
     # elif algorithm == 'pso' and is_geometric:
     #     return geometric_summary_search(min_var,max_var,deltas, initial_structure_obj,lateral_pressure,
@@ -185,7 +203,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
 
 def any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, init_filter=float('inf'),
                       side='p', const_chk=(True, True, True, True, True, False), fat_dict=None, fat_press=None,
-                      slamming_press=0):
+                      slamming_press=0, weld_bias=0.0, builtup_stiffener=False,
+                      weld_metric='weld_consumables', cost_factors=None):
     '''
     Calulating initial values.
     :param min:
@@ -200,7 +219,23 @@ def any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_p
     plt.grid(True)
     plt.draw()
     iter_count = 0
-    min_weight = init_filter
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    builtup_stiffener = bool(builtup_stiffener)
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
+    try:
+        stiffener_type = (
+            initial_structure_obj.Stiffener.get_stiffener_type()
+            if initial_structure_obj.Stiffener is not None
+            else 'T'
+        )
+    except Exception:
+        stiffener_type = 'T'
+
+    min_objective = init_filter
     main_fail = list()
     for spacing in np.arange(min_var[0], max_var[0] + deltas[0], deltas[0]):
         for plate_thk in np.arange(min_var[1], max_var[1] + deltas[1], deltas[1]):
@@ -211,14 +246,25 @@ def any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_p
                             var_x = np.array([spacing, plate_thk, stf_web_h, stf_web_thk, stf_flange_width,
                                               stf_flange_thk, min_var[6], min_var[7]])
                             check = any_constraints_all(var_x, initial_structure_obj, lat_press=lateral_pressure,
-                                                        init_weight=min_weight, side=side, chk=const_chk,
+                                                        init_weight=min_objective, side=side, chk=const_chk,
                                                         fat_dict=fat_dict, fat_press=fat_press,
-                                                        slamming_press=slamming_press)
+                                                        slamming_press=slamming_press, weld_bias=weld_bias,
+                                                        builtup_stiffener=builtup_stiffener,
+                                                        weld_metric=weld_metric,
+                                                        cost_factors=cost_factors)
                             if check[0] is not False:
-                                current_weight = calc_weight(var_x)
-                                if current_weight <= min_weight:
+                                current_objective = calc_flat_objective_value(
+                                    var_x,
+                                    stiffener_type=stiffener_type,
+                                    weld_bias=weld_bias,
+                                    include_web_to_flange=builtup_stiffener,
+                                    weld_metric=weld_metric,
+                                    cost_factors=cost_factors,
+                                )
+
+                                if current_objective <= min_objective:
                                     iter_count += 1
-                                    min_weight = current_weight
+                                    min_objective = current_objective
                                     ass_var = var_x
                                 main_fail.append(check)
                             else:
@@ -237,7 +283,8 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
                    fat_dict=None, fat_press=None,
                    slamming_press=0, predefiened_stiffener_iter=None, processes=None,
                    puls_sheet=None, puls_acceptance=0.87, fdwn=1, fup=0.5, ml_algo=None,
-                   weld_bias=0.0, builtup_stiffener=False):
+                   weld_bias=0.0, builtup_stiffener=False, weld_metric='weld_consumables',
+                   cost_factors=None):
     """
     Trying to be smart.
 
@@ -257,6 +304,7 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
         weld_bias = min(max(float(weld_bias), 0.0), 1.0)
     except Exception:
         weld_bias = 0.0
+    cost_factors = normalize_cost_factors(cost_factors)
 
     if predefiened_stiffener_iter is None:
         structure_to_check = any_get_all_combs(min_var, max_var, deltas)
@@ -272,14 +320,40 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
                                        init_filter_weight=init_filter, side=side, chk=const_chk, fat_dict=fat_dict,
                                        fat_press=fat_press, slamming_press=slamming_press, processes=processes,
                                        puls_sheet=puls_sheet, puls_acceptance=puls_acceptance, ml_algo=ml_algo,
-                                       weld_bias=weld_bias, builtup_stiffener=builtup_stiffener)
+                                       weld_bias=weld_bias, builtup_stiffener=builtup_stiffener,
+                                       weld_metric=weld_metric, cost_factors=cost_factors)
 
     main_iter = main_result[0]
     main_fail = main_result[1]
 
     ass_var = None
 
-    if weld_bias <= 0.0:
+    if cost_factors is not None:
+        current_score = float('inf')
+        try:
+            stiffener_type = (
+                initial_structure_obj.Stiffener.get_stiffener_type()
+                if initial_structure_obj.Stiffener is not None
+                else 'T'
+            )
+        except Exception:
+            stiffener_type = 'T'
+
+        for item in main_iter:
+            main_fail.append(item)
+            objective_score = calc_flat_objective_value(
+                item[2],
+                stiffener_type=stiffener_type,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+            if objective_score < current_score:
+                ass_var = item[2]
+                current_score = objective_score
+
+    elif weld_bias <= 0.0:
         current_weight = float('inf')
         for item in main_iter:
             main_fail.append(item)
@@ -303,10 +377,11 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
         valid_x = [item[2] for item in main_iter]
         weight_values = [calc_weight(x) for x in valid_x]
         weld_values = [
-            calc_weld_consumable(
+            calc_weld_objective(
                 x,
                 stiffener_type=stiffener_type,
                 include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
             )
             for x in valid_x
         ]
@@ -357,7 +432,8 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
                             fat_dict=None,
                             fat_press=None, slamming_press=0, predefiened_stiffener_iter=None, processes=None,
                             fdwn=1, fup=0.5, ml_algo=None, use_weight_filter=True,
-                            weld_bias=0.0, builtup_stiffener=False):
+                            weld_bias=0.0, builtup_stiffener=False, weld_metric='weld_consumables',
+                            cost_factors=None):
     """
     Cylinder optimization.
 
@@ -376,6 +452,8 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
         weld_bias = 0.0
 
     builtup_stiffener = bool(builtup_stiffener)
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
 
     combs = list()
 
@@ -403,9 +481,17 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
                 for ring_frame in combs[3]:
                     final_comb.append([[shell, long, ring_stf, ring_frame], initial_structure_obj])
 
-    min_weight = float('inf')
-    if use_weight_filter and weld_bias <= 0.0:
-        to_check = [random.choice(final_comb) + [float('inf')] for dummy in range(10000)]
+    min_filter_value = float('inf')
+    use_initial_filter = use_weight_filter and (
+            cost_factors is not None or weld_bias <= 0.0 or weld_bias >= 1.0)
+    if use_initial_filter:
+        to_check = [
+            tuple(random.choice(final_comb) + [float('inf'), None, 'p',
+                                               (True, True, True, True, True, True, True, False, False, False),
+                                               None, None, 0, 1, 0.5, None, weld_bias, builtup_stiffener,
+                                               weld_metric, cost_factors])
+            for dummy in range(10000)
+        ]
         pool_processes = max(cpu_count() - 1, 1) if processes is None else int(processes)
         if pool_processes == 1:
             res_pre = [any_constraints_cylinder(*args) for args in to_check]
@@ -415,15 +501,24 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
 
         for chk_res in res_pre:
             if chk_res[0]:
-                current_weight = calc_weight_cylinder(chk_res[2])
-                if current_weight < min_weight:
-                    min_weight = current_weight
+                current_value = calc_cylinder_objective_value(
+                    chk_res[2],
+                    weld_bias=weld_bias,
+                    include_web_to_flange=builtup_stiffener,
+                    weld_metric=weld_metric,
+                    cost_factors=cost_factors,
+                )
+                if current_value < min_filter_value:
+                    min_filter_value = current_value
     else:
-        min_weight = False
+        min_filter_value = False
 
     final_comb_inc_weight = list()
     for val in final_comb:
-        final_comb_inc_weight.append(val + [min_weight])
+        final_comb_inc_weight.append(tuple(val + [min_filter_value, None, 'p',
+                                                  (True, True, True, True, True, True, True, False, False, False),
+                                                  None, None, 0, 1, 0.5, None, weld_bias, builtup_stiffener,
+                                                  weld_metric, cost_factors]))
 
     pool_processes = max(cpu_count() - 1, 1) if processes is None else int(processes)
     if pool_processes == 1:
@@ -443,7 +538,22 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
     main_fail = check_not_ok
     ass_var = None
 
-    if weld_bias <= 0.0:
+    if cost_factors is not None:
+        current_score = float('inf')
+        for item in main_iter:
+            main_fail.append(item)
+            objective_score = calc_cylinder_objective_value(
+                item[2],
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+            if objective_score < current_score:
+                ass_var = item[2]
+                current_score = objective_score
+
+    elif weld_bias <= 0.0:
         current_weight = float('inf')
         for item in main_iter:
             main_fail.append(item)
@@ -458,7 +568,11 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
         valid_x = [item[2] for item in main_iter]
         weight_values = [calc_weight_cylinder(x) for x in valid_x]
         weld_values = [
-            calc_weld_consumable_cylinder(x, include_web_to_flange=builtup_stiffener)
+            calc_weld_objective_cylinder(
+                x,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+            )
             for x in valid_x
         ]
 
@@ -487,7 +601,8 @@ def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, la
                              init_filter=float('inf'),
                              side='p', const_chk=(True, True, True, True, True, True), fat_obj=None, fat_press=None,
                              slamming_press=None, predefiened_stiffener_iter=None, processes=None, ml_algo=None,
-                             weld_bias=0.0, builtup_stiffener=False):
+                             weld_bias=0.0, builtup_stiffener=False, weld_metric='weld_consumables',
+                             cost_factors=None):
     ''' Searching multiple sections using the smart loop. '''
 
     all_obj = []
@@ -508,7 +623,8 @@ def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, la
                                  slamming_press=0 if slam_press is None else slam_press,
                                  predefiened_stiffener_iter=this_predefiened_objects, processes=processes,
                                  ml_algo=ml_algo, weld_bias=weld_bias,
-                                 builtup_stiffener=builtup_stiffener)
+                                 builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                                 cost_factors=cost_factors)
 
         all_obj.append(opt_obj)
         idx += 1
@@ -522,7 +638,8 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                              min_max_span=(2, 6), tot_len=None, frame_distance=None,
                              algorithm='anysmart', predefiened_stiffener_iter=None, reiterate=True,
                              processes=None, slamming_press=None, load_pre=False, opt_girder_prop=None,
-                             ml_algo=None, weld_bias=0.0, builtup_stiffener=False):
+                             ml_algo=None, weld_bias=0.0, builtup_stiffener=False,
+                             weld_metric='weld_consumables', cost_factors=None):
     '''Geometric optimization of all relevant sections. '''
     try:
         weld_bias = min(max(float(weld_bias), 0.0), 1.0)
@@ -530,6 +647,8 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
         weld_bias = 0.0
 
     builtup_stiffener = bool(builtup_stiffener)
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
 
     # Checking the number of initial objects and adding if number of fraction is to be changed.
     # print('Min/max span is', min_max_span)
@@ -660,9 +779,12 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                                                            slamming_press=working_slamming[no_of_fractions],
                                                            fat_press=working_fatigue_press[no_of_fractions],
                                                            predefiened_stiffener_iter=predefiened_stiffener_iter,
+                                                           processes=processes,
                                                            ml_algo=ml_algo,
                                                            weld_bias=weld_bias,
-                                                           builtup_stiffener=builtup_stiffener)
+                                                           builtup_stiffener=builtup_stiffener,
+                                                           weld_metric=weld_metric,
+                                                           cost_factors=cost_factors)
 
             # Finding weight of this solution.
 
@@ -683,14 +805,15 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                     tot_weight += weigth_to_add
                     weight_details['objects'].append(weigth_to_add)
 
-                    if weld_bias > 0.0:
+                    if weld_bias > 0.0 or cost_factors is not None:
                         panel_x = (obj.Plate.get_s(), obj.Plate.get_pl_thk(), obj.Stiffener.get_web_h(),
                                    obj.Stiffener.get_web_thk(), obj.Stiffener.get_fl_w(),
                                    obj.Stiffener.get_fl_thk(), obj.Plate.span, width)
-                        weld_to_add = calc_weld_consumable(
+                        weld_to_add = calc_weld_objective(
                             panel_x,
                             stiffener_type=obj.Stiffener.get_stiffener_type(),
                             include_web_to_flange=builtup_stiffener,
+                            weld_metric=weld_metric,
                         )
                         tot_weld += weld_to_add
                         weight_details['weld_objects'].append(weld_to_add)
@@ -726,10 +849,11 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                     weight_details['frames'].append(this_weight * this_scale)
                     weight_details['scales'].append(this_scale)
 
-                    if weld_bias > 0.0:
-                        frame_weld = calc_weld_consumable(
+                    if weld_bias > 0.0 or cost_factors is not None:
+                        frame_weld = calc_weld_objective(
                             this_x,
                             include_web_to_flange=builtup_stiffener,
+                            weld_metric=weld_metric,
                         ) * this_scale
                         tot_weld += frame_weld
                         weight_details['weld_frames'].append(frame_weld)
@@ -739,7 +863,13 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
             if predefiened_stiffener_iter is not None or not reiterate:
                 solution_found = True  # Noe solution may be found, but in this case no more iteations.
 
-        if weld_bias > 0.0:
+        if cost_factors is not None:
+            total_objective = cost_factors['steel'] * tot_weight + cost_factors['weld'] * tot_weld
+            weight_details['total_weight'] = tot_weight
+            weight_details['total_weld_consumables'] = tot_weld
+            weight_details['objective'] = total_objective
+            results[no_of_fractions] = total_objective, opt_objects, weight_details
+        elif weld_bias > 0.0:
             total_objective = (1.0 - weld_bias) * tot_weight + weld_bias * tot_weld
             weight_details['total_weight'] = tot_weight
             weight_details['total_weld_consumables'] = tot_weld
@@ -767,7 +897,8 @@ def any_find_min_weight_var(var):
 def any_constraints_cylinder(x, obj: calc.CylinderAndCurvedPlate, init_weight, lat_press=None, side='p',
                              chk=(True, True, True, True, True, True, True, False, False, False),
                              fat_dict=None, fat_press=None, slamming_press=0, fdwn=1, fup=0.5,
-                             ml_results=None):
+                             ml_results=None, weld_bias=0.0, builtup_stiffener=False,
+                             weld_metric='weld_consumables', cost_factors=None):
     '''
     Checking all constraints defined.
 
@@ -784,14 +915,43 @@ def any_constraints_cylinder(x, obj: calc.CylinderAndCurvedPlate, init_weight, l
     calc_obj = create_new_cylinder_obj(obj, x)
 
     optimizing = True if any([calc_obj.RingStfObj is None, calc_obj.RingFrameObj is None]) else False
-    # Weigth
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    cost_factors = normalize_cost_factors(cost_factors)
+    weld_metric = normalize_weld_metric(weld_metric)
+
+    # Initial objective filter.
     if init_weight != False:
-        this_weight = calc_weight_cylinder(x)
-        if this_weight > init_weight:
+        if cost_factors is not None:
+            filter_value = calc_cylinder_objective_value(
+                x,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+            filter_name = 'Cost filter'
+        elif weld_bias >= 1.0:
+            filter_value = calc_weld_objective_cylinder(
+                x,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+            )
+            filter_name = 'Weld filter'
+        else:
+            filter_value = calc_weight_cylinder(x)
+            filter_name = 'Weight filter'
+
+        if filter_value > init_weight:
             results = calc_obj.get_utilization_factors(optimizing=optimizing, empty_result_dict=True)
-            results['Weight'] = this_weight
-            all_checks[0] += 1
-            return False, 'Weight filter', x, all_checks, calc_obj
+            results['Weight'] = calc_weight_cylinder(x)
+            if init_weight == 0:
+                all_checks[0] = float('inf')
+            else:
+                all_checks[0] = filter_value / init_weight
+            return False, filter_name, x, all_checks, calc_obj
 
     if chk[0]:
         results = calc_obj.get_utilization_factors(optimizing=optimizing)
@@ -1041,7 +1201,8 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
                                                                        False, False),
                         fat_dict=None, fat_press=None, slamming_press=0, PULSrun: calc.PULSpanel = None,
                         print_result=False, fdwn=1, fup=0.5, ml_results=None, random_result_return=False,
-                        weld_bias=0.0, builtup_stiffener=False):
+                        weld_bias=0.0, builtup_stiffener=False, weld_metric='weld_consumables',
+                        cost_factors=None):
     '''
     Checking all constraints defined.
 
@@ -1160,21 +1321,35 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
         weld_bias = min(max(float(weld_bias), 0.0), 1.0)
     except Exception:
         weld_bias = 0.0
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
 
     if init_weight != float('inf'):
-        if weld_bias >= 1.0:
-            try:
-                stiffener_type = (
-                    obj.Stiffener.get_stiffener_type()
-                    if obj.Stiffener is not None
-                    else 'T'
-                )
-            except Exception:
-                stiffener_type = 'T'
-            filter_value = calc_weld_consumable(
+        try:
+            stiffener_type = (
+                obj.Stiffener.get_stiffener_type()
+                if obj.Stiffener is not None
+                else 'T'
+            )
+        except Exception:
+            stiffener_type = 'T'
+
+        if cost_factors is not None:
+            filter_value = calc_flat_objective_value(
+                x,
+                stiffener_type=stiffener_type,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+            filter_name = 'Cost filter'
+        elif weld_bias >= 1.0:
+            filter_value = calc_weld_objective(
                 x,
                 stiffener_type=stiffener_type,
                 include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
             )
             filter_name = 'Weld filter'
         else:
@@ -1546,10 +1721,29 @@ def create_new_structure_obj(init_obj, x, fat_dict=None, fdwn=1, fup=0.5):
 
 
 def _get_stiffener_type_from_x(x, default='T'):
+    for idx in (8, 7):
+        try:
+            stiffener_type = str(x[idx]).strip()
+            if stiffener_type != '' and stiffener_type.lower() != 'nan':
+                try:
+                    float(stiffener_type)
+                except Exception:
+                    return stiffener_type
+        except Exception:
+            pass
+    return default
+
+
+def _get_plate_to_stiffener_weld_lines(stiffener_type):
     try:
-        return x[8]
+        stf_type = str(stiffener_type).strip().lower()
     except Exception:
-        return default
+        return 2.0
+
+    if stf_type in ('l', 'l-bulb', 'bulb', 'hp'):
+        return 1.0
+
+    return 2.0
 
 
 def estimate_fillet_weld_leg(thickness_1, thickness_2,
@@ -1563,6 +1757,49 @@ def estimate_fillet_weld_leg(thickness_1, thickness_2,
         return min_leg
     leg = thickness_factor * t_min
     return min(max(leg, min_leg), max_leg)
+
+
+def normalize_weld_metric(weld_metric):
+    """Return supported weld objective metric key."""
+    try:
+        metric = str(weld_metric).strip().lower().replace('_', ' ')
+    except Exception:
+        return 'weld_consumables'
+
+    if metric in ('length', 'weld length', 'weld_length'):
+        return 'weld_length'
+
+    return 'weld_consumables'
+
+
+def normalize_cost_factors(cost_factors):
+    """Return optimizer cost factors or None when cost optimization is inactive."""
+    if cost_factors is None:
+        return None
+
+    if isinstance(cost_factors, dict):
+        steel_cost = cost_factors.get('steel')
+        weld_cost = cost_factors.get('weld')
+    else:
+        try:
+            steel_cost, weld_cost = cost_factors
+        except Exception:
+            return None
+
+    try:
+        steel_cost = max(float(steel_cost), 0.0)
+        weld_cost = max(float(weld_cost), 0.0)
+    except Exception:
+        return None
+
+    if steel_cost <= 0.0 and weld_cost <= 0.0:
+        return None
+
+    return {'steel': steel_cost, 'weld': weld_cost}
+
+
+def _uses_cost_objective(cost_factors):
+    return normalize_cost_factors(cost_factors) is not None
 
 
 def calc_weld_consumable(x, stiffener_type='T', density=7850.0, weld_area_factor=0.5,
@@ -1581,7 +1818,7 @@ def calc_weld_consumable(x, stiffener_type='T', density=7850.0, weld_area_factor
     number_of_stiffeners = estimate_number_of_stiffeners(width, spacing)
     weld_mass = 0.0
     if include_plate_to_stiffener:
-        weld_lines_to_plate = 1.0 if stf_type in ('L', 'L-bulb', 'Bulb') else 2.0
+        weld_lines_to_plate = _get_plate_to_stiffener_weld_lines(stf_type)
         plate_web_leg = estimate_fillet_weld_leg(plate_thk, web_thk)
         plate_web_area = weld_area_factor * plate_web_leg ** 2
         weld_mass += number_of_stiffeners * span * weld_lines_to_plate * plate_web_area * density
@@ -1590,6 +1827,78 @@ def calc_weld_consumable(x, stiffener_type='T', density=7850.0, weld_area_factor
         flange_area = weld_area_factor * flange_leg ** 2
         weld_mass += number_of_stiffeners * span * 2.0 * flange_area * density
     return weld_mass
+
+
+def calc_weld_length(x, stiffener_type='T', include_plate_to_stiffener=True, include_web_to_flange=False):
+    """Estimate total weld length [m] for one stiffened plate field."""
+    try:
+        spacing = float(x[0]); web_h = float(x[2]); web_thk = float(x[3])
+        fl_w = float(x[4]); fl_thk = float(x[5]); span = float(x[6]); width = float(x[7])
+    except Exception:
+        return float('inf')
+    if spacing <= 0.0 or span <= 0.0 or width <= 0.0:
+        return float('inf')
+    if web_h <= 0.0 or web_thk <= 0.0:
+        return 0.0
+
+    stf_type = _get_stiffener_type_from_x(x, default=stiffener_type)
+    number_of_stiffeners = estimate_number_of_stiffeners(width, spacing)
+    weld_length = 0.0
+
+    if include_plate_to_stiffener:
+        weld_lines_to_plate = _get_plate_to_stiffener_weld_lines(stf_type)
+        weld_length += number_of_stiffeners * span * weld_lines_to_plate
+
+    if include_web_to_flange and fl_w > 0.0 and fl_thk > 0.0:
+        weld_length += number_of_stiffeners * span * 2.0
+
+    return weld_length
+
+
+def calc_weld_objective(x, stiffener_type='T', include_web_to_flange=False, weld_metric='weld_consumables'):
+    """Return selected flat-panel weld metric."""
+    if normalize_weld_metric(weld_metric) == 'weld_length':
+        return calc_weld_length(
+            x,
+            stiffener_type=stiffener_type,
+            include_web_to_flange=include_web_to_flange,
+        )
+
+    return calc_weld_consumable(
+        x,
+        stiffener_type=stiffener_type,
+        include_web_to_flange=include_web_to_flange,
+    )
+
+
+def calc_flat_objective_value(x, stiffener_type='T', weld_bias=0.0, include_web_to_flange=False,
+                              weld_metric='weld_consumables', cost_factors=None):
+    """Return the scalar flat-panel objective used for filtering and winner selection."""
+    cost_factors = normalize_cost_factors(cost_factors)
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    weight = calc_weight(x)
+
+    if cost_factors is None and weld_bias <= 0.0:
+        return weight
+
+    weld_value = calc_weld_objective(
+        x,
+        stiffener_type=stiffener_type,
+        include_web_to_flange=include_web_to_flange,
+        weld_metric=weld_metric,
+    )
+
+    if cost_factors is not None:
+        return cost_factors['steel'] * weight + cost_factors['weld'] * weld_value
+
+    if weld_bias >= 1.0:
+        return weld_value
+
+    return (1.0 - weld_bias) * weight + weld_bias * weld_value
 
 
 def _safe_float(value, default=0.0):
@@ -1633,7 +1942,8 @@ def calc_weld_consumable_cylinder(x, density=7850.0, weld_area_factor=0.5,
             num_long_stf = circumference / long_spacing
             leg = estimate_fillet_weld_leg(shell_thk, long_web_thk)
             weld_area = weld_area_factor * leg ** 2
-            weld_mass += num_long_stf * cylinder_length * 2.0 * weld_area * density
+            weld_lines_to_shell = _get_plate_to_stiffener_weld_lines(_get_stiffener_type_from_x(long_stf))
+            weld_mass += num_long_stf * cylinder_length * weld_lines_to_shell * weld_area * density
             if include_web_to_flange and long_fl_w > 0.0 and long_fl_thk > 0.0:
                 flange_leg = estimate_fillet_weld_leg(long_web_thk, long_fl_thk)
                 flange_area = weld_area_factor * flange_leg ** 2
@@ -1644,7 +1954,8 @@ def calc_weld_consumable_cylinder(x, density=7850.0, weld_area_factor=0.5,
         num_ring_stf = cylinder_length / ring_stf_spacing
         leg = estimate_fillet_weld_leg(shell_thk, ring_web_thk)
         weld_area = weld_area_factor * leg ** 2
-        weld_mass += num_ring_stf * circumference * 2.0 * weld_area * density
+        weld_lines_to_shell = _get_plate_to_stiffener_weld_lines(_get_stiffener_type_from_x(ring_stf))
+        weld_mass += num_ring_stf * circumference * weld_lines_to_shell * weld_area * density
         if include_web_to_flange and ring_fl_w > 0.0 and ring_fl_thk > 0.0:
             flange_radius = max(radius - ring_web_h, 0.0)
             flange_circumference = 2.0 * math.pi * flange_radius
@@ -1657,7 +1968,8 @@ def calc_weld_consumable_cylinder(x, density=7850.0, weld_area_factor=0.5,
         num_ring_frames = cylinder_length / ring_frame_spacing
         leg = estimate_fillet_weld_leg(shell_thk, frame_web_thk)
         weld_area = weld_area_factor * leg ** 2
-        weld_mass += num_ring_frames * circumference * 2.0 * weld_area * density
+        weld_lines_to_shell = _get_plate_to_stiffener_weld_lines(_get_stiffener_type_from_x(ring_frame))
+        weld_mass += num_ring_frames * circumference * weld_lines_to_shell * weld_area * density
         if include_web_to_flange and frame_fl_w > 0.0 and frame_fl_thk > 0.0:
             flange_radius = max(radius - frame_web_h, 0.0)
             flange_circumference = 2.0 * math.pi * flange_radius
@@ -1665,6 +1977,94 @@ def calc_weld_consumable_cylinder(x, density=7850.0, weld_area_factor=0.5,
             flange_area = weld_area_factor * flange_leg ** 2
             weld_mass += num_ring_frames * flange_circumference * 2.0 * flange_area * density
     return weld_mass
+
+
+def calc_weld_length_cylinder(x, include_web_to_flange=False):
+    """Estimate total weld length [m] for a stiffened cylinder candidate."""
+    try:
+        shell = x[0]; long_stf = x[1]; ring_stf = x[2]; ring_frame = x[3]
+    except Exception:
+        return float('inf')
+
+    shell_thk = _safe_float(shell[0]); radius = _safe_float(shell[1])
+    ring_stf_spacing = _safe_float(shell[2]); ring_frame_spacing = _safe_float(shell[3])
+    cylinder_length = _safe_float(shell[4])
+    if shell_thk <= 0.0 or radius <= 0.0 or cylinder_length <= 0.0:
+        return float('inf')
+
+    circumference = 2.0 * math.pi * radius
+    weld_length = 0.0
+
+    if _component_has_stiffener_geometry(long_stf):
+        long_spacing = _safe_float(long_stf[0])
+        long_fl_w = _safe_float(long_stf[4]); long_fl_thk = _safe_float(long_stf[5])
+        if long_spacing > 0.0:
+            num_long_stf = circumference / long_spacing
+            weld_lines_to_shell = _get_plate_to_stiffener_weld_lines(_get_stiffener_type_from_x(long_stf))
+            weld_length += num_long_stf * cylinder_length * weld_lines_to_shell
+            if include_web_to_flange and long_fl_w > 0.0 and long_fl_thk > 0.0:
+                weld_length += num_long_stf * cylinder_length * 2.0
+
+    if _component_has_stiffener_geometry(ring_stf) and ring_stf_spacing > 0.0:
+        ring_fl_w = _safe_float(ring_stf[4]); ring_fl_thk = _safe_float(ring_stf[5])
+        num_ring_stf = cylinder_length / ring_stf_spacing
+        weld_lines_to_shell = _get_plate_to_stiffener_weld_lines(_get_stiffener_type_from_x(ring_stf))
+        weld_length += num_ring_stf * circumference * weld_lines_to_shell
+        if include_web_to_flange and ring_fl_w > 0.0 and ring_fl_thk > 0.0:
+            weld_length += num_ring_stf * circumference * 2.0
+
+    if _component_has_stiffener_geometry(ring_frame) and ring_frame_spacing > 0.0:
+        frame_fl_w = _safe_float(ring_frame[4]); frame_fl_thk = _safe_float(ring_frame[5])
+        num_ring_frames = cylinder_length / ring_frame_spacing
+        weld_lines_to_shell = _get_plate_to_stiffener_weld_lines(_get_stiffener_type_from_x(ring_frame))
+        weld_length += num_ring_frames * circumference * weld_lines_to_shell
+        if include_web_to_flange and frame_fl_w > 0.0 and frame_fl_thk > 0.0:
+            weld_length += num_ring_frames * circumference * 2.0
+
+    return weld_length
+
+
+def calc_weld_objective_cylinder(x, include_web_to_flange=False, weld_metric='weld_consumables'):
+    """Return selected cylinder weld metric."""
+    if normalize_weld_metric(weld_metric) == 'weld_length':
+        return calc_weld_length_cylinder(
+            x,
+            include_web_to_flange=include_web_to_flange,
+        )
+
+    return calc_weld_consumable_cylinder(
+        x,
+        include_web_to_flange=include_web_to_flange,
+    )
+
+
+def calc_cylinder_objective_value(x, weld_bias=0.0, include_web_to_flange=False,
+                                  weld_metric='weld_consumables', cost_factors=None):
+    """Return the scalar cylinder objective used for filtering and winner selection."""
+    cost_factors = normalize_cost_factors(cost_factors)
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    weight = calc_weight_cylinder(x)
+
+    if cost_factors is None and weld_bias <= 0.0:
+        return weight
+
+    weld_value = calc_weld_objective_cylinder(
+        x,
+        include_web_to_flange=include_web_to_flange,
+        weld_metric=weld_metric,
+    )
+
+    if cost_factors is not None:
+        return cost_factors['steel'] * weight + cost_factors['weld'] * weld_value
+
+    if weld_bias >= 1.0:
+        return weld_value
+
+    return (1.0 - weld_bias) * weight + weld_bias * weld_value
 
 
 
@@ -1870,7 +2270,8 @@ def x_to_string(x):
 def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_weight, side='p',
                          chk=(True, True, True, True, True, True, True, False), fat_dict=None, fat_press=None,
                          slamming_press=None, processes=None, puls_sheet=None, puls_acceptance=0.87,
-                         fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False):
+                         fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False,
+                         weld_metric='weld_consumables', cost_factors=None):
     '''
     Using multiprocessing to return list of applicable results.
 
@@ -1882,6 +2283,9 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
 
     if len(chk) > 8 and chk[8]:
         raise NotImplementedError('ML-CL buckling is deactivated. Use ML-Numeric or SemiAnalytical.')
+
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
 
     if chk[7]:
         # Built-in SemiAnalytical replacement. Columns: buckling UF, ultimate UF,
@@ -2039,7 +2443,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
 
         iter_var.append((item, init_stuc_obj, lat_press, init_filter_weight, side, chk, fat_dict, fat_press,
                          slamming_press, PULSrun, False, fdwn, fup, this_ml_result, False, weld_bias,
-                         builtup_stiffener))
+                         builtup_stiffener, weld_metric, cost_factors))
 
     iter_var = tuple(iter_var)
 
@@ -2213,7 +2617,8 @@ def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef
 
 
 def get_initial_weight(obj, lat_press, min_var, max_var, deltas, trials, fat_dict, fat_press, predefined_stiffener_iter,
-                       slamming_press, fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False):
+                       slamming_press, fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False,
+                       weld_metric='weld_consumables', cost_factors=None):
     '''
     Return a guess of the initial objective used to filter constraints.
     Only aim is to reduce running time of the algorithm.
@@ -2223,6 +2628,8 @@ def get_initial_weight(obj, lat_press, min_var, max_var, deltas, trials, fat_dic
         weld_bias = min(max(float(weld_bias), 0.0), 1.0)
     except Exception:
         weld_bias = 0.0
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
 
     min_value = float('inf')
     if predefined_stiffener_iter is None:
@@ -2237,23 +2644,24 @@ def get_initial_weight(obj, lat_press, min_var, max_var, deltas, trials, fat_dic
         if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=min_value,
                                fat_dict=fat_dict, fat_press=fat_press, slamming_press=slamming_press,
                                fdwn=fdwn, fup=fup, weld_bias=weld_bias,
-                               builtup_stiffener=builtup_stiffener)[0]:
-            if weld_bias >= 1.0:
-                try:
-                    stiffener_type = (
-                        obj.Stiffener.get_stiffener_type()
-                        if obj.Stiffener is not None
-                        else 'T'
-                    )
-                except Exception:
-                    stiffener_type = 'T'
-                current_value = calc_weld_consumable(
-                    x,
-                    stiffener_type=stiffener_type,
-                    include_web_to_flange=builtup_stiffener,
+                               builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                               cost_factors=cost_factors)[0]:
+            try:
+                stiffener_type = (
+                    obj.Stiffener.get_stiffener_type()
+                    if obj.Stiffener is not None
+                    else 'T'
                 )
-            else:
-                current_value = calc_weight(x)
+            except Exception:
+                stiffener_type = 'T'
+            current_value = calc_flat_objective_value(
+                x,
+                stiffener_type=stiffener_type,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
 
             if current_value < min_value:
                 min_value = current_value
@@ -2262,20 +2670,43 @@ def get_initial_weight(obj, lat_press, min_var, max_var, deltas, trials, fat_dic
 
 def get_random_result(obj, lat_press, min_var, max_var, deltas, trials=10000, side='p',
                       const_chk=(True, True, True, True, True),
-                      fat_dict=None, fat_press=None):
+                      fat_dict=None, fat_press=None, weld_bias=0.0, builtup_stiffener=False,
+                      weld_metric='weld_consumables', cost_factors=None):
     '''
     Return random results
     '''
-    min_weight = float('inf')
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
+
+    min_value = float('inf')
     ass_var = None
     combs = any_get_all_combs(min_var, max_var, deltas)
     trial_selection = random_product(combs, repeat=trials)
+    try:
+        stiffener_type = obj.Stiffener.get_stiffener_type() if obj.Stiffener is not None else 'T'
+    except Exception:
+        stiffener_type = 'T'
     for x in trial_selection:
-        if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=min_weight, side=side, chk=const_chk,
-                               fat_dict=fat_dict, fat_press=fat_press)[0] is not False:
-            current_weight = calc_weight(x)
-            if current_weight < min_weight:
-                min_weight = current_weight
+        init_value = min_value if (cost_factors is not None or weld_bias <= 0.0 or weld_bias >= 1.0) else float('inf')
+        if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=init_value, side=side, chk=const_chk,
+                               fat_dict=fat_dict, fat_press=fat_press, weld_bias=weld_bias,
+                               builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                               cost_factors=cost_factors)[0] is not False:
+            current_value = calc_flat_objective_value(
+                x,
+                stiffener_type=stiffener_type,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+
+            if current_value < min_value:
+                min_value = current_value
                 ass_var = x
     if ass_var == None:
         return ass_var
@@ -2285,12 +2716,24 @@ def get_random_result(obj, lat_press, min_var, max_var, deltas, trials=10000, si
 
 def get_random_result_no_bounds(obj, lat_press, min_var, max_var, trials=10000, side='p',
                                 const_chk=(True, True, True, True, True)
-                                , fat_dict=None, fat_press=None):
+                                , fat_dict=None, fat_press=None, weld_bias=0.0, builtup_stiffener=False,
+                                weld_metric='weld_consumables', cost_factors=None):
     '''
     Return random results, ignoring the deltas
     '''
-    min_weight = float('inf')
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
+
+    min_value = float('inf')
     ass_var = None
+    try:
+        stiffener_type = obj.Stiffener.get_stiffener_type() if obj.Stiffener is not None else 'T'
+    except Exception:
+        stiffener_type = 'T'
     for trial in range(trials):
         spacing = random.randrange(int(min_var[0] * 1000), int(max_var[0] * 1000), 1) / 1000
         pl_thk = random.randrange(int(min_var[1] * 1000), int(max_var[1] * 1000), 1) / 1000
@@ -2299,11 +2742,22 @@ def get_random_result_no_bounds(obj, lat_press, min_var, max_var, trials=10000, 
         fl_w = random.randrange(int(min_var[4] * 1000), int(max_var[4] * 1000), 1) / 1000
         fl_thk = random.randrange(int(min_var[5] * 1000), int(max_var[5] * 1000), 1) / 1000
         x = (spacing, pl_thk, web_h, web_thk, fl_w, fl_thk, min_var[6], min_var[7])
-        if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=min_weight, side=side, chk=const_chk,
-                               fat_dict=fat_dict, fat_press=fat_press)[0]:
-            current_weight = calc_weight(x)
-            if current_weight < min_weight:
-                min_weight = current_weight
+        init_value = min_value if (cost_factors is not None or weld_bias <= 0.0 or weld_bias >= 1.0) else float('inf')
+        if any_constraints_all(x=x, obj=obj, lat_press=lat_press, init_weight=init_value, side=side, chk=const_chk,
+                               fat_dict=fat_dict, fat_press=fat_press, weld_bias=weld_bias,
+                               builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                               cost_factors=cost_factors)[0]:
+            current_value = calc_flat_objective_value(
+                x,
+                stiffener_type=stiffener_type,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+
+            if current_value < min_value:
+                min_value = current_value
                 ass_var = x
     if ass_var == None:
         return ass_var

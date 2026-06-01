@@ -48,3 +48,18 @@ def test_multiple_optimizer_updates_harmonized_fatigue_from_stiffener(monkeypatc
     assert captured["x"] == [1, 2, 3]
     assert captured["fat_dict"] == {"fatigue": "properties"}
     assert window._opt_results["line1"][2] == "updated fatigue"
+
+
+def test_multiple_optimizer_weld_objective_wiring_is_explicit():
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "optimize_multiple_window.py").read_text(
+        encoding="utf-8")
+
+    assert "weld_bias=self._get_weld_bias_for_optimization()" in source
+    assert "builtup_stiffener=self._new_include_builtup_weld.get()" in source
+    assert "weld_metric=self._get_weld_metric_for_optimization()" in source
+    assert "def _get_weld_metric_for_optimization(self):" in source
+    assert "'Weld length'" in source
+    assert "op.calc_weld_objective(" in source
+    assert "use_weight_filter=False" in source
+    assert "mixed weight/weld combination disables the initial filter" in source
+    assert "multi-line filter is disabled to preserve harmonizing candidates" in source

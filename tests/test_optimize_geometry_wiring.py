@@ -72,3 +72,25 @@ def test_span_result_drawing_accepts_allstructure_instances(monkeypatch):
     window.draw_select_canvas(opt_results=opt_results)
 
     assert any("fake structure" in text for text in window._canvas_select.texts)
+
+
+def test_span_optimizer_weld_objective_wiring_is_explicit():
+    optimize_geometry_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize_geometry.py"
+    source = optimize_geometry_source.read_text(encoding="utf-8")
+
+    assert "weld_bias=self._get_weld_bias_for_optimization()" in source
+    assert "builtup_stiffener=self._new_include_builtup_weld.get()" in source
+    assert "weld_metric=self._get_weld_metric_for_optimization()" in source
+    assert "def _get_weld_metric_for_optimization(self):" in source
+    assert "'Weld length'" in source
+    assert "mixed weight/weld combination disables the initial filter" in source
+    assert "Pure weld objective: span optimizer uses ' + self._get_weld_metric_text()" in source
+    assert "Objective index" in source
+
+
+def test_geometric_optimizer_forwards_process_count():
+    optimize_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize.py"
+    source = optimize_source.read_text(encoding="utf-8")
+
+    assert "opt_girder_prop=opt_girder_prop, processes=processes, ml_algo=ml_algo" in source
+    assert "processes=processes,\n                                                           ml_algo=ml_algo" in source
