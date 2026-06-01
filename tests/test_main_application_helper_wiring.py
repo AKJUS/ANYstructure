@@ -61,9 +61,25 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "self._simplified_calculation_mode = False" in source
     assert "self._single_line_name = 'line1'" in source
     assert "def _prompt_startup_calculation_mode(self):" in source
-    assert "messagebox.askyesno(" in source
-    assert "default=messagebox.NO" in source
-    assert "standard multi-panel modelling" in source
+    assert "from importlib import metadata as importlib_metadata" in source
+    assert "def _get_application_version_from_metadata():" in source
+    assert "importlib_metadata.version(package_name)" in source
+    assert "__version__" not in source[source.index("def _show_startup_calculation_mode_dialog"):source.index("def switch_to_single_calculation_mode")]
+    assert "def _show_startup_calculation_mode_dialog(self):" in source
+    assert "tk.Toplevel(self._parent, background='#f5f7fb')" in source
+    assert "ANYstructure_logo.jpg" in source
+    assert "from PIL import Image, ImageTk" in source
+    assert "ImageTk.PhotoImage(logo_image)" in source
+    assert "logo_image.thumbnail((132, 76), Image.LANCZOS)" in source
+    assert "Version ' + app_version" in source
+    assert "Choose calculation workflow" in source
+    assert "Multiple panels" in source
+    assert "subtitle='Default'" in source
+    assert "Recommended default" not in source
+    assert "Single panel/cylinder" in source
+    assert "dialog.bind('<Return>', lambda _event: choose(False))" in source
+    assert "dialog.bind('<Escape>', lambda _event: choose(False))" in source
+    assert "self._parent.wait_window(dialog)" in source
     assert "Mode - Single panel/cylinder" in source
     assert "Mode - Multiple panels" in source
     assert "def switch_to_single_calculation_mode(self):" in source

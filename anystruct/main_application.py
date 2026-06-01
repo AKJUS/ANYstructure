@@ -1,5 +1,6 @@
 import math
 import os  # -*- coding: utf-8 -*-
+from importlib import metadata as importlib_metadata
 
 import tkinter as tk
 from tkinter import ttk
@@ -1866,13 +1867,7 @@ class Application():
     def _prompt_startup_calculation_mode(self):
         """Let the user choose the simplified single-line mode or the standard multi-panel GUI."""
         try:
-            use_single_line = messagebox.askyesno(
-                title='Calculation mode',
-                message='Use simplified single panel/cylinder calculation?\n\n'
-                        'Yes: one hidden calculation line with manual pressure input.\n'
-                        'No: standard multi-panel modelling.',
-                default=messagebox.NO,
-            )
+            use_single_line = self._show_startup_calculation_mode_dialog()
         except Exception:
             use_single_line = False
 
@@ -1880,6 +1875,130 @@ class Application():
         self._new_show_prop_3d.set(self._simplified_calculation_mode)
         if self._simplified_calculation_mode:
             self.switch_to_single_calculation_mode()
+
+    def _show_startup_calculation_mode_dialog(self):
+        """Show a polished startup mode picker and return True for the simplified workflow."""
+        result = {'use_single_line': False}
+        app_version = self._get_application_version_from_metadata()
+        dialog = tk.Toplevel(self._parent, background='#f5f7fb')
+        dialog.title('Start ANYstructure')
+        dialog.resizable(False, False)
+        dialog.transient(self._parent)
+
+        width, height = 640, 382
+        try:
+            self._parent.update_idletasks()
+            root_x = self._parent.winfo_rootx()
+            root_y = self._parent.winfo_rooty()
+            root_w = self._parent.winfo_width()
+            root_h = self._parent.winfo_height()
+            pos_x = root_x + max((root_w - width) // 2, 0)
+            pos_y = root_y + max((root_h - height) // 2, 0)
+            dialog.geometry(f'{width}x{height}+{pos_x}+{pos_y}')
+        except Exception:
+            dialog.geometry(f'{width}x{height}')
+
+        def choose(use_single_line):
+            result['use_single_line'] = use_single_line
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        dialog.protocol('WM_DELETE_WINDOW', lambda: choose(False))
+        dialog.bind('<Return>', lambda _event: choose(False))
+        dialog.bind('<Escape>', lambda _event: choose(False))
+
+        header = tk.Frame(dialog, background='#172033', height=116)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        header_content = tk.Frame(header, background='#172033')
+        header_content.pack(fill=tk.BOTH, expand=True, padx=24, pady=14)
+        try:
+            from PIL import Image, ImageTk
+            img_file_name = 'ANYstructure_logo.jpg'
+            if os.path.isfile('images/' + img_file_name):
+                file_path = 'images/' + img_file_name
+            else:
+                file_path = os.path.dirname(os.path.abspath(__file__)) + '/images/' + img_file_name
+            with Image.open(file_path) as logo_image:
+                logo_image.thumbnail((132, 76), Image.LANCZOS)
+                logo = ImageTk.PhotoImage(logo_image)
+            logo_label = tk.Label(header_content, image=logo, background='white', bd=0, padx=8, pady=6)
+            logo_label.image = logo
+            logo_label.pack(side=tk.LEFT, padx=(0, 16))
+        except Exception:
+            pass
+        header_text = tk.Frame(header_content, background='#172033')
+        header_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(header_text, text='Choose calculation workflow', background='#172033', foreground='white',
+                 font=('Segoe UI', 18, 'bold')).pack(anchor=tk.W, pady=(2, 2))
+        tk.Label(header_text, text='Start in the workspace that matches the job in front of you.',
+                 background='#172033', foreground='#d7deeb', font=('Segoe UI', 10)).pack(anchor=tk.W)
+        if app_version is not None:
+            tk.Label(header_text, text='Version ' + app_version, background='#172033', foreground='#aebbd0',
+                     font=('Segoe UI', 9)).pack(anchor=tk.W, pady=(7, 0))
+
+        content = tk.Frame(dialog, background='#f5f7fb')
+        content.pack(fill=tk.BOTH, expand=True, padx=26, pady=24)
+
+        def add_mode_card(parent, title, subtitle, details, button_text, command, primary=False):
+            border = '#1f6feb' if primary else '#cad2df'
+            button_bg = '#1f6feb' if primary else '#eef2f7'
+            button_fg = 'white' if primary else '#172033'
+            card = tk.Frame(parent, background='white', highlightbackground=border,
+                            highlightthickness=2 if primary else 1, bd=0)
+            tk.Label(card, text=title, background='white', foreground='#111827',
+                     font=('Segoe UI', 13, 'bold')).pack(anchor=tk.W, padx=18, pady=(16, 2))
+            tk.Label(card, text=subtitle, background='white', foreground='#475569',
+                     font=('Segoe UI', 9, 'bold')).pack(anchor=tk.W, padx=18)
+            tk.Label(card, text=details, background='white', foreground='#475569',
+                     justify=tk.LEFT, wraplength=235, font=('Segoe UI', 9)).pack(anchor=tk.W, padx=18, pady=(12, 16))
+            tk.Button(card, text=button_text, command=command, background=button_bg, foreground=button_fg,
+                      activebackground=button_bg, activeforeground=button_fg, relief=tk.FLAT,
+                      padx=14, pady=7, font=('Segoe UI', 9, 'bold'), cursor='hand2').pack(
+                anchor=tk.W, padx=18, pady=(0, 16))
+            return card
+
+        standard_card = add_mode_card(
+            content,
+            title='Multiple panels',
+            subtitle='Default',
+            details='Use the full modelling workspace with points, lines, compartments and load combinations.',
+            button_text='Start multiple panels',
+            command=lambda: choose(False),
+            primary=True,
+        )
+        single_card = add_mode_card(
+            content,
+            title='Single panel/cylinder',
+            subtitle='Simplified calculation',
+            details='Use one hidden calculation line and focus on section inputs, stresses and the 3D preview.',
+            button_text='Start single mode',
+            command=lambda: choose(True),
+            primary=False,
+        )
+        standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
+
+        try:
+            dialog.grab_set()
+            dialog.focus_force()
+        except Exception:
+            pass
+        self._parent.wait_window(dialog)
+        return result['use_single_line']
+
+    @staticmethod
+    def _get_application_version_from_metadata():
+        """Return the installed package version when distribution metadata is available."""
+        for package_name in ('ANYstructure', 'anystructure'):
+            try:
+                return importlib_metadata.version(package_name)
+            except importlib_metadata.PackageNotFoundError:
+                pass
+        return None
 
     def switch_to_single_calculation_mode(self):
         """Switch from standard modelling to the simplified one-line calculation workflow."""
