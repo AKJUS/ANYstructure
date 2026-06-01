@@ -322,14 +322,14 @@ class CreateOptimizeCylinderWindow():
         self._opt_actual_running_time = tk.Label(self._frame, text='', font='Verdana 12 bold')
 
         self._draw_scale = 600
-        self._canvas_dim = (550, 550)
+        self._canvas_dim = (550, 490)
         self._canvas_opt = tk.Canvas(self._frame, width=self._canvas_dim[0], height=self._canvas_dim[1],
                                      background='azure', relief='groove', borderwidth=2)
 
         # tk.Frame(self._frame,width=770,height=5, bg="grey", colormap="new").place(x=20,y=127)
         # tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=167)
 
-        self._canvas_opt.place(x=1050, y=430)
+        self._canvas_opt.place(x=1050, y=500)
 
         algorithms = ('anysmart cylinder', 'random', 'random_no_delta')
 
@@ -397,11 +397,18 @@ class CreateOptimizeCylinderWindow():
         tk.Entry(self._frame, textvariable=self._new_processes, width=12, bg='silver') \
             .place(x=start_x + 10 * dx, y=start_y - 0.3 * dy)
 
-        self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 12 bold', fg='red')
-        self._runnig_time_label.place(x=start_x + 4.3 * dx, y=start_y + 2.8 * dy)
+        self._runnig_time_label = tk.Label(
+            self._frame,
+            text='',
+            font='Verdana 12 bold',
+            fg='red',
+            wraplength=520,
+            justify=tk.LEFT,
+        )
+        self._runnig_time_label.place(x=1020, y=425, width=520)
         # tk.Label(self._frame, text='seconds ',font='Verdana 9 bold').place(x=start_x+6*dx, y=start_y + 2.8 * dy)
-        self._result_label = tk.Label(self._frame, text='', font='Verdana 9 bold', wraplength=950, justify=tk.LEFT)
-        self._result_label.place(x=start_x, y=start_y + 4.2 * dy)
+        self._result_label = tk.Label(self._frame, text='', font='Verdana 9 bold', wraplength=460, justify=tk.LEFT)
+        self._result_label.place(x=520, y=800)
 
         '''
                 self._new_geo_data =  [[shell_upper_bounds,shell_deltas, shell_lower_bounds],
@@ -455,8 +462,8 @@ class CreateOptimizeCylinderWindow():
         # objective block now uses the previous right-side stress area.
         # ---------------------------------------------------------------------
         stress_x = 20
-        stress_y = 405
-        stress_dy = 36
+        stress_y = 710
+        stress_dy = 32
         stress_entry_x = stress_x + 300
         stress_unit_x = stress_x + 430
 
@@ -501,13 +508,13 @@ class CreateOptimizeCylinderWindow():
             tk.Label(self._frame,
                      text='Fatigue pressure: internal= ' + str(self._fatigue_pressure['p_int']) + ' external= '
                           + str(self._fatigue_pressure['p_ext']), font='Verdana 7',
-                     wraplength=950, justify=tk.LEFT) \
-                .place(x=start_x, y=760)
+                     wraplength=980, justify=tk.LEFT) \
+                .place(x=start_x, y=955)
         else:
             tk.Label(self._frame, text='Fatigue pressure: internal= ' + str(0) + ' external= '
                                        + str(0), font='Verdana 7',
-                     wraplength=950, justify=tk.LEFT) \
-                .place(x=start_x, y=760)
+                     wraplength=980, justify=tk.LEFT) \
+                .place(x=start_x, y=955)
 
         # setting default values
         init_dim = float(10)  # mm
@@ -534,6 +541,7 @@ class CreateOptimizeCylinderWindow():
         self._new_algorithm.trace_add('write', self.schedule_running_time_update)
 
         self.running_time_per_item = {'RP': 1.009943181818182e-5}
+        self.running_time_no_filter_factor = 4.0
 
         # self.running_time_per_item = {'PULS':0.2489626556016598, 'RP': 1.009943181818182e-5}
         # self.initial_weight = op.calc_weight([self._spacing,self._pl_thk,self._stf_web_h,self._stf_web_thk,
@@ -557,9 +565,9 @@ class CreateOptimizeCylinderWindow():
         #     .place(x=start_x+dx*12.5, y=start_y+dy*7)
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
                                     font='Verdana 10 bold', fg='Yellow', relief="raised")
-        self.run_button.place(x=1220, y=60, width=260, height=32)
+        self.run_button.place(x=1220, y=70, width=260, height=32)
 
-        self._opt_actual_running_time.place(x=1220, y=100)
+        self._opt_actual_running_time.place(x=1220, y=112)
 
         self.weight_weld_study_button = tk.Button(
             self._frame,
@@ -569,15 +577,15 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.weight_weld_study_button.place(x=1220, y=145, width=180, height=28)
-        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=1410, y=151)
+        self.weight_weld_study_button.place(x=1220, y=165, width=180, height=28)
+        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=1410, y=171)
         self._ent_weld_study_delta = tk.Entry(
             self._frame,
             textvariable=self._new_weld_study_delta,
             width=5,
             bg='white',
         )
-        self._ent_weld_study_delta.place(x=1445, y=149)
+        self._ent_weld_study_delta.place(x=1445, y=169)
         self.show_previous_weld_study_button = tk.Button(
             self._frame,
             text='show previous study',
@@ -586,7 +594,7 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.show_previous_weld_study_button.place(x=1220, y=180, width=180, height=28)
+        self.show_previous_weld_study_button.place(x=1220, y=200, width=180, height=28)
         self.cost_study_button = tk.Button(
             self._frame,
             text='cost study',
@@ -595,12 +603,12 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.cost_study_button.place(x=1220, y=215, width=180, height=28)
+        self.cost_study_button.place(x=1220, y=235, width=180, height=28)
 
-        tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=1480, y=56)
-        self._ent_algorithm.place(x=1480, y=80, width=165)
+        tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=1480, y=70)
+        self._ent_algorithm.place(x=1480, y=95, width=165)
         tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
-            .place(x=1480, y=115, width=165)
+            .place(x=1480, y=130, width=165)
 
         self.close_and_save = tk.Button(self._frame, text='Return and replace initial structure with optimized',
                                         command=self.save_and_close, bg='green', font='Verdana 10', fg='yellow')
@@ -614,7 +622,7 @@ class CreateOptimizeCylinderWindow():
         # Optimization objective bias
         # ---------------------------------------------------------------------
         objective_x = start_x + 10 * dx
-        objective_y = start_y + 3.8 * dy
+        objective_y = 285
 
         tk.Label(self._frame, text='Optimization objective', font='Verdana 9 bold') \
             .place(x=objective_x, y=objective_y)
@@ -679,7 +687,7 @@ class CreateOptimizeCylinderWindow():
         # Runtime estimate belongs to the optimization objective block.
         # Keep it below the built-up weld checkbox so it does not collide
         # with the geometry input table.
-        self._runnig_time_label.place(x=objective_x, y=objective_y + 160)
+        self._runnig_time_label.place(x=objective_x, y=425, width=520)
 
         self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
         self._new_weld_metric.trace_add('write', self._update_weld_bias_label)
@@ -691,13 +699,13 @@ class CreateOptimizeCylinderWindow():
         self._new_fdwn.set(1)
 
         tk.Label(self._frame, text='Factor when scaling stresses up, fup') \
-            .place(x=20, y=640)
+            .place(x=520, y=710)
         ent_fup = tk.Entry(self._frame, textvariable=self._new_fup, width=10)
-        ent_fup.place(x=320, y=640)
+        ent_fup.place(x=820, y=710)
         tk.Label(self._frame, text='Factor when scaling stresses up, fdown') \
-            .place(x=20, y=680)
+            .place(x=520, y=742)
         ent_fdwn = tk.Entry(self._frame, textvariable=self._new_fdwn, width=10)
-        ent_fdwn.place(x=320, y=680)
+        ent_fdwn.place(x=820, y=742)
 
         # tk.Button(self._frame,text='Iterate predefiened stiffeners',command=self.open_multiple_files ,bg='yellow')\
         #     .place(x=start_x, y=start_y - dy * 2)
@@ -739,13 +747,13 @@ class CreateOptimizeCylinderWindow():
         self._ent_minfunc.place_forget()
 
         if self._new_algorithm.get() in ('random', 'random_no_delta'):
-            self.algorithm_random_label.place(x=1490, y=150)
-            self._ent_random_trials.place(x=1490, y=175, width=150)
+            self.algorithm_random_label.place(x=1490, y=165)
+            self._ent_random_trials.place(x=1490, y=190, width=150)
 
         elif self._new_algorithm.get() == 'pso':
             label_x = 1490
             entry_x = 1570
-            y0 = 150
+            y0 = 165
             step = 25
 
             controls = [
@@ -1339,7 +1347,8 @@ class CreateOptimizeCylinderWindow():
         if algorithm in ['random', 'random_no_delta']:
             try:
                 number_of_combinations = int(self._new_algorithm_random_trials.get())
-                return int(number_of_combinations * self.running_time_per_item['RP']), number_of_combinations
+                seconds = number_of_combinations * self.running_time_per_item['RP']
+                return int(seconds), number_of_combinations
             except Exception:
                 return 0, 0
 
@@ -1359,7 +1368,14 @@ class CreateOptimizeCylinderWindow():
                 deltas[idx],
             )
 
-        return int(number_of_combinations * self.running_time_per_item['RP']), int(number_of_combinations)
+        seconds = number_of_combinations * self.running_time_per_item['RP']
+        try:
+            if 0.0 < self._get_weld_bias_for_optimization() < 1.0:
+                seconds *= self.running_time_no_filter_factor
+        except Exception:
+            pass
+
+        return int(seconds), int(number_of_combinations)
 
     def schedule_running_time_update(self, *args):
         """
@@ -1405,12 +1421,15 @@ class CreateOptimizeCylinderWindow():
             warning_text = ''
 
             if 0.0 < weld_bias < 1.0:
-                warning_text = '\nWARNING: mixed weight/weld combination disables the initial filter.'
+                warning_text = (
+                    '\nWARNING: mixed weight/weld combination disables the initial filter.'
+                    '\nEstimate uses no-filter runtime.'
+                )
             elif weld_bias >= 1.0:
                 warning_text = '\nPure weld objective: initial filter uses ' + self._get_weld_metric_text() + '.'
 
             self._runnig_time_label.config(
-                text=str(int(number_of_combinations)) + ' (about '
+                text=str(int(number_of_combinations)) + ' combinations\n(about '
                      + str(max(round(seconds / 60, 2), 0.1))
                      + ' min.)'
                      + warning_text

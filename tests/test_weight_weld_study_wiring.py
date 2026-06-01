@@ -41,6 +41,8 @@ def test_running_time_warns_for_mixed_weight_weld_combination():
     source = read_optimize_window_source()
 
     assert "mixed weight/weld combination disables the initial filter" in source
+    assert "Estimate uses no-filter runtime" in source
+    assert "self.running_time_no_filter_factor" in source
     assert "Pure weld objective: initial filter uses ' + self._get_weld_metric_text()" in source
 
 

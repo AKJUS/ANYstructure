@@ -369,8 +369,15 @@ class CreateOptimizeWindow():
                                    'ML-Numeric is about as fast as RP-C203.',
                  font='Verdana 9 bold').place(x=start_x + 0.1 * dx, y=start_y + 2.8 * dy, anchor=tk.NW)
 
-        self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 12 bold', fg='red')
-        self._runnig_time_label.place(x=start_x + 4.3 * dx, y=start_y + 2.8 * dy)
+        self._runnig_time_label = tk.Label(
+            self._frame,
+            text='',
+            font='Verdana 12 bold',
+            fg='red',
+            wraplength=360,
+            justify=tk.CENTER,
+        )
+        self._runnig_time_label.place(x=430, y=start_y + 2.55 * dy, width=380)
         # tk.Label(self._frame, text='seconds ',font='Verdana 9 bold').place(x=start_x+6*dx, y=start_y + 2.8 * dy)
         self._result_label = tk.Label(
             self._frame,
@@ -584,6 +591,7 @@ class CreateOptimizeWindow():
         self._new_algorithm.trace('w', self.schedule_running_time_update)
 
         self.running_time_per_item = {'RP': 1.009943181818182e-5}
+        self.running_time_no_filter_factor = 4.0
         self.initial_weight = op.calc_weight([self._spacing, self._pl_thk, self._stf_web_h, self._stf_web_thk,
                                               self._fl_w, self._fl_thk, self._new_span.get(), self._new_width_lg.get()])
 
@@ -757,6 +765,7 @@ class CreateOptimizeWindow():
         self._new_check_buckling_semi_analytical.trace('w', self.update_running_time)
         self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
         self._new_check_buckling_ml_numeric.trace('w', self.update_running_time)
+        self._new_use_weight_filter.trace('w', self.update_running_time)
 
         # ---------------------------------------------------------------------
         # Right-hand constraint and stress-scaling panel.
@@ -1631,10 +1640,17 @@ class CreateOptimizeWindow():
                     * n_fl_thk
             )
 
-        return (
-            int(number_of_combinations * self.running_time_per_item['RP']),
-            int(number_of_combinations),
-        )
+        seconds = number_of_combinations * self.running_time_per_item['RP']
+        try:
+            weld_bias = self._get_weld_bias_for_optimization()
+            weight_filter_is_off = not bool(self._new_use_weight_filter.get())
+            objective_disables_filter = 0.0 < weld_bias < 1.0
+            if weight_filter_is_off or objective_disables_filter:
+                seconds *= self.running_time_no_filter_factor
+        except Exception:
+            pass
+
+        return int(seconds), int(number_of_combinations)
 
     def get_deltas(self):
         '''
@@ -1660,12 +1676,15 @@ class CreateOptimizeWindow():
             warning_text = ''
 
             if 0.0 < weld_bias < 1.0:
-                warning_text = '\nWARNING: mixed weight/weld combination disables the initial filter.'
+                warning_text = '\nWARNING: mixed weight/weld combination disables the initial filter.\n' \
+                               'Estimate uses no-filter runtime.'
+            elif not bool(self._new_use_weight_filter.get()):
+                warning_text = '\nWARNING: weight filter is off.\nEstimate uses no-filter runtime.'
             elif weld_bias >= 1.0:
                 warning_text = '\nPure weld objective: initial filter uses ' + self._get_weld_metric_text() + '.'
 
             self._runnig_time_label.config(
-                text=str(int(number_of_combinations)) + ' (about '
+                text=str(int(number_of_combinations)) + ' combinations\n(about '
                      + str(max(round(seconds / 60, 2), 0.1))
                      + ' min.)'
                      + warning_text

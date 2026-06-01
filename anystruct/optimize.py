@@ -914,7 +914,7 @@ def any_constraints_cylinder(x, obj: calc.CylinderAndCurvedPlate, init_weight, l
 
     calc_obj = create_new_cylinder_obj(obj, x)
 
-    optimizing = True if any([calc_obj.RingStfObj is None, calc_obj.RingFrameObj is None]) else False
+    optimizing = True
     try:
         weld_bias = min(max(float(weld_bias), 0.0), 1.0)
     except Exception:

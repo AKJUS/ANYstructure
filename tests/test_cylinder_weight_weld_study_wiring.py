@@ -41,7 +41,19 @@ def test_cylinder_running_time_warns_for_weight_weld_combination():
     source = read_optimize_cylinder_source()
 
     assert "mixed weight/weld combination disables the initial filter" in source
+    assert "Estimate uses no-filter runtime" in source
+    assert "self.running_time_no_filter_factor" in source
     assert "Pure weld objective: initial filter uses ' + self._get_weld_metric_text()" in source
+
+
+def test_cylinder_optimizer_layout_reserves_space_for_runtime_warning():
+    source = read_optimize_cylinder_source()
+
+    assert "self._canvas_dim = (550, 490)" in source
+    assert "self._canvas_opt.place(x=1050, y=500)" in source
+    assert "self._runnig_time_label.place(x=objective_x, y=425, width=520)" in source
+    assert "stress_y = 710" in source
+    assert "self._result_label.place(x=520, y=800)" in source
 
 
 def test_cylinder_optimizer_has_weld_metric_selector():

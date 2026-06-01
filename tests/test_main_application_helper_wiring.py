@@ -24,6 +24,97 @@ def test_functional_modes_keep_3d_section_checkbox_visible():
     assert source.count("self._place_3d_section_view_checkbox()") >= 3
 
 
+def test_help_tab_includes_cylinder_panel_buckling_image():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    shell_image_index = source.index("Buckling_Strength_of_Shells.png")
+    panel_heading_index = source.index("Buckling cylinder panels")
+    panel_image_index = source.index("buckling_cylinder_panel.png")
+
+    assert shell_image_index < panel_heading_index < panel_image_index
+
+
+def test_main_application_uses_tcl9_compatible_variable_traces():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert ".trace('w', self.trace_acceptance_change)" not in source
+    assert ".trace_add('write', self.trace_acceptance_change)" in source
+
+
+def test_resize_state_is_initialized_before_configure_binding():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    init_source = source[
+        source.index("def __init__(self, parent):"):
+        source.index("self._root_dir =")
+    ]
+
+    assert init_source.index("self._last_resize_size = (0, 0)") < init_source.index('parent.bind("<Configure>"')
+    assert init_source.index("self._resize_after_id = None") < init_source.index('parent.bind("<Configure>"')
+
+
+def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "self._simplified_calculation_mode = False" in source
+    assert "self._single_line_name = 'line1'" in source
+    assert "def _prompt_startup_calculation_mode(self):" in source
+    assert "messagebox.askyesno(" in source
+    assert "default=messagebox.NO" in source
+    assert "standard multi-panel modelling" in source
+    assert "Mode - Single panel/cylinder" in source
+    assert "Mode - Multiple panels" in source
+    assert "def switch_to_single_calculation_mode(self):" in source
+    assert "def switch_to_multiple_calculation_mode(self):" in source
+    assert "self._single_line_name = selected_line" in source
+    assert "self._activate_simplified_calculation_pipeline()" in source
+    assert "def _ensure_single_dummy_line(self):" in source
+    assert "self._line_dict[self._single_line_name] = [1, 2]" in source
+    assert "def _ensure_manual_pressure_combination(self, line, default_enabled=False):" in source
+    assert "def _gui_single_line_manual_pressure(self):" in source
+    assert "Manual pressure [Pa]" in source
+    assert "if self._line_to_struc[self._active_line][5] is not None:" in source
+    assert "self._result_label_manual, self._lab_pressure" in source
+    assert "def _sync_simplified_domain_selection(self):" in source
+    assert "self._sync_simplified_domain_selection()" in source
+    assert "if not getattr(self, '_simplified_calculation_mode', False):\n            self.set_selected_variables(self._active_line)" in source
+    assert "self._tabControl.hide(self._tab_geo)" in source
+    assert "self._tabControl.hide(self._tab_comp)" in source
+    assert "def _show_standard_calculation_layout(self):" in source
+    assert "self._tabControl.add(self._tab_geo, text='Geometry')" in source
+    assert "self._tabControl.add(self._tab_comp, text='Compartments and loads')" in source
+    assert "self.gui_load_combinations(self._combination_slider.get())" in source
+
+
+def test_simplified_3d_preview_uses_main_canvas_place():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    placement_block = source[
+        source.index("def _get_prop_3d_bottom_place"):
+        source.index("def _resize_prop_3d_figure")
+    ]
+
+    assert "getattr(self, '_simplified_calculation_mode', False)" in placement_block
+    assert "self._place_info_float(self._main_canvas, 'relx', 0.26)" in placement_block
+    assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
+
+
+def test_cylinder_panel_domains_render_as_angular_sector_preview():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _is_cylinder_panel_preview(cyl_obj):" in source
+    assert "api_helpers.domain_for_geometry_id(cyl_obj.geometry)" in source
+    assert "return 'panel' in domain.lower() and 'shell' not in domain.lower()" in source
+    assert "def _cylinder_preview_theta_range(self, cyl_obj):" in source
+    assert "math.radians(60.0)" in source
+    assert "theta_range=theta_range" in source
+    assert "3D cylinder panel preview (60 deg)" in source
+    assert "arc_length = abs(theta_end - theta_start) * radius" in source
+
+
 def test_main_application_uses_geometry_helpers_for_active_lookups():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
