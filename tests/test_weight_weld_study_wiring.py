@@ -68,3 +68,16 @@ def test_single_optimizer_has_cost_study_button_and_dialog():
     assert "def run_cost_study(self, cost_factors):" in source
     assert "cost_factors=cost_factors" in source
     assert "Cost optimization result" in source
+    assert "def _build_cost_study_report(self, cost_factors" in source
+    assert "def _show_cost_study_report(self, report):" in source
+    assert "Cost optimization report" in source
+    assert "Steel contribution" in source
+    assert "Weld contribution" in source
+    assert "Optimized geometry" in source
+    assert "Optimization field size" in source
+    assert "Panel field span used [m]" in source
+    assert "Panel field length used [m]" in source
+    assert "Design pressure used [kPa]" in source
+    assert "self._last_cost_study_report = report" in source
+    assert "self._last_study_type = 'cost'" in source
+    assert "self._show_cost_study_report(self._last_cost_study_report)" in source

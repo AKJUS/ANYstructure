@@ -78,3 +78,17 @@ def test_cylinder_optimizer_has_cost_study_button_and_dialog():
     assert "def run_cost_study(self, cost_factors):" in source
     assert "cost_factors=cost_factors" in source
     assert "Cost optimization result" in source
+    assert "def _build_cost_study_report(self, cost_factors" in source
+    assert "def _show_cost_study_report(self, report):" in source
+    assert "Cylinder cost optimization report" in source
+    assert "Steel contribution" in source
+    assert "Weld contribution" in source
+    assert "Optimized geometry" in source
+    assert "Optimization field size" in source
+    assert "Cylinder radius used [m]" in source
+    assert "Distance between rings used [mm]" in source
+    assert "Total cylinder length used [mm]" in source
+    assert "Design lateral pressure used [Pa]" in source
+    assert "self._last_cost_study_report = report" in source
+    assert "self._last_study_type = 'cost'" in source
+    assert "self._show_cost_study_report(self._last_cost_study_report)" in source

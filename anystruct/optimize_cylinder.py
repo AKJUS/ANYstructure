@@ -314,6 +314,8 @@ class CreateOptimizeCylinderWindow():
         self._new_weld_study_delta = tk.DoubleVar()
         self._new_weld_study_delta.set(0.1)
         self._last_weight_weld_study_rows = None
+        self._last_cost_study_report = None
+        self._last_study_type = None
         self._new_include_builtup_weld = tk.BooleanVar()
         self._new_include_builtup_weld.set(False)
 
@@ -945,13 +947,14 @@ class CreateOptimizeCylinderWindow():
             self.cost_study_button.config(state=tk.NORMAL)
 
     def _show_cost_study_result(self, cost_factors, t_start):
-        if self._opt_results is None or self._opt_results[0] is None:
+        if self._opt_results is None or len(self._opt_results) == 0 or self._opt_results[0] is None:
             messagebox.showinfo(title='Nothing found', message='No cost optimum found. Modify input.\n')
             self._opt_actual_running_time.config(text='Cost optimization finished without result')
             return
 
+        elapsed_seconds = time.time() - t_start
         self._opt_actual_running_time.config(text='Actual running time: \n'
-                                                  + str(round((time.time() - t_start) / 60, 4)) + ' min')
+                                                  + str(round(elapsed_seconds / 60, 4)) + ' min')
         self._opt_actual_running_time.update()
         self._opt_runned = True
         self._canvas_opt.delete('all')
@@ -969,12 +972,126 @@ class CreateOptimizeCylinderWindow():
             weld_metric=self._get_weld_metric_for_optimization(),
         )
         result_cost = cost_factors['steel'] * result_weight + cost_factors['weld'] * result_weld
+        steel_cost = cost_factors['steel'] * result_weight
+        weld_cost = cost_factors['weld'] * result_weld
         self._result_label.config(
             text='Cost optimization result | Cost: ' + str(round(result_cost, 2))
                  + ' | Weight: ' + str(round(result_weight, 1)) + ' kg'
                  + ' | ' + self._get_weld_metric_text() + ': ' + str(round(result_weld, 3))
                  + ' ' + self._get_weld_metric_unit()
         )
+        report = self._build_cost_study_report(
+            cost_factors=cost_factors,
+            result_x=result_x,
+            result_weight=result_weight,
+            result_weld=result_weld,
+            steel_cost=steel_cost,
+            weld_cost=weld_cost,
+            result_cost=result_cost,
+            elapsed_seconds=elapsed_seconds,
+        )
+        self._last_cost_study_report = report
+        self._last_study_type = 'cost'
+        self._show_cost_study_report(report)
+
+    def _build_cost_study_report(self, cost_factors, result_x, result_weight, result_weld,
+                                 steel_cost, weld_cost, result_cost, elapsed_seconds):
+        seconds, combinations = self.get_running_time()
+        shell, long_stf, ring_stf, ring_frame = result_x
+        return {
+            'title': 'Cylinder cost study report',
+            'summary': [
+                ('Total cost', self._format_study_value(result_cost, 3)),
+                ('Steel contribution', self._format_study_value(steel_cost, 3)),
+                ('Weld contribution', self._format_study_value(weld_cost, 3)),
+                ('Steel cost per kg', self._format_study_value(cost_factors['steel'], 3)),
+                ('Weld cost per ' + self._get_weld_metric_unit(), self._format_study_value(cost_factors['weld'], 3)),
+                ('Weight [kg]', self._format_study_value(result_weight, 3)),
+                (self._get_weld_metric_text().title() + ' [' + self._get_weld_metric_unit() + ']',
+                 self._format_study_value(result_weld, 3)),
+                ('Weld bias', self._format_study_value(self._get_weld_bias_for_optimization(), 2)),
+                ('Weld metric', self._get_weld_metric_text()),
+                ('Built-up weld included', str(bool(self._new_include_builtup_weld.get()))),
+                ('Algorithm', self._new_algorithm.get()),
+                ('Estimated combinations', self._format_study_value(combinations, 0)),
+                ('Elapsed [s]', self._format_study_value(elapsed_seconds, 2)),
+            ],
+            'geometry': [
+                ('Shell thickness [mm]', self._format_study_value(shell[0] * 1000, 2)),
+                ('Shell radius [m]', self._format_study_value(shell[1], 3)),
+                ('Ring spacing [mm]', self._format_study_value(shell[2] * 1000, 2)),
+                ('Shell length [mm]', self._format_study_value(shell[3] * 1000, 2)),
+                ('Total length [mm]', self._format_study_value(shell[4] * 1000, 2)),
+                ('Longitudinal spacing [mm]', self._format_study_value(long_stf[0] * 1000, 2)),
+                ('Longitudinal web height [mm]', self._format_study_value(long_stf[2] * 1000, 2)),
+                ('Longitudinal web thickness [mm]', self._format_study_value(long_stf[3] * 1000, 2)),
+                ('Longitudinal flange width [mm]', self._format_study_value(long_stf[4] * 1000, 2)),
+                ('Longitudinal flange thickness [mm]', self._format_study_value(long_stf[5] * 1000, 2)),
+                ('Ring stiffener web height [mm]', self._format_study_value(ring_stf[2] * 1000, 2)),
+                ('Ring stiffener web thickness [mm]', self._format_study_value(ring_stf[3] * 1000, 2)),
+                ('Ring frame web height [mm]', self._format_study_value(ring_frame[2] * 1000, 2)),
+                ('Ring frame web thickness [mm]', self._format_study_value(ring_frame[3] * 1000, 2)),
+            ],
+            'field_size': [
+                ('Cylinder radius used [m]', self._format_study_value(shell[1], 3)),
+                ('Distance between rings used [mm]', self._format_study_value(shell[2] * 1000, 2)),
+                ('Shell length used [mm]', self._format_study_value(shell[3] * 1000, 2)),
+                ('Total cylinder length used [mm]', self._format_study_value(shell[4] * 1000, 2)),
+                ('Design lateral pressure used [Pa]', self._format_study_value(self._new_design_pressure.get(), 3)),
+            ],
+        }
+
+    def _show_cost_study_report(self, report):
+        result_window = tk.Toplevel(self._frame)
+        result_window.title(report.get('title', 'Cylinder cost study report'))
+        result_window.geometry('1220x660')
+
+        tk.Label(
+            result_window,
+            text='Cylinder cost optimization report',
+            font='Verdana 12 bold',
+        ).pack(side=tk.TOP, anchor='w', padx=10, pady=(10, 4))
+
+        tk.Label(
+            result_window,
+            text='Objective = steel cost per kg * weight + weld cost per '
+                 + self._get_weld_metric_unit() + ' * ' + self._get_weld_metric_text() + '.',
+            font='Verdana 8',
+            wraplength=1180,
+            justify=tk.LEFT,
+        ).pack(side=tk.TOP, anchor='w', padx=10, pady=(0, 8))
+
+        table_frame = tk.Frame(result_window)
+        table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        columns = ('item', 'value')
+        summary_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=16)
+        geometry_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=16)
+        field_size_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=16)
+
+        for tree, heading in (
+                (summary_tree, 'Cost and run data'),
+                (geometry_tree, 'Optimized geometry'),
+                (field_size_tree, 'Optimization field size')):
+            tree.heading('item', text=heading)
+            tree.heading('value', text='Value')
+            tree.column('item', width=270, anchor=tk.W)
+            tree.column('value', width=130, anchor=tk.CENTER)
+
+        for item, value in report.get('summary', []):
+            summary_tree.insert('', tk.END, values=(item, value))
+        for item, value in report.get('geometry', []):
+            geometry_tree.insert('', tk.END, values=(item, value))
+        for item, value in report.get('field_size', []):
+            field_size_tree.insert('', tk.END, values=(item, value))
+
+        summary_tree.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+        geometry_tree.grid(row=0, column=1, sticky='nsew', padx=8)
+        field_size_tree.grid(row=0, column=2, sticky='nsew', padx=(8, 0))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.columnconfigure(1, weight=1)
+        table_frame.columnconfigure(2, weight=1)
+        table_frame.rowconfigure(0, weight=1)
 
     def run_optimizaion(self):
         '''
@@ -1259,6 +1376,7 @@ class CreateOptimizeCylinderWindow():
                 )
 
             self._last_weight_weld_study_rows = list(rows)
+            self._last_study_type = 'weight_weld'
             self._show_weight_weld_study_results(rows)
         finally:
             self._new_weld_bias.set(original_bias)
@@ -1268,14 +1386,28 @@ class CreateOptimizeCylinderWindow():
             self._opt_actual_running_time.update()
 
     def show_previous_weight_weld_study(self):
-        if not self._last_weight_weld_study_rows:
-            messagebox.showinfo(
-                title='Weight/weld study',
-                message='No previous weight/weld study is available. Run the study first.',
-            )
+        if self._last_study_type == 'cost' and self._last_cost_study_report:
+            self._show_cost_study_report(self._last_cost_study_report)
             return
 
-        self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
+        if self._last_study_type == 'weight_weld' and self._last_weight_weld_study_rows:
+            self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
+            return
+
+        if self._last_cost_study_report:
+            self._show_cost_study_report(self._last_cost_study_report)
+            return
+
+        if self._last_weight_weld_study_rows:
+            self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
+            return
+
+        if not self._last_weight_weld_study_rows:
+            messagebox.showinfo(
+                title='Previous study',
+                message='No previous study is available. Run a weight/weld or cost study first.',
+            )
+            return
 
     def _count_steps(self, lower, upper, delta):
         """

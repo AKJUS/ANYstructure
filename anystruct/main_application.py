@@ -1965,7 +1965,7 @@ class Application():
             content,
             title='Multiple panels',
             subtitle='Default',
-            details='Use the full modelling workspace with points, lines, compartments and load combinations.',
+            details='For multiple panels/cylinders with advanced load definition.',
             button_text='Start multiple panels',
             command=lambda: choose(False),
             primary=True,
@@ -1974,7 +1974,7 @@ class Application():
             content,
             title='Single panel/cylinder',
             subtitle='Simplified calculation',
-            details='Use one hidden calculation line and focus on section inputs, stresses and the 3D preview.',
+            details='For single panel/cylinder with simplified load interface.',
             button_text='Start single mode',
             command=lambda: choose(True),
             primary=False,
@@ -2074,11 +2074,20 @@ class Application():
         except Exception:
             pass
 
+    def _single_mode_active_line_candidate(self):
+        """Return the selected line when valid, otherwise the remembered dummy/single line."""
+        if self._active_line in self._line_dict:
+            return self._active_line
+        if self._single_line_name in self._line_dict:
+            return self._single_line_name
+        if self._line_dict:
+            return sorted(self._line_dict.keys(), key=get_num)[0]
+        return self._single_line_name
+
     def _ensure_single_dummy_line(self):
         """Create the hidden point/line geometry needed by the legacy calculation pipeline."""
         if self._line_dict:
-            if self._single_line_name not in self._line_dict:
-                self._single_line_name = sorted(self._line_dict.keys(), key=get_num)[0]
+            self._single_line_name = self._single_mode_active_line_candidate()
             return
 
         try:
@@ -2092,9 +2101,8 @@ class Application():
         self._line_point_to_point_string = self.make_point_point_line_string(1, 2)
 
     def _select_single_calculation_line(self):
-        """Keep the dummy line selected so stress, load and optimization callbacks work unchanged."""
-        if self._single_line_name not in self._line_dict and self._line_dict:
-            self._single_line_name = sorted(self._line_dict.keys(), key=get_num)[0]
+        """Keep single-line mode bound to the selected line or the dummy line."""
+        self._single_line_name = self._single_mode_active_line_candidate()
         self._active_line = self._single_line_name
         self._line_is_active = self._active_line in self._line_dict
         self._active_point = ''
@@ -2149,6 +2157,30 @@ class Application():
         self._new_show_prop_3d.set(True)
         self.update_frame(force_recalc=True)
         self.gui_load_combinations(self._combination_slider.get())
+
+    def _prepare_simplified_optimizer_replacement(self):
+        """Ensure optimizer return values replace the hidden single calculation line."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return False
+
+        self._ensure_single_dummy_line()
+        self._select_single_calculation_line()
+        self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        return True
+
+    def _refresh_simplified_optimizer_replacement(self):
+        """Refresh the single-line GUI after optimizer results were returned."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return False
+
+        self._select_single_calculation_line()
+        self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        self._apply_simplified_calculation_layout()
+        self._new_show_prop_3d.set(True)
+        self.set_selected_variables(self._active_line)
+        self.update_frame(force_recalc=True)
+        self.gui_load_combinations(self._combination_slider.get())
+        return True
 
     def gui_structural_properties(self, flat_panel_stf_girder=False, flat_unstf=False, flat_stf=True,
                                   shell=False, long_stf=False, ring_stf=False,
@@ -9557,6 +9589,7 @@ class Application():
         '''
         self.save_no_dialogue(backup=True)  # keeping a backup
 
+        self._prepare_simplified_optimizer_replacement()
         self.new_structure(multi_return=returned_object[0:2])
         # self._line_to_struc[self._active_line][1]=returned_objects[0]
         # self._line_to_struc[self._active_line][1]=returned_objects[1]
@@ -9566,7 +9599,8 @@ class Application():
         #     self._line_to_struc[self._active_line][2] = CalcFatigue(returned_objects[0].get_structure_prop(),
         #                                                             returned_objects[2])
         # self.new_structure()
-        self.update_frame()
+        if not self._refresh_simplified_optimizer_replacement():
+            self.update_frame()
 
     def on_close_opt_cyl_window(self, returned_object):
         '''
@@ -9575,9 +9609,11 @@ class Application():
         :return:
         '''
 
+        self._prepare_simplified_optimizer_replacement()
         self.new_structure(cylinder_return=returned_object[0])
 
-        self.update_frame()
+        if not self._refresh_simplified_optimizer_replacement():
+            self.update_frame()
 
     def on_close_opt_multiple_window(self, returned_objects):
         '''

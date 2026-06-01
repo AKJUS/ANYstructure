@@ -104,6 +104,55 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "self.gui_load_combinations(self._combination_slider.get())" in source
 
 
+def test_single_line_optimizer_return_refreshes_hidden_line():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _prepare_simplified_optimizer_replacement(self):" in source
+    assert "def _refresh_simplified_optimizer_replacement(self):" in source
+    assert "self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)" in source
+    assert "self.set_selected_variables(self._active_line)" in source
+
+    flat_close = source[
+        source.index("def on_close_opt_window"):
+        source.index("def on_close_opt_cyl_window")
+    ]
+    cylinder_close = source[
+        source.index("def on_close_opt_cyl_window"):
+        source.index("def on_close_opt_multiple_window")
+    ]
+
+    assert "self._prepare_simplified_optimizer_replacement()" in flat_close
+    assert "self.new_structure(multi_return=returned_object[0:2])" in flat_close
+    assert "if not self._refresh_simplified_optimizer_replacement():" in flat_close
+    assert "self._prepare_simplified_optimizer_replacement()" in cylinder_close
+    assert "self.new_structure(cylinder_return=returned_object[0])" in cylinder_close
+    assert "if not self._refresh_simplified_optimizer_replacement():" in cylinder_close
+
+
+def test_single_line_mode_keeps_active_line_on_selected_or_dummy_line():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _single_mode_active_line_candidate(self):" in source
+    selector_block = source[
+        source.index("def _single_mode_active_line_candidate"):
+        source.index("def _ensure_single_dummy_line")
+    ]
+    select_block = source[
+        source.index("def _select_single_calculation_line"):
+        source.index("def _ensure_manual_pressure_combination")
+    ]
+
+    assert "if self._active_line in self._line_dict:" in selector_block
+    assert "return self._active_line" in selector_block
+    assert "if self._single_line_name in self._line_dict:" in selector_block
+    assert "return self._single_line_name" in selector_block
+    assert "return sorted(self._line_dict.keys(), key=get_num)[0]" in selector_block
+    assert "self._single_line_name = self._single_mode_active_line_candidate()" in select_block
+    assert "self._active_line = self._single_line_name" in select_block
+
+
 def test_simplified_3d_preview_uses_main_canvas_place():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
