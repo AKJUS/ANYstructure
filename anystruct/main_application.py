@@ -1791,17 +1791,20 @@ class Application():
             self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.74, relheight=0.99)
             tk.Misc.lift(self._main_canvas)
             self._gui_functional_look = 'modelling'
+            self._place_3d_section_view_checkbox()
         elif theme == 'all items':
             self._gui_functional_look = 'all items'
             self._main_canvas.place_forget()
             x_canvas_place = 0.26
             self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.523, relheight=0.73)
+            self._place_3d_section_view_checkbox()
         elif theme == 'cylinder':
             self._main_canvas.place_forget()
             x_canvas_place = 0.26
             self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.74, relheight=0.73)
             tk.Misc.lift(self._main_canvas)
             self._gui_functional_look = 'cylinder'
+            self._place_3d_section_view_checkbox()
             placement = self._gui_functional_look_cylinder_opt  # [0.786458333, 0.12962963000000005, 0.04, 0.175]
             self._opt_cylinder.place(relx=placement[0], rely=placement[1], relheight=placement[2],
                                      relwidth=placement[3])
@@ -1830,6 +1833,14 @@ class Application():
         # self._frame_viz_ver.configure(bg=self._color_text)
 
         self.update_frame()
+
+    def _place_3d_section_view_checkbox(self):
+        """Keep the 3D preview checkbox visible when functional modes move the main canvas."""
+        try:
+            self._chk_show_prop_3d.place(relx=0.637, rely=0.705)
+            self._chk_show_prop_3d.lift()
+        except Exception:
+            pass
 
     def gui_structural_properties(self, flat_panel_stf_girder=False, flat_unstf=False, flat_stf=True,
                                   shell=False, long_stf=False, ring_stf=False,

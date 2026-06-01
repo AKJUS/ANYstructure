@@ -602,7 +602,7 @@ class CreateOptimizeWindow():
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
 
         tk.Button(self._frame, text='algorith information', command=self.algorithm_info, bg='white') \
-            .place(x=1120, y=195)
+            .place(x=1120, y=195, width=140)
 
         # ---------------------------------------------------------------------
         # Optimization objective bias
@@ -685,7 +685,7 @@ class CreateOptimizeWindow():
         self.run_button.place(x=815, y=145, width=250)
         self.run_results = tk.Button(self._frame, text='show calculated', command=self.plot_results, bg='white',
                                      font='Verdana 10', fg='black')
-        self.run_results.place(x=815, y=190)
+        self.run_results.place(x=815, y=190, width=150)
         self.weight_weld_study_button = tk.Button(
             self._frame,
             text='weight/weld study',
@@ -694,15 +694,15 @@ class CreateOptimizeWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.weight_weld_study_button.place(x=815, y=235)
-        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=1075, y=239)
+        self.weight_weld_study_button.place(x=815, y=235, width=150)
+        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=975, y=239)
         self._ent_weld_study_delta = tk.Entry(
             self._frame,
             textvariable=self._new_weld_study_delta,
             width=6,
             bg='white',
         )
-        self._ent_weld_study_delta.place(x=1115, y=238)
+        self._ent_weld_study_delta.place(x=1015, y=238)
         self.show_previous_weld_study_button = tk.Button(
             self._frame,
             text='show previous study',
@@ -711,7 +711,7 @@ class CreateOptimizeWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.show_previous_weld_study_button.place(x=970, y=270, width=150)
+        self.show_previous_weld_study_button.place(x=970, y=190, width=150)
         self.cost_study_button = tk.Button(
             self._frame,
             text='cost study',
@@ -720,7 +720,7 @@ class CreateOptimizeWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.cost_study_button.place(x=970, y=305, width=150)
+        self.cost_study_button.place(x=970, y=270, width=150)
         self._opt_actual_running_time.place(x=970, y=75)
 
         self.close_and_save = tk.Button(self._frame, text='Return and replace initial structure with optimized',
