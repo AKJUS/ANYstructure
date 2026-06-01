@@ -76,6 +76,205 @@ def test_weld_bias_filter_rejects_by_weld_consumables(opt_input):
     assert result[1] == 'Weld filter'
 
 
+def test_weld_length_filter_does_not_use_weld_consumables(monkeypatch, opt_input):
+    obj, _, _, lat_press, _, _, _, _ = opt_input
+    x = [0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10]
+
+    monkeypatch.setattr(opt, 'calc_weld_length', lambda *args, **kwargs: 10.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable', lambda *args, **kwargs: 1000.0)
+
+    result = opt.any_constraints_all(
+        x=x,
+        obj=obj,
+        lat_press=lat_press,
+        init_weight=11.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+        weld_metric='weld_length',
+    )
+
+    assert result[0] is True
+
+
+def test_weld_length_filter_rejects_by_length(monkeypatch, opt_input):
+    obj, _, _, lat_press, _, _, _, _ = opt_input
+    x = [0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10]
+
+    monkeypatch.setattr(opt, 'calc_weld_length', lambda *args, **kwargs: 10.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable', lambda *args, **kwargs: 1.0)
+
+    result = opt.any_constraints_all(
+        x=x,
+        obj=obj,
+        lat_press=lat_press,
+        init_weight=9.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+        weld_metric='Weld length',
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Weld filter'
+
+
+def test_cost_filter_uses_weight_and_selected_weld_metric(monkeypatch, opt_input):
+    obj, _, _, lat_press, _, _, _, _ = opt_input
+    x = [0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10]
+
+    monkeypatch.setattr(opt, 'calc_weight', lambda candidate: 100.0)
+    monkeypatch.setattr(opt, 'calc_weld_length', lambda *args, **kwargs: 20.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable', lambda *args, **kwargs: 2000.0)
+
+    result = opt.any_constraints_all(
+        x=x,
+        obj=obj,
+        lat_press=lat_press,
+        init_weight=139.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_metric='Weld length',
+        cost_factors={'steel': 1.0, 'weld': 2.0},
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Cost filter'
+
+
+def test_cost_objective_calculates_flat_panel_cost(monkeypatch):
+    monkeypatch.setattr(opt, 'calc_weight', lambda candidate: 100.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable', lambda *args, **kwargs: 7.0)
+
+    assert opt.calc_flat_objective_value(
+        x='candidate',
+        cost_factors=(2.0, 3.0),
+    ) == pytest.approx(221.0)
+
+
+def test_cylinder_weld_bias_filter_does_not_use_panel_weight(monkeypatch):
+    class FakeCylinder:
+        RingStfObj = None
+        RingFrameObj = None
+
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, x: FakeCylinder())
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda x: 1000.0)
+    monkeypatch.setattr(
+        opt,
+        'calc_weld_consumable_cylinder',
+        lambda x, include_web_to_flange=False: 10.0,
+    )
+
+    result = opt.any_constraints_cylinder(
+        x='candidate',
+        obj=object(),
+        init_weight=11.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+    )
+
+    assert result is None
+
+
+def test_cylinder_weld_bias_filter_rejects_by_weld_consumables(monkeypatch):
+    class FakeCylinder:
+        RingStfObj = None
+        RingFrameObj = None
+
+        def get_utilization_factors(self, optimizing=False, empty_result_dict=False):
+            return {}
+
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, x: FakeCylinder())
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda x: 1000.0)
+    monkeypatch.setattr(
+        opt,
+        'calc_weld_consumable_cylinder',
+        lambda x, include_web_to_flange=False: 10.0,
+    )
+
+    result = opt.any_constraints_cylinder(
+        x='candidate',
+        obj=object(),
+        init_weight=9.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Weld filter'
+
+
+def test_cylinder_weld_length_filter_does_not_use_weld_consumables(monkeypatch):
+    class FakeCylinder:
+        RingStfObj = None
+        RingFrameObj = None
+
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, x: FakeCylinder())
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda x: 1000.0)
+    monkeypatch.setattr(opt, 'calc_weld_length_cylinder', lambda x, include_web_to_flange=False: 10.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable_cylinder', lambda x, include_web_to_flange=False: 1000.0)
+
+    result = opt.any_constraints_cylinder(
+        x='candidate',
+        obj=object(),
+        init_weight=11.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+        weld_metric='weld_length',
+    )
+
+    assert result is None
+
+
+def test_cylinder_weld_length_filter_rejects_by_length(monkeypatch):
+    class FakeCylinder:
+        RingStfObj = None
+        RingFrameObj = None
+
+        def get_utilization_factors(self, optimizing=False, empty_result_dict=False):
+            return {}
+
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, x: FakeCylinder())
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda x: 1000.0)
+    monkeypatch.setattr(opt, 'calc_weld_length_cylinder', lambda x, include_web_to_flange=False: 10.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable_cylinder', lambda x, include_web_to_flange=False: 1.0)
+
+    result = opt.any_constraints_cylinder(
+        x='candidate',
+        obj=object(),
+        init_weight=9.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_bias=1.0,
+        weld_metric='Weld length',
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Weld filter'
+
+
+def test_cylinder_cost_filter_uses_weight_and_selected_weld_metric(monkeypatch):
+    class FakeCylinder:
+        RingStfObj = None
+        RingFrameObj = None
+
+        def get_utilization_factors(self, optimizing=False, empty_result_dict=False):
+            return {}
+
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, x: FakeCylinder())
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda x: 100.0)
+    monkeypatch.setattr(opt, 'calc_weld_length_cylinder', lambda x, include_web_to_flange=False: 20.0)
+    monkeypatch.setattr(opt, 'calc_weld_consumable_cylinder', lambda x, include_web_to_flange=False: 2000.0)
+
+    result = opt.any_constraints_cylinder(
+        x='candidate',
+        obj=object(),
+        init_weight=139.0,
+        chk=(False, False, False, False, False, False, False, False, False, False),
+        weld_metric='Weld length',
+        cost_factors={'steel': 1.0, 'weld': 2.0},
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Cost filter'
+
+
 def test_mixed_weld_bias_skips_initial_filter(monkeypatch, opt_input):
     obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
     captured = {}
@@ -109,6 +308,95 @@ def test_mixed_weld_bias_skips_initial_filter(monkeypatch, opt_input):
         'processes': 1,
         'weld_bias': 0.5,
     }
+
+
+def test_run_optimization_forwards_weld_metric_to_flat_algorithms(monkeypatch, opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
+    captured = {}
+
+    def fake_any_optimize_loop(*args, **kwargs):
+        captured['anydetail'] = kwargs['weld_metric']
+        return None, None, None, False, []
+
+    def fake_get_random_result(*args, **kwargs):
+        captured['random'] = kwargs['weld_metric']
+        return None
+
+    def fake_get_random_result_no_bounds(*args, **kwargs):
+        captured['random_no_delta'] = kwargs['weld_metric']
+        return None
+
+    monkeypatch.setattr(opt, 'any_optimize_loop', fake_any_optimize_loop)
+    monkeypatch.setattr(opt, 'get_random_result', fake_get_random_result)
+    monkeypatch.setattr(opt, 'get_random_result_no_bounds', fake_get_random_result_no_bounds)
+
+    for algorithm in ('anydetail', 'random', 'random_no_delta'):
+        opt.run_optmizataion(
+            obj,
+            upper_bounds,
+            lower_bounds,
+            lat_press,
+            deltas,
+            algorithm=algorithm,
+            use_weight_filter=False,
+            weld_bias=1.0,
+            weld_metric='Weld length',
+        )
+
+    assert captured == {
+        'anydetail': 'weld_length',
+        'random': 'weld_length',
+        'random_no_delta': 'weld_length',
+    }
+
+
+def test_run_optimization_forwards_weld_metric_to_cylinder(monkeypatch, opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
+    captured = {}
+
+    def fake_any_smart_loop_cylinder(*args, **kwargs):
+        captured['weld_metric'] = kwargs['weld_metric']
+        return None, False
+
+    monkeypatch.setattr(opt, 'any_smart_loop_cylinder', fake_any_smart_loop_cylinder)
+
+    opt.run_optmizataion(
+        obj,
+        upper_bounds,
+        lower_bounds,
+        lat_press,
+        deltas,
+        algorithm='anysmart cylinder',
+        cylinder=True,
+        weld_bias=1.0,
+        weld_metric='Weld length',
+    )
+
+    assert captured['weld_metric'] == 'weld_length'
+
+
+def test_run_optimization_forwards_cost_factors_to_flat_algorithm(monkeypatch, opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
+    captured = {}
+
+    def fake_any_smart_loop(*args, **kwargs):
+        captured['cost_factors'] = kwargs['cost_factors']
+        return None, None, None, False, []
+
+    monkeypatch.setattr(opt, 'get_initial_weight', lambda **kwargs: 1.0)
+    monkeypatch.setattr(opt, 'any_smart_loop', fake_any_smart_loop)
+
+    opt.run_optmizataion(
+        obj,
+        upper_bounds,
+        lower_bounds,
+        lat_press,
+        deltas,
+        algorithm='anysmart',
+        cost_factors={'steel': 2.0, 'weld': 3.0},
+    )
+
+    assert captured['cost_factors'] == {'steel': 2.0, 'weld': 3.0}
 
 
 def test_external_excel_puls_sheet_argument_is_removed(opt_input):

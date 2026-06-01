@@ -120,20 +120,32 @@ class CreateOptGeoWindow():
         except Exception:
             return 0.0
 
+    def _get_weld_metric_for_optimization(self):
+        try:
+            return op.normalize_weld_metric(self._new_weld_metric.get())
+        except Exception:
+            return 'weld_consumables'
+
+    def _get_weld_metric_text(self):
+        return 'weld length' if self._get_weld_metric_for_optimization() == 'weld_length' else 'weld consumables'
+
+    def _get_weld_metric_unit(self):
+        return 'm' if self._get_weld_metric_for_optimization() == 'weld_length' else 'kg'
+
     def _get_weld_bias_text(self):
         weld_bias = self._get_weld_bias_for_optimization()
         weight_bias = 1.0 - weld_bias
 
         if weld_bias <= 0.0:
-            return 'Pure weight optimization - no weld consumable calculations'
+            return 'Pure weight optimization - no weld metric calculations'
 
         if weld_bias >= 1.0:
-            return 'Pure weld consumable optimization'
+            return 'Pure ' + self._get_weld_metric_text() + ' optimization'
 
         return (
             'Mixed objective: '
             + str(round(100.0 * weight_bias, 0)) + '% weight / '
-            + str(round(100.0 * weld_bias, 0)) + '% weld consumables'
+            + str(round(100.0 * weld_bias, 0)) + '% ' + self._get_weld_metric_text()
         )
 
     def _update_weld_bias_label(self, *args):
@@ -144,6 +156,25 @@ class CreateOptGeoWindow():
             self._weld_bias_info_label.config(text=self._get_weld_bias_text())
         except Exception:
             pass
+
+        try:
+            self.schedule_running_time_update()
+        except Exception:
+            pass
+
+    def _get_objective_warning_text(self):
+        weld_bias = self._get_weld_bias_for_optimization()
+
+        if 0.0 < weld_bias < 1.0:
+            return '\nWARNING: mixed weight/weld combination disables the initial filter.'
+
+        if weld_bias >= 1.0:
+            return '\nPure weld objective: span optimizer uses ' + self._get_weld_metric_text() + ' in the objective.'
+
+        return ''
+
+    def _get_objective_index_label(self):
+        return 'Weight index' if self._get_weld_bias_for_optimization() <= 0.0 else 'Objective index'
 
 
     def _show_weight_figure(self, xplot=None, yplot=None):
@@ -183,8 +214,9 @@ class CreateOptGeoWindow():
             markersize=6,
         )
         plt.xlabel('Length of plate fields [m]')
-        plt.ylabel('Weight / max weight')
-        plt.title('Length of plate fields vs. total weight')
+        objective_label = self._get_objective_index_label()
+        plt.ylabel(objective_label)
+        plt.title('Length of plate fields vs. total ' + objective_label.replace(' index', '').lower())
         plt.grid()
         plt.show()
 
@@ -426,6 +458,7 @@ class CreateOptGeoWindow():
         self._new_option_fraction = tk.IntVar()
         self._new_option_panel = tk.IntVar()
         self._new_weld_bias = tk.DoubleVar()
+        self._new_weld_metric = tk.StringVar()
         self._new_include_builtup_weld = tk.BooleanVar()
 
         ent_w = 10
@@ -524,10 +557,15 @@ class CreateOptGeoWindow():
                                                                                      y=start_y - 0.6 * dy)
         tk.Label(self._frame, text='Flange thk. [mm]', font='Verdana 7 bold').place(x=start_x + 6.97 * dx,
                                                                                     y=start_y - 0.6 * dy)
-        tk.Label(self._frame, text='Estimated running time for algorithm not calculated.',
-                 font='Verdana 9 bold').place(x=start_x, y=start_y + 2.8 * dy)
+        self._running_time_info_label = tk.Label(
+            self._frame,
+            text='Estimated running time for algorithm not calculated.',
+            font='Verdana 9 bold',
+            justify=tk.LEFT,
+        )
+        self._running_time_info_label.place(x=start_x, y=start_y + 2.8 * dy)
         tk.Label(self._frame, text='- Harmonize stiffener spacing for section.', font='Verdana 9 bold') \
-            .place(x=start_x + 5 * dx, y=start_y + 2.8 * dy)
+            .place(x=650, y=218)
         # self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 9 bold')
         # self._runnig_time_label.place(x=start_x + 2.7 * dx, y=start_y + 2.8 * dy)
         # tk.Label(self._frame, text='seconds ', font='Verdana 9 bold').place(x=start_x + 3.3 * dx, y=start_y + 2.8 * dy)
@@ -658,6 +696,7 @@ class CreateOptGeoWindow():
         self._new_option_fraction.set(None)
         self._new_option_panel.set(None)
         self._new_weld_bias.set(0.0)
+        self._new_weld_metric.set('Weld consumables')
         self._new_include_builtup_weld.set(False)
         self._new_harmonize_spacing.set(False)
         self._new_check_buckling_semi_analytical.set(False)
@@ -668,6 +707,7 @@ class CreateOptGeoWindow():
         self._new_check_buckling_ml_cl.trace_add('write', self.schedule_running_time_update)
         self._new_check_buckling_ml_numeric.trace_add('write', self.schedule_running_time_update)
         self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
+        self._new_weld_metric.trace_add('write', self._update_weld_bias_label)
 
         start_y, start_x, dy = 620, 100, 25
         tk.Label(self._frame, text='Check for minimum section modulus').place(x=start_x + dx * 9.7, y=start_y + 4 * dy)
@@ -723,7 +763,7 @@ class CreateOptGeoWindow():
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric).place(x=start_x + dx * 12,
                                                                                         y=start_y + 13 * dy)
 
-        tk.Checkbutton(self._frame, variable=self._new_harmonize_spacing).place(x=start_x + 3.9 * dx, y=180)
+        tk.Checkbutton(self._frame, variable=self._new_harmonize_spacing).place(x=620, y=216)
 
         # Stress scaling
         self._new_fup = tk.DoubleVar()
@@ -781,7 +821,7 @@ class CreateOptGeoWindow():
         # Optimization objective bias.
         # For geometric optimization this is forwarded to optimize.py.
         # optimize.py must skip weld calculations when weld_bias == 0.0.
-        obj_x, obj_y = start_x + dx * 12.4, start_y - dy * 25
+        obj_x, obj_y = 20, 175
 
         tk.Label(
             self._frame,
@@ -796,43 +836,52 @@ class CreateOptGeoWindow():
             to=1.0,
             resolution=0.05,
             orient=tk.HORIZONTAL,
-            length=250,
+            length=230,
             showvalue=False,
             command=self._update_weld_bias_label,
         )
         self._weld_bias_slider.place(x=obj_x, y=obj_y + 18)
 
         tk.Label(self._frame, text='Weight', font='Verdana 7').place(x=obj_x, y=obj_y + 52)
-        tk.Label(self._frame, text='Weld consumables', font='Verdana 7').place(x=obj_x + 185, y=obj_y + 52)
+        tk.Label(self._frame, text='Weld', font='Verdana 7').place(x=obj_x + 205, y=obj_y + 52)
 
         self._weld_bias_value_label = tk.Label(
             self._frame,
             text='Weld bias: 0.0',
             font='Verdana 8 bold',
         )
-        self._weld_bias_value_label.place(x=obj_x, y=obj_y + 75)
+        self._weld_bias_value_label.place(x=obj_x + 285, y=obj_y)
 
         self._weld_bias_info_label = tk.Label(
             self._frame,
             text=self._get_weld_bias_text(),
             font='Verdana 7',
-            wraplength=370,
+            wraplength=300,
             justify=tk.LEFT,
         )
-        self._weld_bias_info_label.place(x=obj_x, y=obj_y + 98)
+        self._weld_bias_info_label.place(x=obj_x + 285, y=obj_y + 22)
+
+        self._weld_metric_menu = tk.OptionMenu(
+            self._frame,
+            self._new_weld_metric,
+            'Weld consumables',
+            'Weld length',
+            command=self._update_weld_bias_label,
+        )
+        self._weld_metric_menu.place(x=obj_x + 285, y=obj_y + 68, width=150)
 
         tk.Checkbutton(
             self._frame,
             variable=self._new_include_builtup_weld,
-        ).place(x=obj_x + 300, y=obj_y + 72)
+        ).place(x=obj_x + 460, y=obj_y + 68)
 
         tk.Label(
             self._frame,
             text='Include web-to-flange weld for built-up stiffeners',
             font='Verdana 7',
-            wraplength=260,
+            wraplength=230,
             justify=tk.LEFT,
-        ).place(x=obj_x + 325, y=obj_y + 76)
+        ).place(x=obj_x + 485, y=obj_y + 72)
 
 
 
@@ -1067,7 +1116,8 @@ class CreateOptGeoWindow():
                                                       ml_algo=selected_ml_algo,
                                                       material_factor=selected_mat_fac,
                                                       weld_bias=self._get_weld_bias_for_optimization(),
-                                                      builtup_stiffener=self._new_include_builtup_weld.get())
+                                                      builtup_stiffener=self._new_include_builtup_weld.get(),
+                                                      weld_metric=self._get_weld_metric_for_optimization())
                     resulting_geo.append(geo_results)
 
                 # need to find the lowest
@@ -1098,7 +1148,8 @@ class CreateOptGeoWindow():
                                                   ml_algo=selected_ml_algo,
                                                   material_factor=selected_mat_fac,
                                                   weld_bias=self._get_weld_bias_for_optimization(),
-                                                  builtup_stiffener=self._new_include_builtup_weld.get())
+                                                  builtup_stiffener=self._new_include_builtup_weld.get(),
+                                                  weld_metric=self._get_weld_metric_for_optimization())
 
             self._geo_results = geo_results
 
@@ -1332,10 +1383,13 @@ class CreateOptGeoWindow():
 
         self._running_time_after_id = None
 
-        # try:
-        #     self._runnig_time_label.config(text=str(self.get_running_time()))
-        # except ZeroDivisionError:
-        #     pass  # _tkinter.TclError: pass
+        try:
+            self._running_time_info_label.config(
+                text='Estimated running time for algorithm not calculated.'
+                     + self._get_objective_warning_text()
+            )
+        except Exception:
+            pass
 
         selected_buckling_checks = [
             self._new_check_buckling.get(),
@@ -1719,14 +1773,23 @@ class CreateOptGeoWindow():
         xplot = list()
         yplot = list()
 
+        objective_label = self._get_objective_index_label()
+        objective_description = (
+            'Weight index is tot_weight / max_weight \n'
+            'max_weight is the highest total weight of the checked variations.\n'
+            'Weight index of 1 is the heaviest calculated variation.'
+            if objective_label == 'Weight index' else
+            'Objective index is objective / max_objective \n'
+            'max_objective is the highest objective value of the checked variations.\n'
+            'Objective index of 1 is the highest calculated objective.'
+        )
+
         self._canvas_opt.create_text([start_x, 40],
-                                     text='Results seen next. Weight index is tot_weight / max_weight \n'
-                                          'max_weight is the highest total weight of the checked variations.\n'
-                                          'Weight index of 1 is the heaviest calculated variation.',
+                                     text='Results seen next. ' + objective_description,
                                      font='Verdana 10', fill='Blue', anchor='w')
 
         self._canvas_opt.create_text([start_x, y_loc],
-                                     text='| Plate fields | Fields length | Weight index | All OK? |',
+                                     text='| Plate fields | Fields length | ' + objective_label + ' | All OK? |',
                                      font='Verdana 10 bold', fill='red', anchor='w')
         y_loc += delta / 2
         self._canvas_opt.create_text([start_x, y_loc],
@@ -1742,7 +1805,7 @@ class CreateOptGeoWindow():
 
         if save_to_file is not None:
             save_file = open(save_to_file, 'w')
-            save_file.write('| Plate fields | Fields length | Weight index | All OK? |\n')
+            save_file.write('| Plate fields | Fields length | ' + objective_label + ' | All OK? |\n')
             save_file.write('*********************************************************\n')
 
         for key, value in self._geo_results.items():

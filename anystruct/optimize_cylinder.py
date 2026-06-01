@@ -5,6 +5,7 @@ from _tkinter import TclError
 import numpy as np
 import time, os, datetime
 from tkinter import messagebox
+from tkinter import ttk
 from tkinter.filedialog import askopenfilenames
 from multiprocessing import cpu_count
 
@@ -308,6 +309,11 @@ class CreateOptimizeCylinderWindow():
         # 1.0 = pure estimated weld consumable optimization.
         self._new_weld_bias = tk.DoubleVar()
         self._new_weld_bias.set(0.0)
+        self._new_weld_metric = tk.StringVar()
+        self._new_weld_metric.set('Weld consumables')
+        self._new_weld_study_delta = tk.DoubleVar()
+        self._new_weld_study_delta.set(0.1)
+        self._last_weight_weld_study_rows = None
         self._new_include_builtup_weld = tk.BooleanVar()
         self._new_include_builtup_weld.set(False)
 
@@ -555,6 +561,42 @@ class CreateOptimizeCylinderWindow():
 
         self._opt_actual_running_time.place(x=1220, y=100)
 
+        self.weight_weld_study_button = tk.Button(
+            self._frame,
+            text='weight/weld study',
+            command=self.run_weight_weld_study,
+            bg='white',
+            font='Verdana 10',
+            fg='black',
+        )
+        self.weight_weld_study_button.place(x=1220, y=145, width=180, height=28)
+        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=1410, y=151)
+        self._ent_weld_study_delta = tk.Entry(
+            self._frame,
+            textvariable=self._new_weld_study_delta,
+            width=5,
+            bg='white',
+        )
+        self._ent_weld_study_delta.place(x=1445, y=149)
+        self.show_previous_weld_study_button = tk.Button(
+            self._frame,
+            text='show previous study',
+            command=self.show_previous_weight_weld_study,
+            bg='white',
+            font='Verdana 10',
+            fg='black',
+        )
+        self.show_previous_weld_study_button.place(x=1220, y=180, width=180, height=28)
+        self.cost_study_button = tk.Button(
+            self._frame,
+            text='cost study',
+            command=self.open_cost_study_window,
+            bg='white',
+            font='Verdana 10',
+            fg='black',
+        )
+        self.cost_study_button.place(x=1220, y=215, width=180, height=28)
+
         tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=1480, y=56)
         self._ent_algorithm.place(x=1480, y=80, width=165)
         tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
@@ -572,7 +614,7 @@ class CreateOptimizeCylinderWindow():
         # Optimization objective bias
         # ---------------------------------------------------------------------
         objective_x = start_x + 10 * dx
-        objective_y = start_y + 1.0 * dy
+        objective_y = start_y + 3.8 * dy
 
         tk.Label(self._frame, text='Optimization objective', font='Verdana 9 bold') \
             .place(x=objective_x, y=objective_y)
@@ -612,10 +654,19 @@ class CreateOptimizeCylinderWindow():
         )
         self._weld_bias_info_label.place(x=objective_x, y=objective_y + 85)
 
+        self._weld_metric_menu = tk.OptionMenu(
+            self._frame,
+            self._new_weld_metric,
+            'Weld consumables',
+            'Weld length',
+            command=self._update_weld_bias_label,
+        )
+        self._weld_metric_menu.place(x=objective_x, y=objective_y + 112, width=150)
+
         tk.Checkbutton(
             self._frame,
             variable=self._new_include_builtup_weld
-        ).place(x=objective_x, y=objective_y + 125)
+        ).place(x=objective_x + 170, y=objective_y + 116)
 
         tk.Label(
             self._frame,
@@ -623,14 +674,15 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 7',
             wraplength=300,
             justify=tk.LEFT,
-        ).place(x=objective_x + 25, y=objective_y + 129)
+        ).place(x=objective_x + 195, y=objective_y + 120)
 
         # Runtime estimate belongs to the optimization objective block.
         # Keep it below the built-up weld checkbox so it does not collide
         # with the geometry input table.
-        self._runnig_time_label.place(x=objective_x, y=objective_y + 165)
+        self._runnig_time_label.place(x=objective_x, y=objective_y + 160)
 
         self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
+        self._new_weld_metric.trace_add('write', self._update_weld_bias_label)
 
         # Stress scaling
         self._new_fup = tk.DoubleVar()
@@ -729,6 +781,18 @@ class CreateOptimizeCylinderWindow():
         except Exception:
             return 0.0
 
+    def _get_weld_metric_for_optimization(self):
+        try:
+            return op.normalize_weld_metric(self._new_weld_metric.get())
+        except Exception:
+            return 'weld_consumables'
+
+    def _get_weld_metric_text(self):
+        return 'weld length' if self._get_weld_metric_for_optimization() == 'weld_length' else 'weld consumables'
+
+    def _get_weld_metric_unit(self):
+        return 'm' if self._get_weld_metric_for_optimization() == 'weld_length' else 'kg'
+
     def _get_weld_bias_text(self):
         """
         User-readable explanation for the current weld bias.
@@ -737,15 +801,15 @@ class CreateOptimizeCylinderWindow():
         weight_bias = 1.0 - weld_bias
 
         if weld_bias <= 0.0:
-            return 'Pure weight optimization - no weld consumable calculations'
+            return 'Pure weight optimization - no weld metric calculations'
 
         if weld_bias >= 1.0:
-            return 'Pure weld consumable optimization'
+            return 'Pure ' + self._get_weld_metric_text() + ' optimization'
 
         return (
                 'Mixed objective: '
                 + str(round(100.0 * weight_bias, 0)) + '% weight / '
-                + str(round(100.0 * weld_bias, 0)) + '% weld consumables'
+                + str(round(100.0 * weld_bias, 0)) + '% ' + self._get_weld_metric_text()
         )
 
     def _update_weld_bias_label(self, *args):
@@ -761,6 +825,148 @@ class CreateOptimizeCylinderWindow():
             )
         except Exception:
             pass
+
+        try:
+            self.schedule_running_time_update()
+        except Exception:
+            pass
+
+    def _get_fatigue_pressure_tuple(self):
+        if self._fatigue_pressure is None:
+            return None
+
+        return ((self._fatigue_pressure['p_ext']['loaded'], self._fatigue_pressure['p_ext']['ballast'],
+                 self._fatigue_pressure['p_ext']['part']),
+                (self._fatigue_pressure['p_int']['loaded'], self._fatigue_pressure['p_int']['ballast'],
+                 self._fatigue_pressure['p_int']['part']))
+
+    def _prepare_cylinder_for_optimization(self):
+        self._new_sasd.set(self._new_sasd.get())
+        self._new_smsd.set(self._new_smsd.get())
+        self._new_tTsd.set(self._new_tTsd.get())
+        self._new_tQsd.set(self._new_tQsd.get())
+        self._new_design_pressure.set(self._new_design_pressure.get())
+        self._new_shsd.set(self._new_shsd.get())
+
+        self._initial_cylinder_obj.sasd = self._new_sasd.get()
+        self._initial_cylinder_obj.smsd = self._new_smsd.get()
+        self._initial_cylinder_obj.tTsd = self._new_tTsd.get()
+        self._initial_cylinder_obj.tQsd = self._new_tQsd.get()
+        self._initial_cylinder_obj.psd = self._new_design_pressure.get()
+        self._initial_cylinder_obj.shsd = self._new_shsd.get()
+
+    def _run_optimizer_with_weld_bias(self, weld_bias, cost_factors=None):
+        self._prepare_cylinder_for_optimization()
+        return op.run_optmizataion(initial_structure_obj=self._initial_cylinder_obj,
+                                   min_var=self.get_lower_bounds(),
+                                   max_var=self.get_upper_bounds(),
+                                   lateral_pressure=self._new_design_pressure.get(),
+                                   deltas=self.get_deltas(),
+                                   algorithm=self._new_algorithm.get(),
+                                   trials=self._new_algorithm_random_trials.get(),
+                                   fatigue_obj=self._fatigue_object,
+                                   fat_press_ext_int=self._get_fatigue_pressure_tuple(),
+                                   slamming_press=self._new_slamming_pressure.get(),
+                                   predefined_stiffener_iter=self._predefined_stiffener_iter,
+                                   processes=self._new_processes.get(),
+                                   use_weight_filter=True,
+                                   fdwn=self._new_fdwn.get(),
+                                   fup=self._new_fup.get(),
+                                   cylinder=True,
+                                   weld_bias=weld_bias,
+                                   builtup_stiffener=self._new_include_builtup_weld.get(),
+                                   weld_metric=self._get_weld_metric_for_optimization(),
+                                   cost_factors=cost_factors)
+
+    def open_cost_study_window(self):
+        cost_window = tk.Toplevel(self._frame)
+        cost_window.title('Cylinder cost study')
+        cost_window.geometry('360x170')
+        cost_window.grab_set()
+
+        steel_cost = tk.DoubleVar()
+        weld_cost = tk.DoubleVar()
+        steel_cost.set(1.0)
+        weld_cost.set(1.0)
+
+        tk.Label(cost_window, text='Steel cost per kg').place(x=20, y=25)
+        tk.Entry(cost_window, textvariable=steel_cost, width=12).place(x=210, y=22)
+        tk.Label(cost_window, text='Weld cost per ' + self._get_weld_metric_unit()).place(x=20, y=60)
+        tk.Entry(cost_window, textvariable=weld_cost, width=12).place(x=210, y=57)
+
+        def run_cost_study():
+            try:
+                cost_factors = op.normalize_cost_factors((steel_cost.get(), weld_cost.get()))
+            except Exception:
+                cost_factors = None
+
+            if cost_factors is None:
+                messagebox.showerror(
+                    title='Cost study',
+                    message='Enter non-negative costs. At least one cost must be larger than zero.',
+                )
+                return
+
+            cost_window.destroy()
+            self.run_cost_study(cost_factors)
+
+        tk.Button(cost_window, text='Run cost optimization', command=run_cost_study, bg='white') \
+            .place(x=20, y=110, width=180)
+        tk.Button(cost_window, text='Cancel', command=cost_window.destroy, bg='white') \
+            .place(x=220, y=110, width=90)
+
+    def run_cost_study(self, cost_factors):
+        self.run_button.config(state=tk.DISABLED)
+        self.cost_study_button.config(state=tk.DISABLED)
+        self._opt_actual_running_time.config(text='Cost optimization started ' + datetime.datetime.now().strftime("%H:%M:%S"))
+        self._opt_actual_running_time.update()
+        t_start = time.time()
+        self._opt_results, self._opt_runned = (), False
+        self.pso_parameters = (self._new_swarm_size.get(), self._new_omega.get(), self._new_phip.get(),
+                               self._new_phig.get(),
+                               self._new_maxiter.get(), self._new_minstep.get(), self._new_minfunc.get())
+
+        try:
+            self._opt_results = self._run_optimizer_with_weld_bias(
+                self._get_weld_bias_for_optimization(),
+                cost_factors=cost_factors,
+            )
+            self._show_cost_study_result(cost_factors, t_start)
+        finally:
+            self.run_button.config(state=tk.NORMAL)
+            self.cost_study_button.config(state=tk.NORMAL)
+
+    def _show_cost_study_result(self, cost_factors, t_start):
+        if self._opt_results is None or self._opt_results[0] is None:
+            messagebox.showinfo(title='Nothing found', message='No cost optimum found. Modify input.\n')
+            self._opt_actual_running_time.config(text='Cost optimization finished without result')
+            return
+
+        self._opt_actual_running_time.config(text='Actual running time: \n'
+                                                  + str(round((time.time() - t_start) / 60, 4)) + ' min')
+        self._opt_actual_running_time.update()
+        self._opt_runned = True
+        self._canvas_opt.delete('all')
+        main_application.Application.draw_cylinder(text_size='Verdana 8 bold',
+                                                   canvas=self._canvas_opt,
+                                                   CylObj=self._opt_results[0],
+                                                   start_x_cyl=350, start_y_cyl=345, text_x=230,
+                                                   text_y=110)
+
+        result_x = self._opt_results[0].get_x_opt()
+        result_weight = op.calc_weight_cylinder(result_x)
+        result_weld = op.calc_weld_objective_cylinder(
+            result_x,
+            include_web_to_flange=self._new_include_builtup_weld.get(),
+            weld_metric=self._get_weld_metric_for_optimization(),
+        )
+        result_cost = cost_factors['steel'] * result_weight + cost_factors['weld'] * result_weld
+        self._result_label.config(
+            text='Cost optimization result | Cost: ' + str(round(result_cost, 2))
+                 + ' | Weight: ' + str(round(result_weight, 1)) + ' kg'
+                 + ' | ' + self._get_weld_metric_text() + ': ' + str(round(result_weld, 3))
+                 + ' ' + self._get_weld_metric_unit()
+        )
 
     def run_optimizaion(self):
         '''
@@ -781,39 +987,7 @@ class CreateOptimizeCylinderWindow():
                                self._new_phig.get(),
                                self._new_maxiter.get(), self._new_minstep.get(), self._new_minfunc.get())
 
-        if self._fatigue_pressure is not None:
-
-            fat_press = ((self._fatigue_pressure['p_ext']['loaded'], self._fatigue_pressure['p_ext']['ballast'],
-                          self._fatigue_pressure['p_ext']['part']),
-                         (self._fatigue_pressure['p_int']['loaded'], self._fatigue_pressure['p_int']['ballast'],
-                          self._fatigue_pressure['p_int']['part']))
-        else:
-            fat_press = None
-
-        self._new_sasd.set(self._new_sasd.get())
-        self._new_smsd.set(self._new_smsd.get())
-        self._new_tTsd.set(self._new_tTsd.get())
-        self._new_tQsd.set(self._new_tQsd.get())
-        self._new_design_pressure.set(self._new_design_pressure.get())
-        self._initial_cylinder_obj.psd = self._new_design_pressure.get()
-        self._new_shsd.set(self._new_shsd.get())
-
-        self._opt_results = op.run_optmizataion(initial_structure_obj=self._initial_cylinder_obj,
-                                                min_var=self.get_lower_bounds(),
-                                                max_var=self.get_upper_bounds(), lateral_pressure=
-                                                self._new_design_pressure.get(),
-                                                deltas=self.get_deltas(), algorithm=self._new_algorithm.get(),
-                                                trials=self._new_algorithm_random_trials.get(),
-                                                fatigue_obj=self._fatigue_object,
-                                                fat_press_ext_int=fat_press,
-                                                slamming_press=self._new_slamming_pressure.get(),
-                                                predefined_stiffener_iter=self._predefined_stiffener_iter,
-                                                processes=self._new_processes.get(),
-                                                use_weight_filter=True,
-                                                fdwn=self._new_fdwn.get(), fup=self._new_fup.get(),
-                                                cylinder=True,
-                                                weld_bias=self._get_weld_bias_for_optimization(),
-                                                builtup_stiffener=self._new_include_builtup_weld.get())
+        self._opt_results = self._run_optimizer_with_weld_bias(self._get_weld_bias_for_optimization())
 
         if self._opt_results is not None and self._opt_results[0] is not None:
             self._opt_actual_running_time.config(text='Actual running time: \n'
@@ -840,6 +1014,8 @@ class CreateOptimizeCylinderWindow():
                 result_text += (
                         ' | Weld bias: '
                         + str(round(self._get_weld_bias_for_optimization(), 2))
+                        + ' | Weld metric: '
+                        + self._get_weld_metric_text()
                         + ' | Built-up weld: '
                         + str(bool(self._new_include_builtup_weld.get()))
                 )
@@ -853,6 +1029,245 @@ class CreateOptimizeCylinderWindow():
         self.run_button.config(fg='yellow')
         self.run_button.config(text='RUN OPTIMIZATION')
         self.run_button.config(relief="raised")
+
+    def _get_weld_study_bias_values(self):
+        try:
+            delta = float(self._new_weld_study_delta.get())
+        except Exception:
+            raise ValueError('Weight/weld study delta must be a number between 0 and 1.')
+
+        if delta <= 0.0 or delta > 1.0:
+            raise ValueError('Weight/weld study delta must be larger than 0 and no larger than 1.')
+
+        values = []
+        value = 0.0
+        while value <= 1.0 + 1e-12:
+            values.append(round(min(value, 1.0), 10))
+            value += delta
+
+        if values[-1] < 1.0:
+            values.append(1.0)
+
+        return values
+
+    def _summarize_weight_weld_study_result(self, weld_bias, opt_results, elapsed_seconds):
+        row = {
+            'bias': weld_bias,
+            'weight': None,
+            'weld': None,
+            'weld_heading': 'Weld [' + self._get_weld_metric_unit() + ']',
+            'weld_axis_label': self._get_weld_metric_text().title() + ' [' + self._get_weld_metric_unit() + ']',
+            'shell_thk': None,
+            'radius': None,
+            'long_s': None,
+            'long_web_h': None,
+            'ring_web_h': None,
+            'frame_web_h': None,
+            'elapsed': elapsed_seconds,
+            'status': 'No result',
+        }
+
+        if opt_results is None or len(opt_results) == 0 or opt_results[0] is None:
+            return row
+
+        result_x = opt_results[0].get_x_opt()
+
+        try:
+            row['weight'] = op.calc_weight_cylinder(result_x)
+        except Exception:
+            row['weight'] = None
+
+        try:
+            row['weld'] = op.calc_weld_objective_cylinder(
+                result_x,
+                include_web_to_flange=self._new_include_builtup_weld.get(),
+                weld_metric=self._get_weld_metric_for_optimization(),
+            )
+        except Exception:
+            row['weld'] = None
+
+        row['shell_thk'] = result_x[0][0] * 1000
+        row['radius'] = result_x[0][1]
+        row['long_s'] = result_x[1][0] * 1000 if sum(result_x[1][0:6]) != 0 else None
+        row['long_web_h'] = result_x[1][2] * 1000 if sum(result_x[1][0:6]) != 0 else None
+        row['ring_web_h'] = result_x[2][2] * 1000 if sum(result_x[2][0:6]) != 0 else None
+        row['frame_web_h'] = result_x[3][2] * 1000 if sum(result_x[3][0:6]) != 0 else None
+        row['status'] = 'OK'
+        return row
+
+    def _format_study_value(self, value, decimals=3):
+        if value is None:
+            return '-'
+        try:
+            return str(round(float(value), decimals))
+        except Exception:
+            return str(value)
+
+    def _show_weight_weld_study_results(self, rows):
+        result_window = tk.Toplevel(self._frame)
+        result_window.title('Cylinder weight/weld study')
+        result_window.geometry('1180x720')
+
+        table_frame = tk.Frame(result_window)
+        table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        columns = (
+            'bias', 'weight', 'weld', 'shell_thk', 'radius',
+            'long_s', 'long_web_h', 'ring_web_h', 'frame_web_h', 'elapsed', 'status'
+        )
+        weld_heading = rows[0].get('weld_heading', 'Weld [kg]') if len(rows) > 0 else 'Weld [kg]'
+        weld_axis_label = rows[0].get('weld_axis_label', 'Weld consumables [kg]') if len(rows) > 0 \
+            else 'Weld consumables [kg]'
+        headings = {
+            'bias': 'Bias',
+            'weight': 'Weight [kg]',
+            'weld': weld_heading,
+            'shell_thk': 'shell t [mm]',
+            'radius': 'radius [m]',
+            'long_s': 'long s [mm]',
+            'long_web_h': 'long h [mm]',
+            'ring_web_h': 'ring h [mm]',
+            'frame_web_h': 'frame h [mm]',
+            'elapsed': 'Time [s]',
+            'status': 'Status',
+        }
+
+        tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=12)
+        y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+        x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=100 if column not in ('weight', 'weld', 'status') else 115, anchor=tk.CENTER)
+
+        for row in rows:
+            tree.insert(
+                '',
+                tk.END,
+                values=(
+                    self._format_study_value(row['bias'], 2),
+                    self._format_study_value(row['weight'], 1),
+                    self._format_study_value(row['weld'], 3),
+                    self._format_study_value(row['shell_thk'], 1),
+                    self._format_study_value(row['radius'], 3),
+                    self._format_study_value(row['long_s'], 1),
+                    self._format_study_value(row['long_web_h'], 1),
+                    self._format_study_value(row['ring_web_h'], 1),
+                    self._format_study_value(row['frame_web_h'], 1),
+                    self._format_study_value(row['elapsed'], 2),
+                    row['status'],
+                ),
+            )
+
+        tree.grid(row=0, column=0, sticky='nsew')
+        y_scroll.grid(row=0, column=1, sticky='ns')
+        x_scroll.grid(row=1, column=0, sticky='ew')
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        try:
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+
+            plot_rows = [row for row in rows if row['status'] == 'OK']
+            if len(plot_rows) == 0:
+                return
+
+            figure = Figure(figsize=(10.5, 3.5), dpi=100)
+            weight_axis = figure.add_subplot(111)
+            weld_axis = weight_axis.twinx()
+
+            biases = [row['bias'] for row in plot_rows]
+            weights = [row['weight'] for row in plot_rows]
+            welds = [row['weld'] for row in plot_rows]
+
+            weight_axis.plot(biases, weights, marker='o', color='tab:blue', label='Weight')
+            weld_axis.plot(biases, welds, marker='s', color='tab:red', label='Weld')
+            weight_axis.set_xlabel('Weld bias')
+            weight_axis.set_ylabel('Weight [kg]', color='tab:blue')
+            weld_axis.set_ylabel(weld_axis_label, color='tab:red')
+            weight_axis.grid(True, alpha=0.3)
+            figure.tight_layout()
+
+            canvas = FigureCanvasTkAgg(figure, master=result_window)
+            canvas.draw()
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        except Exception as err:
+            tk.Label(
+                result_window,
+                text='Plot unavailable: ' + str(err),
+                fg='red',
+            ).pack(side=tk.TOP, padx=10, pady=(0, 10))
+
+    def run_weight_weld_study(self):
+        self.pso_parameters = (self._new_swarm_size.get(), self._new_omega.get(), self._new_phip.get(),
+                               self._new_phig.get(),
+                               self._new_maxiter.get(), self._new_minstep.get(), self._new_minfunc.get())
+
+        try:
+            bias_values = self._get_weld_study_bias_values()
+        except ValueError as err:
+            messagebox.showerror(title='Weight/weld study', message=str(err))
+            return
+
+        seconds, combinations = self.get_running_time()
+        estimated_minutes = max(round((seconds * len(bias_values)) / 60, 2), 0.1)
+
+        proceed = messagebox.askyesno(
+            title='Cylinder weight/weld study',
+            message='This will run ' + str(len(bias_values)) + ' optimizer runs over the current slider range.\n'
+                    + 'Each run uses about ' + str(int(combinations)) + ' combinations.\n'
+                    + 'Estimated total time: about ' + str(estimated_minutes) + ' min.\n\n'
+                    + 'Continue?'
+        )
+        if not proceed:
+            return
+
+        original_bias = self._get_weld_bias_for_optimization()
+        rows = []
+
+        self.weight_weld_study_button.config(state=tk.DISABLED)
+        self.run_button.config(state=tk.DISABLED)
+
+        try:
+            for idx, weld_bias in enumerate(bias_values, start=1):
+                self._new_weld_bias.set(weld_bias)
+                self._opt_actual_running_time.config(
+                    text='Weight/weld study: ' + str(idx) + '/' + str(len(bias_values))
+                         + ' | bias ' + str(round(weld_bias, 2))
+                )
+                self._opt_actual_running_time.update()
+                self._frame.update_idletasks()
+
+                t_start = time.time()
+                opt_results = self._run_optimizer_with_weld_bias(weld_bias)
+                rows.append(
+                    self._summarize_weight_weld_study_result(
+                        weld_bias,
+                        opt_results,
+                        time.time() - t_start,
+                    )
+                )
+
+            self._last_weight_weld_study_rows = list(rows)
+            self._show_weight_weld_study_results(rows)
+        finally:
+            self._new_weld_bias.set(original_bias)
+            self.weight_weld_study_button.config(state=tk.NORMAL)
+            self.run_button.config(state=tk.NORMAL)
+            self._opt_actual_running_time.config(text='Weight/weld study finished')
+            self._opt_actual_running_time.update()
+
+    def show_previous_weight_weld_study(self):
+        if not self._last_weight_weld_study_rows:
+            messagebox.showinfo(
+                title='Weight/weld study',
+                message='No previous weight/weld study is available. Run the study first.',
+            )
+            return
+
+        self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
 
     def _count_steps(self, lower, upper, delta):
         """
@@ -875,7 +1290,8 @@ class CreateOptimizeCylinderWindow():
         if abs(upper - lower) < 1e-12:
             return 1
 
-        return int(np.floor((upper - lower) / delta + 1.0 + 1e-9))
+        values = np.arange(lower, upper + delta, delta)
+        return int(np.count_nonzero(values <= upper))
 
     def _count_cylinder_component_combinations(self, idx, lower, upper, delta):
         """
@@ -985,10 +1401,19 @@ class CreateOptimizeCylinderWindow():
 
         try:
             seconds, number_of_combinations = self.get_running_time()
+            weld_bias = self._get_weld_bias_for_optimization()
+            warning_text = ''
+
+            if 0.0 < weld_bias < 1.0:
+                warning_text = '\nWARNING: mixed weight/weld combination disables the initial filter.'
+            elif weld_bias >= 1.0:
+                warning_text = '\nPure weld objective: initial filter uses ' + self._get_weld_metric_text() + '.'
+
             self._runnig_time_label.config(
                 text=str(int(number_of_combinations)) + ' (about '
                      + str(max(round(seconds / 60, 2), 0.1))
                      + ' min.)'
+                     + warning_text
             )
         except (ZeroDivisionError, TclError):
             pass
