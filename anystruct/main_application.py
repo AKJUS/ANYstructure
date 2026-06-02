@@ -1,6 +1,8 @@
 import math
 import os  # -*- coding: utf-8 -*-
+from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
+from typing import Any
 
 import tkinter as tk
 from tkinter import ttk
@@ -60,6 +62,21 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.ml_models as ml_models
     import ANYstructure.anystruct.project_application as project_application
     import ANYstructure.anystruct.project_services as project_services
+
+
+@dataclass(frozen=True)
+class NewStructureProperties:
+    """Resolved structure data needed to add or update one active line."""
+
+    prop_dict: Any
+    obj_dict_stf: Any = None
+    cylinder_obj: Any = None
+    main_dict_cyl: Any = None
+    shell_dict: Any = None
+    long_dict: Any = None
+    ring_stf_dict: Any = None
+    ring_frame_dict: Any = None
+    geometry: Any = None
 
 
 class Application():
@@ -2139,16 +2156,8 @@ class Application():
         if self._structure_input_is_missing():
             return
 
-        prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, \
-            ring_frame_dict, geometry = self._resolve_new_structure_properties()
-
-        if self._active_line not in self._line_to_struc:
-            self._add_structure_to_active_line(prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict,
-                                               long_dict, ring_stf_dict, ring_frame_dict, geometry)
-        else:
-            self._update_existing_active_line_structure(prop_dict, CylinderObj, None)
-
-        self._calculate_load_combinations_after_structure_update()
+        resolved = self._resolve_new_structure_properties()
+        self._apply_resolved_new_structure(resolved)
         project_services.mark_line_for_recalculation(self._line_to_struc, self._active_line)
 
     def _sync_simplified_domain_selection(self):
@@ -7839,7 +7848,7 @@ class Application():
 
     def _resolve_new_structure_properties(self, pasted_structure=None, multi_return=None, toggle_multi=None,
                                           cylinder_return=None):
-        CylinderObj = None
+        cylinder_obj = None
         obj_dict_stf = None
         main_dict_cyl = shell_dict = long_dict = ring_stf_dict = ring_frame_dict = geometry = None
 
@@ -7852,43 +7861,44 @@ class Application():
         elif pasted_structure is None:
             prop_dict, obj_dict_stf = self._build_flat_structure_properties()
 
-            if not self._is_flat_calculation_domain(self._new_calculation_domain.get()) and cylinder_return is None:
-                CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
+            if cylinder_return is None and not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
+                cylinder_obj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
                     self._build_cylinder_structure_properties()
-            elif cylinder_return is not None:
-                main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
-                    cylinder_return.get_all_properties()
-                geometry = main_dict_cyl['geometry'][0]
         else:
             prop_dict = pasted_structure.get_main_properties()
 
         if cylinder_return is not None:
-            CylinderObj = cylinder_return
-            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
-                cylinder_return.get_all_properties()
-            geometry = main_dict_cyl['geometry'][0]
+            cylinder_obj = cylinder_return
+            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
+                self._cylinder_property_parts(cylinder_return)
 
         if obj_dict_stf is None and isinstance(prop_dict, dict):
             obj_dict_stf = prop_dict.get('Stiffener')
 
-        return (prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict,
-                ring_frame_dict, geometry)
+        return NewStructureProperties(prop_dict, obj_dict_stf, cylinder_obj, main_dict_cyl, shell_dict, long_dict,
+                                      ring_stf_dict, ring_frame_dict, geometry)
 
-    def _add_structure_to_active_line(self, prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict,
-                                      long_dict, ring_stf_dict, ring_frame_dict, geometry):
-        All = self._create_all_structure_from_properties(prop_dict)
+    @staticmethod
+    def _cylinder_property_parts(cylinder_obj):
+        main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = cylinder_obj.get_all_properties()
+        return main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, main_dict_cyl['geometry'][0]
+
+    def _add_structure_to_active_line(self, resolved):
+        All = self._create_all_structure_from_properties(resolved.prop_dict)
         line_structures = project_services.LineStructureService(self._line_to_struc)
-        line_structures.assign_structure(self._active_line, All, cylinder=CylinderObj)
+        line_structures.assign_structure(self._active_line, All, cylinder=resolved.cylinder_obj)
 
-        self._sections = add_new_section(self._sections, struc.Section(obj_dict_stf))  # TODO error when pasting
+        self._sections = add_new_section(self._sections, struc.Section(resolved.obj_dict_stf))  # TODO error when pasting
         if line_structures.structure(self._active_line).Plate.get_structure_type() not in \
                 self._structure_types['non-wt']:
             self._clear_tanks_and_grid()
         if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
-            if CylinderObj is None:
-                CylinderObj = self._create_cylinder_structure_from_properties(
-                    main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry)
-            line_structures.set_cylinder(self._active_line, CylinderObj)
+            cylinder_obj = resolved.cylinder_obj
+            if cylinder_obj is None:
+                cylinder_obj = self._create_cylinder_structure_from_properties(
+                    resolved.main_dict_cyl, resolved.shell_dict, resolved.long_dict, resolved.ring_stf_dict,
+                    resolved.ring_frame_dict, resolved.geometry)
+            line_structures.set_cylinder(self._active_line, cylinder_obj)
 
     def _scale_existing_flat_structure_if_needed(self, prev_all_obj):
         line_structures = project_services.LineStructureService(self._line_to_struc)
@@ -7913,27 +7923,28 @@ class Application():
         project_services.LineStructureService(self._line_to_struc).sync_fatigue_after_structure_update(
             self._active_line, prop_dict)
 
-    def _sync_cylinder_object_after_structure_update(self, CylinderObj, cylinder_return):
+    def _sync_cylinder_object_after_structure_update(self, cylinder_obj, cylinder_return):
         line_structures = project_services.LineStructureService(self._line_to_struc)
-        if all([CylinderObj is None, cylinder_return is None,
+        if all([cylinder_obj is None, cylinder_return is None,
                 line_structures.cylinder(self._active_line) is not None]):
             line_structures.set_cylinder(self._active_line, None)
-        elif CylinderObj is not None:
+        elif cylinder_obj is not None:
             if line_structures.cylinder(self._active_line) is not None and self._new_scale_stresses.get():
                 NewCylinderObj = op.create_new_cylinder_obj(line_structures.cylinder(self._active_line),
-                                                            CylinderObj.get_x_opt())
-                NewCylinderObj.LongStfObj = None if CylinderObj.LongStfObj is None \
+                                                            cylinder_obj.get_x_opt())
+                NewCylinderObj.LongStfObj = None if cylinder_obj.LongStfObj is None \
                     else NewCylinderObj.LongStfObj
-                NewCylinderObj.RingStfObj = None if CylinderObj.RingStfObj is None \
+                NewCylinderObj.RingStfObj = None if cylinder_obj.RingStfObj is None \
                     else NewCylinderObj.RingStfObj
-                NewCylinderObj.RingFrameObj = None if CylinderObj.RingFrameObj is None \
+                NewCylinderObj.RingFrameObj = None if cylinder_obj.RingFrameObj is None \
                     else NewCylinderObj.RingFrameObj
-            line_structures.set_cylinder(self._active_line, CylinderObj)
+            line_structures.set_cylinder(self._active_line, cylinder_obj)
         elif cylinder_return is not None:
             line_structures.set_cylinder(self._active_line, cylinder_return)
 
-    def _update_existing_active_line_structure(self, prop_dict, CylinderObj, cylinder_return):
+    def _update_existing_active_line_structure(self, resolved, cylinder_return):
         line_structures = project_services.LineStructureService(self._line_to_struc)
+        prop_dict = resolved.prop_dict
         prev_type = line_structures.structure(self._active_line).Plate.get_structure_type()
         prev_all_obj = copy.deepcopy(line_structures.structure(self._active_line))
         line_structures.update_structure_properties(self._active_line, prop_dict)
@@ -7946,7 +7957,14 @@ class Application():
                 self._structure_types['vertical']:
             self._clear_tanks_and_grid()
 
-        self._sync_cylinder_object_after_structure_update(CylinderObj, cylinder_return)
+        self._sync_cylinder_object_after_structure_update(resolved.cylinder_obj, cylinder_return)
+
+    def _apply_resolved_new_structure(self, resolved, cylinder_return=None):
+        if self._active_line not in self._line_to_struc:
+            self._add_structure_to_active_line(resolved)
+        else:
+            self._update_existing_active_line_structure(resolved, cylinder_return)
+        self._calculate_load_combinations_after_structure_update()
 
     def _replace_active_line_with_optimized_structure(self, optimized_structure):
         """Replace the active single-line structure with the optimizer result object."""
@@ -7975,6 +7993,21 @@ class Application():
         except (KeyError, AttributeError):
             pass
 
+    def _prepare_new_structure_context(self, multi_return=None):
+        if multi_return is not None:
+            return
+
+        self.save_no_dialogue(backup=True)  # keeping a backup
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._ensure_single_dummy_line()
+            self._select_single_calculation_line()
+            self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+
+    @staticmethod
+    def _uses_visible_structure_inputs(pasted_structure=None, multi_return=None, toggle_multi=None,
+                                       cylinder_return=None):
+        return all(value is None for value in (pasted_structure, multi_return, toggle_multi, cylinder_return))
+
     def new_structure(self, event=None, pasted_structure=None, multi_return=None, toggle_multi=None,
                       suspend_recalc=False, cylinder_return=None):
         '''
@@ -7990,36 +8023,20 @@ class Application():
             [5] Cylinder buckling data
         :return:
         '''
-        if multi_return is None:
-            self.save_no_dialogue(backup=True)  # keeping a backup
+        self._prepare_new_structure_context(multi_return)
 
-        if getattr(self, '_simplified_calculation_mode', False) and multi_return is None:
-            self._ensure_single_dummy_line()
-            self._select_single_calculation_line()
-            self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
-
-        if all([pasted_structure == None, multi_return == None, toggle_multi == None, cylinder_return == None]):
+        if self._uses_visible_structure_inputs(pasted_structure, multi_return, toggle_multi, cylinder_return):
             if self._structure_input_is_missing():
                 self._show_missing_structure_input_warning()
                 return
 
-        if self._line_is_active or multi_return != None:
+        if self._line_is_active or multi_return is not None:
             # structure dictionary: name of line : [ 0.Structure class, 1.calc scantling class,
             # 2.calc fatigue class, 3.load object, 4.load combinations result ]
-            prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, \
-                ring_frame_dict, geometry = self._resolve_new_structure_properties(
+            resolved = self._resolve_new_structure_properties(
                 pasted_structure=pasted_structure, multi_return=multi_return, toggle_multi=toggle_multi,
                 cylinder_return=cylinder_return)
-
-            if self._active_line not in self._line_to_struc.keys():
-                self._add_structure_to_active_line(prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict,
-                                                   long_dict, ring_stf_dict, ring_frame_dict, geometry)
-            else:
-                self._update_existing_active_line_structure(prop_dict, CylinderObj, cylinder_return)
-            self._calculate_load_combinations_after_structure_update()
-
-        else:
-            pass
+            self._apply_resolved_new_structure(resolved, cylinder_return)
 
         self._refresh_after_structure_change(suspend_recalc)
 

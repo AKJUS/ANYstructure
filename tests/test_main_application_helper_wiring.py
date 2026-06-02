@@ -180,8 +180,14 @@ def test_cylinder_optimizer_return_bypasses_missing_flat_input_guard():
         source.index("def new_structure"):
         source.index("def option_meny_structure_type_trace")
     ]
+    visible_input_guard = source[
+        source.index("def _uses_visible_structure_inputs"):
+        source.index("def new_structure")
+    ]
 
-    assert "cylinder_return == None" in new_structure
+    assert "cylinder_return" in visible_input_guard
+    assert "all(value is None" in visible_input_guard
+    assert "self._uses_visible_structure_inputs(" in new_structure
     assert "self._show_missing_structure_input_warning()" in new_structure
 
 
@@ -342,14 +348,25 @@ def test_new_structure_delegates_property_building():
     ]
     update_structure = source[
         source.index("def _update_existing_active_line_structure"):
-        source.index("def _calculate_load_combinations_after_structure_update")
+        source.index("def _replace_active_line_with_optimized_structure")
+    ]
+    apply_structure = source[
+        source.index("def _apply_resolved_new_structure"):
+        source.index("def _replace_active_line_with_optimized_structure")
+    ]
+    new_structure_context = source[
+        source.index("def _prepare_new_structure_context"):
+        source.index("def new_structure")
     ]
 
+    assert "class NewStructureProperties" in source
     assert "self._build_flat_structure_properties()" in resolver
     assert "elif isinstance(toggle_multi, tuple):" in resolver
     assert "prop_dict, obj_dict_stf = toggle_multi" in resolver
     assert "if cylinder_return is not None:" in resolver
-    assert "CylinderObj = cylinder_return" in resolver
+    assert "cylinder_obj = cylinder_return" in resolver
+    assert "self._cylinder_property_parts(cylinder_return)" in resolver
+    assert "NewStructureProperties(" in resolver
     assert "FlatStructurePropertyRequest(" in flat_builder
     assert "FlatStructurePropertyService.build(" in flat_builder
     assert "api_helpers.mpa_to_pa" not in flat_builder
@@ -360,16 +377,23 @@ def test_new_structure_delegates_property_building():
     assert "api_helpers.mpa_to_pa" not in cylinder_builder
     assert "api_helpers.mm_to_m" not in cylinder_builder
     assert "self._build_cylinder_structure_properties()" in resolver
+    assert "self.save_no_dialogue(backup=True)" in new_structure_context
+    assert "self._ensure_single_dummy_line()" in new_structure_context
+    assert "self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)" in new_structure_context
     assert "self._structure_input_is_missing()" in new_structure
-    assert "self._create_all_structure_from_properties(prop_dict)" in add_structure
+    assert "self._create_all_structure_from_properties(resolved.prop_dict)" in add_structure
     assert "self._create_cylinder_structure_from_properties(" in add_structure
     assert "self._clear_tanks_and_grid()" in add_structure
     assert "self._clear_tanks_and_grid()" in update_structure
     assert "self._refresh_after_structure_change(suspend_recalc)" in new_structure
     assert "self._resolve_new_structure_properties(" in new_structure
-    assert "self._add_structure_to_active_line(" in new_structure
-    assert "self._update_existing_active_line_structure(" in new_structure
-    assert "self._calculate_load_combinations_after_structure_update()" in new_structure
+    assert "self._apply_resolved_new_structure(resolved, cylinder_return)" in new_structure
+    assert "self._add_structure_to_active_line(resolved)" in apply_structure
+    assert "self._update_existing_active_line_structure(resolved, cylinder_return)" in apply_structure
+    assert "self._calculate_load_combinations_after_structure_update()" in apply_structure
+    assert "self._add_structure_to_active_line(" not in new_structure
+    assert "self._update_existing_active_line_structure(" not in new_structure
+    assert "self._calculate_load_combinations_after_structure_update()" not in new_structure
     assert "obj_dict = {" not in new_structure
     assert "shell_dict = {" not in new_structure
     assert "AllStructure(" not in new_structure

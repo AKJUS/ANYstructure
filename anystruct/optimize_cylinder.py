@@ -15,12 +15,14 @@ try:
     import anystruct.example_data as test
     import anystruct.helper as hlp
     import anystruct.line_structure as line_structure
+    import anystruct.ml_models as ml_models
 except ModuleNotFoundError:
     import ANYstructure.anystruct.main_application as main_application
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.helper as hlp
     import ANYstructure.anystruct.line_structure as line_structure
+    import ANYstructure.anystruct.ml_models as ml_models
 
 
 class CreateOptimizeCylinderWindow():
@@ -31,152 +33,22 @@ class CreateOptimizeCylinderWindow():
     def __init__(self, master, app=None):
         super(CreateOptimizeCylinderWindow, self).__init__()
         if __name__ == '__main__':
-            import pickle
             import anystruct.calc_structure as calc
             self._initial_structure_obj = test.get_structure_calc_object(heavy=True)
             self._initial_calc_obj = test.get_structure_calc_object(heavy=True)
             self._fatigue_object = test.get_fatigue_object()
             self._fatigue_pressure = test.get_fatigue_pressures()
             self._slamming_pressure = test.get_slamming_pressure()
-            image_dir = os.path.dirname(__file__) + '\\images\\'
+            self._root_dir = os.path.dirname(os.path.abspath(__file__))
+            image_dir = self._root_dir + '\\images\\'
             self._initial_cylinder_obj = calc.CylinderAndCurvedPlate(main_dict=test.shell_main_dict,
                                                                      shell=calc.Shell(test.shell_dict),
                                                                      long_stf=calc.Structure(test.obj_dict_cyl_long2),
                                                                      ring_stf=None,
                                                                      # calc.Structure(test.obj_dict_cyl_ring2),
                                                                      ring_frame=None)  # calc.Structure(test.obj_dict_cyl_heavy_ring2))
-
-            self._ML_buckling = dict()  # Buckling machine learning algorithms
-
-            for name, file_base in zip(
-                    [
-                        # ---------------------------------------------------------------------
-                        # Classification pipeline
-                        # ---------------------------------------------------------------------
-                        'cl SP buc int predictor',
-                        'cl SP buc int scaler',
-                        'cl SP ult int predictor',
-                        'cl SP ult int scaler',
-
-                        'cl SP buc GLGT predictor',
-                        'cl SP buc GLGT scaler',
-                        'cl SP ult GLGT predictor',
-                        'cl SP ult GLGT scaler',
-
-                        'cl UP buc int predictor',
-                        'cl UP buc int scaler',
-                        'cl UP ult int predictor',
-                        'cl UP ult int scaler',
-
-                        'cl UP buc GLGT predictor',
-                        'cl UP buc GLGT scaler',
-                        'cl UP ult GLGT predictor',
-                        'cl UP ult GLGT scaler',
-
-                        'CSR predictor UP',
-                        'CSR scaler UP',
-                        'CSR predictor SP',
-                        'CSR scaler SP',
-
-                        # ---------------------------------------------------------------------
-                        # Numeric UF pipeline
-                        # ---------------------------------------------------------------------
-                        'num SP int validity predictor',
-                        'num SP int validity xscaler',
-                        'num SP int UF reg predictor',
-                        'num SP int UF reg xscaler',
-                        'num SP int UF reg yscaler',
-
-                        'num SP GLGT validity predictor',
-                        'num SP GLGT validity xscaler',
-                        'num SP GLGT UF reg predictor',
-                        'num SP GLGT UF reg xscaler',
-                        'num SP GLGT UF reg yscaler',
-
-                        'num UP int validity predictor',
-                        'num UP int validity xscaler',
-                        'num UP int UF reg predictor',
-                        'num UP int UF reg xscaler',
-                        'num UP int UF reg yscaler',
-
-                        'num UP GLGT validity predictor',
-                        'num UP GLGT validity xscaler',
-                        'num UP GLGT UF reg predictor',
-                        'num UP GLGT UF reg xscaler',
-                        'num UP GLGT UF reg yscaler',
-                    ],
-                    [
-                        # ---------------------------------------------------------------------
-                        # Classification pipeline
-                        # ---------------------------------------------------------------------
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_SP",
-
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_SP",
-
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_UP",
-
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_UP",
-
-                        "ml_files\\CLPIPE_CL_CSR-Tank_req_cl_predictor_UP",
-                        "ml_files\\CLPIPE_CL_CSR-Tank_req_cl_scaler_UP",
-                        "ml_files\\CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor_SP",
-                        "ml_files\\CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler_SP",
-
-                        # ---------------------------------------------------------------------
-                        # Numeric UF pipeline
-                        # ---------------------------------------------------------------------
-                        "ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_1",
-
-                        "ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_2,_3",
-
-                        "ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_1",
-
-                        "ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_2,_3",
-                    ],
-            ):
-                self._ML_buckling[name] = None
-                if os.path.isfile(file_base + '.pickle'):
-                    file = open(file_base + '.pickle', 'rb')
-                    self._ML_buckling[name] = pickle.load(file)
-                    file.close()
-
-            self._ML_classes = {0: 'N/A',
-                                1: 'A negative utilisation factor is found.',
-                                2: 'At least one of the in-plane loads must be non-zero.',
-                                3: 'Division by zero',
-                                4: 'Overflow',
-                                5: 'The aspect ratio exceeds the PULS code limit',
-                                6: 'The global slenderness exceeds 4. Please reduce stiffener span or increase stiffener height.',
-                                7: 'The applied pressure is too high for this plate field.', 8: 'web-flange-ratio',
-                                9: 'UF below or equal 0.87', 10: 'UF between 0.87 and 1.0', 11: 'UF above 1.0'}
+            self._ML_buckling = ml_models.load_buckling_models((self._root_dir,))
+            self._ML_classes = ml_models.default_ml_class_messages()
         else:
             self.app = app
             active_bundle = app._line_to_struc[app._active_line]

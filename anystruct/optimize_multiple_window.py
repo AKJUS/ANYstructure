@@ -5,6 +5,7 @@ from tkinter.ttk import Progressbar
 from tkinter import messagebox
 from tkinter.filedialog import askopenfilenames
 from multiprocessing import Pool, cpu_count
+import os
 import numpy as np
 
 try:
@@ -12,6 +13,7 @@ try:
     import anystruct.optimize as op
     import anystruct.example_data as test
     import anystruct.line_structure as line_structure
+    import anystruct.ml_models as ml_models
     from anystruct.calc_structure import *
     import anystruct.calc_structure as calc
     from anystruct.helper import *
@@ -21,6 +23,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.line_structure as line_structure
+    import ANYstructure.anystruct.ml_models as ml_models
     from ANYstructure.anystruct.calc_structure import *
     import ANYstructure.anystruct.calc_structure as calc
     from ANYstructure.anystruct.helper import *
@@ -101,7 +104,6 @@ class CreateOptimizeMultipleWindow():
     def __init__(self, master, app=None):
         super(CreateOptimizeMultipleWindow, self).__init__()
         if __name__ == '__main__':
-            import pickle
             self._load_objects = {}
             self._load_comb_dict = {}
             self._line_dict = test.get_line_dict()
@@ -113,45 +115,10 @@ class CreateOptimizeMultipleWindow():
             self._fatigue_pressure = test.get_fatigue_pressures()
             self._fatigue_object = test.get_fatigue_object()
             self._normal_pressure = test.get_random_pressure()
-            image_dir = os.path.dirname(__file__) + '\\images\\'
+            self._root_dir = os.path.dirname(os.path.abspath(__file__))
+            image_dir = self._root_dir + '\\images\\'
             self._active_lines = []
-            self._ML_buckling = dict()  # Buckling machine learning algorithm
-            for name, file_base in zip(['cl SP buc int predictor', 'cl SP buc int scaler',
-                                        'cl SP ult int predictor', 'cl SP ult int scaler',
-                                        'cl SP buc GLGT predictor', 'cl SP buc GLGT scaler',
-                                        'cl SP ult GLGT predictor', 'cl SP ult GLGT scaler',
-                                        'cl UP buc int predictor', 'cl UP buc int scaler',
-                                        'cl UP ult int predictor', 'cl UP ult int scaler',
-                                        'cl UP buc GLGT predictor', 'cl UP buc GLGT scaler',
-                                        'cl UP ult GLGT predictor', 'cl UP ult GLGT scaler'
-                                        ],
-                                       ["ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_2,_3_UP",
-                                        "CLPIPE_CL_CSR-Tank_req_cl_predictor",
-                                        "CLPIPE_CL_CSR-Tank_req_cl_UP_scaler",
-                                        "CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor",
-                                        "CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_SP_scaler"]):
-                self._ML_buckling[name] = None
-                if os.path.isfile(file_base + '.pickle'):
-                    file = open(file_base + '.pickle', 'rb')
-                    from sklearn.neural_network import MLPClassifier
-                    from sklearn.preprocessing import StandardScaler
-                    self._ML_buckling[name] = pickle.load(file)
-                    file.close()
+            self._ML_buckling = ml_models.load_buckling_models((self._root_dir,))
         else:
             self.app = app
             self._load_objects = app._load_dict
