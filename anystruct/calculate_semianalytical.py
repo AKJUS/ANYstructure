@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, MutableMapping, Sequence
 
 import numpy as np
 
@@ -656,6 +656,18 @@ def _anystructure_selected_method(value: Any) -> str:
     return text
 
 
+def _selected_anystructure_method(calc_object: Any, selected_method: Any = None) -> str:
+    """Return the PULS result branch requested by ANYstructure optimization."""
+
+    if selected_method is not None:
+        return _anystructure_selected_method(selected_method)
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+    try:
+        return _anystructure_selected_method(all_structure.Plate.get_puls_method())
+    except Exception:
+        return ""
+
+
 def _anystructure_material_factor(all_structure: Any) -> float | None:
     for candidate in (
         getattr(all_structure, "Plate", None),
@@ -935,15 +947,50 @@ def _predict_anystructure_uf_core(
     calc_object: Any,
     lat_press: float,
     config: S3SolverConfig | None,
+    selected_method: Any = None,
+    default_acceptance: float = 0.87,
+    cache: MutableMapping[Any, np.ndarray] | None = None,
 ) -> tuple[float, float, float, float | None]:
     all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
     material_factor = _anystructure_material_factor(all_structure)
-    acceptance_limit = None if material_factor is None else 1.0 / material_factor
+    fallback_acceptance = _optional_float(default_acceptance)
+    if fallback_acceptance is None:
+        fallback_acceptance = 0.87
+    acceptance_limit = fallback_acceptance if material_factor is None else 1.0 / material_factor
     panel = anystructure_panel_input(calc_object, lat_press)
     if panel is None:
         return float("inf"), float("inf"), 0.0, acceptance_limit
 
     fast_config = _anystructure_fast_solver_config(config)
+    method = _selected_anystructure_method(calc_object, selected_method)
+    cache_key = None
+    if cache is not None:
+        cache_key = _anystructure_optimization_cache_key(
+            panel,
+            method,
+            acceptance_limit,
+            fast_config,
+        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return float(cached[0]), float(cached[1]), float(cached[2]), float(cached[3])
+
+    if method == "buckling" and isinstance(panel, S3PanelInput):
+        prefilter = _s3_buckling_early_reject_vector(
+            panel,
+            fast_config,
+            acceptance_limit,
+        )
+        if prefilter is not None:
+            if cache is not None and cache_key is not None:
+                cache[cache_key] = prefilter.copy()
+            return (
+                float(prefilter[0]),
+                float(prefilter[1]),
+                float(prefilter[2]),
+                float(prefilter[3]),
+            )
+
     solved = (
         solve_s3_panel(panel, fast_config)
         if isinstance(panel, S3PanelInput)
@@ -954,12 +1001,26 @@ def _predict_anystructure_uf_core(
         and solved.buckling_usage_factor is not None
         and solved.ultimate_usage_factor is not None
     ):
+        vector = np.array(
+            [
+                float(solved.buckling_usage_factor),
+                float(solved.ultimate_usage_factor),
+                1.0,
+                float(acceptance_limit),
+            ],
+            dtype=float,
+        )
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = vector.copy()
         return (
             float(solved.buckling_usage_factor),
             float(solved.ultimate_usage_factor),
             1.0,
             acceptance_limit,
         )
+    vector = np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
+    if cache is not None and cache_key is not None:
+        cache[cache_key] = vector.copy()
     return float("inf"), float("inf"), 0.0, acceptance_limit
 
 
@@ -967,6 +1028,8 @@ def predict_anystructure_uf(
     calc_object: Any,
     lat_press: float = 0.0,
     config: S3SolverConfig | None = None,
+    selected_method: Any = None,
+    cache: MutableMapping[Any, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Return legacy ANYstructure vector [buckling UF, ultimate UF, valid].
 
@@ -974,7 +1037,13 @@ def predict_anystructure_uf(
     them against a separate PULS acceptance limit, typically 1 / material factor.
     """
 
-    buckling, ultimate, valid, _ = _predict_anystructure_uf_core(calc_object, lat_press, config)
+    buckling, ultimate, valid, _ = _predict_anystructure_uf_core(
+        calc_object,
+        lat_press,
+        config,
+        selected_method=selected_method,
+        cache=cache,
+    )
     return np.array([buckling, ultimate, valid], dtype=float)
 
 
@@ -983,6 +1052,8 @@ def predict_anystructure_uf_with_acceptance(
     lat_press: float = 0.0,
     config: S3SolverConfig | None = None,
     default_acceptance: float = 0.87,
+    selected_method: Any = None,
+    cache: MutableMapping[Any, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Return [buckling UF, ultimate UF, valid, acceptance limit] for ANYstructure."""
 
@@ -990,16 +1061,160 @@ def predict_anystructure_uf_with_acceptance(
         calc_object,
         lat_press,
         config,
+        selected_method=selected_method,
+        default_acceptance=default_acceptance,
+        cache=cache,
     )
-    acceptance = _optional_float(acceptance)
-    if acceptance is None:
-        acceptance = float(default_acceptance)
     vector = np.array([float("inf"), float("inf"), 0.0, acceptance], dtype=float)
     if valid:
         vector[0] = buckling
         vector[1] = ultimate
         vector[2] = valid
     return vector
+
+
+def predict_anystructure_uf_batch(
+    items: Iterable[Any],
+    config: S3SolverConfig | None = None,
+    default_acceptance: float = 0.87,
+    selected_method: Any = None,
+    cache: MutableMapping[Any, np.ndarray] | None = None,
+) -> np.ndarray:
+    """Return optimization vectors for multiple ANYstructure candidates.
+
+    Each item may be `(calc_object, lat_press)` or the optimization tuple
+    `(calc_object, x, lat_press)`.  The returned columns are
+    `[buckling_uf, ultimate_uf, valid_prediction, acceptance]`.
+    """
+
+    rows = list(items)
+    result = np.full((len(rows), 4), float("inf"), dtype=float)
+    fallback_acceptance = _optional_float(default_acceptance)
+    if fallback_acceptance is None:
+        fallback_acceptance = 0.87
+    result[:, 2] = 0.0
+    result[:, 3] = float(fallback_acceptance)
+    local_cache: MutableMapping[Any, np.ndarray] = {} if cache is None else cache
+    predictor = predict_anystructure_uf_with_acceptance
+    for index, item in enumerate(rows):
+        try:
+            if isinstance(item, (list, tuple)) and len(item) >= 3:
+                calc_object = item[0]
+                lat_press = item[2]
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                calc_object = item[0]
+                lat_press = item[1]
+            else:
+                calc_object = item
+                lat_press = 0.0
+            result[index] = predictor(
+                calc_object,
+                lat_press,
+                config=config,
+                default_acceptance=fallback_acceptance,
+                selected_method=selected_method,
+                cache=local_cache,
+            )
+        except Exception:
+            result[index, 2] = 0.0
+            result[index, 3] = float(fallback_acceptance)
+    return result
+
+
+def _hashable_float(value: Any, digits: int = 9) -> float | str:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return str(value)
+    if not math.isfinite(parsed):
+        return str(parsed)
+    return round(parsed, digits)
+
+
+def _anystructure_optimization_cache_key(
+    panel: S3PanelInput | U3PanelInput,
+    selected_method: str,
+    acceptance_limit: float,
+    config: S3SolverConfig,
+) -> tuple[Any, ...]:
+    return (
+        type(panel).__name__,
+        tuple(
+            (name, _hashable_float(value) if isinstance(value, (int, float)) else str(value))
+            for name, value in panel.__dict__.items()
+        ),
+        selected_method,
+        _hashable_float(acceptance_limit),
+        tuple(config.longitudinal_modes),
+        tuple(config.transverse_modes),
+        tuple(config.web_longitudinal_modes),
+        tuple(config.web_depth_modes),
+        _hashable_float(config.global_stiffened_strip_capacity_factor),
+        _hashable_float(config.s3_shear_buckling_capacity_factor),
+    )
+
+
+def _s3_buckling_early_reject_vector(
+    panel: S3PanelInput,
+    config: S3SolverConfig,
+    acceptance_limit: float,
+) -> np.ndarray | None:
+    """Return an optimization rejection vector when elastic buckling already fails.
+
+    This is intentionally a one-way filter.  It never accepts a candidate and it
+    never changes public solver results; it only skips continuation for
+    buckling-method optimization candidates whose elastic buckling envelope is
+    already above the PULS acceptance limit.
+    """
+
+    validation_reasons = collect_s3_validation_reasons(panel, config)
+    if validation_reasons:
+        return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
+    if all(
+        abs(value) <= EPS
+        for value in (
+            panel.axial_stress,
+            panel.mean_transverse_stress,
+            panel.shear_stress,
+        )
+    ):
+        return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
+
+    section = build_section_properties(panel)
+    stiffener_section, _ = build_effective_stiffener_section(panel, config)
+    modes = build_ritz_modes(panel, section, config)
+    runtime = _build_ritz_runtime(panel, modes, config)
+    amplitudes, pressure_converged, _ = solve_equilibrium_amplitudes(
+        panel,
+        modes,
+        0.0,
+        [0.0 for _ in modes],
+        config,
+        runtime,
+    )
+    if not pressure_converged:
+        return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
+
+    pressure_yield = yield_utilization(
+        panel,
+        section,
+        stiffener_section,
+        modes,
+        amplitudes,
+        0.0,
+        config,
+        runtime=runtime,
+    )
+    if pressure_yield["max"] >= config.pressure_yield_limit:
+        return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
+
+    buckling = elastic_buckling_factors(panel, section, modes, config, stiffener_section)
+    buckling_factor = buckling["critical_factor"]
+    if buckling_factor is None or buckling_factor <= EPS:
+        return None
+    elastic_usage = 1.0 / max(float(buckling_factor), EPS)
+    if elastic_usage >= float(acceptance_limit):
+        return np.array([elastic_usage, float("inf"), 1.0, float(acceptance_limit)], dtype=float)
+    return None
 
 
 def normalized_load_components(panel: S3PanelInput) -> dict[str, float]:
@@ -3217,6 +3432,8 @@ def solve_equilibrium_amplitudes(
     imperfection = runtime.imperfection
     force = pressure + load_factor * (geometric @ imperfection)
     tangent_linear = linear - load_factor * geometric
+    tangent_linear_diagonal = np.diagonal(tangent_linear).copy()
+    diagonal_stride = len(modes) + 1
     if np.max(np.abs(force)) <= EPS and np.max(np.abs(q)) <= EPS:
         return [0.0 for _ in modes], True, 0
 
@@ -3232,7 +3449,8 @@ def solve_equilibrium_amplitudes(
         if float(np.max(np.abs(residual))) <= config.newton_tolerance * scale:
             return q.tolist(), True, iteration
 
-        tangent = tangent_linear + np.diag(3.0 * nonlinear * q * q)
+        tangent = tangent_linear.copy()
+        tangent.flat[::diagonal_stride] = tangent_linear_diagonal + 3.0 * nonlinear * q * q
         try:
             delta = np.linalg.solve(tangent, -residual)
         except np.linalg.LinAlgError:
@@ -4814,4 +5032,5 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         solve_u3_panel,
         validation_reasons,
     )
+
 

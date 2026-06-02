@@ -1418,14 +1418,29 @@ class CreateOptimizeMultipleWindow():
         Predict built-in SemiAnalytical UF results for harmonizer candidate objects.
 
         Returns columns [buckling_uf, ultimate_uf, valid_prediction, acceptance].
-        U3 will reuse this GUI slot when the unstiffened solver branch is added.
+        U3 reuses this GUI slot through the runtime S3/U3 adapter.
         """
         sort_again = np.full([len(to_run), 4], float('inf'), dtype=float)
         sort_again[:, 2] = 0
         sort_again[:, 3] = 0.87
 
+        try:
+            if hasattr(op.semi_analytical, 'predict_anystructure_uf_batch'):
+                return op.semi_analytical.predict_anystructure_uf_batch(
+                    to_run,
+                    default_acceptance=0.87,
+                    cache={},
+                )
+        except Exception:
+            pass
+
+        local_cache = {}
         for idx, (calc_object, x, lat_press) in enumerate(to_run):
-            sort_again[idx, 0:3] = op._predict_semi_analytical_uf(calc_object, lat_press)
+            sort_again[idx, 0:4] = op._predict_semi_analytical_uf(
+                calc_object,
+                lat_press,
+                cache=local_cache,
+            )
 
         return sort_again
 

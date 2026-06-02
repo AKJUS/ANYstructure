@@ -22,6 +22,9 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.calculate_semianalytical as semi_analytical
 
 
+DEFAULT_USE_SEMIANALYTICAL_SPEED_STAGING = True
+
+
 def _set_material_factor_on_structure(obj, material_factor):
     """
     Apply selected material factor to Plate/Stiffener/Girder objects.
@@ -1161,21 +1164,33 @@ def _get_semi_analytical_input_for_optimization(calc_object, lat_press):
     )
 
 
-def _predict_semi_analytical_uf(calc_object, lat_press, default_acceptance=0.87):
+def _predict_semi_analytical_uf(calc_object, lat_press, default_acceptance=0.87, selected_method=None, cache=None):
     """
     Return [buckling_uf, ultimate_uf, valid_prediction, acceptance_limit].
     """
     result = np.array([float('inf'), float('inf'), 0.0, float(default_acceptance)], dtype=float)
 
     try:
+        if selected_method is None:
+            try:
+                selected_method = _puls_selected_method(calc_object[0].Plate.get_puls_method())
+            except Exception:
+                selected_method = None
         if hasattr(semi_analytical, 'predict_anystructure_uf_with_acceptance'):
             return semi_analytical.predict_anystructure_uf_with_acceptance(
                 calc_object,
                 lat_press,
                 default_acceptance=default_acceptance,
+                selected_method=selected_method,
+                cache=cache,
             )
         if hasattr(semi_analytical, 'predict_anystructure_uf'):
-            result[0:3] = semi_analytical.predict_anystructure_uf(calc_object, lat_press)
+            result[0:3] = semi_analytical.predict_anystructure_uf(
+                calc_object,
+                lat_press,
+                selected_method=selected_method,
+                cache=cache,
+            )
             return result
 
         panel = _get_semi_analytical_input_for_optimization(calc_object, lat_press)
@@ -2267,11 +2282,59 @@ def x_to_string(x):
     return ret
 
 
+
+def _semianalytical_speed_staging_candidates(iterable_all, init_stuc_obj, lat_press, init_filter_weight, side,
+                                             chk, fat_dict, fat_press, slamming_press, fdwn, fup,
+                                             weld_bias, builtup_stiffener, weld_metric, cost_factors):
+    """
+    Return (surviving_candidates, early_rejects) for SemiAnalytical optimization.
+
+    This helper deliberately uses any_constraints_all as the cheap-check oracle
+    with SemiAnalytical/ML/fatigue/slamming/heavy buckling checks disabled. The
+    final decision for every survivor is still made by any_constraints_all.
+    """
+    pre_chk = list(chk)
+    while len(pre_chk) < 10:
+        pre_chk.append(False)
+    for disabled_idx in (3, 4, 5, 7, 8, 9):
+        pre_chk[disabled_idx] = False
+
+    candidates = []
+    rejects = []
+    for x in iterable_all:
+        precheck = any_constraints_all(
+            x,
+            init_stuc_obj,
+            lat_press,
+            init_filter_weight,
+            side,
+            tuple(pre_chk),
+            fat_dict,
+            fat_press,
+            slamming_press,
+            None,
+            False,
+            fdwn,
+            fup,
+            None,
+            False,
+            weld_bias,
+            builtup_stiffener,
+            weld_metric,
+            cost_factors,
+        )
+        if precheck[0]:
+            candidates.append(x)
+        else:
+            rejects.append(precheck)
+    return candidates, rejects
+
 def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_weight, side='p',
                          chk=(True, True, True, True, True, True, True, False), fat_dict=None, fat_press=None,
                          slamming_press=None, processes=None, puls_sheet=None, puls_acceptance=0.87,
                          fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0, builtup_stiffener=False,
-                         weld_metric='weld_consumables', cost_factors=None):
+                         weld_metric='weld_consumables', cost_factors=None,
+                         use_semianalytical_speed_staging=DEFAULT_USE_SEMIANALYTICAL_SPEED_STAGING):
     '''
     Using multiprocessing to return list of applicable results.
 
@@ -2284,17 +2347,46 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
     if len(chk) > 8 and chk[8]:
         raise NotImplementedError('ML-CL buckling is deactivated. Use ML-Numeric or SemiAnalytical.')
 
+    iterable_all = list(iterable_all)
+    semianalytical_precheck_rejects = []
+    semianalytical_candidates = iterable_all
+
     weld_metric = normalize_weld_metric(weld_metric)
     cost_factors = normalize_cost_factors(cost_factors)
 
     if chk[7]:
         # Built-in SemiAnalytical replacement. Columns: buckling UF, ultimate UF,
-        # valid prediction, acceptance limit.
-        sort_again = np.full([len(iterable_all), 4], np.inf, dtype=float)
+        # valid prediction, acceptance limit. Optional staging uses
+        # any_constraints_all as the cheap-check oracle, and final survivor
+        # decisions still pass through any_constraints_all below.
+        if use_semianalytical_speed_staging:
+            semianalytical_candidates, semianalytical_precheck_rejects = _semianalytical_speed_staging_candidates(
+                iterable_all,
+                init_stuc_obj,
+                lat_press,
+                init_filter_weight,
+                side,
+                chk,
+                fat_dict,
+                fat_press,
+                slamming_press,
+                fdwn,
+                fup,
+                weld_bias,
+                builtup_stiffener,
+                weld_metric,
+                cost_factors,
+            )
+        else:
+            semianalytical_candidates = iterable_all
+            semianalytical_precheck_rejects = []
+
+        sort_again = np.full([len(semianalytical_candidates), 4], np.inf, dtype=float)
         sort_again[:, 2] = 0.0
         sort_again[:, 3] = float(puls_acceptance)
 
-        for idx, x in enumerate(iterable_all):
+        to_run = []
+        for x in semianalytical_candidates:
             calc_object_stf = None if init_stuc_obj.Stiffener is None else create_new_calc_obj(init_stuc_obj.Stiffener,
                                                                                                x, fat_dict,
                                                                                                fdwn=fdwn, fup=fup)
@@ -2304,8 +2396,23 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
                                              Girder=None,
                                              main_dict=init_stuc_obj.get_main_properties()['main dict']),
                            calc_object_pl[1]]
+            to_run.append((calc_object, x, lat_press))
 
-            sort_again[idx, 0:4] = _predict_semi_analytical_uf(calc_object, lat_press, puls_acceptance)
+        if len(to_run) > 0 and hasattr(semi_analytical, 'predict_anystructure_uf_batch'):
+            sort_again[:, 0:4] = semi_analytical.predict_anystructure_uf_batch(
+                to_run,
+                default_acceptance=puls_acceptance,
+                cache={},
+            )
+        else:
+            local_cache = {}
+            for idx, (calc_object, x, this_lat_press) in enumerate(to_run):
+                sort_again[idx, 0:4] = _predict_semi_analytical_uf(
+                    calc_object,
+                    this_lat_press,
+                    puls_acceptance,
+                    cache=local_cache,
+                )
 
         PULSrun = None
 
@@ -2435,7 +2542,8 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
         sort_again = None
 
     iter_var = list()
-    for idx, item in enumerate(iterable_all):
+    final_iterable = semianalytical_candidates if chk[7] else iterable_all
+    for idx, item in enumerate(final_iterable):
         if chk[7] or chk[8] or chk[9]:
             this_ml_result = sort_again[idx]
         else:
@@ -2456,7 +2564,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
         with Pool(processes) as my_process:
             res_pre = my_process.starmap(any_constraints_all, iter_var)
 
-    check_ok, check_not_ok = list(), list()
+    check_ok, check_not_ok = list(), list(semianalytical_precheck_rejects)
     for item in res_pre:
         if item[0] is False:
             check_not_ok.append(item)
