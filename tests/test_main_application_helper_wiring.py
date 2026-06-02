@@ -105,6 +105,23 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "self.gui_load_combinations(self._combination_slider.get())" in source
 
 
+def test_initial_property_layout_uses_domain_selection_after_root_geometry_is_realized():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    init_tail = source[
+        source.index("self._chk_show_prop_3d.place(relx=0.637, rely=0.705)"):
+        source.index("# self._current_theme = 'default'")
+    ]
+
+    assert "parent.minsize(1200, 750)" in init_tail
+    assert "parent.update_idletasks()" in init_tail
+    assert "self.calculation_domain_selected(sync_cylinder_inputs=False)" in init_tail
+    assert "self.gui_structural_properties()  # Initiating the flat panel structural properties" not in init_tail
+    assert init_tail.index("parent.update_idletasks()") < init_tail.index(
+        "self.calculation_domain_selected(sync_cylinder_inputs=False)"
+    )
+
+
 def test_single_line_optimizer_return_refreshes_hidden_line():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -193,6 +210,59 @@ def test_cylinder_panel_domains_render_as_angular_sector_preview():
     assert "theta_range=theta_range" in source
     assert "3D cylinder panel preview (60 deg)" in source
     assert "arc_length = abs(theta_end - theta_start) * radius" in source
+
+
+def test_unstiffened_flat_plate_input_check_does_not_require_stiffener_dimensions():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    missing_input_block = source[
+        source.index("def _structure_input_is_missing"):
+        source.index("def _show_missing_structure_input_warning")
+    ]
+
+    assert "required_inputs = [self._new_stf_spacing.get(), self._new_plate_thk.get()]" in missing_input_block
+    assert "if self._new_calculation_domain.get() != 'Flat plate, unstiffened':" in missing_input_block
+    assert "required_inputs.extend([self._new_stf_web_h.get(), self._new_stf_web_t.get()])" in missing_input_block
+    assert "self._new_stf_web_h.get() == 0" not in missing_input_block
+
+
+def test_unstiffened_flat_plate_color_state_initializes_fatigue_color():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    no_stiffener_start = source.index("else:\n                    sec_mod = [0, 0]")
+    no_stiffener_block = source[
+        no_stiffener_start:
+        source.index("if slamming_pressure is not None and slamming_pressure > 0 and obj_scnt_calc_stf is not None:")
+    ]
+
+    assert "color_fatigue = 'green'" in no_stiffener_block
+    assert "shear_area = 0" in no_stiffener_block
+    assert "min_shear = 0" in no_stiffener_block
+    assert "min_sec_mod = 0" in no_stiffener_block
+    assert no_stiffener_start + no_stiffener_block.index("color_fatigue = 'green'") < source.index(
+        "return_dict['colors'][current_line] = {'buckling': color_buckling, 'fatigue': color_fatigue,"
+    )
+
+
+def test_color_code_summary_handles_models_without_stiffener_spacing():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    color_code_block = source[
+        source.index("spacings = list()"):
+        source.index("line_color_coding = {}")
+    ]
+
+    assert "max_spacing = max(spacing) if len(spacing) != 0 else 0" in color_code_block
+    assert "min_spacing = min(spacing) if len(spacing) != 0 else 0" in color_code_block
+    assert "'max spacing': max(spacing)" not in color_code_block
+    assert "'min spacing': min(spacing)" not in color_code_block
+
+
+def test_color_state_cog_handles_zero_weight_lines():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "tot_cog = [0, 0] if tot_weight == 0 else [weight_mult_dist_x / tot_weight," in source
 
 
 def test_main_application_uses_geometry_helpers_for_active_lookups():

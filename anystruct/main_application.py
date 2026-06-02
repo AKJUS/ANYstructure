@@ -1770,12 +1770,18 @@ class Application():
         )
         self._chk_show_prop_3d.place(relx=0.637, rely=0.705)
 
-        self.gui_structural_properties()  # Initiating the flat panel structural properties
+        # Minimum practical size for the current Tkinter layout.  Apply this
+        # before the initial property placement so winfo_width() has a real
+        # geometry to work from instead of the transient startup width.
+        parent.minsize(1200, 750)
+        try:
+            parent.update_idletasks()
+        except Exception:
+            pass
+
+        self.calculation_domain_selected(sync_cylinder_inputs=False)  # Initiating the flat panel structural properties
         self.set_colors('default')  # Setting colors theme
         self._prompt_startup_calculation_mode()
-
-        # Minimum practical size for the current Tkinter layout
-        parent.minsize(1200, 750)
 
         # self._current_theme = 'default'
 
@@ -3700,10 +3706,14 @@ class Application():
                         else 'red'
                 else:
                     sec_mod = [0, 0]
+                    shear_area = 0
+                    min_shear = 0
+                    min_sec_mod = 0
                     rec_for_color[current_line]['section modulus'] = 0.0
                     rec_for_color[current_line]['shear'] = 0
                     return_dict['slamming'][current_line] = dict()
                     fatigue_obj, p_int, p_ext, damage, dff = [None for dummy in range(5)]
+                    color_fatigue = 'green'
                     color_sec = 'green' if all_obj.Stiffener is None else 'black'
                     color_shear = 'green' if all_obj.Stiffener is None else 'black'
                     return_dict['slamming'][current_line]['state'] = False
@@ -4482,6 +4492,8 @@ class Application():
                 if self._line_to_struc[line][0].Stiffener is not None:
                     spacings.append(self._line_to_struc[line][0].Stiffener.get_s())
             spacing = np.unique(spacings).tolist()
+            max_spacing = max(spacing) if len(spacing) != 0 else 0
+            min_spacing = min(spacing) if len(spacing) != 0 else 0
             structure_type = [self._line_to_struc[line][0].Plate.get_structure_type() for line in
                               self._line_to_struc.keys()]
 
@@ -4504,7 +4516,7 @@ class Application():
                                          'cyl sections in model': cyl_sec_in_model,
                                          'recorded sections': recorded_sections,
                                          'recorded cylinder long sections': recorded_cyl_sections,
-                                         'spacings': spacing, 'max spacing': max(spacing), 'min spacing': min(spacing)}
+                                         'spacings': spacing, 'max spacing': max_spacing, 'min spacing': min_spacing}
             line_color_coding = {}
             cmap_sections = plt.get_cmap('jet')
             thk_sort_unique = return_dict['color code']['all thicknesses']
@@ -4624,7 +4636,8 @@ class Application():
                 weight_mult_dist_y += return_dict['weights'][line]['line weight'] \
                                       * return_dict['weights'][line]['mid_coord'][1]
 
-            tot_cog = [weight_mult_dist_x / tot_weight, weight_mult_dist_y / tot_weight]
+            tot_cog = [0, 0] if tot_weight == 0 else [weight_mult_dist_x / tot_weight,
+                                                      weight_mult_dist_y / tot_weight]
         else:
             tot_cog = [0, 0]
             tot_weight = 0
@@ -7770,8 +7783,10 @@ class Application():
     def _structure_input_is_missing(self):
         if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
             return False
-        return any([self._new_stf_spacing.get() == 0, self._new_plate_thk.get() == 0,
-                    self._new_stf_web_h.get() == 0, self._new_stf_web_t.get() == 0])
+        required_inputs = [self._new_stf_spacing.get(), self._new_plate_thk.get()]
+        if self._new_calculation_domain.get() != 'Flat plate, unstiffened':
+            required_inputs.extend([self._new_stf_web_h.get(), self._new_stf_web_t.get()])
+        return any(value == 0 for value in required_inputs)
 
     @staticmethod
     def _show_missing_structure_input_warning():
