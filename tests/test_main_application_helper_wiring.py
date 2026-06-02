@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
 
 def test_main_application_uses_shared_geometry_menu_helpers():
@@ -495,7 +496,47 @@ def test_csr_requirement_is_shared_by_numeric_and_semianalytical_methods():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
 
-    assert "def _predict_ml_csr_requirement(self, plate_obj, stiffener_obj, design_pressure, material_factor):" in source
+    assert "use_semi_analytical_equation=False" in source
     assert "selected_buckling_method in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']" in source
+    assert "use_semi_analytical_equation=selected_buckling_method == 'SemiAnalytical S3/U3'" in source
     assert "return_dict['ML buckling class'][current_line]['CSR'] = csr_values" in source
     assert "return_dict['ML buckling colors'][current_line]['CSR requirement'] = csr_color" in source
+
+
+def test_semianalytical_csr_helper_uses_equation_predictor(monkeypatch):
+    from anystruct import main_application
+    from anystruct.main_application import Application
+
+    calls = {}
+
+    def fake_predict(calc_object, design_pressure):
+        calls["plate"] = calc_object.Plate
+        calls["stiffener"] = calc_object.Stiffener
+        calls["design_pressure"] = design_pressure
+        return [1, 0, 1, 1], "red", {"source": "equation"}
+
+    monkeypatch.setattr(
+        main_application.op.semi_analytical,
+        "predict_anystructure_csr_requirement",
+        fake_predict,
+    )
+
+    app = object.__new__(Application)
+    plate = SimpleNamespace(mat_factor=1.15)
+    stiffener = SimpleNamespace()
+
+    csr, color = app._predict_csr_requirement(
+        plate,
+        stiffener,
+        design_pressure=123.0,
+        material_factor=1.15,
+        use_semi_analytical_equation=True,
+    )
+
+    assert csr == [1, 0, 1, 1]
+    assert color == "red"
+    assert calls == {
+        "plate": plate,
+        "stiffener": stiffener,
+        "design_pressure": 123.0,
+    }

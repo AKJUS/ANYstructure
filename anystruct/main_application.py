@@ -3439,8 +3439,26 @@ class Application():
         except Exception:
             return 'red'
 
-    def _predict_ml_csr_requirement(self, plate_obj, stiffener_obj, design_pressure, material_factor):
-        """Predict the CSR geometry/slenderness requirement shared by ML-Numeric and SemiAnalytical."""
+    def _predict_csr_requirement(
+            self, plate_obj, stiffener_obj, design_pressure, material_factor,
+            use_semi_analytical_equation=False):
+        """Predict CSR requirement; SemiAnalytical uses direct equations instead of ML classifiers."""
+        if use_semi_analytical_equation:
+            try:
+                class _SemiAnalyticalCsrObject:
+                    pass
+
+                calc_object = _SemiAnalyticalCsrObject()
+                calc_object.Plate = plate_obj
+                calc_object.Stiffener = stiffener_obj
+                csr, color, _ = op.semi_analytical.predict_anystructure_csr_requirement(
+                    calc_object,
+                    design_pressure,
+                )
+                return csr, color
+            except Exception:
+                return [0, 0, 0, 0], 'red'
+
         try:
             mat_fac = float(material_factor)
         except Exception:
@@ -3793,11 +3811,12 @@ class Application():
                 }
 
                 if selected_buckling_method in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']:
-                    csr_values, csr_color = self._predict_ml_csr_requirement(
+                    csr_values, csr_color = self._predict_csr_requirement(
                         obj_scnt_calc_pl,
                         obj_scnt_calc_stf,
                         design_pressure,
                         active_mat_fac,
+                        use_semi_analytical_equation=selected_buckling_method == 'SemiAnalytical S3/U3',
                     )
                     return_dict['ML buckling class'][current_line]['CSR'] = csr_values
                     return_dict['ML buckling colors'][current_line]['CSR requirement'] = csr_color
@@ -3929,7 +3948,7 @@ class Application():
 
                         numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
 
-                        csr_values, csr_color = self._predict_ml_csr_requirement(
+                        csr_values, csr_color = self._predict_csr_requirement(
                             obj_scnt_calc_pl,
                             obj_scnt_calc_stf,
                             design_pressure,
@@ -4118,7 +4137,7 @@ class Application():
 
                             numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
 
-                            csr_values, csr_color = self._predict_ml_csr_requirement(
+                            csr_values, csr_color = self._predict_csr_requirement(
                                 obj_scnt_calc_pl,
                                 obj_scnt_calc_stf,
                                 design_pressure,

@@ -57,6 +57,25 @@ PULS_MANUAL_U3_LIMITS = {
     "plate_slenderness_max": 200.0,
     "long_to_short_aspect_ratio_max": 20.0,
 }
+CSR_RULE_REFERENCE = {
+    "source": "Common Structural Rules",
+    "edition": "Rules for the Classification of Steel Ships 2014, Pt 12 Common Structural Rules",
+    "proportions_clause": "Sec 10/2.2.1 and Table 10.2.1",
+    "advanced_buckling_clause": "Sec 10/4 and Appendix D",
+}
+CSR_PLATE_SLENDERNESS_COEFFICIENTS = {
+    "hull_envelope_or_tank_boundary": 100.0,
+    "other_structure": 125.0,
+}
+CSR_STIFFENER_WEB_COEFFICIENTS = {
+    "T-bar": 75.0,
+    "Angle": 75.0,
+    "L-bulb": 41.0,
+    "Flatbar": 22.0,
+}
+CSR_FLANGE_OUTSTAND_COEFFICIENT = 12.0
+CSR_MIN_TOTAL_FLANGE_WIDTH_TO_WEB_HEIGHT = 0.25
+DEFAULT_ANYSTRUCTURE_CSR_CORROSION_ADDITION_MM = 2.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +106,9 @@ class S3PanelInput:
     in_plane_support: str
     elastic_modulus: float = 210000.0
     poisson_ratio: float = 0.3
+    plate_corrosion_addition: float = 0.0
+    web_corrosion_addition: float = 0.0
+    flange_corrosion_addition: float = 0.0
 
     @property
     def width(self) -> float:
@@ -122,6 +144,7 @@ class U3PanelInput:
     rotational_support_2: str = "SS"
     elastic_modulus: float = 210000.0
     poisson_ratio: float = 0.3
+    plate_corrosion_addition: float = 0.0
 
     @property
     def axial_stress(self) -> float:
@@ -652,6 +675,61 @@ def _anystructure_material_factor(all_structure: Any) -> float | None:
     return None
 
 
+def _main_dict_value(candidate: Any, names: Sequence[str]) -> float | None:
+    try:
+        main_dict = getattr(candidate, "_main_dict")
+    except Exception:
+        main_dict = None
+    if not isinstance(main_dict, Mapping):
+        return None
+    normalized = {str(key).strip().lower(): value for key, value in main_dict.items()}
+    for name in names:
+        value = normalized.get(name.strip().lower())
+        if isinstance(value, (list, tuple)) and value:
+            value = value[0]
+        parsed = _optional_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _anystructure_corrosion_addition_mm(
+    *candidates: Any,
+    default_mm: float = DEFAULT_ANYSTRUCTURE_CSR_CORROSION_ADDITION_MM,
+) -> float:
+    """Return a full local CSR corrosion addition in mm."""
+
+    names = (
+        "corrosion_addition_mm",
+        "corrosion_addition",
+        "tcorr",
+        "t_corr",
+        "corr_add",
+        "cor_add",
+        "tk",
+        "plate corrosion addition",
+        "corrosion addition",
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for name in names:
+            try:
+                parsed = _optional_float(getattr(candidate, name))
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                if parsed <= EPS:
+                    return 0.0
+                return parsed * 1000.0 if parsed < 0.05 else parsed
+        parsed = _main_dict_value(candidate, names)
+        if parsed is not None:
+            if parsed <= EPS:
+                return 0.0
+            return parsed * 1000.0 if parsed < 0.05 else parsed
+    return max(float(default_mm), 0.0)
+
+
 def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
     if sigma_x1 * sigma_x2 >= 0:
         return sigma_x1 if abs(sigma_x1) > abs(sigma_x2) else sigma_x2
@@ -676,10 +754,12 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
     pressure_mpa = _anystructure_float(lat_press) / 1000.0
     elastic_modulus = _anystructure_float(getattr(all_structure, "E", None), 210000.0e6) / 1.0e6
     poisson_ratio = _anystructure_float(getattr(all_structure, "v", None), 0.3)
+    plate_corrosion = _anystructure_corrosion_addition_mm(plate, all_structure)
 
     if sp_or_up == "SP" and stiffener is not None:
         puls_boundary = stiffener.get_puls_boundary()
         sigxd = _anystructure_axial_design_stress(stiffener.sigma_x1, stiffener.sigma_x2)
+        stiffener_corrosion = _anystructure_corrosion_addition_mm(stiffener, all_structure)
         return S3PanelInput(
             length=stiffener.span * 1000.0,
             stiffener_spacing=stiffener.spacing,
@@ -700,6 +780,9 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
             in_plane_support=_anystructure_in_plane_support(puls_boundary),
             elastic_modulus=elastic_modulus,
             poisson_ratio=poisson_ratio,
+            plate_corrosion_addition=plate_corrosion,
+            web_corrosion_addition=stiffener_corrosion,
+            flange_corrosion_addition=stiffener_corrosion,
         )
 
     up_boundary = plate.get_puls_up_boundary() if hasattr(plate, "get_puls_up_boundary") else "SSSS"
@@ -721,6 +804,7 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
         rotational_support_2=rotational_2,
         elastic_modulus=elastic_modulus,
         poisson_ratio=poisson_ratio,
+        plate_corrosion_addition=plate_corrosion,
     )
 
 
@@ -755,6 +839,7 @@ def solve_anystructure_panel(
 
     panel_family = "S3" if isinstance(panel, S3PanelInput) else "U3"
     solved = solve_s3_panel(panel, config) if panel_family == "S3" else solve_u3_panel(panel, config)
+    csr_requirement = calculate_csr_requirement(panel)
     valid_prediction = (
         solved.valid
         and solved.buckling_usage_factor is not None
@@ -779,9 +864,32 @@ def solve_anystructure_panel(
         "invalid_reason": solved.invalid_reason,
         "confidence": solved.confidence,
         "confidence_reasons": list(solved.confidence_reasons),
+        "csr_requirement": csr_requirement,
+        "csr_vector": csr_requirement["csr_vector"],
+        "csr_color": "green" if csr_requirement["within_csr_proportions"] else "red",
         "diagnostics": solved.diagnostics,
         "result": solved.to_dict(),
     }
+
+
+def predict_anystructure_csr_requirement(
+    calc_object: Any,
+    lat_press: float = 0.0,
+) -> tuple[list[float | int], str, dict[str, Any]]:
+    """Return equation-based CSR flags for ANYstructure without running ML."""
+
+    panel = anystructure_panel_input(calc_object, lat_press)
+    if panel is None:
+        diagnostics = {
+            "within_csr_proportions": False,
+            "csr_vector": [0, 0, 0, 0],
+            "failed": ["unsupported-anystructure-input"],
+            "unknown": [],
+        }
+        return [0, 0, 0, 0], "red", diagnostics
+    diagnostics = calculate_csr_requirement(panel)
+    color = "green" if diagnostics["within_csr_proportions"] else "red"
+    return list(diagnostics["csr_vector"]), color, diagnostics
 
 
 def _anystructure_fast_solver_config(config: S3SolverConfig | None) -> S3SolverConfig:
@@ -1122,6 +1230,201 @@ def _limit_check(value: float | None, *, maximum: float | None = None, minimum: 
     return True
 
 
+def _csr_strength_scale(yield_stress: float) -> float:
+    if yield_stress <= EPS or not math.isfinite(yield_stress):
+        return float("nan")
+    return math.sqrt(235.0 / yield_stress)
+
+
+def _csr_check_from_ratio(
+    ratio: float | None,
+    coefficient: float | None,
+    yield_stress: float,
+) -> tuple[bool | None, float | None]:
+    if ratio is None or coefficient is None:
+        return None, None
+    scale = _csr_strength_scale(yield_stress)
+    if not math.isfinite(scale):
+        return None, None
+    limit = coefficient * scale
+    return ratio <= limit, limit
+
+
+def _net_thickness(gross_thickness: float, corrosion_addition: float) -> float | None:
+    if gross_thickness <= EPS:
+        return None
+    net = gross_thickness - max(corrosion_addition, 0.0)
+    return net if net > EPS else None
+
+
+def _csr_flange_outstand(panel: S3PanelInput) -> float | None:
+    if panel.stiffener_type == "T-bar":
+        return max(0.5 * (panel.flange_width - panel.web_thickness), 0.0)
+    if panel.stiffener_type == "Angle":
+        return max(panel.flange_width - 0.5 * panel.web_thickness, 0.0)
+    return None
+
+
+def calculate_csr_requirement(
+    panel: S3PanelInput | U3PanelInput,
+    *,
+    plate_location: str = "hull_envelope_or_tank_boundary",
+) -> dict[str, Any]:
+    """Return equation-based CSR proportion diagnostics."""
+
+    plate_coefficient = CSR_PLATE_SLENDERNESS_COEFFICIENTS.get(plate_location)
+    width = min(panel.length, panel.width) if isinstance(panel, U3PanelInput) else panel.width
+    plate_net_thickness = _net_thickness(panel.plate_thickness, panel.plate_corrosion_addition)
+    plate_slenderness = width / plate_net_thickness if plate_net_thickness is not None else None
+    plate_ok, plate_limit = _csr_check_from_ratio(
+        plate_slenderness,
+        plate_coefficient,
+        panel.yield_stress_plate,
+    )
+    checks: dict[str, bool | None] = {"plate_slenderness": plate_ok}
+    values: dict[str, float | None] = {
+        "plate_slenderness": plate_slenderness,
+        "plate_slenderness_limit": plate_limit,
+        "plate_gross_thickness": panel.plate_thickness,
+        "plate_corrosion_addition": panel.plate_corrosion_addition,
+        "plate_net_thickness": plate_net_thickness,
+    }
+    limits: dict[str, float | None] = {
+        "plate_coefficient": plate_coefficient,
+        "plate_yield_scale": (
+            _csr_strength_scale(panel.yield_stress_plate)
+            if panel.yield_stress_plate > EPS
+            else None
+        ),
+    }
+    csr_vector: list[float | int] = [
+        1 if plate_ok is True else 0,
+        float("inf"),
+        float("inf"),
+        float("inf"),
+    ]
+    notes = [
+        "CSR Sec 10 proportion checks are diagnostic only and do not alter SemiAnalytical UF results",
+        "gross breadth/depth dimensions are used with net thickness after deducting the corrosion addition",
+    ]
+
+    if isinstance(panel, S3PanelInput):
+        web_coefficient = CSR_STIFFENER_WEB_COEFFICIENTS.get(panel.stiffener_type)
+        web_net_thickness = _net_thickness(panel.web_thickness, panel.web_corrosion_addition)
+        web_slenderness = (
+            panel.stiffener_height / web_net_thickness
+            if web_net_thickness is not None
+            else None
+        )
+        web_ok, web_limit = _csr_check_from_ratio(
+            web_slenderness,
+            web_coefficient,
+            panel.yield_stress_stiffener,
+        )
+
+        flange_outstand = _csr_flange_outstand(panel)
+        flange_net_thickness = _net_thickness(
+            panel.flange_thickness,
+            panel.flange_corrosion_addition,
+        )
+        flange_slenderness = (
+            flange_outstand / flange_net_thickness
+            if flange_outstand is not None and flange_net_thickness is not None
+            else None
+        )
+        flange_coefficient = (
+            CSR_FLANGE_OUTSTAND_COEFFICIENT
+            if panel.stiffener_type in {"T-bar", "Angle"}
+            else None
+        )
+        flange_ok, flange_limit = _csr_check_from_ratio(
+            flange_slenderness,
+            flange_coefficient,
+            panel.yield_stress_stiffener,
+        )
+
+        total_flange_ratio = None
+        web_flange_ok = True
+        if panel.stiffener_type in {"T-bar", "Angle"}:
+            total_flange_ratio = panel.flange_width / max(panel.stiffener_height, EPS)
+            web_flange_ok = total_flange_ratio >= CSR_MIN_TOTAL_FLANGE_WIDTH_TO_WEB_HEIGHT
+        elif panel.stiffener_type in {"Flatbar", "L-bulb"}:
+            flange_ok = True
+        else:
+            web_flange_ok = None
+
+        checks.update(
+            {
+                "web_slenderness": web_ok,
+                "web_flange_ratio": web_flange_ok,
+                "flange_outstand_slenderness": flange_ok,
+            }
+        )
+        values.update(
+            {
+                "web_slenderness": web_slenderness,
+                "web_slenderness_limit": web_limit,
+                "web_gross_thickness": panel.web_thickness,
+                "web_corrosion_addition": panel.web_corrosion_addition,
+                "web_net_thickness": web_net_thickness,
+                "flange_outstand": flange_outstand,
+                "flange_outstand_slenderness": flange_slenderness,
+                "flange_outstand_slenderness_limit": flange_limit,
+                "flange_gross_thickness": panel.flange_thickness,
+                "flange_corrosion_addition": panel.flange_corrosion_addition,
+                "flange_net_thickness": flange_net_thickness,
+                "total_flange_width_to_web_height": total_flange_ratio,
+                "min_total_flange_width_to_web_height": (
+                    CSR_MIN_TOTAL_FLANGE_WIDTH_TO_WEB_HEIGHT
+                    if panel.stiffener_type in {"T-bar", "Angle"}
+                    else None
+                ),
+            }
+        )
+        limits.update(
+            {
+                "web_coefficient": web_coefficient,
+                "flange_outstand_coefficient": flange_coefficient,
+                "stiffener_yield_scale": (
+                    _csr_strength_scale(panel.yield_stress_stiffener)
+                    if panel.yield_stress_stiffener > EPS
+                    else None
+                ),
+            }
+        )
+        csr_vector = [
+            1 if plate_ok is True else 0,
+            1 if web_ok is True else 0,
+            1 if web_flange_ok is True else 0,
+            1 if flange_ok is True else 0,
+        ]
+        if panel.stiffener_type == "L-bulb":
+            notes.append("L-bulb flange/bulb geometry is represented by the CSR bulb web coefficient; flange checks are not applied")
+        if panel.stiffener_type == "Flatbar":
+            notes.append("Flatbar has no separate flange outstand or web/flange ratio check")
+
+    failed = [name for name, passed in checks.items() if passed is False]
+    unknown = [name for name, passed in checks.items() if passed is None]
+    return {
+        "source": CSR_RULE_REFERENCE["source"],
+        "edition": CSR_RULE_REFERENCE["edition"],
+        "panel_family": "S3" if isinstance(panel, S3PanelInput) else "U3",
+        "basis": {
+            "proportions": CSR_RULE_REFERENCE["proportions_clause"],
+            "advanced_buckling": CSR_RULE_REFERENCE["advanced_buckling_clause"],
+        },
+        "plate_location": plate_location,
+        "limits": limits,
+        "values": values,
+        "checks": checks,
+        "failed": failed,
+        "unknown": unknown,
+        "within_csr_proportions": not failed and not unknown,
+        "csr_vector": csr_vector,
+        "notes": notes,
+    }
+
+
 def _puls_manual_reference_domain(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
     """Return source-backed PULS manual limit diagnostics without gating solves."""
 
@@ -1241,6 +1544,7 @@ def _validation_domain(
         "load_family": _load_family(panel),
         "reasons": list(reasons or ()),
         "puls_manual_reference": _puls_manual_reference_domain(panel),
+        "csr_equation_reference": calculate_csr_requirement(panel),
     }
     if isinstance(panel, S3PanelInput):
         domain.update(

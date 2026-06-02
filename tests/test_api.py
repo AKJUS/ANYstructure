@@ -118,6 +118,9 @@ def test_flat_structure_api_selects_all_buckling_methods():
     assert semi["available"] is True
     assert semi["valid prediction"] == 1
     assert semi["buckling UF"] == pytest.approx(0.7962660701476253)
+    assert semi["CSR"] == [1, 1, 1, 1]
+    assert semi["CSR color"] == "green"
+    assert semi["CSR requirement"]["within_csr_proportions"] is True
 
     flat.set_buckling_parameters(calculation_method="ML-Numeric (PULS based)", buckling_acceptance="ultimate")
     ml_missing_model = flat.get_buckling_results()
