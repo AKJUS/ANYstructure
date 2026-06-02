@@ -730,6 +730,36 @@ def _anystructure_corrosion_addition_mm(
     return max(float(default_mm), 0.0)
 
 
+def _anystructure_csr_dimension_mm(value: float) -> float:
+    value = float(value)
+    return value * 1000.0 if abs(value) < 50.0 else value
+
+
+def _anystructure_csr_panel_input(panel: S3PanelInput | U3PanelInput) -> S3PanelInput | U3PanelInput:
+    """Return panel dimensions in mm for CSR proportion checks.
+
+    The existing ANYstructure SemiAnalytical adapter uses the solver's historic
+    input convention.  CSR proportion checks, however, are explicit local
+    scantling checks and need millimetres for breadth/depth/thickness values.
+    """
+
+    if isinstance(panel, S3PanelInput):
+        return replace(
+            panel,
+            stiffener_spacing=_anystructure_csr_dimension_mm(panel.stiffener_spacing),
+            plate_thickness=_anystructure_csr_dimension_mm(panel.plate_thickness),
+            stiffener_height=_anystructure_csr_dimension_mm(panel.stiffener_height),
+            web_thickness=_anystructure_csr_dimension_mm(panel.web_thickness),
+            flange_width=_anystructure_csr_dimension_mm(panel.flange_width),
+            flange_thickness=_anystructure_csr_dimension_mm(panel.flange_thickness),
+        )
+    return replace(
+        panel,
+        width=_anystructure_csr_dimension_mm(panel.width),
+        plate_thickness=_anystructure_csr_dimension_mm(panel.plate_thickness),
+    )
+
+
 def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
     if sigma_x1 * sigma_x2 >= 0:
         return sigma_x1 if abs(sigma_x1) > abs(sigma_x2) else sigma_x2
@@ -839,7 +869,7 @@ def solve_anystructure_panel(
 
     panel_family = "S3" if isinstance(panel, S3PanelInput) else "U3"
     solved = solve_s3_panel(panel, config) if panel_family == "S3" else solve_u3_panel(panel, config)
-    csr_requirement = calculate_csr_requirement(panel)
+    csr_requirement = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
     valid_prediction = (
         solved.valid
         and solved.buckling_usage_factor is not None
@@ -887,7 +917,7 @@ def predict_anystructure_csr_requirement(
             "unknown": [],
         }
         return [0, 0, 0, 0], "red", diagnostics
-    diagnostics = calculate_csr_requirement(panel)
+    diagnostics = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
     color = "green" if diagnostics["within_csr_proportions"] else "red"
     return list(diagnostics["csr_vector"]), color, diagnostics
 

@@ -58,6 +58,10 @@ def test_semi_analytical_helper_maps_stiffened_anystructure_input_units():
     assert panel.length == pytest.approx(stiffener.span * 1000)
     assert panel.stiffener_spacing == pytest.approx(stiffener.spacing)
     assert panel.plate_thickness == pytest.approx(stiffener.t)
+    assert panel.stiffener_height == pytest.approx(stiffener.hw)
+    assert panel.web_thickness == pytest.approx(stiffener.tw)
+    assert panel.flange_width == pytest.approx(stiffener.b)
+    assert panel.flange_thickness == pytest.approx(stiffener.tf)
     assert panel.yield_stress_plate == pytest.approx(stiffener.mat_yield / 1e6)
     assert panel.pressure == pytest.approx(0.2)
     assert panel.elastic_modulus == pytest.approx(210000)
@@ -165,12 +169,12 @@ def test_anystructure_csr_equation_adapter_returns_gui_vector_and_color():
     plate = SimpleNamespace(get_puls_sp_or_up=lambda: "SP")
     stiffener = SimpleNamespace(
         span=3.0,
-        spacing=700.0,
-        t=14.0,
-        hw=250.0,
-        tw=8.0,
-        b=120.0,
-        tf=10.0,
+        spacing=0.700,
+        t=0.014,
+        hw=0.250,
+        tw=0.008,
+        b=0.120,
+        tf=0.010,
         mat_yield=355.0e6,
         sigma_x1=0.0,
         sigma_x2=0.0,
@@ -191,3 +195,35 @@ def test_anystructure_csr_equation_adapter_returns_gui_vector_and_color():
     assert diagnostics["values"]["plate_corrosion_addition"] == pytest.approx(
         semi.DEFAULT_ANYSTRUCTURE_CSR_CORROSION_ADDITION_MM
     )
+
+
+def test_anystructure_csr_equation_adapter_accepts_validation_case_geometry():
+    plate = SimpleNamespace(get_puls_sp_or_up=lambda: "SP")
+    stiffener = SimpleNamespace(
+        span=4.0,
+        spacing=0.75,
+        t=0.017,
+        hw=0.300,
+        tw=0.010,
+        b=0.130,
+        tf=0.012,
+        mat_yield=355.0e6,
+        sigma_x1=49.1,
+        sigma_x2=49.1,
+        sigma_y1=95.3,
+        sigma_y2=95.3,
+        tau_xy=5.3,
+        get_puls_boundary=lambda: "Int",
+        get_stiffener_type=lambda: "T",
+        get_puls_stf_end=lambda: "Continuous",
+    )
+    structure = SimpleNamespace(Plate=plate, Stiffener=stiffener, E=210.0e9, v=0.3)
+
+    csr, color, diagnostics = semi.predict_anystructure_csr_requirement(structure, lat_press=0.0)
+
+    assert csr == [1, 1, 1, 1]
+    assert color == "green"
+    assert diagnostics["failed"] == []
+    assert diagnostics["values"]["plate_net_thickness"] == pytest.approx(15.0)
+    assert diagnostics["values"]["web_net_thickness"] == pytest.approx(8.0)
+    assert diagnostics["values"]["flange_net_thickness"] == pytest.approx(10.0)
