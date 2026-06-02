@@ -110,6 +110,7 @@ def test_single_line_optimizer_return_refreshes_hidden_line():
 
     assert "def _prepare_simplified_optimizer_replacement(self):" in source
     assert "def _refresh_simplified_optimizer_replacement(self):" in source
+    assert "def _replace_active_line_with_optimized_structure(self, optimized_structure):" in source
     assert "self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)" in source
     assert "self.set_selected_variables(self._active_line)" in source
 
@@ -123,7 +124,8 @@ def test_single_line_optimizer_return_refreshes_hidden_line():
     ]
 
     assert "self._prepare_simplified_optimizer_replacement()" in flat_close
-    assert "self.new_structure(multi_return=returned_object[0:2])" in flat_close
+    assert "self._replace_active_line_with_optimized_structure(returned_object[0])" in flat_close
+    assert "else:\n            self.new_structure(multi_return=returned_object[0:2])" in flat_close
     assert "if not self._refresh_simplified_optimizer_replacement():" in flat_close
     assert "self._prepare_simplified_optimizer_replacement()" in cylinder_close
     assert "self.new_structure(cylinder_return=returned_object[0])" in cylinder_close
@@ -151,6 +153,18 @@ def test_single_line_mode_keeps_active_line_on_selected_or_dummy_line():
     assert "return sorted(self._line_dict.keys(), key=get_num)[0]" in selector_block
     assert "self._single_line_name = self._single_mode_active_line_candidate()" in select_block
     assert "self._active_line = self._single_line_name" in select_block
+
+
+def test_cylinder_optimizer_return_bypasses_missing_flat_input_guard():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    new_structure = source[
+        source.index("def new_structure"):
+        source.index("def option_meny_structure_type_trace")
+    ]
+
+    assert "cylinder_return == None" in new_structure
+    assert "self._show_missing_structure_input_warning()" in new_structure
 
 
 def test_simplified_3d_preview_uses_main_canvas_place():
@@ -475,3 +489,13 @@ def test_excel_callbacks_delegate_workbook_adapter_access():
     assert "_new_shell_radius.set(" not in cylinder_import_block
     assert "_new_shell_Nsd.set(" not in cylinder_import_block
     assert "_new_shell_end_cap_pressure_included.set(shell_yield)" not in cylinder_import_block
+
+
+def test_csr_requirement_is_shared_by_numeric_and_semianalytical_methods():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _predict_ml_csr_requirement(self, plate_obj, stiffener_obj, design_pressure, material_factor):" in source
+    assert "selected_buckling_method in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']" in source
+    assert "return_dict['ML buckling class'][current_line]['CSR'] = csr_values" in source
+    assert "return_dict['ML buckling colors'][current_line]['CSR requirement'] = csr_color" in source

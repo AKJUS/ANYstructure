@@ -3439,6 +3439,46 @@ class Application():
         except Exception:
             return 'red'
 
+    def _predict_ml_csr_requirement(self, plate_obj, stiffener_obj, design_pressure, material_factor):
+        """Predict the CSR geometry/slenderness requirement shared by ML-Numeric and SemiAnalytical."""
+        try:
+            mat_fac = float(material_factor)
+        except Exception:
+            mat_fac = plate_obj.mat_factor
+
+        if mat_fac not in [1.1, 1.15]:
+            mat_fac = 1.15
+
+        try:
+            if plate_obj.get_puls_sp_or_up() == 'UP':
+                x_csr = plate_obj.get_buckling_ml_input(
+                    design_lat_press=design_pressure,
+                    csr=True,
+                )
+                x_csr = self._ML_buckling[mat_fac]['CSR scaler UP'].transform(x_csr)
+                csr_pl = self._ML_buckling[mat_fac]['CSR predictor UP'].predict(x_csr)[0]
+                csr = [csr_pl, float('inf'), float('inf'), float('inf')]
+                color = 'green' if csr_pl == 1 else 'red'
+            elif stiffener_obj is not None:
+                x_csr = stiffener_obj.get_buckling_ml_input(
+                    design_lat_press=design_pressure,
+                    csr=True,
+                )
+                x_csr = self._ML_buckling[mat_fac]['CSR scaler SP'].transform(x_csr)
+                csr_pl, csr_web, csr_web_fl, csr_fl = self._ML_buckling[mat_fac][
+                    'CSR predictor SP'
+                ].predict(x_csr)[0]
+                csr = [csr_pl, csr_web, csr_web_fl, csr_fl]
+                color = 'green' if all([csr_pl == 1, csr_web == 1, csr_web_fl == 1, csr_fl == 1]) else 'red'
+            else:
+                csr = [0, 0, 0, 0]
+                color = 'red'
+        except Exception:
+            csr = [0, 0, 0, 0]
+            color = 'red'
+
+        return csr, color
+
     @staticmethod
     def _cylinder_buckling_uf(cylinder_results):
         """Return the governing cylinder buckling UF used for GUI color coding."""
@@ -3752,6 +3792,16 @@ class Application():
                     'ultimate': 'red',
                 }
 
+                if selected_buckling_method in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']:
+                    csr_values, csr_color = self._predict_ml_csr_requirement(
+                        obj_scnt_calc_pl,
+                        obj_scnt_calc_stf,
+                        design_pressure,
+                        active_mat_fac,
+                    )
+                    return_dict['ML buckling class'][current_line]['CSR'] = csr_values
+                    return_dict['ML buckling colors'][current_line]['CSR requirement'] = csr_color
+
                 if selected_buckling_method == 'ML-Numeric (PULS based)':
                     mat_fac_error = ''
 
@@ -3879,18 +3929,12 @@ class Application():
 
                         numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
 
-                        # -------------------------------------------------------------------------
-                        # CSR prediction
-                        # -------------------------------------------------------------------------
-                        try:
-                            x_csr = obj_scnt_calc_pl.get_buckling_ml_input(
-                                design_lat_press=design_pressure,
-                                csr=True,
-                            )
-                            x_csr = self._ML_buckling[mat_fac]['CSR scaler UP'].transform(x_csr)
-                            csr_pl = self._ML_buckling[mat_fac]['CSR predictor UP'].predict(x_csr)[0]
-                        except Exception:
-                            csr_pl = 0
+                        csr_values, csr_color = self._predict_ml_csr_requirement(
+                            obj_scnt_calc_pl,
+                            obj_scnt_calc_stf,
+                            design_pressure,
+                            mat_fac,
+                        )
 
                         if mat_fac == 1.1:
                             accept = 'below or equal 0.91'
@@ -3900,13 +3944,13 @@ class Application():
                         return_dict['ML buckling colors'][current_line] = {
                             'buckling': 'green' if y_pred_buc == accept else 'red',
                             'ultimate': 'green' if y_pred_ult == accept else 'red',
-                            'CSR requirement': 'green' if csr_pl == 1 else 'red',
+                            'CSR requirement': csr_color,
                         }
 
                         return_dict['ML buckling class'][current_line] = {
                             'buckling': str(y_pred_buc) + mat_fac_error,
                             'ultimate': str(y_pred_ult) + mat_fac_error,
-                            'CSR': [csr_pl, float('inf'), float('inf'), float('inf')],
+                            'CSR': csr_values,
                         }
 
                         # -------------------------------------------------------------------------
@@ -4074,21 +4118,12 @@ class Application():
 
                             numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
 
-                            # ---------------------------------------------------------------------
-                            # CSR prediction
-                            # ---------------------------------------------------------------------
-                            try:
-                                x_csr = obj_scnt_calc_stf.get_buckling_ml_input(
-                                    design_lat_press=design_pressure,
-                                    csr=True,
-                                )
-
-                                x_csr = self._ML_buckling[mat_fac]['CSR scaler SP'].transform(x_csr)
-                                csr_pl, csr_web, csr_web_fl, csr_fl = self._ML_buckling[mat_fac][
-                                    'CSR predictor SP'
-                                ].predict(x_csr)[0]
-                            except Exception:
-                                csr_pl, csr_web, csr_web_fl, csr_fl = 0, 0, 0, 0
+                            csr_values, csr_color = self._predict_ml_csr_requirement(
+                                obj_scnt_calc_pl,
+                                obj_scnt_calc_stf,
+                                design_pressure,
+                                mat_fac,
+                            )
 
                             if mat_fac == 1.1:
                                 accept = 'below or equal 0.91'
@@ -4098,15 +4133,13 @@ class Application():
                             return_dict['ML buckling colors'][current_line] = {
                                 'buckling': 'green' if y_pred_buc == accept else 'red',
                                 'ultimate': 'green' if y_pred_ult == accept else 'red',
-                                'CSR requirement': 'green' if all(
-                                    [csr_pl == 1, csr_web == 1, csr_web_fl == 1, csr_fl == 1]
-                                ) else 'red',
+                                'CSR requirement': csr_color,
                             }
 
                             return_dict['ML buckling class'][current_line] = {
                                 'buckling': str(y_pred_buc) + mat_fac_error,
                                 'ultimate': str(y_pred_ult) + mat_fac_error,
-                                'CSR': [csr_pl, csr_web, csr_web_fl, csr_fl],
+                                'CSR': csr_values,
                             }
 
                             # ---------------------------------------------------------------------
@@ -7881,6 +7914,27 @@ class Application():
 
         self._sync_cylinder_object_after_structure_update(CylinderObj, cylinder_return)
 
+    def _replace_active_line_with_optimized_structure(self, optimized_structure):
+        """Replace the active single-line structure with the optimizer result object."""
+        if optimized_structure is None:
+            return False
+
+        line_structures = project_services.LineStructureService(self._line_to_struc)
+        if self._active_line in self._line_to_struc:
+            line_structures.replace_structure(self._active_line, optimized_structure)
+            line_structures.set_cylinder(self._active_line, None)
+        else:
+            line_structures.assign_structure(self._active_line, optimized_structure, cylinder=None)
+
+        try:
+            self._sync_fatigue_object_after_structure_update(optimized_structure.get_main_properties())
+        except Exception:
+            pass
+
+        self._calculate_load_combinations_after_structure_update()
+        project_services.mark_line_for_recalculation(self._line_to_struc, self._active_line)
+        return True
+
     def _calculate_load_combinations_after_structure_update(self):
         try:
             self.calculate_all_load_combinations_for_line_all_lines()
@@ -7910,7 +7964,7 @@ class Application():
             self._select_single_calculation_line()
             self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
 
-        if all([pasted_structure == None, multi_return == None, toggle_multi == None]):
+        if all([pasted_structure == None, multi_return == None, toggle_multi == None, cylinder_return == None]):
             if self._structure_input_is_missing():
                 self._show_missing_structure_input_warning()
                 return
@@ -9589,8 +9643,11 @@ class Application():
         '''
         self.save_no_dialogue(backup=True)  # keeping a backup
 
-        self._prepare_simplified_optimizer_replacement()
-        self.new_structure(multi_return=returned_object[0:2])
+        simplified_replacement = self._prepare_simplified_optimizer_replacement()
+        if simplified_replacement:
+            self._replace_active_line_with_optimized_structure(returned_object[0])
+        else:
+            self.new_structure(multi_return=returned_object[0:2])
         # self._line_to_struc[self._active_line][1]=returned_objects[0]
         # self._line_to_struc[self._active_line][1]=returned_objects[1]
         # self._line_to_struc[self._active_line][0].need_recalc = True
