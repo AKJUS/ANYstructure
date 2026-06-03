@@ -211,7 +211,35 @@ def test_simplified_3d_preview_uses_main_canvas_place():
 
     assert "getattr(self, '_simplified_calculation_mode', False)" in placement_block
     assert "self._place_info_float(self._main_canvas, 'relx', 0.26)" in placement_block
-    assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
+    assert "self._place_info_float(self._main_canvas, 'relheight', 0.70)" in placement_block
+
+
+def test_simplified_single_line_layout_keeps_results_out_of_right_control_column():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    simplified_layout = source[
+        source.index("def _place_simplified_single_line_layout"):
+        source.index("def _single_mode_active_line_candidate")
+    ]
+    standard_layout = source[
+        source.index("def _place_standard_canvas_layout"):
+        source.index("def _place_simplified_single_line_layout")
+    ]
+    results_block = source[
+        source.index("def draw_results"):
+        source.index("def _place_info_float")
+    ]
+
+    assert "self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=center_width, relheight=top_height)" in simplified_layout
+    assert "self._result_canvas.place(relx=x_canvas_place, rely=bottom_y, relwidth=center_width, relheight=0.27)" in simplified_layout
+    assert "self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.25, relheight=0.27)" in standard_layout
+    assert "self._result_canvas.place(relx=x_canvas_place + 0.25, rely=0.73, relwidth=0.273, relheight=0.27)" in standard_layout
+    assert "self._place_simplified_single_line_layout()" in source
+    assert "self._place_standard_canvas_layout()" in source
+    assert "if self._result_canvas.winfo_width() < 650:" in results_block
+    assert "x1, x2, x3 = (13, 23, 32) if dx < 15 else (15, 25, 35)" in results_block
+    assert "Special provisions - DNV-OS-C101:" in results_block
+    assert "Buckling results DNV-RP-C201:" in results_block
 
 
 def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners():
