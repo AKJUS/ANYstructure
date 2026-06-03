@@ -291,8 +291,8 @@ class Application():
 
         x_canvas_place = 0.26
         self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.523, relheight=0.73)
-        self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.38, relheight=0.27)
-        self._result_canvas.place(relx=x_canvas_place + 0.38, rely=0.73, relwidth=0.36, relheight=0.27)
+        self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.25, relheight=0.27)
+        self._result_canvas.place(relx=x_canvas_place + 0.25, rely=0.73, relwidth=0.273, relheight=0.27)
 
         self._simplified_calculation_mode = False
         self._single_line_name = 'line1'
@@ -2104,11 +2104,11 @@ class Application():
 
     def _place_standard_canvas_layout(self):
         """Use the original multi-panel canvas layout."""
+        x_canvas_place = 0.26
         try:
-            self._apply_responsive_main_layout(
-                max(self._parent.winfo_width(), 1),
-                max(self._parent.winfo_height(), 1),
-            )
+            self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.523, relheight=0.73)
+            self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.25, relheight=0.27)
+            self._result_canvas.place(relx=x_canvas_place + 0.25, rely=0.73, relwidth=0.273, relheight=0.27)
             self._place_3d_section_view_checkbox()
         except Exception:
             pass
@@ -2847,33 +2847,30 @@ class Application():
             left_width = 0.2585
 
         x_canvas_place = left_width + 0.005
-        right_control_start = 0.786458333
-        center_width = max(0.30, right_control_start - x_canvas_place - 0.005)
+        remaining_width = 1.0 - x_canvas_place
 
         self._tabControl.place(relwidth=left_width, relheight=1)
 
         self._main_canvas.place(
             relx=x_canvas_place,
             rely=0,
-            relwidth=center_width,
+            relwidth=remaining_width * 0.70,
             relheight=0.73,
         )
 
-        if center_width * width < 1200:
-            # Laptop/windowed mode: prioritize readable result text.  The
-            # section/result table needs the full central width to keep
-            # minimum, actual and accepted columns separated.
-            self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.01, relheight=0.01)
-            self._result_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=center_width, relheight=0.27)
-        else:
-            prop_width = min(0.25, center_width * 0.42)
-            self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=prop_width, relheight=0.27)
-            self._result_canvas.place(
-                relx=x_canvas_place + prop_width,
-                rely=0.73,
-                relwidth=center_width - prop_width,
-                relheight=0.27,
-            )
+        self._prop_canvas.place(
+            relx=x_canvas_place,
+            rely=0.73,
+            relwidth=remaining_width * 0.52,
+            relheight=0.27,
+        )
+
+        self._result_canvas.place(
+            relx=x_canvas_place + remaining_width * 0.52,
+            rely=0.73,
+            relwidth=remaining_width * 0.48,
+            relheight=0.27,
+        )
 
     def toggle_select_multiple(self, event=None):
         if self._toggle_btn.config('relief')[-1] == 'sunken':
@@ -5547,6 +5544,11 @@ class Application():
 
         if self._line_is_active:
             x, y, dx, dy = 0, 5, 15, 17
+            try:
+                if self._result_canvas.winfo_width() < 650:
+                    dx = 12
+            except Exception:
+                pass
 
             if self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is None:
 
@@ -5596,11 +5598,10 @@ class Application():
                 color_buckling = state['colors'][current_line]['buckling']
 
                 # printing the minimum section modulus
-                x1, x2, x3 = 15, 25, 35
+                x1, x2, x3 = (13, 23, 32) if dx < 15 else (15, 25, 35)
 
                 self._result_canvas.create_text([x + 0 * dx, (y + 0 * dy) * 1],
-                                                text='Special provisions - DNV-OS-C101 - checks for section, '
-                                                     'web thickness and plate thickness.',
+                                                text='Special provisions - DNV-OS-C101:',
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
                 self._result_canvas.create_text([x + 0 * dx, (y + 2 * dy) * 1],
                                                 text='Section modulus check',
@@ -5694,7 +5695,7 @@ class Application():
                     '''
 
                     self._result_canvas.create_text([x * 1, (y + (start_y + 0) * dy) * 1],
-                                                    text='Buckling results DNV-RP-C201 - prescriptive - (plate, stiffener, girder):',
+                                                    text='Buckling results DNV-RP-C201:',
                                                     font=self._text_size["Text 9 bold"], anchor='nw',
                                                     fill=self._color_text)
 
@@ -5721,14 +5722,14 @@ class Application():
                                                     anchor='nw', fill=self._color_text)
 
                     # 'Local buckling'
-                    x1, x2, x3 = 15, 25, 35
-                    self._result_canvas.create_text([x + dx * 15, (y + (start_y + 1) * dy) * 1],
+                    x1, x2, x3 = (13, 23, 32) if dx < 15 else (15, 25, 35)
+                    self._result_canvas.create_text([x + dx * x1, (y + (start_y + 1) * dy) * 1],
                                                     text='Plate', font=self._text_size["Text 9 bold"],
                                                     anchor='nw', fill=self._color_text)
-                    self._result_canvas.create_text([x + dx * 25, (y + (start_y + 1) * dy) * 1],
+                    self._result_canvas.create_text([x + dx * x2, (y + (start_y + 1) * dy) * 1],
                                                     text='Stiffener', font=self._text_size["Text 9 bold"],
                                                     anchor='nw', fill=self._color_text)
-                    self._result_canvas.create_text([x + dx * 35, (y + (start_y + 1) * dy) * 1],
+                    self._result_canvas.create_text([x + dx * x3, (y + (start_y + 1) * dy) * 1],
                                                     text='Girder', font=self._text_size["Text 9 bold"],
                                                     anchor='nw', fill=self._color_text)
                     x_mult = x1
@@ -10114,13 +10115,6 @@ if __name__ == '__main__':
     width = root.winfo_screenwidth()
     height = root.winfo_screenheight()
     root.geometry(f'{width}x{height}')
-    try:
-        root.state('zoomed')
-    except TclError:
-        try:
-            root.attributes('-zoomed', True)
-        except TclError:
-            pass
     my_app = Application(root)
     root.mainloop()
 
