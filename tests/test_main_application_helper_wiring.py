@@ -214,7 +214,7 @@ def test_simplified_3d_preview_uses_main_canvas_place():
     assert "self._place_info_float(self._main_canvas, 'relheight', 0.70)" in placement_block
 
 
-def test_simplified_single_line_layout_keeps_results_out_of_right_control_column():
+def test_responsive_layout_prioritizes_readable_result_columns_on_laptop_widths():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
     simplified_layout = source[
@@ -225,21 +225,34 @@ def test_simplified_single_line_layout_keeps_results_out_of_right_control_column
         source.index("def _place_standard_canvas_layout"):
         source.index("def _place_simplified_single_line_layout")
     ]
+    responsive_layout = source[
+        source.index("def _apply_responsive_main_layout"):
+        source.index("def toggle_select_multiple")
+    ]
     results_block = source[
         source.index("def draw_results"):
         source.index("def _place_info_float")
     ]
+    startup_anchor = source.rindex("multiprocessing.freeze_support()")
+    startup_block = source[
+        source.index("root = tk.Tk()", startup_anchor):
+        source.index("my_app = Application(root)", startup_anchor)
+    ]
 
     assert "self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=center_width, relheight=top_height)" in simplified_layout
     assert "self._result_canvas.place(relx=x_canvas_place, rely=bottom_y, relwidth=center_width, relheight=0.27)" in simplified_layout
-    assert "self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.25, relheight=0.27)" in standard_layout
-    assert "self._result_canvas.place(relx=x_canvas_place + 0.25, rely=0.73, relwidth=0.273, relheight=0.27)" in standard_layout
+    assert "self._apply_responsive_main_layout(" in standard_layout
+    assert "right_control_start = 0.786458333" in responsive_layout
+    assert "if center_width * width < 1200:" in responsive_layout
+    assert "self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.01, relheight=0.01)" in responsive_layout
+    assert "self._result_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=center_width, relheight=0.27)" in responsive_layout
     assert "self._place_simplified_single_line_layout()" in source
     assert "self._place_standard_canvas_layout()" in source
-    assert "if self._result_canvas.winfo_width() < 650:" in results_block
-    assert "x1, x2, x3 = (13, 23, 32) if dx < 15 else (15, 25, 35)" in results_block
-    assert "Special provisions - DNV-OS-C101:" in results_block
-    assert "Buckling results DNV-RP-C201:" in results_block
+    assert "if self._result_canvas.winfo_width() < 650:" not in results_block
+    assert "x1, x2, x3 = 15, 25, 35" in results_block
+    assert "Special provisions - DNV-OS-C101 - checks for section," in results_block
+    assert "Buckling results DNV-RP-C201 - prescriptive - (plate, stiffener, girder):" in results_block
+    assert "root.state('zoomed')" in startup_block
 
 
 def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners():
