@@ -291,8 +291,8 @@ class Application():
 
         x_canvas_place = 0.26
         self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.523, relheight=0.73)
-        self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.25, relheight=0.27)
-        self._result_canvas.place(relx=x_canvas_place + 0.25, rely=0.73, relwidth=0.273, relheight=0.27)
+        self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.38, relheight=0.27)
+        self._result_canvas.place(relx=x_canvas_place + 0.38, rely=0.73, relwidth=0.36, relheight=0.27)
 
         self._simplified_calculation_mode = False
         self._single_line_name = 'line1'
@@ -2078,8 +2078,6 @@ class Application():
         except Exception:
             pass
 
-        self._place_simplified_single_line_layout()
-
     def _show_standard_calculation_layout(self):
         """Restore modelling tabs and controls for the standard multi-panel workflow."""
         try:
@@ -2097,33 +2095,6 @@ class Application():
             self.add_stucture.config(text='Press to add input properties\n'
                                           'to the selected line. Sets all\n'
                                           'basic structural information.')
-        except Exception:
-            pass
-
-        self._place_standard_canvas_layout()
-
-    def _place_standard_canvas_layout(self):
-        """Use the original multi-panel canvas layout."""
-        x_canvas_place = 0.26
-        try:
-            self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=0.523, relheight=0.73)
-            self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.25, relheight=0.27)
-            self._result_canvas.place(relx=x_canvas_place + 0.25, rely=0.73, relwidth=0.273, relheight=0.27)
-            self._place_3d_section_view_checkbox()
-        except Exception:
-            pass
-
-    def _place_simplified_single_line_layout(self):
-        """Keep single-line results out of the right-side control column."""
-        x_canvas_place = 0.26
-        top_height = 0.70
-        bottom_y = 0.72
-        center_width = 0.523
-        try:
-            self._main_canvas.place(relx=x_canvas_place, rely=0, relwidth=center_width, relheight=top_height)
-            self._prop_canvas.place(relx=x_canvas_place, rely=bottom_y, relwidth=0.01, relheight=0.01)
-            self._result_canvas.place(relx=x_canvas_place, rely=bottom_y, relwidth=center_width, relheight=0.27)
-            self._place_3d_section_view_checkbox()
         except Exception:
             pass
 
@@ -5544,11 +5515,6 @@ class Application():
 
         if self._line_is_active:
             x, y, dx, dy = 0, 5, 15, 17
-            try:
-                if self._result_canvas.winfo_width() < 650:
-                    dx = 12
-            except Exception:
-                pass
 
             if self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is None:
 
@@ -5598,10 +5564,11 @@ class Application():
                 color_buckling = state['colors'][current_line]['buckling']
 
                 # printing the minimum section modulus
-                x1, x2, x3 = (13, 23, 32) if dx < 15 else (15, 25, 35)
+                x1, x2, x3 = 15, 25, 35
 
                 self._result_canvas.create_text([x + 0 * dx, (y + 0 * dy) * 1],
-                                                text='Special provisions - DNV-OS-C101:',
+                                                text='Special provisions - DNV-OS-C101 - checks for section, '
+                                                     'web thickness and plate thickness.',
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
                 self._result_canvas.create_text([x + 0 * dx, (y + 2 * dy) * 1],
                                                 text='Section modulus check',
@@ -5695,7 +5662,7 @@ class Application():
                     '''
 
                     self._result_canvas.create_text([x * 1, (y + (start_y + 0) * dy) * 1],
-                                                    text='Buckling results DNV-RP-C201:',
+                                                    text='Buckling results DNV-RP-C201 - prescriptive - (plate, stiffener, girder):',
                                                     font=self._text_size["Text 9 bold"], anchor='nw',
                                                     fill=self._color_text)
 
@@ -5722,14 +5689,14 @@ class Application():
                                                     anchor='nw', fill=self._color_text)
 
                     # 'Local buckling'
-                    x1, x2, x3 = (13, 23, 32) if dx < 15 else (15, 25, 35)
-                    self._result_canvas.create_text([x + dx * x1, (y + (start_y + 1) * dy) * 1],
+                    x1, x2, x3 = 15, 25, 35
+                    self._result_canvas.create_text([x + dx * 15, (y + (start_y + 1) * dy) * 1],
                                                     text='Plate', font=self._text_size["Text 9 bold"],
                                                     anchor='nw', fill=self._color_text)
-                    self._result_canvas.create_text([x + dx * x2, (y + (start_y + 1) * dy) * 1],
+                    self._result_canvas.create_text([x + dx * 25, (y + (start_y + 1) * dy) * 1],
                                                     text='Stiffener', font=self._text_size["Text 9 bold"],
                                                     anchor='nw', fill=self._color_text)
-                    self._result_canvas.create_text([x + dx * x3, (y + (start_y + 1) * dy) * 1],
+                    self._result_canvas.create_text([x + dx * 35, (y + (start_y + 1) * dy) * 1],
                                                     text='Girder', font=self._text_size["Text 9 bold"],
                                                     anchor='nw', fill=self._color_text)
                     x_mult = x1
@@ -6259,7 +6226,7 @@ class Application():
                     'relx': self._place_info_float(self._main_canvas, 'relx', 0.26),
                     'rely': self._place_info_float(self._main_canvas, 'rely', 0),
                     'relwidth': self._place_info_float(self._main_canvas, 'relwidth', 0.523),
-                    'relheight': self._place_info_float(self._main_canvas, 'relheight', 0.70),
+                    'relheight': self._place_info_float(self._main_canvas, 'relheight', 0.73),
                 }
 
             prop_relx = self._place_info_float(self._prop_canvas, 'relx', 0.26)
