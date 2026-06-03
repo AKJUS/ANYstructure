@@ -67,6 +67,16 @@ def _set_material_factor_on_structure(obj, material_factor):
     return obj
 
 
+def _deactivate_non_prescriptive_girder_buckling(const_chk):
+    checks = list(const_chk)
+    while len(checks) < 10:
+        checks.append(False)
+    checks[7] = False
+    checks[8] = False
+    checks[9] = False
+    return tuple(checks)
+
+
 def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lateral_pressure=None,
                      deltas=None, algorithm='anysmart', trials=30000, side='p',
                      const_chk=(True, True, True, True, True, True, True, False, False, False),
@@ -108,6 +118,8 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
     # Make material factor explicit for all optimizer variants.
     # Single optimization receives one structure object; geometric optimization receives a list.
     initial_structure_obj = _set_material_factor_on_structure(initial_structure_obj, material_factor)
+    if not cylinder and not is_geometric and getattr(initial_structure_obj, 'Girder', None) is not None:
+        const_chk = _deactivate_non_prescriptive_girder_buckling(const_chk)
 
     init_filter_weight = float('inf')
 
@@ -411,20 +423,14 @@ def any_smart_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pres
     if ass_var == None:
         return None, None, None, False, main_fail
 
-    if len(ass_var) == 8:
+    if len(ass_var) >= 12:
+        ass_var = [round(item, 10) for item in ass_var[0:12]]
+    elif len(ass_var) == 8:
         ass_var = [round(item, 10) for item in ass_var[0:8]]
     else:
         ass_var = [round(item, 10) for item in ass_var[0:8]] + [ass_var[8]]
 
-    calc_object_stf = None if initial_structure_obj.Stiffener is None \
-        else create_new_calc_obj(initial_structure_obj.Stiffener, ass_var,
-                                 fat_dict, fdwn=fdwn, fup=fup)
-    calc_object_pl = create_new_calc_obj(initial_structure_obj.Plate, ass_var, fat_dict,
-                                         fdwn=fdwn, fup=fup)
-    calc_object = calc.AllStructure(Plate=calc_object_pl[0],
-                                    Stiffener=None if initial_structure_obj.Stiffener is None else calc_object_stf[0],
-                                    Girder=None,
-                                    main_dict=initial_structure_obj.get_main_properties()['main dict'])
+    calc_object = create_new_calc_obj(initial_structure_obj, ass_var, fat_dict, fdwn=fdwn, fup=fup)[0]
     calc_object.lat_press = lateral_pressure
 
     return calc_object, fat_dict, True, main_fail
@@ -986,6 +992,10 @@ def _get_ml_input_for_optimization(calc_object, lat_press):
     return all_structure.Plate.get_buckling_ml_input(lat_press, alone=False)
 
 
+def _is_integrated_puls_boundary(boundary):
+    return str(boundary).strip().lower() in {'int', 'integrated'}
+
+
 def _get_numeric_pipeline_prefix(calc_object):
     """Return numeric ML pipeline prefix for this optimization candidate."""
     all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
@@ -994,14 +1004,14 @@ def _get_numeric_pipeline_prefix(calc_object):
 
     if sp_or_up == 'UP':
         boundary = all_structure.Plate.get_puls_boundary()
-        return 'num UP int' if boundary == 'Int' else 'num UP GLGT'
+        return 'num UP int' if _is_integrated_puls_boundary(boundary) else 'num UP GLGT'
 
     if all_structure.Stiffener is not None:
         boundary = all_structure.Stiffener.get_puls_boundary()
     else:
         boundary = all_structure.Plate.get_puls_boundary()
 
-    return 'num SP int' if boundary == 'Int' else 'num SP GLGT'
+    return 'num SP int' if _is_integrated_puls_boundary(boundary) else 'num SP GLGT'
 
 
 def _predict_numeric_uf_group(ml_algo, input_rows, prefix, mat_fac):
@@ -1247,14 +1257,10 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
 
     all_checks = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     print_result = False
+    if getattr(obj, 'Girder', None) is not None:
+        chk = _deactivate_non_prescriptive_girder_buckling(chk)
 
-    calc_object_stf = None if obj.Stiffener is None else create_new_calc_obj(obj.Stiffener, x, fat_dict, fdwn=fdwn,
-                                                                             fup=fup)
-    calc_object_pl = create_new_calc_obj(obj.Plate, x, fat_dict, fdwn=fdwn, fup=fup)
-    calc_object = [calc.AllStructure(Plate=calc_object_pl[0],
-                                     Stiffener=None if obj.Stiffener is None else calc_object_stf[0],
-                                     Girder=None,
-                                     main_dict=obj.get_main_properties()['main dict']), calc_object_pl[1]]
+    calc_object = list(create_new_calc_obj(obj, x, fat_dict, fdwn=fdwn, fup=fup))
     calc_object[0].lat_press = lat_press
 
     # SemiAnalytical buckling check
@@ -1405,12 +1411,27 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
 
         web_ok = True if max_web_height == 0 else calc_object[0].Stiffener.hw <= max_web_height
         flange_ok = True if max_flange_width == 0 else calc_object[0].Stiffener.b <= max_flange_width
-        check = all([web_ok, flange_ok])
+        check_items = [web_ok, flange_ok]
 
-        all_checks[2] = max([
+        local_fractions = [
             0 if max_web_height == 0 else calc_object[0].Stiffener.hw / max_web_height,
             0 if max_flange_width == 0 else calc_object[0].Stiffener.b / max_flange_width,
-        ])
+        ]
+
+        if calc_object[0].Girder is not None:
+            max_girder_web_height = buckling_local['Girder'][0]
+            max_girder_flange_width = buckling_local['Girder'][1]
+            girder_web_ok = True if max_girder_web_height == 0 else calc_object[0].Girder.hw <= max_girder_web_height
+            girder_flange_ok = True if max_girder_flange_width == 0 else \
+                calc_object[0].Girder.b <= max_girder_flange_width
+            check_items.extend([girder_web_ok, girder_flange_ok])
+            local_fractions.extend([
+                0 if max_girder_web_height == 0 else calc_object[0].Girder.hw / max_girder_web_height,
+                0 if max_girder_flange_width == 0 else calc_object[0].Girder.b / max_girder_flange_width,
+            ])
+
+        check = all(check_items)
+        all_checks[2] = max(local_fractions)
 
         if not check:
             if print_result:
@@ -1422,6 +1443,8 @@ def any_constraints_all(x, obj, lat_press, init_weight, side='p', chk=(True, Tru
         buckling_results = calc_object[0].plate_buckling(optimizing=True)
         res = [buckling_results['Plate']['Plate buckling'], ]
         for val in buckling_results['Stiffener'].values():
+            res.append(val)
+        for val in buckling_results['Girder'].values():
             res.append(val)
         buckling_results = res
         all_checks[3] = max(buckling_results)
@@ -1570,6 +1593,21 @@ def create_new_cylinder_obj(init_obj, x_new):
 
     return new_obj
 
+
+def _candidate_float(x, index, default=0.0):
+    try:
+        value = float(x[index])
+        if math.isnan(value):
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _candidate_has_girder_dimensions(x):
+    return len(x) >= 12
+
+
 def create_new_calc_obj(init_obj, x, fat_dict=None, fdwn=1, fup=0.5):
     '''
     Returns a new calculation object to be used in optimization
@@ -1578,55 +1616,72 @@ def create_new_calc_obj(init_obj, x, fat_dict=None, fdwn=1, fup=0.5):
     '''
 
     if type(init_obj) == calc.AllStructure:
+        plate = init_obj.Plate
+        stiffener = init_obj.Stiffener
+        girder = init_obj.Girder
 
-        if init_obj.Stiffener is not None:
-            plate = init_obj.Plate
-            stiffener = init_obj.Stiffener
-            girder = init_obj.Girder
+        if stiffener is not None:
             x_old = (plate.get_s(), plate.get_pl_thk(), stiffener.get_web_h(), stiffener.get_web_thk(),
-                     stiffener.get_fl_w(),
-                     stiffener.get_fl_thk(), plate.span, stiffener.girder_lg if girder is None else
-                     girder.girder_lg, stiffener.stiffener_type)
+                     stiffener.get_fl_w(), stiffener.get_fl_thk(), plate.span,
+                     stiffener.girder_lg if girder is None else girder.girder_lg, stiffener.stiffener_type)
         else:
-            x_old = init_obj.Plate.get_tuple()
+            x_old = plate.get_tuple()
 
-        sigma_y1_new = stress_scaling(init_obj.Plate.sigma_y1, init_obj.Plate.get_pl_thk(), x[1], fdwn=fdwn, fup=fup)
-        sigma_y2_new = stress_scaling(init_obj.Plate.sigma_y2, init_obj.Plate.get_pl_thk(), x[1], fdwn=fdwn, fup=fup)
-        tau_xy_new = stress_scaling(init_obj.Plate.tau_xy, init_obj.Plate.get_pl_thk(), x[1], fdwn=fdwn, fup=fup)
-        sigma_x1_new = stress_scaling_area(init_obj.Plate.sigma_x1,
+        sigma_y1_new = stress_scaling(plate.sigma_y1, plate.get_pl_thk(), x[1], fdwn=fdwn, fup=fup)
+        sigma_y2_new = stress_scaling(plate.sigma_y2, plate.get_pl_thk(), x[1], fdwn=fdwn, fup=fup)
+        tau_xy_new = stress_scaling(plate.tau_xy, plate.get_pl_thk(), x[1], fdwn=fdwn, fup=fup)
+        sigma_x1_new = stress_scaling_area(plate.sigma_x1,
                                            sum(get_field_tot_area(x_old)),
                                            sum(get_field_tot_area(x)), fdwn=fdwn, fup=fup)
-        sigma_x2_new = stress_scaling_area(init_obj.Plate.sigma_x2,
+        sigma_x2_new = stress_scaling_area(plate.sigma_x2,
                                            sum(get_field_tot_area(x_old)),
                                            sum(get_field_tot_area(x)), fdwn=fdwn, fup=fup)
-        try:
-            stf_type = x[8]
-        except IndexError:
-            stf_type = init_obj.plate.get_stiffener_type()
+        default_stf_type = stiffener.get_stiffener_type() if stiffener is not None else 'T'
+        stf_type = _get_stiffener_type_from_x(x, default=default_stf_type)
 
-        main_dict = {'mat_yield': [init_obj.Plate.get_fy(), 'Pa'], 'mat_factor': [init_obj.Plate.mat_factor, ''],
-                     'span': [init_obj.Plate.span, 'm'],
+        main_dict = {'mat_yield': [plate.get_fy(), 'Pa'], 'mat_factor': [plate.mat_factor, ''],
+                     'span': [plate.span, 'm'],
                      'spacing': [x[0], 'm'], 'plate_thk': [x[1], 'm'], 'stf_web_height': [x[2], 'm'],
                      'stf_web_thk': [x[3], 'm'], 'stf_flange_width': [x[4], 'm'],
-                     'stf_flange_thk': [x[5], 'm'], 'structure_type': [init_obj.Plate.get_structure_type(), ''],
+                     'stf_flange_thk': [x[5], 'm'], 'structure_type': [plate.get_structure_type(), ''],
                      'stf_type': [stf_type, ''], 'sigma_y1': [sigma_y1_new, 'MPa'],
                      'sigma_y2': [sigma_y2_new, 'MPa'], 'sigma_x1': [sigma_x1_new, 'MPa'],
                      'sigma_x2': [sigma_x2_new, 'MPa'],
-                     'tau_xy': [tau_xy_new, 'MPa'], 'plate_kpp': [init_obj.Plate.get_kpp(), ''],
-                     'stf_kps': [init_obj.Plate.get_kps(), ''], 'stf_km1': [init_obj.Plate.get_km1(), ''],
-                     'stf_km2': [init_obj.Plate.get_km2(), ''], 'stf_km3': [init_obj.Plate.get_km3(), ''],
-                     'structure_types': [init_obj.Plate.get_structure_types(), ''],
-                     'zstar_optimization': [init_obj.Plate.get_z_opt(), ''],
-                     'puls buckling method': [init_obj.Plate.get_puls_method(), ''],
-                     'puls boundary': [init_obj.Plate.get_puls_boundary(), ''],
-                     'puls stiffener end': [init_obj.Plate.get_puls_stf_end(), ''],
-                     'puls sp or up': [init_obj.Plate.get_puls_sp_or_up(), ''],
-                     'puls up boundary': [init_obj.Plate.get_puls_up_boundary(), ''],
-                     'panel or shell': [init_obj.Plate.panel_or_shell, '']}
-        all_dict = init_obj.get_main_properties()
+                     'tau_xy': [tau_xy_new, 'MPa'], 'plate_kpp': [plate.get_kpp(), ''],
+                     'stf_kps': [plate.get_kps(), ''], 'stf_km1': [plate.get_km1(), ''],
+                     'stf_km2': [plate.get_km2(), ''], 'stf_km3': [plate.get_km3(), ''],
+                     'structure_types': [plate.get_structure_types(), ''],
+                     'zstar_optimization': [plate.get_z_opt(), ''],
+                     'puls buckling method': [plate.get_puls_method(), ''],
+                     'puls boundary': [plate.get_puls_boundary(), ''],
+                     'puls stiffener end': [plate.get_puls_stf_end(), ''],
+                     'puls sp or up': [plate.get_puls_sp_or_up(), ''],
+                     'puls up boundary': [plate.get_puls_up_boundary(), ''],
+                     'panel or shell': [plate.panel_or_shell, ''],
+                     'girder_lg': [x[7], 'm']}
+        all_dict = copy.deepcopy(init_obj.get_main_properties())
         all_dict['Plate'] = main_dict
-        all_dict['Stiffener'] = None if init_obj.Stiffener is None else main_dict
-        all_dict['Girder'] = None if init_obj.Girder is None else main_dict
+        all_dict['Stiffener'] = None if stiffener is None else main_dict
+
+        if girder is None:
+            all_dict['Girder'] = None
+        else:
+            girder_dict = copy.deepcopy(main_dict)
+            girder_dict['spacing'] = [x[7], 'm']
+            girder_dict['stf_web_height'] = [
+                _candidate_float(x, 8, girder.get_web_h()) if _candidate_has_girder_dimensions(x)
+                else girder.get_web_h(), 'm']
+            girder_dict['stf_web_thk'] = [
+                _candidate_float(x, 9, girder.get_web_thk()) if _candidate_has_girder_dimensions(x)
+                else girder.get_web_thk(), 'm']
+            girder_dict['stf_flange_width'] = [
+                _candidate_float(x, 10, girder.get_fl_w()) if _candidate_has_girder_dimensions(x)
+                else girder.get_fl_w(), 'm']
+            girder_dict['stf_flange_thk'] = [
+                _candidate_float(x, 11, girder.get_fl_thk()) if _candidate_has_girder_dimensions(x)
+                else girder.get_fl_thk(), 'm']
+            girder_dict['stf_type'] = [girder.get_stiffener_type(), '']
+            all_dict['Girder'] = girder_dict
 
         if fat_dict == None:
             return calc.AllStructure(Plate=None if all_dict['Plate'] is None
@@ -2122,11 +2177,15 @@ def calc_weight(x, prt=False):
     '''
     span = x[6]
     plate_area, stiff_area = get_field_tot_area(x)
+    girder_area = 0.0
+    girder_length = x[7] if len(x) > 7 else 0.0
+    if _candidate_has_girder_dimensions(x):
+        girder_area = x[8] * x[9] + x[10] * x[11]
 
     if prt:
         print('x is', x, 'plate area', plate_area, 'stiff area', stiff_area, 'weight',
-              span * 7850 * (plate_area + stiff_area))
-    return span * 7850 * (plate_area + stiff_area)
+              span * 7850 * (plate_area + stiff_area) + girder_length * 7850 * girder_area)
+    return span * 7850 * (plate_area + stiff_area) + girder_length * 7850 * girder_area
 
 
 def calc_weight_pso(x, *args):
@@ -2433,7 +2492,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
                            calc_object_pl[1]]
 
             if calc_object[0].Plate.get_puls_sp_or_up() == 'UP':
-                if calc_object[0].Plate.get_puls_boundary() == 'Int':
+                if _is_integrated_puls_boundary(calc_object[0].Plate.get_puls_boundary()):
                     up_int.append(calc_object[0].Plate.get_buckling_ml_input(lat_press, alone=False))
                     up_int_idx.append(idx)
                 else:
@@ -2441,7 +2500,7 @@ def get_filtered_results(iterable_all, init_stuc_obj, lat_press, init_filter_wei
                     up_gl_gt_idx.append(idx)
             else:
                 ml_input = _get_ml_input_for_optimization(calc_object, lat_press)
-                if calc_object[0].Plate.get_puls_boundary() == 'Int':
+                if _is_integrated_puls_boundary(calc_object[0].Stiffener.get_puls_boundary() if calc_object[0].Stiffener is not None else calc_object[0].Plate.get_puls_boundary()):
                     sp_int.append(ml_input)
                     sp_int_idx.append(idx)
                 else:
@@ -2657,14 +2716,14 @@ def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef
     if min_var[0] is not None:
         spacing_array = (np.arange(min_var[0], max_var[0] + deltas[0], deltas[0])) if min_var[0] != max_var[0] \
             else np.array([min_var[0]])
-        spacing_array = spacing_array[spacing_array <= max_var[0]]
+        spacing_array = spacing_array[spacing_array <= max_var[0] + abs(deltas[0]) * 1e-9]
     else:
         spacing_array = np.array([np.nan])
 
     if min_var[1] is not None:
         pl_thk_array = (np.arange(min_var[1], max_var[1] + deltas[1], deltas[1])) if min_var[1] != max_var[1] \
             else np.array([min_var[1]])
-        pl_thk_array = pl_thk_array[pl_thk_array <= max_var[1]]
+        pl_thk_array = pl_thk_array[pl_thk_array <= max_var[1] + abs(deltas[1]) * 1e-9]
     else:
         pl_thk_array = np.array([np.nan])
 
@@ -2689,20 +2748,20 @@ def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef
 
     web_h_array = (np.arange(min_var[2], max_var[2] + deltas[2], deltas[2])) if min_var[2] != max_var[2] \
         else np.array([min_var[2]])
-    web_h_array = web_h_array[web_h_array <= max_var[2]]
+    web_h_array = web_h_array[web_h_array <= max_var[2] + abs(deltas[2]) * 1e-9]
 
     web_thk_array = (np.arange(min_var[3], max_var[3] + deltas[3], deltas[3])) if min_var[3] != max_var[3] \
         else np.array([min_var[3]])
-    web_thk_array = web_thk_array[web_thk_array <= max_var[3]]
+    web_thk_array = web_thk_array[web_thk_array <= max_var[3] + abs(deltas[3]) * 1e-9]
 
     flange_w_array = (np.arange(min_var[4], max_var[4] + deltas[4], deltas[4])) if min_var[4] != max_var[4] \
         else np.array([min_var[4]])
-    flange_w_array = flange_w_array[flange_w_array <= max_var[4]]
+    flange_w_array = flange_w_array[flange_w_array <= max_var[4] + abs(deltas[4]) * 1e-9]
 
     if min_var[5] is not None:
         flange_thk_array = (np.arange(min_var[5], max_var[5] + deltas[5], deltas[5])) if min_var[5] != max_var[5] \
             else np.array([min_var[5]])
-        flange_thk_array = flange_thk_array[flange_thk_array <= max_var[5]]
+        flange_thk_array = flange_thk_array[flange_thk_array <= max_var[5] + abs(deltas[5]) * 1e-9]
     else:
         flange_thk_array = np.array([np.nan])
 
@@ -2717,6 +2776,41 @@ def any_get_all_combs(min_var, max_var, deltas, init_weight=float('inf'), predef
             else np.array([min_var[7]])
     else:
         girder_array = np.array([np.nan])
+
+    if len(min_var) >= 12:
+        girder_web_h_delta = deltas[6] if len(deltas) > 6 else deltas[2]
+        girder_web_thk_delta = deltas[7] if len(deltas) > 7 else deltas[3]
+        girder_flange_w_delta = deltas[8] if len(deltas) > 8 else deltas[4]
+        girder_flange_thk_delta = deltas[9] if len(deltas) > 9 else deltas[5]
+
+        girder_web_h_array = (
+            np.arange(min_var[8], max_var[8] + girder_web_h_delta, girder_web_h_delta)
+        ) if min_var[8] != max_var[8] else np.array([min_var[8]])
+        girder_web_h_array = girder_web_h_array[
+            girder_web_h_array <= max_var[8] + abs(girder_web_h_delta) * 1e-9]
+
+        girder_web_thk_array = (
+            np.arange(min_var[9], max_var[9] + girder_web_thk_delta, girder_web_thk_delta)
+        ) if min_var[9] != max_var[9] else np.array([min_var[9]])
+        girder_web_thk_array = girder_web_thk_array[
+            girder_web_thk_array <= max_var[9] + abs(girder_web_thk_delta) * 1e-9]
+
+        girder_flange_w_array = (
+            np.arange(min_var[10], max_var[10] + girder_flange_w_delta, girder_flange_w_delta)
+        ) if min_var[10] != max_var[10] else np.array([min_var[10]])
+        girder_flange_w_array = girder_flange_w_array[
+            girder_flange_w_array <= max_var[10] + abs(girder_flange_w_delta) * 1e-9]
+
+        girder_flange_thk_array = (
+            np.arange(min_var[11], max_var[11] + girder_flange_thk_delta, girder_flange_thk_delta)
+        ) if min_var[11] != max_var[11] else np.array([min_var[11]])
+        girder_flange_thk_array = girder_flange_thk_array[
+            girder_flange_thk_array <= max_var[11] + abs(girder_flange_thk_delta) * 1e-9]
+
+        comb = it.product(spacing_array, pl_thk_array, web_h_array, web_thk_array, flange_w_array, flange_thk_array,
+                          span_array, girder_array, girder_web_h_array, girder_web_thk_array,
+                          girder_flange_w_array, girder_flange_thk_array)
+        return list(comb)
 
     comb = it.product(spacing_array, pl_thk_array, web_h_array, web_thk_array, flange_w_array, flange_thk_array,
                       span_array, girder_array)

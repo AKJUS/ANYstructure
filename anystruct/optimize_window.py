@@ -78,9 +78,17 @@ class CreateOptimizeWindow():
             self._ML_buckling = app._ML_buckling
 
         self._predefined_stiffener_iter = None
+        self._is_unstiffened_plate = self._initial_calc_obj.Stiffener is None
+        self._has_girder = self._initial_calc_obj.Girder is not None
 
         self._frame = master
-        self._frame.wm_title("Optimize structure")
+        if self._is_unstiffened_plate:
+            window_title = "Optimize unstiffened plate"
+        elif self._has_girder:
+            window_title = "Optimize structure with girder"
+        else:
+            window_title = "Optimize structure"
+        self._frame.wm_title(window_title)
         self._frame.geometry('1600x1000')
         self._frame.grab_set()
 
@@ -118,6 +126,17 @@ class CreateOptimizeWindow():
             self._fl_w = 0
             self._fl_thk = 0
 
+        if self._has_girder:
+            self._girder_web_h = self._initial_calc_obj.Girder.get_web_h()
+            self._girder_web_thk = self._initial_calc_obj.Girder.get_web_thk()
+            self._girder_fl_w = self._initial_calc_obj.Girder.get_fl_w()
+            self._girder_fl_thk = self._initial_calc_obj.Girder.get_fl_thk()
+        else:
+            self._girder_web_h = 0
+            self._girder_web_thk = 0
+            self._girder_fl_w = 0
+            self._girder_fl_thk = 0
+
         # upper and lower bounds for optimization
         # [0.6, 0.012, 0.3, 0.01, 0.1, 0.01]
         self._new_spacing_upper = tk.DoubleVar()
@@ -132,6 +151,14 @@ class CreateOptimizeWindow():
         self._new_fl_w_lower = tk.DoubleVar()
         self._new_fl_thk_upper = tk.DoubleVar()
         self._new_fl_thk_lower = tk.DoubleVar()
+        self._new_girder_web_h_upper = tk.DoubleVar()
+        self._new_girder_web_h_lower = tk.DoubleVar()
+        self._new_girder_web_thk_upper = tk.DoubleVar()
+        self._new_girder_web_thk_lower = tk.DoubleVar()
+        self._new_girder_fl_w_upper = tk.DoubleVar()
+        self._new_girder_fl_w_lower = tk.DoubleVar()
+        self._new_girder_fl_thk_upper = tk.DoubleVar()
+        self._new_girder_fl_thk_lower = tk.DoubleVar()
         self._new_span = tk.DoubleVar()
         self._new_width_lg = tk.DoubleVar()
         self._new_algorithm = tk.StringVar()
@@ -166,6 +193,24 @@ class CreateOptimizeWindow():
         self._ent_fl_thk_upper = tk.Entry(self._frame, textvariable=self._new_fl_thk_upper, width=ent_w)
         self._ent_fl_thk_lower = tk.Entry(self._frame, textvariable=self._new_fl_thk_lower, width=ent_w)
 
+        girder_ent_w = 8
+        self._ent_girder_web_h_upper = tk.Entry(self._frame, textvariable=self._new_girder_web_h_upper,
+                                                width=girder_ent_w)
+        self._ent_girder_web_h_lower = tk.Entry(self._frame, textvariable=self._new_girder_web_h_lower,
+                                                width=girder_ent_w)
+        self._ent_girder_web_thk_upper = tk.Entry(self._frame, textvariable=self._new_girder_web_thk_upper,
+                                                  width=girder_ent_w)
+        self._ent_girder_web_thk_lower = tk.Entry(self._frame, textvariable=self._new_girder_web_thk_lower,
+                                                  width=girder_ent_w)
+        self._ent_girder_fl_w_upper = tk.Entry(self._frame, textvariable=self._new_girder_fl_w_upper,
+                                               width=girder_ent_w)
+        self._ent_girder_fl_w_lower = tk.Entry(self._frame, textvariable=self._new_girder_fl_w_lower,
+                                               width=girder_ent_w)
+        self._ent_girder_fl_thk_upper = tk.Entry(self._frame, textvariable=self._new_girder_fl_thk_upper,
+                                                 width=girder_ent_w)
+        self._ent_girder_fl_thk_lower = tk.Entry(self._frame, textvariable=self._new_girder_fl_thk_lower,
+                                                 width=girder_ent_w)
+
         self._ent_span = tk.Entry(self._frame, textvariable=self._new_span, width=ent_w)
         self._ent_width_lg = tk.Entry(self._frame, textvariable=self._new_width_lg, width=ent_w)
         self._ent_slamming_pressure = tk.Entry(self._frame, textvariable=self._new_slamming_pressure, width=ent_w)
@@ -190,6 +235,10 @@ class CreateOptimizeWindow():
         self._new_delta_web_thk = tk.DoubleVar()
         self._new_delta_fl_w = tk.DoubleVar()
         self._new_delta_fl_thk = tk.DoubleVar()
+        self._new_delta_girder_web_h = tk.DoubleVar()
+        self._new_delta_girder_web_thk = tk.DoubleVar()
+        self._new_delta_girder_fl_w = tk.DoubleVar()
+        self._new_delta_girder_fl_thk = tk.DoubleVar()
 
         self._new_opt_spacing = tk.DoubleVar()
         self._new_opt_pl_thk = tk.DoubleVar()
@@ -197,6 +246,10 @@ class CreateOptimizeWindow():
         self._new_opt_web_thk = tk.DoubleVar()
         self._new_opt_fl_w = tk.DoubleVar()
         self._new_opt_fl_thk = tk.DoubleVar()
+        self._new_opt_girder_web_h = tk.DoubleVar()
+        self._new_opt_girder_web_thk = tk.DoubleVar()
+        self._new_opt_girder_fl_w = tk.DoubleVar()
+        self._new_opt_girder_fl_thk = tk.DoubleVar()
 
         self._ent_delta_spacing = tk.Entry(self._frame, textvariable=self._new_delta_spacing, width=ent_w)
         self._ent_delta_pl_thk = tk.Entry(self._frame, textvariable=self._new_delta_pl_thk, width=ent_w)
@@ -204,6 +257,14 @@ class CreateOptimizeWindow():
         self._ent_delta_web_thk = tk.Entry(self._frame, textvariable=self._new_delta_web_thk, width=ent_w)
         self._ent_delta_fl_w = tk.Entry(self._frame, textvariable=self._new_delta_fl_w, width=ent_w)
         self._ent_delta_fl_thk = tk.Entry(self._frame, textvariable=self._new_delta_fl_thk, width=ent_w)
+        self._ent_delta_girder_web_h = tk.Entry(self._frame, textvariable=self._new_delta_girder_web_h,
+                                                width=girder_ent_w)
+        self._ent_delta_girder_web_thk = tk.Entry(self._frame, textvariable=self._new_delta_girder_web_thk,
+                                                  width=girder_ent_w)
+        self._ent_delta_girder_fl_w = tk.Entry(self._frame, textvariable=self._new_delta_girder_fl_w,
+                                               width=girder_ent_w)
+        self._ent_delta_girder_fl_thk = tk.Entry(self._frame, textvariable=self._new_delta_girder_fl_thk,
+                                                 width=girder_ent_w)
 
         bg_col = 'pink'
         self._ent_opt_spacing = tk.Entry(self._frame, textvariable=self._new_opt_spacing, width=ent_w, bg=bg_col)
@@ -212,6 +273,14 @@ class CreateOptimizeWindow():
         self._ent_opt_web_thk = tk.Entry(self._frame, textvariable=self._new_opt_web_thk, width=ent_w, bg=bg_col)
         self._ent_opt_fl_w = tk.Entry(self._frame, textvariable=self._new_opt_fl_w, width=ent_w, bg=bg_col)
         self._ent_opt_fl_thk = tk.Entry(self._frame, textvariable=self._new_opt_fl_thk, width=ent_w, bg=bg_col)
+        self._ent_opt_girder_web_h = tk.Entry(self._frame, textvariable=self._new_opt_girder_web_h,
+                                              width=girder_ent_w, bg=bg_col)
+        self._ent_opt_girder_web_thk = tk.Entry(self._frame, textvariable=self._new_opt_girder_web_thk,
+                                                width=girder_ent_w, bg=bg_col)
+        self._ent_opt_girder_fl_w = tk.Entry(self._frame, textvariable=self._new_opt_girder_fl_w,
+                                             width=girder_ent_w, bg=bg_col)
+        self._ent_opt_girder_fl_thk = tk.Entry(self._frame, textvariable=self._new_opt_girder_fl_thk,
+                                               width=girder_ent_w, bg=bg_col)
 
         # stresses in plate and stiffener
 
@@ -319,6 +388,35 @@ class CreateOptimizeWindow():
         self._ent_delta_fl_thk.place(x=start_x + dx * 7, y=start_y + dy)
         self._ent_fl_thk_lower.place(x=start_x + dx * 7, y=start_y + 2 * dy)
 
+        if self._has_girder:
+            girder_x, girder_y, girder_dx, girder_dy = 1270, 335, 72, 30
+            tk.Label(self._frame, text='Girder iteration [mm]', font='Verdana 9 bold').place(x=girder_x,
+                                                                                             y=girder_y - 38)
+            tk.Label(self._frame, text='Upper', font='Verdana 8').place(x=girder_x, y=girder_y)
+            tk.Label(self._frame, text='Delta', font='Verdana 8').place(x=girder_x, y=girder_y + girder_dy)
+            tk.Label(self._frame, text='Lower', font='Verdana 8').place(x=girder_x, y=girder_y + 2 * girder_dy)
+            tk.Label(self._frame, text='Web h', font='Verdana 7 bold').place(x=girder_x + girder_dx,
+                                                                             y=girder_y - 18)
+            tk.Label(self._frame, text='Web t', font='Verdana 7 bold').place(x=girder_x + 2 * girder_dx,
+                                                                             y=girder_y - 18)
+            tk.Label(self._frame, text='Fl. w', font='Verdana 7 bold').place(x=girder_x + 3 * girder_dx,
+                                                                             y=girder_y - 18)
+            tk.Label(self._frame, text='Fl. t', font='Verdana 7 bold').place(x=girder_x + 4 * girder_dx,
+                                                                             y=girder_y - 18)
+
+            self._ent_girder_web_h_upper.place(x=girder_x + girder_dx, y=girder_y)
+            self._ent_delta_girder_web_h.place(x=girder_x + girder_dx, y=girder_y + girder_dy)
+            self._ent_girder_web_h_lower.place(x=girder_x + girder_dx, y=girder_y + 2 * girder_dy)
+            self._ent_girder_web_thk_upper.place(x=girder_x + 2 * girder_dx, y=girder_y)
+            self._ent_delta_girder_web_thk.place(x=girder_x + 2 * girder_dx, y=girder_y + girder_dy)
+            self._ent_girder_web_thk_lower.place(x=girder_x + 2 * girder_dx, y=girder_y + 2 * girder_dy)
+            self._ent_girder_fl_w_upper.place(x=girder_x + 3 * girder_dx, y=girder_y)
+            self._ent_delta_girder_fl_w.place(x=girder_x + 3 * girder_dx, y=girder_y + girder_dy)
+            self._ent_girder_fl_w_lower.place(x=girder_x + 3 * girder_dx, y=girder_y + 2 * girder_dy)
+            self._ent_girder_fl_thk_upper.place(x=girder_x + 4 * girder_dx, y=girder_y)
+            self._ent_delta_girder_fl_thk.place(x=girder_x + 4 * girder_dx, y=girder_y + girder_dy)
+            self._ent_girder_fl_thk_lower.place(x=girder_x + 4 * girder_dx, y=girder_y + 2 * girder_dy)
+
         ###
 
         # tk.Label(self._frame,text='Optimized result:\n')\
@@ -340,6 +438,17 @@ class CreateOptimizeWindow():
         tk.Label(self._frame, text='fl_ttk.').place(x=start_x + 4 * dx_mult * dx, y=start_y + 19 * dy)
         self._ent_opt_fl_w.place(x=start_x + 5 * dx_mult * dx, y=start_y + 18 * dy)
         self._ent_opt_fl_thk.place(x=start_x + 5 * dx_mult * dx, y=start_y + 19 * dy)
+
+        if self._has_girder:
+            girder_result_y = start_y + 20.1 * dy
+            tk.Label(self._frame, text='girder web_h').place(x=start_x, y=girder_result_y)
+            tk.Label(self._frame, text='girder web_t').place(x=start_x, y=girder_result_y + dy)
+            self._ent_opt_girder_web_h.place(x=start_x + 1.05 * dx, y=girder_result_y)
+            self._ent_opt_girder_web_thk.place(x=start_x + 1.05 * dx, y=girder_result_y + dy)
+            tk.Label(self._frame, text='girder fl_w').place(x=start_x + 2.45 * dx, y=girder_result_y)
+            tk.Label(self._frame, text='girder fl_t').place(x=start_x + 2.45 * dx, y=girder_result_y + dy)
+            self._ent_opt_girder_fl_w.place(x=start_x + 3.55 * dx, y=girder_result_y)
+            self._ent_opt_girder_fl_thk.place(x=start_x + 3.55 * dx, y=girder_result_y + dy)
 
         # Labels for the pso
 
@@ -418,14 +527,18 @@ class CreateOptimizeWindow():
         self._ent_slamming_pressure.place(x=start_x + dx * 8, y=start_y + 18.5 * dy)
 
         # setting default values
-        init_dim = float(10)  # mm
-        init_thk = float(1)  # mm
-        self._new_delta_spacing.set(init_dim)
+        init_dim = float(50)  # mm
+        init_thk = float(5)  # mm
+        self._new_delta_spacing.set(5)
         self._new_delta_pl_thk.set(init_thk)
         self._new_delta_web_h.set(init_dim)
         self._new_delta_web_thk.set(init_thk)
         self._new_delta_fl_w.set(init_dim)
         self._new_delta_fl_thk.set(init_thk)
+        self._new_delta_girder_web_h.set(100)
+        self._new_delta_girder_web_thk.set(init_thk)
+        self._new_delta_girder_fl_w.set(init_dim)
+        self._new_delta_girder_fl_thk.set(init_thk)
         self._new_trans_stress_high.set(self._initial_calc_obj.Plate.sigma_y1)
         self._new_trans_stress_low.set(self._initial_calc_obj.Plate.sigma_y2)
         self._new_axial_stress.set(self._initial_calc_obj.Plate.sigma_x1)
@@ -442,27 +555,31 @@ class CreateOptimizeWindow():
 
         self._new_spacing_upper.set(round(self._spacing * 1000, 5))
         self._new_spacing_lower.set(round(max(self._spacing * 1000, 0), 5))
-        self._new_pl_thk_upper.set(round(self._pl_thk * 1000 + 10, 5))
-        self._new_pl_thk_lower.set(round(max(self._pl_thk * 1000 - 10, float(10)), 5))
-        self._new_web_h_upper.set(round(self._stf_web_h * 1000 + 100, 5))
-        self._new_web_h_lower.set(round(max(self._stf_web_h * 1000 - 100, 100), 5))
-        self._new_web_thk_upper.set(round(self._stf_web_thk * 1000 + 10, 5))
-        self._new_web_thk_lower.set(round(max(self._stf_web_thk * 1000 - 10, float(10)), 5))
+        self._new_pl_thk_upper.set(30)
+        self._new_pl_thk_lower.set(10)
+        self._new_web_h_upper.set(500)
+        self._new_web_h_lower.set(200)
+        self._new_web_thk_upper.set(30)
+        self._new_web_thk_lower.set(10)
         if self._initial_calc_obj.Stiffener is not None:
             if self._initial_calc_obj.Stiffener.get_stiffener_type() != 'FB':
-                self._new_fl_w_upper.set(min(round(self._fl_w * 1000 + 100, 5), 200))
-                self._new_fl_w_lower.set(round(max(self._fl_w * 1000 - 100, 100), 5))
-                self._new_fl_thk_upper.set(round(self._fl_thk * 1000 + 10, 15))
-                self._new_fl_thk_lower.set(round(max(self._fl_thk * 1000 - 10, 10), 15))
+                self._new_fl_w_upper.set(300)
+                self._new_fl_w_lower.set(100)
+                self._new_fl_thk_upper.set(30)
+                self._new_fl_thk_lower.set(10)
 
         else:
             self._new_fl_w_upper.set(0)
             self._new_fl_w_lower.set(0)
             self._new_fl_thk_upper.set(0)
             self._new_fl_thk_lower.set(0)
+        if self._is_unstiffened_plate:
+            self._set_fixed_stiffener_iteration_bounds()
+        if self._has_girder:
+            self._set_girder_iteration_bounds()
 
         self._new_pressure_side.set('p')
-        self._new_width_lg.set(10)
+        self._new_width_lg.set(round(self._initial_calc_obj.Girder.girder_lg, 5) if self._has_girder else 10)
         self._new_span.set(round(self._initial_calc_obj.Plate.span, 5))
         self._new_algorithm.set('anysmart')
         self._new_algorithm_random_trials.set(100000)
@@ -493,14 +610,29 @@ class CreateOptimizeWindow():
         self._new_fl_w_lower.trace('w', self.schedule_running_time_update)
         self._new_fl_thk_upper.trace('w', self.schedule_running_time_update)
         self._new_fl_thk_lower.trace('w', self.schedule_running_time_update)
+        self._new_delta_girder_web_h.trace('w', self.schedule_running_time_update)
+        self._new_delta_girder_web_thk.trace('w', self.schedule_running_time_update)
+        self._new_delta_girder_fl_w.trace('w', self.schedule_running_time_update)
+        self._new_delta_girder_fl_thk.trace('w', self.schedule_running_time_update)
+        self._new_girder_web_h_upper.trace('w', self.schedule_running_time_update)
+        self._new_girder_web_h_lower.trace('w', self.schedule_running_time_update)
+        self._new_girder_web_thk_upper.trace('w', self.schedule_running_time_update)
+        self._new_girder_web_thk_lower.trace('w', self.schedule_running_time_update)
+        self._new_girder_fl_w_upper.trace('w', self.schedule_running_time_update)
+        self._new_girder_fl_w_lower.trace('w', self.schedule_running_time_update)
+        self._new_girder_fl_thk_upper.trace('w', self.schedule_running_time_update)
+        self._new_girder_fl_thk_lower.trace('w', self.schedule_running_time_update)
 
         self._new_algorithm_random_trials.trace('w', self.schedule_running_time_update)
         self._new_algorithm.trace('w', self.schedule_running_time_update)
 
         self.running_time_per_item = {'RP': 1.009943181818182e-5}
         self.running_time_no_filter_factor = 4.0
-        self.initial_weight = op.calc_weight([self._spacing, self._pl_thk, self._stf_web_h, self._stf_web_thk,
-                                              self._fl_w, self._fl_thk, self._new_span.get(), self._new_width_lg.get()])
+        initial_x = [self._spacing, self._pl_thk, self._stf_web_h, self._stf_web_thk, self._fl_w, self._fl_thk,
+                     self._new_span.get(), self._new_width_lg.get()]
+        if self._has_girder:
+            initial_x.extend([self._girder_web_h, self._girder_web_thk, self._girder_fl_w, self._girder_fl_thk])
+        self.initial_weight = op.calc_weight(initial_x)
 
         img_file_name = 'img_plate_and_stiffener.gif'
         if os.path.isfile('images/' + img_file_name):
@@ -636,6 +768,8 @@ class CreateOptimizeWindow():
             fg='black',
         )
         self.cost_study_button.place(x=970, y=270, width=150)
+        if self._is_unstiffened_plate:
+            self._disable_stiffener_iteration_controls()
         self._opt_actual_running_time.place(x=970, y=75)
 
         self.close_and_save = tk.Button(self._frame, text='Return and replace initial structure with optimized',
@@ -669,6 +803,8 @@ class CreateOptimizeWindow():
         self._new_check_buckling_semi_analytical.set(False)
         self._new_check_buckling_ml_cl.set(False)
         self._new_check_buckling_ml_numeric.set(False)
+        if self._is_unstiffened_plate:
+            self._disable_stiffener_only_constraints()
         self._new_check_buckling_semi_analytical.trace('w', self.update_running_time)
         self._new_check_buckling_ml_cl.trace('w', self.update_running_time)
         self._new_check_buckling_ml_numeric.trace('w', self.update_running_time)
@@ -726,12 +862,21 @@ class CreateOptimizeWindow():
             .place(x=constraint_chk_x, y=constraint_y + 6 * constraint_dy - 4)
         tk.Checkbutton(self._frame, variable=self._new_use_weight_filter) \
             .place(x=constraint_chk_x, y=constraint_y + 7 * constraint_dy - 4)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_semi_analytical) \
-            .place(x=constraint_chk_x, y=constraint_y + 8 * constraint_dy - 4)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl, state='disabled') \
-            .place(x=constraint_chk_x, y=constraint_y + 9 * constraint_dy - 4)
-        tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric) \
-            .place(x=constraint_chk_x, y=constraint_y + 10 * constraint_dy - 4)
+        self._chk_buckling_semi_analytical = tk.Checkbutton(
+            self._frame,
+            variable=self._new_check_buckling_semi_analytical,
+            state='disabled' if self._has_girder else tk.NORMAL,
+        )
+        self._chk_buckling_semi_analytical.place(x=constraint_chk_x, y=constraint_y + 8 * constraint_dy - 4)
+        self._chk_buckling_ml_cl = tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_cl,
+                                                  state='disabled')
+        self._chk_buckling_ml_cl.place(x=constraint_chk_x, y=constraint_y + 9 * constraint_dy - 4)
+        self._chk_buckling_ml_numeric = tk.Checkbutton(
+            self._frame,
+            variable=self._new_check_buckling_ml_numeric,
+            state='disabled' if self._has_girder else tk.NORMAL,
+        )
+        self._chk_buckling_ml_numeric.place(x=constraint_chk_x, y=constraint_y + 10 * constraint_dy - 4)
 
         # Stress scaling
         self._new_fup = tk.DoubleVar()
@@ -757,8 +902,58 @@ class CreateOptimizeWindow():
                                      command=self.toggle, bg='salmon')
         self._toggle_btn.place(x=start_x, y=60)
         self._toggle_object, self._filez = self._initial_calc_obj, None
+        if self._is_unstiffened_plate:
+            self._toggle_btn.config(state=tk.DISABLED, text='Plate-only optimization')
         self.draw_properties()
         self.update_running_time()
+
+    def _set_fixed_stiffener_iteration_bounds(self):
+        for variable in (
+                self._new_web_h_upper, self._new_web_h_lower, self._new_web_thk_upper, self._new_web_thk_lower,
+                self._new_fl_w_upper, self._new_fl_w_lower, self._new_fl_thk_upper, self._new_fl_thk_lower):
+            variable.set(0)
+
+        for variable in (
+                self._new_delta_web_h, self._new_delta_web_thk, self._new_delta_fl_w, self._new_delta_fl_thk):
+            variable.set(5)
+
+    def _set_girder_iteration_bounds(self):
+        self._new_girder_web_h_upper.set(1000)
+        self._new_girder_web_h_lower.set(500)
+        self._new_girder_web_thk_upper.set(30)
+        self._new_girder_web_thk_lower.set(10)
+
+        if self._initial_calc_obj.Girder.get_stiffener_type() == 'FB':
+            self._new_girder_fl_w_upper.set(0)
+            self._new_girder_fl_w_lower.set(0)
+            self._new_girder_fl_thk_upper.set(0)
+            self._new_girder_fl_thk_lower.set(0)
+        else:
+            self._new_girder_fl_w_upper.set(300)
+            self._new_girder_fl_w_lower.set(100)
+            self._new_girder_fl_thk_upper.set(30)
+            self._new_girder_fl_thk_lower.set(10)
+
+    def _disable_stiffener_only_constraints(self):
+        self._new_check_sec_mod.set(False)
+        self._new_check_shear_area.set(False)
+        self._new_check_slamming.set(False)
+        self._new_check_local_buckling.set(False)
+        self._new_weld_bias.set(0.0)
+
+    def _disable_stiffener_iteration_controls(self):
+        for entry in (
+                self._ent_web_h_upper, self._ent_web_h_lower, self._ent_delta_web_h,
+                self._ent_web_thk_upper, self._ent_web_thk_lower, self._ent_delta_web_thk,
+                self._ent_fl_w_upper, self._ent_fl_w_lower, self._ent_delta_fl_w,
+                self._ent_fl_thk_upper, self._ent_fl_thk_lower, self._ent_delta_fl_thk,
+                self._ent_opt_web_h, self._ent_opt_web_thk, self._ent_opt_fl_w, self._ent_opt_fl_thk):
+            entry.config(state=tk.DISABLED)
+
+        for widget in (
+                self._weld_bias_slider, self._weld_metric_menu, self.weight_weld_study_button,
+                self.show_previous_weld_study_button, self.cost_study_button):
+            widget.config(state=tk.DISABLED)
 
     def selected_algorithm(self, event):
         '''
@@ -896,6 +1091,13 @@ class CreateOptimizeWindow():
         Only one buckling formulation should be active at a time:
             RP-C201, SemiAnalytical S3/U3, or ML-Numeric.
         '''
+        if getattr(self, '_has_girder', False):
+            if self._new_check_buckling_semi_analytical.get():
+                self._new_check_buckling_semi_analytical.set(False)
+            if self._new_check_buckling_ml_numeric.get():
+                self._new_check_buckling_ml_numeric.set(False)
+            return
+
         selected = [
             self._new_check_buckling.get(),
             self._new_check_buckling_semi_analytical.get(),
@@ -925,6 +1127,8 @@ class CreateOptimizeWindow():
               weld consumable calculations.
         1.0 = pure estimated weld consumable optimization.
         '''
+        if getattr(self, '_is_unstiffened_plate', False):
+            return 0.0
         try:
             return min(max(float(self._new_weld_bias.get()), 0.0), 1.0)
         except Exception:
@@ -981,6 +1185,19 @@ class CreateOptimizeWindow():
             pass
 
     def _get_constraint_tuple(self):
+        if getattr(self, '_is_unstiffened_plate', False):
+            return (False, self._new_check_min_pl_thk.get(),
+                    False, self._new_check_buckling.get(),
+                    self._new_check_fatigue.get(), False, False,
+                    self._new_check_buckling_semi_analytical.get(),
+                    False, self._new_check_buckling_ml_numeric.get())
+
+        if getattr(self, '_has_girder', False):
+            return (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
+                    self._new_check_shear_area.get(), self._new_check_buckling.get(),
+                    self._new_check_fatigue.get(), self._new_check_slamming.get(),
+                    self._new_check_local_buckling.get(), False, False, False)
+
         return (self._new_check_sec_mod.get(), self._new_check_min_pl_thk.get(),
                 self._new_check_shear_area.get(), self._new_check_buckling.get(),
                 self._new_check_fatigue.get(), self._new_check_slamming.get(),
@@ -1232,7 +1449,7 @@ class CreateOptimizeWindow():
         table_frame.rowconfigure(0, weight=1)
 
     def _result_x_from_structure(self, structure_obj):
-        return [
+        result = [
             structure_obj.Plate.get_s(),
             structure_obj.Plate.get_pl_thk(),
             0.0 if structure_obj.Stiffener is None else structure_obj.Stiffener.get_web_h(),
@@ -1242,6 +1459,14 @@ class CreateOptimizeWindow():
             self._new_span.get(),
             self._new_width_lg.get(),
         ]
+        if structure_obj.Girder is not None:
+            result.extend([
+                structure_obj.Girder.get_web_h(),
+                structure_obj.Girder.get_web_thk(),
+                structure_obj.Girder.get_fl_w(),
+                structure_obj.Girder.get_fl_thk(),
+            ])
+        return result
 
     def _stiffener_type_from_structure(self, structure_obj):
         try:
@@ -1287,6 +1512,13 @@ class CreateOptimizeWindow():
                 text = 'Optimization result | Spacing: ' + str(round(self._opt_results[0].Plate.get_s(), 10) * 1000) + \
                        ' Plate thickness: ' + str(round(self._opt_results[0].Plate.get_pl_thk() * 1000, 10))
 
+            if self._opt_results[0].Girder is not None:
+                text += ' Girder - ' + self._opt_results[0].Girder.get_stiffener_type() + \
+                        str(round(self._opt_results[0].Girder.get_web_h() * 1000, 10)) + 'x' + \
+                        str(round(self._opt_results[0].Girder.get_web_thk() * 1000, 10)) + '+' + \
+                        str(round(self._opt_results[0].Girder.get_fl_w() * 1000, 10)) + 'x' + \
+                        str(round(self._opt_results[0].Girder.get_fl_thk() * 1000, 10))
+
             result_x = self._result_x_from_structure(self._opt_results[0])
 
             try:
@@ -1322,6 +1554,11 @@ class CreateOptimizeWindow():
                 self._new_opt_web_thk.set(round(self._opt_results[0].Stiffener.get_web_thk(), 5))
                 self._new_opt_fl_w.set(round(self._opt_results[0].Stiffener.get_fl_w(), 5))
                 self._new_opt_fl_thk.set(round(self._opt_results[0].Stiffener.get_fl_thk(), 5))
+            if self._opt_results[0].Girder is not None:
+                self._new_opt_girder_web_h.set(round(self._opt_results[0].Girder.get_web_h(), 5))
+                self._new_opt_girder_web_thk.set(round(self._opt_results[0].Girder.get_web_thk(), 5))
+                self._new_opt_girder_fl_w.set(round(self._opt_results[0].Girder.get_fl_w(), 5))
+                self._new_opt_girder_fl_thk.set(round(self._opt_results[0].Girder.get_fl_thk(), 5))
             self.draw_properties()
         else:
             messagebox.showinfo(title='Nothing found', message='No better alternatives found. Modify input.\n'
@@ -1612,7 +1849,18 @@ class CreateOptimizeWindow():
             return 1
 
         values = np.arange(lower, upper + delta, delta)
-        return int(np.count_nonzero(values <= upper))
+        return int(np.count_nonzero(values <= upper + abs(delta) * 1e-9))
+
+    def _count_girder_iteration_combinations(self, lower, upper, deltas):
+        if not getattr(self, '_has_girder', False):
+            return 1
+
+        return (
+                self._count_steps(lower[8], upper[8], deltas[6])
+                * self._count_steps(lower[9], upper[9], deltas[7])
+                * self._count_steps(lower[10], upper[10], deltas[8])
+                * self._count_steps(lower[11], upper[11], deltas[9])
+        )
 
     def get_running_time(self):
         """
@@ -1644,9 +1892,15 @@ class CreateOptimizeWindow():
         except Exception:
             return 0, 0
 
+        if getattr(self, '_is_unstiffened_plate', False):
+            number_of_combinations = (
+                    self._count_steps(lower[0], upper[0], deltas[0])
+                    * self._count_steps(lower[1], upper[1], deltas[1])
+            )
+
         # If predefined stiffeners are used, only spacing and plate thickness
         # are iterated in any_get_all_combs(), multiplied by number of sections.
-        if self._predefined_stiffener_iter is not None:
+        elif self._predefined_stiffener_iter is not None:
             n_spacing = self._count_steps(lower[0], upper[0], deltas[0])
             n_plate = self._count_steps(lower[1], upper[1], deltas[1])
             n_predef = len(self._predefined_stiffener_iter)
@@ -1668,6 +1922,7 @@ class CreateOptimizeWindow():
                     * n_fl_w
                     * n_fl_thk
             )
+            number_of_combinations *= self._count_girder_iteration_combinations(lower, upper, deltas)
 
         seconds = number_of_combinations * self.running_time_per_item['RP']
         try:
@@ -1686,9 +1941,15 @@ class CreateOptimizeWindow():
         Return a numpy array of the deltas.
         :return:
         '''
-        return np.array([float(self._new_delta_spacing.get()) / 1000, float(self._new_delta_pl_thk.get()) / 1000,
-                         float(self._new_delta_web_h.get()) / 1000, float(self._new_delta_web_thk.get()) / 1000,
-                         float(self._new_delta_fl_w.get()) / 1000, float(self._new_delta_fl_thk.get()) / 1000])
+        deltas = [float(self._new_delta_spacing.get()) / 1000, float(self._new_delta_pl_thk.get()) / 1000,
+                  float(self._new_delta_web_h.get()) / 1000, float(self._new_delta_web_thk.get()) / 1000,
+                  float(self._new_delta_fl_w.get()) / 1000, float(self._new_delta_fl_thk.get()) / 1000]
+        if getattr(self, '_has_girder', False):
+            deltas.extend([float(self._new_delta_girder_web_h.get()) / 1000,
+                           float(self._new_delta_girder_web_thk.get()) / 1000,
+                           float(self._new_delta_girder_fl_w.get()) / 1000,
+                           float(self._new_delta_girder_fl_thk.get()) / 1000])
+        return np.array(deltas)
 
     def update_running_time(self, *args):
         """
@@ -1731,20 +1992,32 @@ class CreateOptimizeWindow():
         Return an numpy array of upper bounds.
         :return:
         '''
-        return np.array([self._new_spacing_upper.get() / 1000, self._new_pl_thk_upper.get() / 1000,
-                         self._new_web_h_upper.get() / 1000, self._new_web_thk_upper.get() / 1000,
-                         self._new_fl_w_upper.get() / 1000, self._new_fl_thk_upper.get() / 1000,
-                         self._new_span.get(), self._new_width_lg.get()])
+        upper = [self._new_spacing_upper.get() / 1000, self._new_pl_thk_upper.get() / 1000,
+                 self._new_web_h_upper.get() / 1000, self._new_web_thk_upper.get() / 1000,
+                 self._new_fl_w_upper.get() / 1000, self._new_fl_thk_upper.get() / 1000,
+                 self._new_span.get(), self._new_width_lg.get()]
+        if getattr(self, '_has_girder', False):
+            upper.extend([self._new_girder_web_h_upper.get() / 1000,
+                          self._new_girder_web_thk_upper.get() / 1000,
+                          self._new_girder_fl_w_upper.get() / 1000,
+                          self._new_girder_fl_thk_upper.get() / 1000])
+        return np.array(upper)
 
     def get_lower_bounds(self):
         '''
         Return an numpy array of lower bounds.
         :return:
         '''
-        return np.array([self._new_spacing_lower.get() / 1000, self._new_pl_thk_lower.get() / 1000,
-                         self._new_web_h_lower.get() / 1000, self._new_web_thk_lower.get() / 1000,
-                         self._new_fl_w_lower.get() / 1000, self._new_fl_thk_lower.get() / 1000,
-                         self._new_span.get(), self._new_width_lg.get()])
+        lower = [self._new_spacing_lower.get() / 1000, self._new_pl_thk_lower.get() / 1000,
+                 self._new_web_h_lower.get() / 1000, self._new_web_thk_lower.get() / 1000,
+                 self._new_fl_w_lower.get() / 1000, self._new_fl_thk_lower.get() / 1000,
+                 self._new_span.get(), self._new_width_lg.get()]
+        if getattr(self, '_has_girder', False):
+            lower.extend([self._new_girder_web_h_lower.get() / 1000,
+                          self._new_girder_web_thk_lower.get() / 1000,
+                          self._new_girder_fl_w_lower.get() / 1000,
+                          self._new_girder_fl_thk_lower.get() / 1000])
+        return np.array(lower)
 
     def checkered(self, line_distance):
         # vertical lines at an interval of "line_distance" pixel
@@ -1768,13 +2041,11 @@ class CreateOptimizeWindow():
         opt_color, opt_stippe = 'red', 'gray12'
         self._canvas_opt.create_rectangle(0, 0, self._canvas_dim[0] + 10, 80, fill='white')
         self._canvas_opt.create_line(10, 10, 30, 10, fill=init_color, width=5)
-        self._canvas_opt.create_text(270, 10, text='Initial    - Pl.: ' + str(self._spacing * 1000) + 'x' + str(
-            self._pl_thk * 1000) +
-                                                   ' Stf.: ' + str(self._stf_web_h * 1000) + 'x' + str(
-            self._stf_web_thk * 1000) + '+' +
-                                                   str(self._fl_w * 1000) + 'x' + str(self._fl_thk * 1000),
-                                     font='Verdana 8',
-                                     fill=init_color)
+        initial_text = 'Initial    - Pl.: ' + str(self._spacing * 1000) + 'x' + str(self._pl_thk * 1000)
+        if self._initial_calc_obj.Stiffener is not None:
+            initial_text += ' Stf.: ' + str(self._stf_web_h * 1000) + 'x' + str(self._stf_web_thk * 1000) + '+' + \
+                            str(self._fl_w * 1000) + 'x' + str(self._fl_thk * 1000)
+        self._canvas_opt.create_text(270, 10, text=initial_text, font='Verdana 8', fill=init_color)
         self._canvas_opt.create_text(120, 30, text='Weight (per Lg width): ' + str(int(self.initial_weight)),
                                      font='Verdana 8', fill=init_color)
 
@@ -1785,6 +2056,19 @@ class CreateOptimizeWindow():
                                           ctr_y - m * (self._stf_web_h + self._pl_thk)
                                           , fill=init_color, stipple=init_stipple)
         if self._initial_calc_obj.Stiffener is None:
+            if self._opt_runned and self._opt_results[0] is not None:
+                opt_plate = self._opt_results[0].Plate
+                self._canvas_opt.create_rectangle(ctr_x - m * opt_plate.get_s() / 2, ctr_y,
+                                                  ctr_x + m * opt_plate.get_s() / 2,
+                                                  ctr_y - m * opt_plate.get_pl_thk(), fill=opt_color,
+                                                  stipple=opt_stippe)
+                self._canvas_opt.create_line(10, 50, 30, 50, fill=opt_color, width=5)
+                self._canvas_opt.create_text(270, 50, text='Optimized - Pl.: ' + str(
+                    round(opt_plate.get_s() * 1000, 1)) + 'x' + str(round(opt_plate.get_pl_thk() * 1000, 1)),
+                                             font='Verdana 8', fill=opt_color)
+                self._canvas_opt.create_text(120, 70, text='Weight (per Lg width): ' + str(int(op.calc_weight([
+                    opt_plate.get_s(), opt_plate.get_pl_thk(), 0, 0, 0, 0, self._new_span.get(),
+                    self._new_width_lg.get()]))), font='Verdana 8', fill=opt_color)
             return
 
         if self._initial_calc_obj.Stiffener.get_stiffener_type() not in ['L', 'L-bulb']:
@@ -1918,6 +2202,10 @@ class CreateOptimizeWindow():
                                     'All algorithms calculates local scantling and buckling requirements')
 
     def toggle(self):
+        if getattr(self, '_is_unstiffened_plate', False):
+            self._predefined_stiffener_iter = None
+            return
+
         if self._toggle_btn.config('relief')[-1] == 'sunken':
             self._toggle_btn.config(relief="raised")
             self._toggle_btn.config(bg='salmon')

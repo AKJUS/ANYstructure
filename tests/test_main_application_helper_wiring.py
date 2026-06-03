@@ -323,6 +323,122 @@ def test_main_application_uses_shared_ml_model_loader():
     assert "pickle.load(" not in ml_loader_block
 
 
+def test_single_flat_domains_display_single_optimizer_button():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    map_start = source.index("self._optimization_buttons =")
+    optimization_map = source[
+        map_start:
+        source.index("# Load information button", map_start)
+    ]
+
+    assert "'Flat plate, unstiffened': [self._opt_button]" in optimization_map
+    assert "'Flat plate, unstiffened place': [[lc_x, lc_y - 6 * lc_y_delta, 0.04, 0.098]]" in optimization_map
+    assert "'Flat plate, stiffened with girder': [self._opt_button]" in optimization_map
+    assert "'Flat plate, stiffened with girder place':" in optimization_map
+
+
+def test_flat_optimizer_default_ranges_are_dimension_specific():
+    opt_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize_window.py"
+    source = opt_source.read_text(encoding="utf-8")
+    defaults = source[
+        source.index("# setting default values"):
+        source.index("self._new_algorithm.set('anysmart')")
+    ]
+    girder_bounds = source[
+        source.index("def _set_girder_iteration_bounds"):
+        source.index("def _disable_stiffener_only_constraints")
+    ]
+
+    for expected in (
+        "self._new_pl_thk_upper.set(30)",
+        "self._new_pl_thk_lower.set(10)",
+        "self._new_web_h_upper.set(500)",
+        "self._new_web_h_lower.set(200)",
+        "self._new_web_thk_upper.set(30)",
+        "self._new_web_thk_lower.set(10)",
+        "self._new_fl_w_upper.set(300)",
+        "self._new_fl_w_lower.set(100)",
+        "self._new_fl_thk_upper.set(30)",
+        "self._new_fl_thk_lower.set(10)",
+    ):
+        assert expected in defaults
+
+    for expected in (
+        "self._new_girder_web_h_upper.set(1000)",
+        "self._new_girder_web_h_lower.set(500)",
+        "self._new_girder_web_thk_upper.set(30)",
+        "self._new_girder_web_thk_lower.set(10)",
+        "self._new_girder_fl_w_upper.set(300)",
+        "self._new_girder_fl_w_lower.set(100)",
+        "self._new_girder_fl_thk_upper.set(30)",
+        "self._new_girder_fl_thk_lower.set(10)",
+    ):
+        assert expected in girder_bounds
+
+    for expected in (
+        "self._new_delta_spacing.set(5)",
+        "self._new_delta_pl_thk.set(init_thk)",
+        "self._new_delta_web_h.set(init_dim)",
+        "self._new_delta_web_thk.set(init_thk)",
+        "self._new_delta_fl_w.set(init_dim)",
+        "self._new_delta_fl_thk.set(init_thk)",
+        "self._new_delta_girder_web_h.set(100)",
+        "self._new_delta_girder_web_thk.set(init_thk)",
+        "self._new_delta_girder_fl_w.set(init_dim)",
+        "self._new_delta_girder_fl_thk.set(init_thk)",
+    ):
+        assert expected in defaults
+
+
+def test_other_optimizer_default_ranges_are_dimension_specific():
+    root = Path(__file__).resolve().parents[1] / "anystruct"
+
+    for filename in ("optimize_multiple_window.py", "optimize_geometry.py"):
+        source = (root / filename).read_text(encoding="utf-8")
+        defaults = source[
+            source.index("# setting default values"):
+            source.index("self._new_algorithm.set('anysmart')")
+        ]
+
+        for expected in (
+            "self._new_pl_thk_upper.set(round(30, 5))",
+            "self._new_pl_thk_lower.set(round(10, 5))",
+            "self._new_web_h_upper.set(round(500, 5))",
+            "self._new_web_h_lower.set(round(200, 5))",
+            "self._new_web_thk_upper.set(round(30, 5))",
+            "self._new_web_thk_lower.set(round(10, 5))",
+            "self._new_fl_w_upper.set(round(300, 5))",
+            "self._new_fl_w_lower.set(round(100, 5))",
+            "self._new_fl_thk_upper.set(round(30, 5))",
+            "self._new_fl_thk_lower.set(round(10, 5))",
+            "self._new_delta_web_h.set(init_dim)",
+            "self._new_delta_fl_w.set(init_dim)",
+            "self._new_delta_web_thk.set(init_thk)",
+            "self._new_delta_fl_thk.set(init_thk)",
+        ):
+            assert expected in defaults
+
+    cylinder_source = (root / "optimize_cylinder.py").read_text(encoding="utf-8")
+    cylinder_defaults = cylinder_source[
+        cylinder_source.index("default_shell_upper_bounds ="):
+        cylinder_source.index("self._default_data =")
+    ]
+
+    for expected in (
+        "default_shell_upper_bounds = np.array([0.03, 3, 5, 5, 10, None, None, None])",
+        "default_shell_lower_bounds = np.array([0.01, 2.5, 5, 5, 10, None, None, None])",
+        "default_long_upper_bounds = np.array([0.8, None, 0.5, 0.03, 0.3, 0.03, None, None])",
+        "default_long_lower_bounds = np.array([0.7, None, 0.2, 0.01, 0.1, 0.01, None, None])",
+        "default_ring_stf_upper_bounds = np.array([None, None, 0.5, 0.03, 0.3, 0.03, None, None])",
+        "default_ring_stf_lower_bounds = np.array([None, None, 0.2, 0.010, 0.1, 0.010, None, None])",
+        "default_ring_frame_upper_bounds = np.array([None, None, 1.0, 0.03, 0.3, 0.03, None, None])",
+        "default_ring_frame_deltas = np.array([None, None, 0.1, 0.005, 0.05, 0.005, None, None])",
+        "default_ring_frame_lower_bounds = np.array([None, None, 0.5, 0.01, 0.1, 0.01, None, None])",
+    ):
+        assert expected in cylinder_defaults
+
+
 def test_new_structure_delegates_property_building():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -634,3 +750,33 @@ def test_semianalytical_csr_helper_uses_equation_predictor(monkeypatch):
         "stiffener": stiffener,
         "design_pressure": 123.0,
     }
+
+
+def test_support_boundary_inputs_are_limited_to_semianalytical_and_numeric_methods():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    layout_block = source[
+        source.index("for buckling_lab, buckling_ent in zip(self._flat_gui_lab_buckling, self._flat_gui_buckling):"):
+        source.index("# optimize buttons")
+    ]
+    method_trace_block = source[
+        source.index("def trace_buckling_method"):
+        source.index("def trace_puls_up_or_sp")
+    ]
+    trace_block = source[
+        source.index("def trace_puls_up_or_sp"):
+        source.index("def resize")
+    ]
+
+    assert "command=self.trace_buckling_method" in source
+    assert "self.calculation_domain_selected(sync_cylinder_inputs=False)" in method_trace_block
+    assert "self.update_frame(event)" in method_trace_block
+    assert "self._flat_gui_lab_buckling, self._flat_gui_buckling" in layout_block
+    assert "buckling_lab.place_forget()" in layout_block
+    assert "buckling_ent.place_forget()" in layout_block
+    assert "self._flat_gui_lab_buckling[:2]" in layout_block
+    assert "self._flat_gui_buckling[:2]" in layout_block
+    assert "if self._new_puls_sp_or_up.get() == 'UP':" in layout_block
+    assert "self._lab_puls_up_supp.place(" in layout_block
+    assert "self._new_buckling_method.get() in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']" in trace_block
+    assert "self._lab_puls_up_supp.place_forget()" in trace_block

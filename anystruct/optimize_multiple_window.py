@@ -305,9 +305,9 @@ class CreateOptimizeMultipleWindow():
         self._ent_fl_thk_lower.place(x=start_x + dx * 7, y=start_y + 2 * dy)
 
         # setting default values
-        init_dim = float(10)  # mm
-        init_thk = float(1)  # mm
-        self._new_delta_spacing.set(init_dim)
+        init_dim = float(50)  # mm
+        init_thk = float(5)  # mm
+        self._new_delta_spacing.set(5)
         self._new_delta_pl_thk.set(init_thk)
         self._new_delta_web_h.set(init_dim)
         self._new_delta_web_thk.set(init_thk)
@@ -315,16 +315,16 @@ class CreateOptimizeMultipleWindow():
         self._new_delta_fl_thk.set(init_thk)
         self._new_spacing_upper.set(round(800, 5))
         self._new_spacing_lower.set(round(600, 5))
-        self._new_pl_thk_upper.set(round(25, 5))
-        self._new_pl_thk_lower.set(round(15, 5))
+        self._new_pl_thk_upper.set(round(30, 5))
+        self._new_pl_thk_lower.set(round(10, 5))
         self._new_web_h_upper.set(round(500, 5))
-        self._new_web_h_lower.set(round(400, 5))
-        self._new_web_thk_upper.set(round(20, 5))
+        self._new_web_h_lower.set(round(200, 5))
+        self._new_web_thk_upper.set(round(30, 5))
         self._new_web_thk_lower.set(round(10, 5))
-        self._new_fl_w_upper.set(round(200, 5))
+        self._new_fl_w_upper.set(round(300, 5))
         self._new_fl_w_lower.set(round(100, 5))
         self._new_fl_thk_upper.set(round(30, 5))
-        self._new_fl_thk_lower.set(round(15, 5))
+        self._new_fl_thk_lower.set(round(10, 5))
         self._new_algorithm.set('anysmart')
         self._new_algorithm_random_trials.set(10000)
         self._new_weld_bias.set(0.0)
@@ -653,7 +653,7 @@ class CreateOptimizeMultipleWindow():
             return 1
 
         values = np.arange(lower, upper + delta, delta)
-        return int(np.count_nonzero(values <= upper))
+        return int(np.count_nonzero(values <= upper + abs(delta) * 1e-9))
 
     def _objective_for_x(self, x, line_structure_obj=None):
         """
@@ -1322,14 +1322,14 @@ class CreateOptimizeMultipleWindow():
             ml_input = self._get_ml_input_for_calc_object(calc_object, lat_press)
 
             if calc_object[0].Plate.get_puls_sp_or_up() == 'UP':
-                if calc_object[0].Plate.get_puls_boundary() == 'Int':
+                if op._is_integrated_puls_boundary(calc_object[0].Plate.get_puls_boundary()):
                     up_int.append(ml_input)
                     up_int_idx.append(idx)
                 else:
                     up_gl_gt.append(ml_input)
                     up_gl_gt_idx.append(idx)
             else:
-                if calc_object[0].Stiffener.get_puls_boundary() == 'Int':
+                if op._is_integrated_puls_boundary(calc_object[0].Stiffener.get_puls_boundary()):
                     sp_int.append(ml_input)
                     sp_int_idx.append(idx)
                 else:
@@ -1439,12 +1439,12 @@ class CreateOptimizeMultipleWindow():
             ml_input = self._get_ml_input_for_calc_object(calc_object, lat_press)
 
             if calc_object[0].Plate.get_puls_sp_or_up() == 'UP':
-                if calc_object[0].Plate.get_puls_boundary() == 'Int':
+                if op._is_integrated_puls_boundary(calc_object[0].Plate.get_puls_boundary()):
                     key = 'up_int'
                 else:
                     key = 'up_glgt'
             else:
-                if calc_object[0].Stiffener.get_puls_boundary() == 'Int':
+                if op._is_integrated_puls_boundary(calc_object[0].Stiffener.get_puls_boundary()):
                     key = 'sp_int'
                 else:
                     key = 'sp_glgt'

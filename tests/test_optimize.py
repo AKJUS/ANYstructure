@@ -36,6 +36,122 @@ def test_optimization(opt_input):
     assert len(results) == 5
     assert results[3] in (True, False)
 
+
+def test_unstiffened_flat_plate_optimization_keeps_plate_only_structure():
+    obj_dict = _with_panel_default(ex.obj_dict)
+    obj_dict['spacing'][0] = 0.7
+    obj_dict['plate_thk'][0] = 0.018
+    scantlings = calc.CalcScantlings(obj_dict)
+    obj = calc.AllStructure(Plate=scantlings, Stiffener=None, Girder=None, main_dict=ex.prescriptive_main_dict)
+    lower_bounds = np.array([obj.Plate.get_s(), obj.Plate.get_pl_thk(), 0.0, 0.0, 0.0, 0.0, obj.Plate.span, 10.0])
+    upper_bounds = np.array([obj.Plate.get_s(), obj.Plate.get_pl_thk() + 0.002, 0.0, 0.0, 0.0, 0.0,
+                             obj.Plate.span, 10.0])
+    deltas = np.array([0.1, 0.002, 1.0, 1.0, 1.0, 1.0])
+
+    results = opt.run_optmizataion(
+        obj,
+        lower_bounds,
+        upper_bounds,
+        lateral_pressure=0.001,
+        deltas=deltas,
+        algorithm='anysmart',
+        const_chk=(False, True, False, True, False, False, False, False, False, False),
+        processes=1,
+        use_weight_filter=False,
+    )
+
+    assert results[0] is not None
+    assert results[0].Stiffener is None
+    assert results[0].Plate.get_pl_thk() == pytest.approx(obj.Plate.get_pl_thk())
+
+
+def test_stiffened_plate_with_girder_optimization_preserves_and_iterates_girder():
+    plate_dict = _with_panel_default(ex.obj_dict)
+    girder_dict = _with_panel_default(ex.obj_dict_heavy)
+    girder_dict['span'][0] = plate_dict['span'][0]
+    girder_dict['spacing'][0] = plate_dict['girder_lg'][0]
+    girder_dict['girder_lg'] = [plate_dict['girder_lg'][0], 'm']
+
+    plate = calc.CalcScantlings(plate_dict)
+    stiffener = calc.CalcScantlings(plate_dict)
+    girder = calc.CalcScantlings(girder_dict)
+    main_dict = deepcopy(ex.prescriptive_main_dict)
+    main_dict['calculation domain'] = ['Flat plate, stiffened with girder', '']
+    obj = calc.AllStructure(Plate=plate, Stiffener=stiffener, Girder=girder, main_dict=main_dict)
+
+    fixed_panel = [
+        plate.get_s(),
+        plate.get_pl_thk(),
+        stiffener.get_web_h(),
+        stiffener.get_web_thk(),
+        stiffener.get_fl_w(),
+        stiffener.get_fl_thk(),
+        plate.span,
+        girder.girder_lg,
+    ]
+    lower_bounds = np.array(fixed_panel + [0.4, 0.012, 0.12, 0.012])
+    upper_bounds = np.array(fixed_panel + [0.5, 0.012, 0.12, 0.012])
+    deltas = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.1, 0.001, 0.1, 0.001])
+
+    results = opt.run_optmizataion(
+        obj,
+        lower_bounds,
+        upper_bounds,
+        lateral_pressure=0.001,
+        deltas=deltas,
+        algorithm='anysmart',
+        const_chk=(False, False, False, False, False, False, False, True, False, True),
+        processes=1,
+        use_weight_filter=False,
+    )
+
+    assert results[0] is not None
+    assert results[0].Stiffener is not None
+    assert results[0].Girder is not None
+    assert results[0].Stiffener.get_web_h() == pytest.approx(stiffener.get_web_h())
+    assert results[0].Girder.get_web_h() == pytest.approx(0.4)
+    assert results[0].Girder.get_web_thk() == pytest.approx(0.012)
+
+
+def test_girder_buckling_utilization_rejects_candidate():
+    plate_dict = _with_panel_default(ex.obj_dict)
+    girder_dict = _with_panel_default(ex.obj_dict_heavy)
+    girder_dict['span'][0] = plate_dict['span'][0]
+    girder_dict['spacing'][0] = plate_dict['girder_lg'][0]
+    girder_dict['girder_lg'] = [plate_dict['girder_lg'][0], 'm']
+
+    plate = calc.CalcScantlings(plate_dict)
+    stiffener = calc.CalcScantlings(plate_dict)
+    girder = calc.CalcScantlings(girder_dict)
+    main_dict = deepcopy(ex.prescriptive_main_dict)
+    main_dict['calculation domain'] = ['Flat plate, stiffened with girder', '']
+    obj = calc.AllStructure(Plate=plate, Stiffener=stiffener, Girder=girder, main_dict=main_dict)
+    weak_girder = [
+        plate.get_s(), plate.get_pl_thk(),
+        stiffener.get_web_h(), stiffener.get_web_thk(), stiffener.get_fl_w(), stiffener.get_fl_thk(),
+        plate.span, girder.girder_lg,
+        0.2, 0.01, 0.1, 0.01,
+    ]
+
+    result = opt.any_constraints_all(
+        weak_girder,
+        obj,
+        lat_press=0.2,
+        init_weight=float('inf'),
+        chk=(False, False, False, True, False, False, False, False, False, False),
+    )
+
+    assert result[0] is False
+    assert result[1] == 'Buckling'
+    assert result[3][3] > 1.0
+
+
+def test_girder_optimization_deactivates_non_prescriptive_buckling_checks():
+    assert opt._deactivate_non_prescriptive_girder_buckling(
+        (False, False, False, True, False, False, False, True, True, True)
+    ) == (False, False, False, True, False, False, False, False, False, False)
+
+
 def test_weight_calc(opt_input):
     assert opt.calc_weight(opt_input[-1]) == pytest.approx(8243.530164606)
 

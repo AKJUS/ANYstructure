@@ -102,20 +102,20 @@ class CreateOptimizeCylinderWindow():
         ent_w = 12
 
         default_shell_upper_bounds = np.array([0.03, 3, 5, 5, 10, None, None, None])
-        default_shell_deltas = np.array([0.005, 0.5, 1, 0.1, 1, None, None, None])
-        default_shell_lower_bounds = np.array([0.02, 2.5, 5, 5, 10, None, None, None])
+        default_shell_deltas = np.array([0.005, 0.005, 0.005, 0.005, 0.005, None, None, None])
+        default_shell_lower_bounds = np.array([0.01, 2.5, 5, 5, 10, None, None, None])
 
-        default_long_upper_bounds = np.array([0.8, None, 0.5, 0.02, 0.2, 0.03, None, None])
-        default_long_deltas = np.array([0.1, None, 0.1, 0.01, 0.1, 0.01, None, None])
-        default_long_lower_bounds = np.array([0.7, None, 0.3, 0.01, 0.1, 0.01, None, None])
+        default_long_upper_bounds = np.array([0.8, None, 0.5, 0.03, 0.3, 0.03, None, None])
+        default_long_deltas = np.array([0.005, None, 0.05, 0.005, 0.05, 0.005, None, None])
+        default_long_lower_bounds = np.array([0.7, None, 0.2, 0.01, 0.1, 0.01, None, None])
 
-        default_ring_stf_upper_bounds = np.array([None, None, 0.5, 0.018, 0.2, 0.03, None, None])
-        default_ring_stf_deltas = np.array([None, None, 0.1, 0.004, 0.1, 0.01, None, None])
-        default_ring_stf_lower_bounds = np.array([None, None, 0.3, 0.010, 0.1, 0.010, None, None])
+        default_ring_stf_upper_bounds = np.array([None, None, 0.5, 0.03, 0.3, 0.03, None, None])
+        default_ring_stf_deltas = np.array([None, None, 0.05, 0.005, 0.05, 0.005, None, None])
+        default_ring_stf_lower_bounds = np.array([None, None, 0.2, 0.010, 0.1, 0.010, None, None])
 
-        default_ring_frame_upper_bounds = np.array([None, None, 0.9, 0.04, 0.3, 0.04, None, None])
-        default_ring_frame_deltas = np.array([None, None, 0.2, 0.01, 0.1, 0.01, None, None])
-        default_ring_frame_lower_bounds = np.array([None, None, 0.7, 0.02, 0.2, 0.02, None, None])
+        default_ring_frame_upper_bounds = np.array([None, None, 1.0, 0.03, 0.3, 0.03, None, None])
+        default_ring_frame_deltas = np.array([None, None, 0.1, 0.005, 0.05, 0.005, None, None])
+        default_ring_frame_lower_bounds = np.array([None, None, 0.5, 0.01, 0.1, 0.01, None, None])
 
         self._default_data = [[default_shell_upper_bounds, default_shell_deltas, default_shell_lower_bounds],
                               [default_long_upper_bounds, default_long_deltas, default_long_lower_bounds],
@@ -391,8 +391,8 @@ class CreateOptimizeCylinderWindow():
                 .place(x=start_x, y=955)
 
         # setting default values
-        init_dim = float(10)  # mm
-        init_thk = float(1)  # mm
+        init_dim = float(5)  # mm
+        init_thk = float(5)  # mm
 
         self._new_slamming_pressure.set(self._slamming_pressure)
         if self._fatigue_pressure is None:
@@ -1303,7 +1303,7 @@ class CreateOptimizeCylinderWindow():
             return 1
 
         values = np.arange(lower, upper + delta, delta)
-        return int(np.count_nonzero(values <= upper))
+        return int(np.count_nonzero(values <= upper + abs(delta) * 1e-9))
 
     def _count_cylinder_component_combinations(self, idx, lower, upper, delta):
         """

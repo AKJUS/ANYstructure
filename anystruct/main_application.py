@@ -962,7 +962,7 @@ class Application():
         ]
         self._lab_buckling_method = ttk.Label(self._tab_prop, text='Set buckling method')
         self._buckling_method = ttk.OptionMenu(self._tab_prop, self._new_buckling_method, options[0], *options,
-                                               command=self.update_frame)
+                                               command=self.trace_buckling_method)
 
         # SemiAnalytical and ML-Numeric share the historic buckling panel input parameters below.
 
@@ -1757,10 +1757,11 @@ class Application():
                                                                       [lc_x + 0.1, lc_y - 6 * lc_y_delta, 0.04, 0.065],
                                                                       [lc_x + 0.167, lc_y - 6 * lc_y_delta, 0.04,
                                                                        0.04]],
-                                      'Flat plate, unstiffened': [],
-                                      'Flat plate, unstiffened place': [],
-                                      'Flat plate, stiffened with girder': [],
-                                      'Flat plate, stiffened with girder place': [],
+                                      'Flat plate, unstiffened': [self._opt_button],
+                                      'Flat plate, unstiffened place': [[lc_x, lc_y - 6 * lc_y_delta, 0.04, 0.098]],
+                                      'Flat plate, stiffened with girder': [self._opt_button],
+                                      'Flat plate, stiffened with girder place':
+                                          [[lc_x, lc_y - 6 * lc_y_delta, 0.04, 0.098]],
                                       'cylinder': [self._opt_cylinder],
                                       'cylinder place': [[lc_x, lc_y - 6 * lc_y_delta, 0.04, 0.175]]}
 
@@ -2318,9 +2319,19 @@ class Application():
                 buckling_ent.place(relx=hor_start + 5 * delta_x, rely=vert_start + idx * delta_y)
                 idx += 1
             for buckling_lab, buckling_ent in zip(self._flat_gui_lab_buckling, self._flat_gui_buckling):
-                buckling_lab.place(relx=hor_start, rely=vert_start + idx * delta_y)
-                buckling_ent.place(relx=hor_start + 5 * delta_x, rely=vert_start + idx * delta_y)
-                idx += 1
+                buckling_lab.place_forget()
+                buckling_ent.place_forget()
+
+            if self._new_buckling_method.get() in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']:
+                for buckling_lab, buckling_ent in zip(self._flat_gui_lab_buckling[:2],
+                                                      self._flat_gui_buckling[:2]):
+                    buckling_lab.place(relx=hor_start, rely=vert_start + idx * delta_y)
+                    buckling_ent.place(relx=hor_start + 5 * delta_x, rely=vert_start + idx * delta_y)
+                    idx += 1
+                if self._new_puls_sp_or_up.get() == 'UP':
+                    self._lab_puls_up_supp.place(relx=hor_start, rely=vert_start + idx * delta_y)
+                    self._ent_puls_up_boundary.place(relx=hor_start + 5 * delta_x, rely=vert_start + idx * delta_y)
+                    idx += 1
 
             # optimize buttons
 
@@ -2707,22 +2718,26 @@ class Application():
             pass
         text_widget.image_create('current', image=photo)
 
+    def trace_buckling_method(self, event=None):
+        self.calculation_domain_selected(sync_cylinder_inputs=False)
+        self.update_frame(event)
+
     def trace_puls_up_or_sp(self, event=None):
-        if self._new_puls_sp_or_up.get() == 'UP':
+        if self._new_puls_sp_or_up.get() == 'UP' and \
+                self._new_buckling_method.get() in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']:
             vert_start = 0.1
             hor_start = 0.02
             delta_y = 0.04
             delta_x = 0.13
-            ent_relx = hor_start + 6 * delta_x
-            geo_ent_width = 0.05
-            ent_geo_y = vert_start
             opt_width = 0.2
             shift_x = delta_x * 4
             lab_place = delta_y * 13
 
+            self._lab_puls_up_supp.place(relx=hor_start, rely=vert_start + lab_place + 2 * delta_y)
             self._ent_puls_up_boundary.place(relx=hor_start + shift_x, rely=vert_start + lab_place + 2 * delta_y,
                                              relwidth=opt_width)
         else:
+            self._lab_puls_up_supp.place_forget()
             self._ent_puls_up_boundary.place_forget()
 
     def resize(self, event=None):

@@ -457,9 +457,9 @@ class CreateOptGeoWindow():
         self._ent_fl_thk_lower.place(x=start_x + dx * 7, y=start_y + 2 * dy)
 
         # setting default values
-        init_dim = float(100)  # mm
+        init_dim = float(50)  # mm
         init_thk = float(5)  # mm
-        self._new_delta_spacing.set(init_dim)
+        self._new_delta_spacing.set(5)
         self._new_delta_pl_thk.set(init_thk)
         self._new_delta_web_h.set(init_dim)
         self._new_delta_web_thk.set(init_thk)
@@ -467,14 +467,14 @@ class CreateOptGeoWindow():
         self._new_delta_fl_thk.set(init_thk)
         self._new_spacing_upper.set(round(800, 5))
         self._new_spacing_lower.set(round(600, 5))
-        self._new_pl_thk_upper.set(round(25, 5))
+        self._new_pl_thk_upper.set(round(30, 5))
         self._new_pl_thk_lower.set(round(10, 5))
         self._new_web_h_upper.set(round(500, 5))
-        self._new_web_h_lower.set(round(300, 5))
-        self._new_web_thk_upper.set(round(25, 5))
+        self._new_web_h_lower.set(round(200, 5))
+        self._new_web_thk_upper.set(round(30, 5))
         self._new_web_thk_lower.set(round(10, 5))
-        self._new_fl_w_upper.set(round(250, 5))
-        self._new_fl_w_lower.set(round(50, 5))
+        self._new_fl_w_upper.set(round(300, 5))
+        self._new_fl_w_lower.set(round(100, 5))
         self._new_fl_thk_upper.set(round(30, 5))
         self._new_fl_thk_lower.set(round(10, 5))
         self._new_algorithm.set('anysmart')

@@ -851,6 +851,10 @@ class Structure():
             sigxd = sig_x1 if abs(sig_x1) > abs(sig_x2) else sig_x2
         else:
             sigxd = max(sig_x1, sig_x2)
+        puls_boundary = str(self._puls_boundary or 'Int').strip()
+        axial_ml = 0 if puls_boundary in ('GT', 'Girder - trans') else sigxd
+        trans_1_ml = 0 if puls_boundary in ('GL', 'Girder - long') else self._sigma_y1
+        trans_2_ml = 0 if puls_boundary in ('GL', 'Girder - long') else self._sigma_y2
         if self._puls_sp_or_up == 'SP':
             return_dict = {'Identification': None, 'Length of panel': self._span*1000, 'Stiffener spacing': self._spacing*1000,
                             'Plate thickness': self._plate_th*1000,
@@ -916,38 +920,45 @@ class Structure():
             sigxd = sig_x1 if abs(sig_x1) > abs(sig_x2) else sig_x2
         else:
             sigxd = max(sig_x1, sig_x2)
+        puls_boundary = str(self._puls_boundary or 'Int').strip()
+        axial_ml = 0 if puls_boundary in ('GT', 'Girder - trans') else sigxd
+        trans_1_ml = 0 if puls_boundary in ('GL', 'Girder - long') else self._sigma_y1
+        trans_2_ml = 0 if puls_boundary in ('GL', 'Girder - long') else self._sigma_y2
         if self._puls_sp_or_up == 'SP':
 
             if csr == False:
 
                 this_field =  [self._span * 1000, self._spacing * 1000, self._plate_th * 1000, self._web_height * 1000,
                                self._web_th * 1000, self._flange_width * 1000, self._flange_th * 1000, self._mat_yield / 1e6,
-                               self._mat_yield / 1e6, sigxd, self._sigma_y1, self._sigma_y2, self._tauxy,
+                               self._mat_yield / 1e6, axial_ml, trans_1_ml, trans_2_ml, self._tauxy,
                                design_lat_press/1000, stf_type[self._stiffener_type],
                                stf_end[map_boundary[self._puls_stf_end]]]
             else:
                 this_field =  [self._span * 1000, self._spacing * 1000, self._plate_th * 1000, self._web_height * 1000,
                                self._web_th * 1000, self._flange_width * 1000, self._flange_th * 1000, self._mat_yield / 1e6,
-                               self._mat_yield / 1e6,  sigxd, self._sigma_y1, self._sigma_y2, self._tauxy,
+                               self._mat_yield / 1e6,  axial_ml, trans_1_ml, trans_2_ml, self._tauxy,
                                design_lat_press/1000, stf_type[self._stiffener_type],
                                stf_end[map_boundary[self._puls_stf_end]],
-                               field_type[self._puls_boundary]]
+                               field_type[puls_boundary]]
         else:
+            boundary = str(self._puls_up_boundary or 'SSSS').strip().upper()
+            if len(boundary) != 4:
+                boundary = 'SSSS'
             ss_cl_list = list()
-            for letter_i in self._puls_up_boundary:
-                if letter_i == 'S':
-                    ss_cl_list.append(up_boundary['SS'])
-                else:
+            for letter_i in boundary:
+                if letter_i == 'C':
                     ss_cl_list.append(up_boundary['CL'])
+                else:
+                    ss_cl_list.append(up_boundary['SS'])
             b1, b2, b3, b4 = ss_cl_list
             if csr == False:
                 this_field =  [self._span * 1000, self._spacing * 1000, self._plate_th * 1000, self._mat_yield / 1e6,
-                               sigxd, self._sigma_y1, self._sigma_y2, self._tauxy, design_lat_press/1000,
+                               axial_ml, trans_1_ml, trans_2_ml, self._tauxy, design_lat_press/1000,
                                b1, b2, b3, b4]
             else:
                 this_field =  [self._span * 1000, self._spacing * 1000, self._plate_th * 1000, self._mat_yield / 1e6,
-                               sigxd, self._sigma_y1, self._sigma_y2, self._tauxy, design_lat_press/1000,
-                               field_type[self._puls_boundary], b1, b2, b3, b4]
+                               axial_ml, trans_1_ml, trans_2_ml, self._tauxy, design_lat_press/1000,
+                               field_type[puls_boundary], b1, b2, b3, b4]
         if alone:
             return [this_field,]
         else:

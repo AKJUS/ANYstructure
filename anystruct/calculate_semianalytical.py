@@ -1,4 +1,4 @@
-﻿"""Reduced semi-analytical PULS S3/U3 panel calculations.
+"""Reduced semi-analytical PULS S3/U3 panel calculations.
 
 This module is a first physics milestone for regular stiffened S3 panels and
 unstiffened U3 panels.  It keeps the PULS CSV files as benchmark data and does
@@ -628,23 +628,68 @@ def _anystructure_stiffener_boundary(value: Any) -> str:
 
 
 def _anystructure_in_plane_support(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = text.lower().replace("_", " ").replace("  ", " ")
     return {
         "Int": "Integrated",
+        "int": "Integrated",
         "Integrated": "Integrated",
+        "integrated": "Integrated",
         "GL": "Girder - long",
+        "gl": "Girder - long",
         "Girder - long": "Girder - long",
+        "girder - long": "Girder - long",
+        "girder long": "Girder - long",
         "GT": "Girder - trans",
+        "gt": "Girder - trans",
         "Girder - trans": "Girder - trans",
-    }.get(str(value), str(value))
+        "girder - trans": "Girder - trans",
+        "girder trans": "Girder - trans",
+    }.get(text, {
+        "int": "Integrated",
+        "integrated": "Integrated",
+        "gl": "Girder - long",
+        "girder - long": "Girder - long",
+        "girder long": "Girder - long",
+        "gt": "Girder - trans",
+        "girder - trans": "Girder - trans",
+        "girder trans": "Girder - trans",
+    }.get(normalized, text))
+
+
+def _anystructure_up_boundary_edges(value: Any) -> tuple[str, str, str, str]:
+    """Return UP rotational support codes for left, right, upper, lower edges."""
+
+    text = str(value or "SSSS").strip().upper().replace("-", "").replace(" ", "")
+    if text in {"CCCC", "CLCL", "CC", "CL"}:
+        return "CL", "CL", "CL", "CL"
+    if text in {"SSSS", "SS"}:
+        return "SS", "SS", "SS", "SS"
+    if text in {"FSFS", "FFFF", "FS"}:
+        return "FS", "FS", "FS", "FS"
+    if len(text) != 4:
+        text = "SSSS"
+
+    edges: list[str] = []
+    for letter in text:
+        if letter == "C":
+            edges.append("CL")
+        elif letter == "F":
+            edges.append("FS")
+        else:
+            edges.append("SS")
+    return edges[0], edges[1], edges[2], edges[3]
 
 
 def _anystructure_rotational_supports(value: Any) -> tuple[str, str]:
-    text = str(value or "SSSS").strip().upper().replace("-", "")
-    if text in {"CCCC", "CLCL", "CC", "CL"}:
-        return "CL", "CL"
-    if text in {"FSFS", "FFFF", "FS"}:
-        return "FS", "FS"
-    return "SS", "SS"
+    left, right, upper, lower = _anystructure_up_boundary_edges(value)
+
+    def paired(first: str, second: str) -> str:
+        if first == second and first in {"CL", "FS"}:
+            return first
+        return "SS"
+
+    return paired(left, right), paired(upper, lower)
 
 
 def _anystructure_selected_method(value: Any) -> str:
@@ -800,6 +845,7 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
 
     if sp_or_up == "SP" and stiffener is not None:
         puls_boundary = stiffener.get_puls_boundary()
+        in_plane_support = _anystructure_in_plane_support(puls_boundary)
         sigxd = _anystructure_axial_design_stress(stiffener.sigma_x1, stiffener.sigma_x2)
         stiffener_corrosion = _anystructure_corrosion_addition_mm(stiffener, all_structure)
         return S3PanelInput(
@@ -814,12 +860,12 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
             flange_thickness=stiffener.tf,
             yield_stress_plate=stiffener.mat_yield / 1.0e6,
             yield_stress_stiffener=stiffener.mat_yield / 1.0e6,
-            axial_stress=0.0 if puls_boundary == "GT" else sigxd,
-            transverse_stress_1=0.0 if puls_boundary == "GL" else stiffener.sigma_y1,
-            transverse_stress_2=0.0 if puls_boundary == "GL" else stiffener.sigma_y2,
+            axial_stress=0.0 if in_plane_support == "Girder - trans" else sigxd,
+            transverse_stress_1=0.0 if in_plane_support == "Girder - long" else stiffener.sigma_y1,
+            transverse_stress_2=0.0 if in_plane_support == "Girder - long" else stiffener.sigma_y2,
             shear_stress=stiffener.tau_xy,
             pressure=pressure_mpa,
-            in_plane_support=_anystructure_in_plane_support(puls_boundary),
+            in_plane_support=in_plane_support,
             elastic_modulus=elastic_modulus,
             poisson_ratio=poisson_ratio,
             plate_corrosion_addition=plate_corrosion,
@@ -830,18 +876,19 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
     up_boundary = plate.get_puls_up_boundary() if hasattr(plate, "get_puls_up_boundary") else "SSSS"
     rotational_1, rotational_2 = _anystructure_rotational_supports(up_boundary)
     puls_boundary = plate.get_puls_boundary() if hasattr(plate, "get_puls_boundary") else "GL"
+    in_plane_support = _anystructure_in_plane_support(puls_boundary)
     return U3PanelInput(
         length=plate.span * 1000.0,
         width=plate.spacing,
         plate_thickness=plate.t,
         yield_stress_plate=plate.mat_yield / 1.0e6,
-        axial_stress_1=plate.sigma_x1,
-        axial_stress_2=plate.sigma_x2,
-        transverse_stress_1=plate.sigma_y1,
-        transverse_stress_2=plate.sigma_y2,
+        axial_stress_1=0.0 if in_plane_support == "Girder - trans" else plate.sigma_x1,
+        axial_stress_2=0.0 if in_plane_support == "Girder - trans" else plate.sigma_x2,
+        transverse_stress_1=0.0 if in_plane_support == "Girder - long" else plate.sigma_y1,
+        transverse_stress_2=0.0 if in_plane_support == "Girder - long" else plate.sigma_y2,
         shear_stress=plate.tau_xy,
         pressure=pressure_mpa,
-        in_plane_support=_anystructure_in_plane_support(puls_boundary),
+        in_plane_support=in_plane_support,
         rotational_support_1=rotational_1,
         rotational_support_2=rotational_2,
         elastic_modulus=elastic_modulus,
