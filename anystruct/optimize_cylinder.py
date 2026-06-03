@@ -15,12 +15,14 @@ try:
     import anystruct.example_data as test
     import anystruct.helper as hlp
     import anystruct.line_structure as line_structure
+    import anystruct.ml_models as ml_models
 except ModuleNotFoundError:
     import ANYstructure.anystruct.main_application as main_application
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.helper as hlp
     import ANYstructure.anystruct.line_structure as line_structure
+    import ANYstructure.anystruct.ml_models as ml_models
 
 
 class CreateOptimizeCylinderWindow():
@@ -31,152 +33,22 @@ class CreateOptimizeCylinderWindow():
     def __init__(self, master, app=None):
         super(CreateOptimizeCylinderWindow, self).__init__()
         if __name__ == '__main__':
-            import pickle
             import anystruct.calc_structure as calc
             self._initial_structure_obj = test.get_structure_calc_object(heavy=True)
             self._initial_calc_obj = test.get_structure_calc_object(heavy=True)
             self._fatigue_object = test.get_fatigue_object()
             self._fatigue_pressure = test.get_fatigue_pressures()
             self._slamming_pressure = test.get_slamming_pressure()
-            image_dir = os.path.dirname(__file__) + '\\images\\'
+            self._root_dir = os.path.dirname(os.path.abspath(__file__))
+            image_dir = self._root_dir + '\\images\\'
             self._initial_cylinder_obj = calc.CylinderAndCurvedPlate(main_dict=test.shell_main_dict,
                                                                      shell=calc.Shell(test.shell_dict),
                                                                      long_stf=calc.Structure(test.obj_dict_cyl_long2),
                                                                      ring_stf=None,
                                                                      # calc.Structure(test.obj_dict_cyl_ring2),
                                                                      ring_frame=None)  # calc.Structure(test.obj_dict_cyl_heavy_ring2))
-
-            self._ML_buckling = dict()  # Buckling machine learning algorithms
-
-            for name, file_base in zip(
-                    [
-                        # ---------------------------------------------------------------------
-                        # Classification pipeline
-                        # ---------------------------------------------------------------------
-                        'cl SP buc int predictor',
-                        'cl SP buc int scaler',
-                        'cl SP ult int predictor',
-                        'cl SP ult int scaler',
-
-                        'cl SP buc GLGT predictor',
-                        'cl SP buc GLGT scaler',
-                        'cl SP ult GLGT predictor',
-                        'cl SP ult GLGT scaler',
-
-                        'cl UP buc int predictor',
-                        'cl UP buc int scaler',
-                        'cl UP ult int predictor',
-                        'cl UP ult int scaler',
-
-                        'cl UP buc GLGT predictor',
-                        'cl UP buc GLGT scaler',
-                        'cl UP ult GLGT predictor',
-                        'cl UP ult GLGT scaler',
-
-                        'CSR predictor UP',
-                        'CSR scaler UP',
-                        'CSR predictor SP',
-                        'CSR scaler SP',
-
-                        # ---------------------------------------------------------------------
-                        # Numeric UF pipeline
-                        # ---------------------------------------------------------------------
-                        'num SP int validity predictor',
-                        'num SP int validity xscaler',
-                        'num SP int UF reg predictor',
-                        'num SP int UF reg xscaler',
-                        'num SP int UF reg yscaler',
-
-                        'num SP GLGT validity predictor',
-                        'num SP GLGT validity xscaler',
-                        'num SP GLGT UF reg predictor',
-                        'num SP GLGT UF reg xscaler',
-                        'num SP GLGT UF reg yscaler',
-
-                        'num UP int validity predictor',
-                        'num UP int validity xscaler',
-                        'num UP int UF reg predictor',
-                        'num UP int UF reg xscaler',
-                        'num UP int UF reg yscaler',
-
-                        'num UP GLGT validity predictor',
-                        'num UP GLGT validity xscaler',
-                        'num UP GLGT UF reg predictor',
-                        'num UP GLGT UF reg xscaler',
-                        'num UP GLGT UF reg yscaler',
-                    ],
-                    [
-                        # ---------------------------------------------------------------------
-                        # Classification pipeline
-                        # ---------------------------------------------------------------------
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_SP",
-
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_SP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_SP",
-
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_1_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_1_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_1_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_1_UP",
-
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_buc_XXX_scaler_In-plane_support_cl_2,_3_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_predictor_In-plane_support_cl_2,_3_UP",
-                        "ml_files\\CLPIPE_CL_output_cl_str_ult_XXX_scaler_In-plane_support_cl_2,_3_UP",
-
-                        "ml_files\\CLPIPE_CL_CSR-Tank_req_cl_predictor_UP",
-                        "ml_files\\CLPIPE_CL_CSR-Tank_req_cl_scaler_UP",
-                        "ml_files\\CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor_SP",
-                        "ml_files\\CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_scaler_SP",
-
-                        # ---------------------------------------------------------------------
-                        # Numeric UF pipeline
-                        # ---------------------------------------------------------------------
-                        "ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_1",
-
-                        "ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_2,_3",
-
-                        "ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_1",
-                        "ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_1",
-
-                        "ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3",
-                        "ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_2,_3",
-                    ],
-            ):
-                self._ML_buckling[name] = None
-                if os.path.isfile(file_base + '.pickle'):
-                    file = open(file_base + '.pickle', 'rb')
-                    self._ML_buckling[name] = pickle.load(file)
-                    file.close()
-
-            self._ML_classes = {0: 'N/A',
-                                1: 'A negative utilisation factor is found.',
-                                2: 'At least one of the in-plane loads must be non-zero.',
-                                3: 'Division by zero',
-                                4: 'Overflow',
-                                5: 'The aspect ratio exceeds the PULS code limit',
-                                6: 'The global slenderness exceeds 4. Please reduce stiffener span or increase stiffener height.',
-                                7: 'The applied pressure is too high for this plate field.', 8: 'web-flange-ratio',
-                                9: 'UF below or equal 0.87', 10: 'UF between 0.87 and 1.0', 11: 'UF above 1.0'}
+            self._ML_buckling = ml_models.load_buckling_models((self._root_dir,))
+            self._ML_classes = ml_models.default_ml_class_messages()
         else:
             self.app = app
             active_bundle = app._line_to_struc[app._active_line]
@@ -314,6 +186,8 @@ class CreateOptimizeCylinderWindow():
         self._new_weld_study_delta = tk.DoubleVar()
         self._new_weld_study_delta.set(0.1)
         self._last_weight_weld_study_rows = None
+        self._last_cost_study_report = None
+        self._last_study_type = None
         self._new_include_builtup_weld = tk.BooleanVar()
         self._new_include_builtup_weld.set(False)
 
@@ -322,14 +196,14 @@ class CreateOptimizeCylinderWindow():
         self._opt_actual_running_time = tk.Label(self._frame, text='', font='Verdana 12 bold')
 
         self._draw_scale = 600
-        self._canvas_dim = (550, 550)
+        self._canvas_dim = (550, 490)
         self._canvas_opt = tk.Canvas(self._frame, width=self._canvas_dim[0], height=self._canvas_dim[1],
                                      background='azure', relief='groove', borderwidth=2)
 
         # tk.Frame(self._frame,width=770,height=5, bg="grey", colormap="new").place(x=20,y=127)
         # tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=167)
 
-        self._canvas_opt.place(x=1050, y=430)
+        self._canvas_opt.place(x=1050, y=500)
 
         algorithms = ('anysmart cylinder', 'random', 'random_no_delta')
 
@@ -397,11 +271,18 @@ class CreateOptimizeCylinderWindow():
         tk.Entry(self._frame, textvariable=self._new_processes, width=12, bg='silver') \
             .place(x=start_x + 10 * dx, y=start_y - 0.3 * dy)
 
-        self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 12 bold', fg='red')
-        self._runnig_time_label.place(x=start_x + 4.3 * dx, y=start_y + 2.8 * dy)
+        self._runnig_time_label = tk.Label(
+            self._frame,
+            text='',
+            font='Verdana 12 bold',
+            fg='red',
+            wraplength=520,
+            justify=tk.LEFT,
+        )
+        self._runnig_time_label.place(x=1020, y=425, width=520)
         # tk.Label(self._frame, text='seconds ',font='Verdana 9 bold').place(x=start_x+6*dx, y=start_y + 2.8 * dy)
-        self._result_label = tk.Label(self._frame, text='', font='Verdana 9 bold', wraplength=950, justify=tk.LEFT)
-        self._result_label.place(x=start_x, y=start_y + 4.2 * dy)
+        self._result_label = tk.Label(self._frame, text='', font='Verdana 9 bold', wraplength=460, justify=tk.LEFT)
+        self._result_label.place(x=520, y=800)
 
         '''
                 self._new_geo_data =  [[shell_upper_bounds,shell_deltas, shell_lower_bounds],
@@ -455,8 +336,8 @@ class CreateOptimizeCylinderWindow():
         # objective block now uses the previous right-side stress area.
         # ---------------------------------------------------------------------
         stress_x = 20
-        stress_y = 405
-        stress_dy = 36
+        stress_y = 710
+        stress_dy = 32
         stress_entry_x = stress_x + 300
         stress_unit_x = stress_x + 430
 
@@ -501,13 +382,13 @@ class CreateOptimizeCylinderWindow():
             tk.Label(self._frame,
                      text='Fatigue pressure: internal= ' + str(self._fatigue_pressure['p_int']) + ' external= '
                           + str(self._fatigue_pressure['p_ext']), font='Verdana 7',
-                     wraplength=950, justify=tk.LEFT) \
-                .place(x=start_x, y=760)
+                     wraplength=980, justify=tk.LEFT) \
+                .place(x=start_x, y=955)
         else:
             tk.Label(self._frame, text='Fatigue pressure: internal= ' + str(0) + ' external= '
                                        + str(0), font='Verdana 7',
-                     wraplength=950, justify=tk.LEFT) \
-                .place(x=start_x, y=760)
+                     wraplength=980, justify=tk.LEFT) \
+                .place(x=start_x, y=955)
 
         # setting default values
         init_dim = float(10)  # mm
@@ -534,6 +415,7 @@ class CreateOptimizeCylinderWindow():
         self._new_algorithm.trace_add('write', self.schedule_running_time_update)
 
         self.running_time_per_item = {'RP': 1.009943181818182e-5}
+        self.running_time_no_filter_factor = 4.0
 
         # self.running_time_per_item = {'PULS':0.2489626556016598, 'RP': 1.009943181818182e-5}
         # self.initial_weight = op.calc_weight([self._spacing,self._pl_thk,self._stf_web_h,self._stf_web_thk,
@@ -557,9 +439,9 @@ class CreateOptimizeCylinderWindow():
         #     .place(x=start_x+dx*12.5, y=start_y+dy*7)
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
                                     font='Verdana 10 bold', fg='Yellow', relief="raised")
-        self.run_button.place(x=1220, y=60, width=260, height=32)
+        self.run_button.place(x=1220, y=70, width=260, height=32)
 
-        self._opt_actual_running_time.place(x=1220, y=100)
+        self._opt_actual_running_time.place(x=1220, y=112)
 
         self.weight_weld_study_button = tk.Button(
             self._frame,
@@ -569,15 +451,15 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.weight_weld_study_button.place(x=1220, y=145, width=180, height=28)
-        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=1410, y=151)
+        self.weight_weld_study_button.place(x=1220, y=165, width=180, height=28)
+        tk.Label(self._frame, text='delta', font='Verdana 8').place(x=1410, y=171)
         self._ent_weld_study_delta = tk.Entry(
             self._frame,
             textvariable=self._new_weld_study_delta,
             width=5,
             bg='white',
         )
-        self._ent_weld_study_delta.place(x=1445, y=149)
+        self._ent_weld_study_delta.place(x=1445, y=169)
         self.show_previous_weld_study_button = tk.Button(
             self._frame,
             text='show previous study',
@@ -586,7 +468,7 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.show_previous_weld_study_button.place(x=1220, y=180, width=180, height=28)
+        self.show_previous_weld_study_button.place(x=1220, y=200, width=180, height=28)
         self.cost_study_button = tk.Button(
             self._frame,
             text='cost study',
@@ -595,12 +477,12 @@ class CreateOptimizeCylinderWindow():
             font='Verdana 10',
             fg='black',
         )
-        self.cost_study_button.place(x=1220, y=215, width=180, height=28)
+        self.cost_study_button.place(x=1220, y=235, width=180, height=28)
 
-        tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=1480, y=56)
-        self._ent_algorithm.place(x=1480, y=80, width=165)
+        tk.Label(self._frame, text='Select algorithm', font='Verdana 8 bold').place(x=1480, y=70)
+        self._ent_algorithm.place(x=1480, y=95, width=165)
         tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
-            .place(x=1480, y=115, width=165)
+            .place(x=1480, y=130, width=165)
 
         self.close_and_save = tk.Button(self._frame, text='Return and replace initial structure with optimized',
                                         command=self.save_and_close, bg='green', font='Verdana 10', fg='yellow')
@@ -614,7 +496,7 @@ class CreateOptimizeCylinderWindow():
         # Optimization objective bias
         # ---------------------------------------------------------------------
         objective_x = start_x + 10 * dx
-        objective_y = start_y + 3.8 * dy
+        objective_y = 285
 
         tk.Label(self._frame, text='Optimization objective', font='Verdana 9 bold') \
             .place(x=objective_x, y=objective_y)
@@ -679,7 +561,7 @@ class CreateOptimizeCylinderWindow():
         # Runtime estimate belongs to the optimization objective block.
         # Keep it below the built-up weld checkbox so it does not collide
         # with the geometry input table.
-        self._runnig_time_label.place(x=objective_x, y=objective_y + 160)
+        self._runnig_time_label.place(x=objective_x, y=425, width=520)
 
         self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
         self._new_weld_metric.trace_add('write', self._update_weld_bias_label)
@@ -691,13 +573,13 @@ class CreateOptimizeCylinderWindow():
         self._new_fdwn.set(1)
 
         tk.Label(self._frame, text='Factor when scaling stresses up, fup') \
-            .place(x=20, y=640)
+            .place(x=520, y=710)
         ent_fup = tk.Entry(self._frame, textvariable=self._new_fup, width=10)
-        ent_fup.place(x=320, y=640)
+        ent_fup.place(x=820, y=710)
         tk.Label(self._frame, text='Factor when scaling stresses up, fdown') \
-            .place(x=20, y=680)
+            .place(x=520, y=742)
         ent_fdwn = tk.Entry(self._frame, textvariable=self._new_fdwn, width=10)
-        ent_fdwn.place(x=320, y=680)
+        ent_fdwn.place(x=820, y=742)
 
         # tk.Button(self._frame,text='Iterate predefiened stiffeners',command=self.open_multiple_files ,bg='yellow')\
         #     .place(x=start_x, y=start_y - dy * 2)
@@ -739,13 +621,13 @@ class CreateOptimizeCylinderWindow():
         self._ent_minfunc.place_forget()
 
         if self._new_algorithm.get() in ('random', 'random_no_delta'):
-            self.algorithm_random_label.place(x=1490, y=150)
-            self._ent_random_trials.place(x=1490, y=175, width=150)
+            self.algorithm_random_label.place(x=1490, y=165)
+            self._ent_random_trials.place(x=1490, y=190, width=150)
 
         elif self._new_algorithm.get() == 'pso':
             label_x = 1490
             entry_x = 1570
-            y0 = 150
+            y0 = 165
             step = 25
 
             controls = [
@@ -937,13 +819,14 @@ class CreateOptimizeCylinderWindow():
             self.cost_study_button.config(state=tk.NORMAL)
 
     def _show_cost_study_result(self, cost_factors, t_start):
-        if self._opt_results is None or self._opt_results[0] is None:
+        if self._opt_results is None or len(self._opt_results) == 0 or self._opt_results[0] is None:
             messagebox.showinfo(title='Nothing found', message='No cost optimum found. Modify input.\n')
             self._opt_actual_running_time.config(text='Cost optimization finished without result')
             return
 
+        elapsed_seconds = time.time() - t_start
         self._opt_actual_running_time.config(text='Actual running time: \n'
-                                                  + str(round((time.time() - t_start) / 60, 4)) + ' min')
+                                                  + str(round(elapsed_seconds / 60, 4)) + ' min')
         self._opt_actual_running_time.update()
         self._opt_runned = True
         self._canvas_opt.delete('all')
@@ -961,12 +844,126 @@ class CreateOptimizeCylinderWindow():
             weld_metric=self._get_weld_metric_for_optimization(),
         )
         result_cost = cost_factors['steel'] * result_weight + cost_factors['weld'] * result_weld
+        steel_cost = cost_factors['steel'] * result_weight
+        weld_cost = cost_factors['weld'] * result_weld
         self._result_label.config(
             text='Cost optimization result | Cost: ' + str(round(result_cost, 2))
                  + ' | Weight: ' + str(round(result_weight, 1)) + ' kg'
                  + ' | ' + self._get_weld_metric_text() + ': ' + str(round(result_weld, 3))
                  + ' ' + self._get_weld_metric_unit()
         )
+        report = self._build_cost_study_report(
+            cost_factors=cost_factors,
+            result_x=result_x,
+            result_weight=result_weight,
+            result_weld=result_weld,
+            steel_cost=steel_cost,
+            weld_cost=weld_cost,
+            result_cost=result_cost,
+            elapsed_seconds=elapsed_seconds,
+        )
+        self._last_cost_study_report = report
+        self._last_study_type = 'cost'
+        self._show_cost_study_report(report)
+
+    def _build_cost_study_report(self, cost_factors, result_x, result_weight, result_weld,
+                                 steel_cost, weld_cost, result_cost, elapsed_seconds):
+        seconds, combinations = self.get_running_time()
+        shell, long_stf, ring_stf, ring_frame = result_x
+        return {
+            'title': 'Cylinder cost study report',
+            'summary': [
+                ('Total cost', self._format_study_value(result_cost, 3)),
+                ('Steel contribution', self._format_study_value(steel_cost, 3)),
+                ('Weld contribution', self._format_study_value(weld_cost, 3)),
+                ('Steel cost per kg', self._format_study_value(cost_factors['steel'], 3)),
+                ('Weld cost per ' + self._get_weld_metric_unit(), self._format_study_value(cost_factors['weld'], 3)),
+                ('Weight [kg]', self._format_study_value(result_weight, 3)),
+                (self._get_weld_metric_text().title() + ' [' + self._get_weld_metric_unit() + ']',
+                 self._format_study_value(result_weld, 3)),
+                ('Weld bias', self._format_study_value(self._get_weld_bias_for_optimization(), 2)),
+                ('Weld metric', self._get_weld_metric_text()),
+                ('Built-up weld included', str(bool(self._new_include_builtup_weld.get()))),
+                ('Algorithm', self._new_algorithm.get()),
+                ('Estimated combinations', self._format_study_value(combinations, 0)),
+                ('Elapsed [s]', self._format_study_value(elapsed_seconds, 2)),
+            ],
+            'geometry': [
+                ('Shell thickness [mm]', self._format_study_value(shell[0] * 1000, 2)),
+                ('Shell radius [m]', self._format_study_value(shell[1], 3)),
+                ('Ring spacing [mm]', self._format_study_value(shell[2] * 1000, 2)),
+                ('Shell length [mm]', self._format_study_value(shell[3] * 1000, 2)),
+                ('Total length [mm]', self._format_study_value(shell[4] * 1000, 2)),
+                ('Longitudinal spacing [mm]', self._format_study_value(long_stf[0] * 1000, 2)),
+                ('Longitudinal web height [mm]', self._format_study_value(long_stf[2] * 1000, 2)),
+                ('Longitudinal web thickness [mm]', self._format_study_value(long_stf[3] * 1000, 2)),
+                ('Longitudinal flange width [mm]', self._format_study_value(long_stf[4] * 1000, 2)),
+                ('Longitudinal flange thickness [mm]', self._format_study_value(long_stf[5] * 1000, 2)),
+                ('Ring stiffener web height [mm]', self._format_study_value(ring_stf[2] * 1000, 2)),
+                ('Ring stiffener web thickness [mm]', self._format_study_value(ring_stf[3] * 1000, 2)),
+                ('Ring frame web height [mm]', self._format_study_value(ring_frame[2] * 1000, 2)),
+                ('Ring frame web thickness [mm]', self._format_study_value(ring_frame[3] * 1000, 2)),
+            ],
+            'field_size': [
+                ('Cylinder radius used [m]', self._format_study_value(shell[1], 3)),
+                ('Distance between rings used [mm]', self._format_study_value(shell[2] * 1000, 2)),
+                ('Shell length used [mm]', self._format_study_value(shell[3] * 1000, 2)),
+                ('Total cylinder length used [mm]', self._format_study_value(shell[4] * 1000, 2)),
+                ('Design lateral pressure used [Pa]', self._format_study_value(self._new_design_pressure.get(), 3)),
+            ],
+        }
+
+    def _show_cost_study_report(self, report):
+        result_window = tk.Toplevel(self._frame)
+        result_window.title(report.get('title', 'Cylinder cost study report'))
+        result_window.geometry('1220x660')
+
+        tk.Label(
+            result_window,
+            text='Cylinder cost optimization report',
+            font='Verdana 12 bold',
+        ).pack(side=tk.TOP, anchor='w', padx=10, pady=(10, 4))
+
+        tk.Label(
+            result_window,
+            text='Objective = steel cost per kg * weight + weld cost per '
+                 + self._get_weld_metric_unit() + ' * ' + self._get_weld_metric_text() + '.',
+            font='Verdana 8',
+            wraplength=1180,
+            justify=tk.LEFT,
+        ).pack(side=tk.TOP, anchor='w', padx=10, pady=(0, 8))
+
+        table_frame = tk.Frame(result_window)
+        table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        columns = ('item', 'value')
+        summary_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=16)
+        geometry_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=16)
+        field_size_tree = ttk.Treeview(table_frame, columns=columns, show='headings', height=16)
+
+        for tree, heading in (
+                (summary_tree, 'Cost and run data'),
+                (geometry_tree, 'Optimized geometry'),
+                (field_size_tree, 'Optimization field size')):
+            tree.heading('item', text=heading)
+            tree.heading('value', text='Value')
+            tree.column('item', width=270, anchor=tk.W)
+            tree.column('value', width=130, anchor=tk.CENTER)
+
+        for item, value in report.get('summary', []):
+            summary_tree.insert('', tk.END, values=(item, value))
+        for item, value in report.get('geometry', []):
+            geometry_tree.insert('', tk.END, values=(item, value))
+        for item, value in report.get('field_size', []):
+            field_size_tree.insert('', tk.END, values=(item, value))
+
+        summary_tree.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+        geometry_tree.grid(row=0, column=1, sticky='nsew', padx=8)
+        field_size_tree.grid(row=0, column=2, sticky='nsew', padx=(8, 0))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.columnconfigure(1, weight=1)
+        table_frame.columnconfigure(2, weight=1)
+        table_frame.rowconfigure(0, weight=1)
 
     def run_optimizaion(self):
         '''
@@ -1251,6 +1248,7 @@ class CreateOptimizeCylinderWindow():
                 )
 
             self._last_weight_weld_study_rows = list(rows)
+            self._last_study_type = 'weight_weld'
             self._show_weight_weld_study_results(rows)
         finally:
             self._new_weld_bias.set(original_bias)
@@ -1260,14 +1258,28 @@ class CreateOptimizeCylinderWindow():
             self._opt_actual_running_time.update()
 
     def show_previous_weight_weld_study(self):
-        if not self._last_weight_weld_study_rows:
-            messagebox.showinfo(
-                title='Weight/weld study',
-                message='No previous weight/weld study is available. Run the study first.',
-            )
+        if self._last_study_type == 'cost' and self._last_cost_study_report:
+            self._show_cost_study_report(self._last_cost_study_report)
             return
 
-        self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
+        if self._last_study_type == 'weight_weld' and self._last_weight_weld_study_rows:
+            self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
+            return
+
+        if self._last_cost_study_report:
+            self._show_cost_study_report(self._last_cost_study_report)
+            return
+
+        if self._last_weight_weld_study_rows:
+            self._show_weight_weld_study_results(self._last_weight_weld_study_rows)
+            return
+
+        if not self._last_weight_weld_study_rows:
+            messagebox.showinfo(
+                title='Previous study',
+                message='No previous study is available. Run a weight/weld or cost study first.',
+            )
+            return
 
     def _count_steps(self, lower, upper, delta):
         """
@@ -1339,7 +1351,8 @@ class CreateOptimizeCylinderWindow():
         if algorithm in ['random', 'random_no_delta']:
             try:
                 number_of_combinations = int(self._new_algorithm_random_trials.get())
-                return int(number_of_combinations * self.running_time_per_item['RP']), number_of_combinations
+                seconds = number_of_combinations * self.running_time_per_item['RP']
+                return int(seconds), number_of_combinations
             except Exception:
                 return 0, 0
 
@@ -1359,7 +1372,14 @@ class CreateOptimizeCylinderWindow():
                 deltas[idx],
             )
 
-        return int(number_of_combinations * self.running_time_per_item['RP']), int(number_of_combinations)
+        seconds = number_of_combinations * self.running_time_per_item['RP']
+        try:
+            if 0.0 < self._get_weld_bias_for_optimization() < 1.0:
+                seconds *= self.running_time_no_filter_factor
+        except Exception:
+            pass
+
+        return int(seconds), int(number_of_combinations)
 
     def schedule_running_time_update(self, *args):
         """
@@ -1405,12 +1425,15 @@ class CreateOptimizeCylinderWindow():
             warning_text = ''
 
             if 0.0 < weld_bias < 1.0:
-                warning_text = '\nWARNING: mixed weight/weld combination disables the initial filter.'
+                warning_text = (
+                    '\nWARNING: mixed weight/weld combination disables the initial filter.'
+                    '\nEstimate uses no-filter runtime.'
+                )
             elif weld_bias >= 1.0:
                 warning_text = '\nPure weld objective: initial filter uses ' + self._get_weld_metric_text() + '.'
 
             self._runnig_time_label.config(
-                text=str(int(number_of_combinations)) + ' (about '
+                text=str(int(number_of_combinations)) + ' combinations\n(about '
                      + str(max(round(seconds / 60, 2), 0.1))
                      + ' min.)'
                      + warning_text

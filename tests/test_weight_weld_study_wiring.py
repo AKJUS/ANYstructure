@@ -41,6 +41,8 @@ def test_running_time_warns_for_mixed_weight_weld_combination():
     source = read_optimize_window_source()
 
     assert "mixed weight/weld combination disables the initial filter" in source
+    assert "Estimate uses no-filter runtime" in source
+    assert "self.running_time_no_filter_factor" in source
     assert "Pure weld objective: initial filter uses ' + self._get_weld_metric_text()" in source
 
 
@@ -66,3 +68,16 @@ def test_single_optimizer_has_cost_study_button_and_dialog():
     assert "def run_cost_study(self, cost_factors):" in source
     assert "cost_factors=cost_factors" in source
     assert "Cost optimization result" in source
+    assert "def _build_cost_study_report(self, cost_factors" in source
+    assert "def _show_cost_study_report(self, report):" in source
+    assert "Cost optimization report" in source
+    assert "Steel contribution" in source
+    assert "Weld contribution" in source
+    assert "Optimized geometry" in source
+    assert "Optimization field size" in source
+    assert "Panel field span used [m]" in source
+    assert "Panel field length used [m]" in source
+    assert "Design pressure used [kPa]" in source
+    assert "self._last_cost_study_report = report" in source
+    assert "self._last_study_type = 'cost'" in source
+    assert "self._show_cost_study_report(self._last_cost_study_report)" in source

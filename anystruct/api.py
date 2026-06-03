@@ -246,6 +246,9 @@ class FlatStru():
                 "confidence": "low",
                 "valid_label": "SemiAnalytical S3/U3 error",
                 "invalid_reason": str(err),
+                "csr_vector": [0, 0, 0, 0],
+                "csr_color": "red",
+                "csr_requirement": {},
             }
             valid_prediction = False
 
@@ -265,6 +268,9 @@ class FlatStru():
             "available": valid_prediction,
             "valid prediction": 1 if valid_prediction else 0,
             "valid label": result.get("valid_label", "SemiAnalytical S3/U3 unsupported or invalid"),
+            "CSR": result.get("csr_vector", [0, 0, 0, 0]),
+            "CSR color": result.get("csr_color", "red"),
+            "CSR requirement": result.get("csr_requirement", {}),
         }
         api_result["selected UF"] = self._selected_buckling_uf(api_result)
         return api_result

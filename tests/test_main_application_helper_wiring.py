@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
 
 def test_main_application_uses_shared_geometry_menu_helpers():
@@ -22,6 +23,252 @@ def test_functional_modes_keep_3d_section_checkbox_visible():
     assert "self._chk_show_prop_3d.place(relx=0.637, rely=0.705)" in source
     assert "self._chk_show_prop_3d.lift()" in source
     assert source.count("self._place_3d_section_view_checkbox()") >= 3
+
+
+def test_help_tab_includes_cylinder_panel_buckling_image():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    shell_image_index = source.index("Buckling_Strength_of_Shells.png")
+    panel_heading_index = source.index("Buckling cylinder panels")
+    panel_image_index = source.index("buckling_cylinder_panel.png")
+
+    assert shell_image_index < panel_heading_index < panel_image_index
+
+
+def test_main_application_uses_tcl9_compatible_variable_traces():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert ".trace('w', self.trace_acceptance_change)" not in source
+    assert ".trace_add('write', self.trace_acceptance_change)" in source
+
+
+def test_resize_state_is_initialized_before_configure_binding():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    init_source = source[
+        source.index("def __init__(self, parent):"):
+        source.index("self._root_dir =")
+    ]
+
+    assert init_source.index("self._last_resize_size = (0, 0)") < init_source.index('parent.bind("<Configure>"')
+    assert init_source.index("self._resize_after_id = None") < init_source.index('parent.bind("<Configure>"')
+
+
+def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "self._simplified_calculation_mode = False" in source
+    assert "self._single_line_name = 'line1'" in source
+    assert "def _prompt_startup_calculation_mode(self):" in source
+    assert "from importlib import metadata as importlib_metadata" in source
+    assert "def _get_application_version_from_metadata():" in source
+    assert "importlib_metadata.version(package_name)" in source
+    assert "__version__" not in source[source.index("def _show_startup_calculation_mode_dialog"):source.index("def switch_to_single_calculation_mode")]
+    assert "def _show_startup_calculation_mode_dialog(self):" in source
+    assert "tk.Toplevel(self._parent, background='#f5f7fb')" in source
+    assert "ANYstructure_logo.jpg" in source
+    assert "from PIL import Image, ImageTk" in source
+    assert "ImageTk.PhotoImage(logo_image)" in source
+    assert "logo_image.thumbnail((132, 76), Image.LANCZOS)" in source
+    assert "Version ' + app_version" in source
+    assert "Choose calculation workflow" in source
+    assert "Multiple panels" in source
+    assert "subtitle='Default'" in source
+    assert "Recommended default" not in source
+    assert "Single panel/cylinder" in source
+    assert "dialog.bind('<Return>', lambda _event: choose(False))" in source
+    assert "dialog.bind('<Escape>', lambda _event: choose(False))" in source
+    assert "self._parent.wait_window(dialog)" in source
+    assert "Mode - Single panel/cylinder" in source
+    assert "Mode - Multiple panels" in source
+    assert "def switch_to_single_calculation_mode(self):" in source
+    assert "def switch_to_multiple_calculation_mode(self):" in source
+    assert "self._single_line_name = selected_line" in source
+    assert "self._activate_simplified_calculation_pipeline()" in source
+    assert "def _ensure_single_dummy_line(self):" in source
+    assert "self._line_dict[self._single_line_name] = [1, 2]" in source
+    assert "def _ensure_manual_pressure_combination(self, line, default_enabled=False):" in source
+    assert "def _gui_single_line_manual_pressure(self):" in source
+    assert "Manual pressure [Pa]" in source
+    assert "if self._line_to_struc[self._active_line][5] is not None:" in source
+    assert "self._result_label_manual, self._lab_pressure" in source
+    assert "def _sync_simplified_domain_selection(self):" in source
+    assert "self._sync_simplified_domain_selection()" in source
+    assert "if not getattr(self, '_simplified_calculation_mode', False):\n            self.set_selected_variables(self._active_line)" in source
+    assert "self._tabControl.hide(self._tab_geo)" in source
+    assert "self._tabControl.hide(self._tab_comp)" in source
+    assert "def _show_standard_calculation_layout(self):" in source
+    assert "self._tabControl.add(self._tab_geo, text='Geometry')" in source
+    assert "self._tabControl.add(self._tab_comp, text='Compartments and loads')" in source
+    assert "self.gui_load_combinations(self._combination_slider.get())" in source
+
+
+def test_initial_property_layout_uses_domain_selection_after_root_geometry_is_realized():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    init_tail = source[
+        source.index("self._chk_show_prop_3d.place(relx=0.637, rely=0.705)"):
+        source.index("# self._current_theme = 'default'")
+    ]
+
+    assert "parent.minsize(1200, 750)" in init_tail
+    assert "parent.update_idletasks()" in init_tail
+    assert "self.calculation_domain_selected(sync_cylinder_inputs=False)" in init_tail
+    assert "self.gui_structural_properties()  # Initiating the flat panel structural properties" not in init_tail
+    assert init_tail.index("parent.update_idletasks()") < init_tail.index(
+        "self.calculation_domain_selected(sync_cylinder_inputs=False)"
+    )
+
+
+def test_single_line_optimizer_return_refreshes_hidden_line():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _prepare_simplified_optimizer_replacement(self):" in source
+    assert "def _refresh_simplified_optimizer_replacement(self):" in source
+    assert "def _replace_active_line_with_optimized_structure(self, optimized_structure):" in source
+    assert "self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)" in source
+    assert "self.set_selected_variables(self._active_line)" in source
+
+    flat_close = source[
+        source.index("def on_close_opt_window"):
+        source.index("def on_close_opt_cyl_window")
+    ]
+    cylinder_close = source[
+        source.index("def on_close_opt_cyl_window"):
+        source.index("def on_close_opt_multiple_window")
+    ]
+
+    assert "self._prepare_simplified_optimizer_replacement()" in flat_close
+    assert "self._replace_active_line_with_optimized_structure(returned_object[0])" in flat_close
+    assert "else:\n            self.new_structure(multi_return=returned_object[0:2])" in flat_close
+    assert "if not self._refresh_simplified_optimizer_replacement():" in flat_close
+    assert "self._prepare_simplified_optimizer_replacement()" in cylinder_close
+    assert "self.new_structure(cylinder_return=returned_object[0])" in cylinder_close
+    assert "if not self._refresh_simplified_optimizer_replacement():" in cylinder_close
+
+
+def test_single_line_mode_keeps_active_line_on_selected_or_dummy_line():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _single_mode_active_line_candidate(self):" in source
+    selector_block = source[
+        source.index("def _single_mode_active_line_candidate"):
+        source.index("def _ensure_single_dummy_line")
+    ]
+    select_block = source[
+        source.index("def _select_single_calculation_line"):
+        source.index("def _ensure_manual_pressure_combination")
+    ]
+
+    assert "if self._active_line in self._line_dict:" in selector_block
+    assert "return self._active_line" in selector_block
+    assert "if self._single_line_name in self._line_dict:" in selector_block
+    assert "return self._single_line_name" in selector_block
+    assert "return sorted(self._line_dict.keys(), key=get_num)[0]" in selector_block
+    assert "self._single_line_name = self._single_mode_active_line_candidate()" in select_block
+    assert "self._active_line = self._single_line_name" in select_block
+
+
+def test_cylinder_optimizer_return_bypasses_missing_flat_input_guard():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    new_structure = source[
+        source.index("def new_structure"):
+        source.index("def option_meny_structure_type_trace")
+    ]
+    visible_input_guard = source[
+        source.index("def _uses_visible_structure_inputs"):
+        source.index("def new_structure")
+    ]
+
+    assert "cylinder_return" in visible_input_guard
+    assert "all(value is None" in visible_input_guard
+    assert "self._uses_visible_structure_inputs(" in new_structure
+    assert "self._show_missing_structure_input_warning()" in new_structure
+
+
+def test_simplified_3d_preview_uses_main_canvas_place():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    placement_block = source[
+        source.index("def _get_prop_3d_bottom_place"):
+        source.index("def _resize_prop_3d_figure")
+    ]
+
+    assert "getattr(self, '_simplified_calculation_mode', False)" in placement_block
+    assert "self._place_info_float(self._main_canvas, 'relx', 0.26)" in placement_block
+    assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
+
+
+def test_cylinder_panel_domains_render_as_angular_sector_preview():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _is_cylinder_panel_preview(cyl_obj):" in source
+    assert "api_helpers.domain_for_geometry_id(cyl_obj.geometry)" in source
+    assert "return 'panel' in domain.lower() and 'shell' not in domain.lower()" in source
+    assert "def _cylinder_preview_theta_range(self, cyl_obj):" in source
+    assert "math.radians(60.0)" in source
+    assert "theta_range=theta_range" in source
+    assert "3D cylinder panel preview (60 deg)" in source
+    assert "arc_length = abs(theta_end - theta_start) * radius" in source
+
+
+def test_unstiffened_flat_plate_input_check_does_not_require_stiffener_dimensions():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    missing_input_block = source[
+        source.index("def _structure_input_is_missing"):
+        source.index("def _show_missing_structure_input_warning")
+    ]
+
+    assert "required_inputs = [self._new_stf_spacing.get(), self._new_plate_thk.get()]" in missing_input_block
+    assert "if self._new_calculation_domain.get() != 'Flat plate, unstiffened':" in missing_input_block
+    assert "required_inputs.extend([self._new_stf_web_h.get(), self._new_stf_web_t.get()])" in missing_input_block
+    assert "self._new_stf_web_h.get() == 0" not in missing_input_block
+
+
+def test_unstiffened_flat_plate_color_state_initializes_fatigue_color():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    no_stiffener_start = source.index("else:\n                    sec_mod = [0, 0]")
+    no_stiffener_block = source[
+        no_stiffener_start:
+        source.index("if slamming_pressure is not None and slamming_pressure > 0 and obj_scnt_calc_stf is not None:")
+    ]
+
+    assert "color_fatigue = 'green'" in no_stiffener_block
+    assert "shear_area = 0" in no_stiffener_block
+    assert "min_shear = 0" in no_stiffener_block
+    assert "min_sec_mod = 0" in no_stiffener_block
+    assert no_stiffener_start + no_stiffener_block.index("color_fatigue = 'green'") < source.index(
+        "return_dict['colors'][current_line] = {'buckling': color_buckling, 'fatigue': color_fatigue,"
+    )
+
+
+def test_color_code_summary_handles_models_without_stiffener_spacing():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    color_code_block = source[
+        source.index("spacings = list()"):
+        source.index("line_color_coding = {}")
+    ]
+
+    assert "max_spacing = max(spacing) if len(spacing) != 0 else 0" in color_code_block
+    assert "min_spacing = min(spacing) if len(spacing) != 0 else 0" in color_code_block
+    assert "'max spacing': max(spacing)" not in color_code_block
+    assert "'min spacing': min(spacing)" not in color_code_block
+
+
+def test_color_state_cog_handles_zero_weight_lines():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "tot_cog = [0, 0] if tot_weight == 0 else [weight_mult_dist_x / tot_weight," in source
 
 
 def test_main_application_uses_geometry_helpers_for_active_lookups():
@@ -101,14 +348,25 @@ def test_new_structure_delegates_property_building():
     ]
     update_structure = source[
         source.index("def _update_existing_active_line_structure"):
-        source.index("def _calculate_load_combinations_after_structure_update")
+        source.index("def _replace_active_line_with_optimized_structure")
+    ]
+    apply_structure = source[
+        source.index("def _apply_resolved_new_structure"):
+        source.index("def _replace_active_line_with_optimized_structure")
+    ]
+    new_structure_context = source[
+        source.index("def _prepare_new_structure_context"):
+        source.index("def new_structure")
     ]
 
+    assert "class NewStructureProperties" in source
     assert "self._build_flat_structure_properties()" in resolver
     assert "elif isinstance(toggle_multi, tuple):" in resolver
     assert "prop_dict, obj_dict_stf = toggle_multi" in resolver
     assert "if cylinder_return is not None:" in resolver
-    assert "CylinderObj = cylinder_return" in resolver
+    assert "cylinder_obj = cylinder_return" in resolver
+    assert "self._cylinder_property_parts(cylinder_return)" in resolver
+    assert "NewStructureProperties(" in resolver
     assert "FlatStructurePropertyRequest(" in flat_builder
     assert "FlatStructurePropertyService.build(" in flat_builder
     assert "api_helpers.mpa_to_pa" not in flat_builder
@@ -119,16 +377,23 @@ def test_new_structure_delegates_property_building():
     assert "api_helpers.mpa_to_pa" not in cylinder_builder
     assert "api_helpers.mm_to_m" not in cylinder_builder
     assert "self._build_cylinder_structure_properties()" in resolver
+    assert "self.save_no_dialogue(backup=True)" in new_structure_context
+    assert "self._ensure_single_dummy_line()" in new_structure_context
+    assert "self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)" in new_structure_context
     assert "self._structure_input_is_missing()" in new_structure
-    assert "self._create_all_structure_from_properties(prop_dict)" in add_structure
+    assert "self._create_all_structure_from_properties(resolved.prop_dict)" in add_structure
     assert "self._create_cylinder_structure_from_properties(" in add_structure
     assert "self._clear_tanks_and_grid()" in add_structure
     assert "self._clear_tanks_and_grid()" in update_structure
     assert "self._refresh_after_structure_change(suspend_recalc)" in new_structure
     assert "self._resolve_new_structure_properties(" in new_structure
-    assert "self._add_structure_to_active_line(" in new_structure
-    assert "self._update_existing_active_line_structure(" in new_structure
-    assert "self._calculate_load_combinations_after_structure_update()" in new_structure
+    assert "self._apply_resolved_new_structure(resolved, cylinder_return)" in new_structure
+    assert "self._add_structure_to_active_line(resolved)" in apply_structure
+    assert "self._update_existing_active_line_structure(resolved, cylinder_return)" in apply_structure
+    assert "self._calculate_load_combinations_after_structure_update()" in apply_structure
+    assert "self._add_structure_to_active_line(" not in new_structure
+    assert "self._update_existing_active_line_structure(" not in new_structure
+    assert "self._calculate_load_combinations_after_structure_update()" not in new_structure
     assert "obj_dict = {" not in new_structure
     assert "shell_dict = {" not in new_structure
     assert "AllStructure(" not in new_structure
@@ -319,3 +584,53 @@ def test_excel_callbacks_delegate_workbook_adapter_access():
     assert "_new_shell_radius.set(" not in cylinder_import_block
     assert "_new_shell_Nsd.set(" not in cylinder_import_block
     assert "_new_shell_end_cap_pressure_included.set(shell_yield)" not in cylinder_import_block
+
+
+def test_csr_requirement_is_shared_by_numeric_and_semianalytical_methods():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "use_semi_analytical_equation=False" in source
+    assert "selected_buckling_method in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']" in source
+    assert "use_semi_analytical_equation=selected_buckling_method == 'SemiAnalytical S3/U3'" in source
+    assert "return_dict['ML buckling class'][current_line]['CSR'] = csr_values" in source
+    assert "return_dict['ML buckling colors'][current_line]['CSR requirement'] = csr_color" in source
+
+
+def test_semianalytical_csr_helper_uses_equation_predictor(monkeypatch):
+    from anystruct import main_application
+    from anystruct.main_application import Application
+
+    calls = {}
+
+    def fake_predict(calc_object, design_pressure):
+        calls["plate"] = calc_object.Plate
+        calls["stiffener"] = calc_object.Stiffener
+        calls["design_pressure"] = design_pressure
+        return [1, 0, 1, 1], "red", {"source": "equation"}
+
+    monkeypatch.setattr(
+        main_application.op.semi_analytical,
+        "predict_anystructure_csr_requirement",
+        fake_predict,
+    )
+
+    app = object.__new__(Application)
+    plate = SimpleNamespace(mat_factor=1.15)
+    stiffener = SimpleNamespace()
+
+    csr, color = app._predict_csr_requirement(
+        plate,
+        stiffener,
+        design_pressure=123.0,
+        material_factor=1.15,
+        use_semi_analytical_equation=True,
+    )
+
+    assert csr == [1, 0, 1, 1]
+    assert color == "red"
+    assert calls == {
+        "plate": plate,
+        "stiffener": stiffener,
+        "design_pressure": 123.0,
+    }

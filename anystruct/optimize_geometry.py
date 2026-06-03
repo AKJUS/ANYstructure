@@ -18,6 +18,7 @@ try:
     import anystruct.optimize as op
     import anystruct.example_data as test
     import anystruct.line_structure as line_structure
+    import anystruct.ml_models as ml_models
     from anystruct.calc_structure import *
     import anystruct.calc_structure
     from anystruct.helper import *
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.optimize as op
     import ANYstructure.anystruct.example_data as test
     import ANYstructure.anystruct.line_structure as line_structure
+    import ANYstructure.anystruct.ml_models as ml_models
     from ANYstructure.anystruct.calc_structure import *
     import ANYstructure.anystruct.calc_structure
     from ANYstructure.anystruct.helper import *
@@ -93,19 +95,6 @@ class CreateOptGeoWindow():
                 except Exception:
                     pass
         return obj
-
-    def _load_pickle_first_existing(self, file_bases):
-        """Load the first existing pickle from one or more base filenames."""
-        if isinstance(file_bases, str):
-            file_bases = (file_bases,)
-
-        for file_base in file_bases:
-            file_name = file_base if file_base.endswith('.pickle') else file_base + '.pickle'
-            if os.path.isfile(file_name):
-                with open(file_name, 'rb') as file:
-                    return pickle.load(file)
-        return None
-
 
     def _get_weld_bias_for_optimization(self):
         """
@@ -240,132 +229,8 @@ class CreateOptGeoWindow():
 
             self._opt_frames = {}
             self._active_points = ['point1', 'point4', 'point8', 'point5']
-            self._ML_buckling = dict()  # Buckling machine learning algorithm
-            for name, file_base in zip(['cl SP buc int predictor', 'cl SP buc int scaler',
-                                        'cl SP ult int predictor', 'cl SP ult int scaler',
-                                        'cl SP buc GLGT predictor', 'cl SP buc GLGT scaler',
-                                        'cl SP ult GLGT predictor', 'cl SP ult GLGT scaler',
-                                        'cl UP buc int predictor', 'cl UP buc int scaler',
-                                        'cl UP ult int predictor', 'cl UP ult int scaler',
-                                        'cl UP buc GLGT predictor', 'cl UP buc GLGT scaler',
-                                        'cl UP ult GLGT predictor', 'cl UP ult GLGT scaler',
-                                        'CSR predictor', 'CSR scaler'
-                                        ],
-                                       ["ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_1_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_2,_3_SP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_1_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_predictor_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_buc_scaler_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_predictor_In-plane_support_cl_2,_3_UP",
-                                        "ml_files\\CLPIPE_CL_output_cl_ult_scaler_In-plane_support_cl_2,_3_UP",
-                                        "CLPIPE_CL_CSR-Tank_req_cl_predictor",
-                                        "CLPIPE_CL_CSR-Tank_req_cl_UP_scaler",
-                                        "CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_predictor",
-                                        "CLPIPE_CL_CSR_plate_cl,_CSR_web_cl,_CSR_web_flange_cl,_CSR_flange_cl_SP_scaler"]):
-                self._ML_buckling[name] = None
-                if os.path.isfile(file_base + '.pickle'):
-                    file = open(file_base + '.pickle', 'rb')
-                    self._ML_buckling[name] = pickle.load(file)
-                    file.close()
-
-            # Numeric UF pipeline models. These are optional in standalone mode.
-            numeric_model_specs = (
-                ('num SP int validity predictor', (
-                    'ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num SP int validity xscaler', (
-                    'ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num SP int UF reg predictor', (
-                    'ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num SP int UF reg xscaler', (
-                    'ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num SP int UF reg yscaler', (
-                    'ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-
-                ('num SP GLGT validity predictor', (
-                    'ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_VALID_predictor_SP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num SP GLGT validity xscaler', (
-                    'ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_VALID_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num SP GLGT UF reg predictor', (
-                    'ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_REG_predictor_SP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num SP GLGT UF reg xscaler', (
-                    'ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_REG_xscaler_SP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num SP GLGT UF reg yscaler', (
-                    'ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_REG_yscaler_SP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-
-                ('num UP int validity predictor', (
-                    'ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num UP int validity xscaler', (
-                    'ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num UP int UF reg predictor', (
-                    'ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num UP int UF reg xscaler', (
-                    'ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-                ('num UP int UF reg yscaler', (
-                    'ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_1',
-                    'ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_1_In-plane_support_cl_1',
-                )),
-
-                ('num UP GLGT validity predictor', (
-                    'ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_VALID_predictor_UP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num UP GLGT validity xscaler', (
-                    'ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_VALID_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num UP GLGT UF reg predictor', (
-                    'ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_REG_predictor_UP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num UP GLGT UF reg xscaler', (
-                    'ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_REG_xscaler_UP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-                ('num UP GLGT UF reg yscaler', (
-                    'ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_2,_3',
-                    'ml_files\\NUMPIPE_REG_yscaler_UP_UF_numeric_In-plane_support_cl_2,_3_In-plane_support_cl_2,_3',
-                )),
-            )
-
-            for name, file_bases in numeric_model_specs:
-                self._ML_buckling[name] = self._load_pickle_first_existing(file_bases)
+            self._root_dir = os.path.dirname(os.path.abspath(__file__))
+            self._ML_buckling = ml_models.load_buckling_models((self._root_dir,))
         else:
             self.app = app
             self._load_objects = app._load_dict

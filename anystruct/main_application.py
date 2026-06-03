@@ -1,5 +1,8 @@
 import math
 import os  # -*- coding: utf-8 -*-
+from dataclasses import dataclass
+from importlib import metadata as importlib_metadata
+from typing import Any
 
 import tkinter as tk
 from tkinter import ttk
@@ -61,6 +64,21 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.project_services as project_services
 
 
+@dataclass(frozen=True)
+class NewStructureProperties:
+    """Resolved structure data needed to add or update one active line."""
+
+    prop_dict: Any
+    obj_dict_stf: Any = None
+    cylinder_obj: Any = None
+    main_dict_cyl: Any = None
+    shell_dict: Any = None
+    long_dict: Any = None
+    ring_stf_dict: Any = None
+    ring_frame_dict: Any = None
+    geometry: Any = None
+
+
 class Application():
     '''
     The Application class sets up the GUI using Tkinter.
@@ -77,6 +95,8 @@ class Application():
         super(Application, self).__init__()
         parent.wm_title('| ANYstructure |')
         self._parent = parent
+        self._resize_after_id = None
+        self._last_resize_size = (0, 0)
         parent.protocol("WM_DELETE_WINDOW", self.close_main_window)
         parent.bind("<Configure>", self.resize)
 
@@ -213,6 +233,9 @@ class Application():
         sub_colors.add_command(label='Functional - All items', command=lambda id="all items": self.set_colors(id))
         sub_colors.add_command(label='Functional - Modelling', command=lambda id="modelling": self.set_colors(id))
         sub_colors.add_command(label='Functional - Cylinder', command=lambda id="cylinder": self.set_colors(id))
+        sub_colors.add_separator()
+        sub_colors.add_command(label='Mode - Single panel/cylinder', command=self.switch_to_single_calculation_mode)
+        sub_colors.add_command(label='Mode - Multiple panels', command=self.switch_to_multiple_calculation_mode)
 
         # base_mult = 1.2
         # base_canvas_dim = [int(1000 * base_mult),int(720*base_mult)]  #do not modify this, sets the "orignal" canvas dimensions.
@@ -271,9 +294,13 @@ class Application():
         self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=0.38, relheight=0.27)
         self._result_canvas.place(relx=x_canvas_place + 0.38, rely=0.73, relwidth=0.36, relheight=0.27)
 
-        # Optional Matplotlib based 3D preview in the lower property canvas.
+        self._simplified_calculation_mode = False
+        self._single_line_name = 'line1'
+
+        # Optional Matplotlib based 3D preview. In simplified mode this is promoted
+        # to the large main pane; otherwise it remains in the lower property canvas.
         self._new_show_prop_3d = tk.BooleanVar()
-        self._new_show_prop_3d.set(False)
+        self._new_show_prop_3d.set(self._simplified_calculation_mode)
         self._prop_3d_canvas_widget = None
         self._prop_3d_fig_canvas = None
         self._prop_3d_frame = None
@@ -403,7 +430,7 @@ class Application():
         except TclError:
             pass
         ttk.Label(self._tab_help, text='Buckling parameters, cylinders', font="Text 10 bold", ) \
-            .place(relx=0.01, rely=0.55)
+            .place(relx=0.01, rely=0.33)
         try:
             img_file_name = 'Buckling_Strength_of_Shells.png'
             if os.path.isfile('images/' + img_file_name):
@@ -413,7 +440,21 @@ class Application():
             photo = tk.PhotoImage(file=file_path)
             label = tk.Label(self._tab_help, image=photo)
             label.image = photo  # keep a reference!
-            label.place(relx=0.01, rely=0.6)
+            label.place(relx=0.01, rely=0.35)
+        except TclError:
+            pass
+        ttk.Label(self._tab_help, text='Buckling cylinder panels', font="Text 10 bold", ) \
+            .place(relx=0.01, rely=0.6)
+        try:
+            img_file_name = 'buckling_cylinder_panel.png'
+            if os.path.isfile('images/' + img_file_name):
+                file_path = 'images/' + img_file_name
+            else:
+                file_path = os.path.dirname(os.path.abspath(__file__)) + '/images/' + img_file_name
+            photo = tk.PhotoImage(file=file_path)
+            label = tk.Label(self._tab_help, image=photo)
+            label.image = photo  # keep a reference!
+            label.place(relx=0.01, rely=0.62)
         except TclError:
             pass
 
@@ -1746,14 +1787,18 @@ class Application():
         )
         self._chk_show_prop_3d.place(relx=0.637, rely=0.705)
 
-        self.gui_structural_properties()  # Initiating the flat panel structural properties
-        self.set_colors('default')  # Setting colors theme
-
-        # Minimum practical size for the current Tkinter layout
+        # Minimum practical size for the current Tkinter layout.  Apply this
+        # before the initial property placement so winfo_width() has a real
+        # geometry to work from instead of the transient startup width.
         parent.minsize(1200, 750)
+        try:
+            parent.update_idletasks()
+        except Exception:
+            pass
 
-        self._resize_after_id = None
-        self._last_resize_size = (0, 0)
+        self.calculation_domain_selected(sync_cylinder_inputs=False)  # Initiating the flat panel structural properties
+        self.set_colors('default')  # Setting colors theme
+        self._prompt_startup_calculation_mode()
 
         # self._current_theme = 'default'
 
@@ -1841,6 +1886,316 @@ class Application():
             self._chk_show_prop_3d.lift()
         except Exception:
             pass
+
+    def _prompt_startup_calculation_mode(self):
+        """Let the user choose the simplified single-line mode or the standard multi-panel GUI."""
+        try:
+            use_single_line = self._show_startup_calculation_mode_dialog()
+        except Exception:
+            use_single_line = False
+
+        self._simplified_calculation_mode = bool(use_single_line)
+        self._new_show_prop_3d.set(self._simplified_calculation_mode)
+        if self._simplified_calculation_mode:
+            self.switch_to_single_calculation_mode()
+
+    def _show_startup_calculation_mode_dialog(self):
+        """Show a polished startup mode picker and return True for the simplified workflow."""
+        result = {'use_single_line': False}
+        app_version = self._get_application_version_from_metadata()
+        dialog = tk.Toplevel(self._parent, background='#f5f7fb')
+        dialog.title('Start ANYstructure')
+        dialog.resizable(False, False)
+        dialog.transient(self._parent)
+
+        width, height = 640, 382
+        try:
+            self._parent.update_idletasks()
+            root_x = self._parent.winfo_rootx()
+            root_y = self._parent.winfo_rooty()
+            root_w = self._parent.winfo_width()
+            root_h = self._parent.winfo_height()
+            pos_x = root_x + max((root_w - width) // 2, 0)
+            pos_y = root_y + max((root_h - height) // 2, 0)
+            dialog.geometry(f'{width}x{height}+{pos_x}+{pos_y}')
+        except Exception:
+            dialog.geometry(f'{width}x{height}')
+
+        def choose(use_single_line):
+            result['use_single_line'] = use_single_line
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        dialog.protocol('WM_DELETE_WINDOW', lambda: choose(False))
+        dialog.bind('<Return>', lambda _event: choose(False))
+        dialog.bind('<Escape>', lambda _event: choose(False))
+
+        header = tk.Frame(dialog, background='#172033', height=116)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        header_content = tk.Frame(header, background='#172033')
+        header_content.pack(fill=tk.BOTH, expand=True, padx=24, pady=14)
+        try:
+            from PIL import Image, ImageTk
+            img_file_name = 'ANYstructure_logo.jpg'
+            if os.path.isfile('images/' + img_file_name):
+                file_path = 'images/' + img_file_name
+            else:
+                file_path = os.path.dirname(os.path.abspath(__file__)) + '/images/' + img_file_name
+            with Image.open(file_path) as logo_image:
+                logo_image.thumbnail((132, 76), Image.LANCZOS)
+                logo = ImageTk.PhotoImage(logo_image)
+            logo_label = tk.Label(header_content, image=logo, background='white', bd=0, padx=8, pady=6)
+            logo_label.image = logo
+            logo_label.pack(side=tk.LEFT, padx=(0, 16))
+        except Exception:
+            pass
+        header_text = tk.Frame(header_content, background='#172033')
+        header_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(header_text, text='Choose calculation workflow', background='#172033', foreground='white',
+                 font=('Segoe UI', 18, 'bold')).pack(anchor=tk.W, pady=(2, 2))
+        tk.Label(header_text, text='Start in the workspace that matches the job in front of you.',
+                 background='#172033', foreground='#d7deeb', font=('Segoe UI', 10)).pack(anchor=tk.W)
+        if app_version is not None:
+            tk.Label(header_text, text='Version ' + app_version, background='#172033', foreground='#aebbd0',
+                     font=('Segoe UI', 9)).pack(anchor=tk.W, pady=(7, 0))
+
+        content = tk.Frame(dialog, background='#f5f7fb')
+        content.pack(fill=tk.BOTH, expand=True, padx=26, pady=24)
+
+        def add_mode_card(parent, title, subtitle, details, button_text, command, primary=False):
+            border = '#1f6feb' if primary else '#cad2df'
+            button_bg = '#1f6feb' if primary else '#eef2f7'
+            button_fg = 'white' if primary else '#172033'
+            card = tk.Frame(parent, background='white', highlightbackground=border,
+                            highlightthickness=2 if primary else 1, bd=0)
+            tk.Label(card, text=title, background='white', foreground='#111827',
+                     font=('Segoe UI', 13, 'bold')).pack(anchor=tk.W, padx=18, pady=(16, 2))
+            tk.Label(card, text=subtitle, background='white', foreground='#475569',
+                     font=('Segoe UI', 9, 'bold')).pack(anchor=tk.W, padx=18)
+            tk.Label(card, text=details, background='white', foreground='#475569',
+                     justify=tk.LEFT, wraplength=235, font=('Segoe UI', 9)).pack(anchor=tk.W, padx=18, pady=(12, 16))
+            tk.Button(card, text=button_text, command=command, background=button_bg, foreground=button_fg,
+                      activebackground=button_bg, activeforeground=button_fg, relief=tk.FLAT,
+                      padx=14, pady=7, font=('Segoe UI', 9, 'bold'), cursor='hand2').pack(
+                anchor=tk.W, padx=18, pady=(0, 16))
+            return card
+
+        standard_card = add_mode_card(
+            content,
+            title='Multiple panels',
+            subtitle='Default',
+            details='For multiple panels/cylinders with advanced load definition.',
+            button_text='Start multiple panels',
+            command=lambda: choose(False),
+            primary=True,
+        )
+        single_card = add_mode_card(
+            content,
+            title='Single panel/cylinder',
+            subtitle='Simplified calculation',
+            details='For single panel/cylinder with simplified load interface.',
+            button_text='Start single mode',
+            command=lambda: choose(True),
+            primary=False,
+        )
+        standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
+
+        try:
+            dialog.grab_set()
+            dialog.focus_force()
+        except Exception:
+            pass
+        self._parent.wait_window(dialog)
+        return result['use_single_line']
+
+    @staticmethod
+    def _get_application_version_from_metadata():
+        """Return the installed package version when distribution metadata is available."""
+        for package_name in ('ANYstructure', 'anystructure'):
+            try:
+                return importlib_metadata.version(package_name)
+            except importlib_metadata.PackageNotFoundError:
+                pass
+        return None
+
+    def switch_to_single_calculation_mode(self):
+        """Switch from standard modelling to the simplified one-line calculation workflow."""
+        selected_line = self._active_line if self._active_line in self._line_dict else None
+        if selected_line is not None:
+            self._single_line_name = selected_line
+            if selected_line in self._line_to_struc:
+                self.set_selected_variables(selected_line)
+        elif self._line_dict:
+            self._single_line_name = sorted(self._line_dict.keys(), key=get_num)[0]
+
+        self._simplified_calculation_mode = True
+        self._activate_simplified_calculation_pipeline()
+
+    def switch_to_multiple_calculation_mode(self):
+        """Switch back to the standard multi-panel modelling workflow."""
+        self._simplified_calculation_mode = False
+        self._new_show_prop_3d.set(False)
+        self._show_standard_calculation_layout()
+        self.clear_prop_3d()
+        self._select_single_calculation_line()
+        self.update_frame(force_recalc=True)
+        try:
+            self.gui_load_combinations(self._combination_slider.get())
+        except Exception:
+            pass
+
+    def _activate_simplified_calculation_pipeline(self):
+        """Initialize the default one-line calculation model used by the main GUI."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return
+
+        self._ensure_single_dummy_line()
+        self._select_single_calculation_line()
+        self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        self._sync_single_line_structure_from_inputs()
+        self._apply_simplified_calculation_layout()
+        self._new_show_prop_3d.set(True)
+        self.update_frame(force_recalc=True)
+        self.gui_load_combinations(self._combination_slider.get())
+
+    def _apply_simplified_calculation_layout(self):
+        """Hide modelling tabs and make the line-property tab the primary input surface."""
+        try:
+            self._tabControl.hide(self._tab_geo)
+            self._tabControl.hide(self._tab_comp)
+            self._tabControl.select(self._tab_prop)
+        except Exception:
+            pass
+
+        try:
+            self.add_stucture.config(text='Update single-line\ncalculation model')
+        except Exception:
+            pass
+
+    def _show_standard_calculation_layout(self):
+        """Restore modelling tabs and controls for the standard multi-panel workflow."""
+        try:
+            self._tabControl.add(self._tab_geo, text='Geometry')
+            self._tabControl.add(self._tab_comp, text='Compartments and loads')
+        except Exception:
+            pass
+
+        try:
+            self._tabControl.select(self._tab_geo)
+        except Exception:
+            pass
+
+        try:
+            self.add_stucture.config(text='Press to add input properties\n'
+                                          'to the selected line. Sets all\n'
+                                          'basic structural information.')
+        except Exception:
+            pass
+
+    def _single_mode_active_line_candidate(self):
+        """Return the selected line when valid, otherwise the remembered dummy/single line."""
+        if self._active_line in self._line_dict:
+            return self._active_line
+        if self._single_line_name in self._line_dict:
+            return self._single_line_name
+        if self._line_dict:
+            return sorted(self._line_dict.keys(), key=get_num)[0]
+        return self._single_line_name
+
+    def _ensure_single_dummy_line(self):
+        """Create the hidden point/line geometry needed by the legacy calculation pipeline."""
+        if self._line_dict:
+            self._single_line_name = self._single_mode_active_line_candidate()
+            return
+
+        try:
+            length = max(float(self._new_field_len.get()) / 1000.0, 1.0)
+        except Exception:
+            length = 4.0
+
+        self._point_dict['point1'] = [0.0, 0.0]
+        self._point_dict['point2'] = [length, 0.0]
+        self._line_dict[self._single_line_name] = [1, 2]
+        self._line_point_to_point_string = self.make_point_point_line_string(1, 2)
+
+    def _select_single_calculation_line(self):
+        """Keep single-line mode bound to the selected line or the dummy line."""
+        self._single_line_name = self._single_mode_active_line_candidate()
+        self._active_line = self._single_line_name
+        self._line_is_active = self._active_line in self._line_dict
+        self._active_point = ''
+        self._point_is_active = False
+
+    def _ensure_manual_pressure_combination(self, line, default_enabled=False):
+        """Ensure the one supported pressure input exists for a line."""
+        name = ('manual', line, 'manual')
+        created = name not in self._new_load_comb_dict
+        if created:
+            self._new_load_comb_dict[name] = [tk.DoubleVar(), tk.DoubleVar(), tk.IntVar()]
+            self._new_load_comb_dict[name][0].set(0)
+            self._new_load_comb_dict[name][1].set(1 if default_enabled else 0)
+            self._new_load_comb_dict[name][2].set(1 if default_enabled else 0)
+            self._new_load_comb_dict[name][0].trace_add('write', self.trace_acceptance_change)
+            self._new_load_comb_dict[name][1].trace_add('write', self.trace_acceptance_change)
+        elif default_enabled:
+            self._new_load_comb_dict[name][1].set(1)
+            self._new_load_comb_dict[name][2].set(1)
+        return name
+
+    def _sync_single_line_structure_from_inputs(self):
+        """Build or update the selected hidden line from the visible property entries."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return
+        if not self._line_is_active:
+            return
+        if self._structure_input_is_missing():
+            return
+
+        resolved = self._resolve_new_structure_properties()
+        self._apply_resolved_new_structure(resolved)
+        project_services.mark_line_for_recalculation(self._line_to_struc, self._active_line)
+
+    def _sync_simplified_domain_selection(self):
+        """Apply a calculation-domain change immediately in simplified mode."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return
+
+        self._ensure_single_dummy_line()
+        self._select_single_calculation_line()
+        self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        self._sync_single_line_structure_from_inputs()
+        self._new_show_prop_3d.set(True)
+        self.update_frame(force_recalc=True)
+        self.gui_load_combinations(self._combination_slider.get())
+
+    def _prepare_simplified_optimizer_replacement(self):
+        """Ensure optimizer return values replace the hidden single calculation line."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return False
+
+        self._ensure_single_dummy_line()
+        self._select_single_calculation_line()
+        self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        return True
+
+    def _refresh_simplified_optimizer_replacement(self):
+        """Refresh the single-line GUI after optimizer results were returned."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return False
+
+        self._select_single_calculation_line()
+        self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        self._apply_simplified_calculation_layout()
+        self._new_show_prop_3d.set(True)
+        self.set_selected_variables(self._active_line)
+        self.update_frame(force_recalc=True)
+        self.gui_load_combinations(self._combination_slider.get())
+        return True
 
     def gui_structural_properties(self, flat_panel_stf_girder=False, flat_unstf=False, flat_stf=True,
                                   shell=False, long_stf=False, ring_stf=False,
@@ -2290,6 +2645,7 @@ class Application():
                     self._new_shell_Qsd.set(Qsd)
 
         self._current_calculation_domain = self._new_calculation_domain.get()
+        self._sync_simplified_domain_selection()
         # Setting the correct optmization buttons
 
     def stress_information_notebooks(self, info_type='shell'):
@@ -2553,6 +2909,44 @@ class Application():
                 # dict[var_to_set][0] = set_var
                 self.new_structure(toggle_multi=prop_dict, suspend_recalc=True if (idx + 1) != no_of_lines else False)
 
+    def _gui_single_line_manual_pressure(self):
+        """Draw the simplified manual-pressure-only load controls."""
+        if not all([self._line_is_active, self._active_line in self._line_to_struc.keys()]):
+            return
+
+        lc_x, lc_x_delta, lc_y, lc_y_delta = 0.791666667, 0.026041667, 0.287037037, 0.023148148
+        [[item.destroy() for item in items] for items in
+         [self._lc_comb_created, self._comp_comb_created, self._manual_created, self._info_created]]
+        self._lc_comb_created, self._comp_comb_created, self._manual_created, self._info_created = [], [], [], []
+
+        if self._line_to_struc[self._active_line][5] is not None:
+            for item in [self._result_label_dnva, self._result_label_dnvb, self._result_label_tanktest,
+                         self._result_label_manual, self._lab_pressure]:
+                item.place_forget()
+            return
+
+        name = self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+        self._manual_created.append(ttk.Label(self._main_fr, text='Manual pressure [Pa]',
+                                              font=self._text_size['Text 8 bold']))
+        self._manual_created.append(ttk.Entry(self._main_fr, textvariable=self._new_load_comb_dict[name][0],
+                                              width=15))
+        self._manual_created[0].place(relx=lc_x, rely=lc_y)
+        self._manual_created[1].place(relx=lc_x + 4 * lc_x_delta, rely=lc_y)
+
+        try:
+            results = self.calculate_all_load_combinations_for_line(self._active_line)
+            self._result_label_manual.config(text='Manual [Pa]: ' + str(results['manual']),
+                                             font=self._text_size['Text 8'])
+        except Exception:
+            self._result_label_manual.config(text='Manual [Pa]: -', font=self._text_size['Text 8'])
+
+        for item in [self._result_label_dnva, self._result_label_dnvb, self._result_label_tanktest]:
+            item.place_forget()
+
+        self._lab_pressure.config(text='Pressure for the single calculation line:')
+        self._lab_pressure.place(relx=0.786458333, rely=self.results_gui_start)
+        self._result_label_manual.place(relx=lc_x, rely=self.results_gui_start + 0.06)
+
     def gui_load_combinations(self, event):
         '''
         Initsializing and updating gui for load combinations.
@@ -2562,6 +2956,10 @@ class Application():
 
         if all([self._line_is_active, self._active_line in self._line_to_struc.keys(),
                 self._gui_functional_look == 'all items']):
+            if getattr(self, '_simplified_calculation_mode', False):
+                self._gui_single_line_manual_pressure()
+                return
+
             lc_x, lc_x_delta, lc_y, lc_y_delta = 0.791666667, 0.026041667, 0.287037037, 0.023148148
 
             # self._active_label.config(text=self._active_line)
@@ -2841,10 +3239,14 @@ class Application():
         name = ('manual', line, 'manual')
         self._new_load_comb_dict[name] = [tk.DoubleVar(), tk.DoubleVar(), tk.IntVar()]
         self._new_load_comb_dict[name][0].set(0)
-        self._new_load_comb_dict[name][1].set(0)
-        self._new_load_comb_dict[name][2].set(0)
-        self._new_load_comb_dict[name][0].trace('w', self.trace_acceptance_change)
-        self._new_load_comb_dict[name][1].trace('w', self.trace_acceptance_change)
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._new_load_comb_dict[name][1].set(1)
+            self._new_load_comb_dict[name][2].set(1)
+        else:
+            self._new_load_comb_dict[name][1].set(0)
+            self._new_load_comb_dict[name][2].set(0)
+        self._new_load_comb_dict[name][0].trace_add('write', self.trace_acceptance_change)
+        self._new_load_comb_dict[name][1].trace_add('write', self.trace_acceptance_change)
 
     def trace_update_load(self, *args):
         try:
@@ -3052,6 +3454,64 @@ class Application():
         except Exception:
             return 'red'
 
+    def _predict_csr_requirement(
+            self, plate_obj, stiffener_obj, design_pressure, material_factor,
+            use_semi_analytical_equation=False):
+        """Predict CSR requirement; SemiAnalytical uses direct equations instead of ML classifiers."""
+        if use_semi_analytical_equation:
+            try:
+                class _SemiAnalyticalCsrObject:
+                    pass
+
+                calc_object = _SemiAnalyticalCsrObject()
+                calc_object.Plate = plate_obj
+                calc_object.Stiffener = stiffener_obj
+                csr, color, _ = op.semi_analytical.predict_anystructure_csr_requirement(
+                    calc_object,
+                    design_pressure,
+                )
+                return csr, color
+            except Exception:
+                return [0, 0, 0, 0], 'red'
+
+        try:
+            mat_fac = float(material_factor)
+        except Exception:
+            mat_fac = plate_obj.mat_factor
+
+        if mat_fac not in [1.1, 1.15]:
+            mat_fac = 1.15
+
+        try:
+            if plate_obj.get_puls_sp_or_up() == 'UP':
+                x_csr = plate_obj.get_buckling_ml_input(
+                    design_lat_press=design_pressure,
+                    csr=True,
+                )
+                x_csr = self._ML_buckling[mat_fac]['CSR scaler UP'].transform(x_csr)
+                csr_pl = self._ML_buckling[mat_fac]['CSR predictor UP'].predict(x_csr)[0]
+                csr = [csr_pl, float('inf'), float('inf'), float('inf')]
+                color = 'green' if csr_pl == 1 else 'red'
+            elif stiffener_obj is not None:
+                x_csr = stiffener_obj.get_buckling_ml_input(
+                    design_lat_press=design_pressure,
+                    csr=True,
+                )
+                x_csr = self._ML_buckling[mat_fac]['CSR scaler SP'].transform(x_csr)
+                csr_pl, csr_web, csr_web_fl, csr_fl = self._ML_buckling[mat_fac][
+                    'CSR predictor SP'
+                ].predict(x_csr)[0]
+                csr = [csr_pl, csr_web, csr_web_fl, csr_fl]
+                color = 'green' if all([csr_pl == 1, csr_web == 1, csr_web_fl == 1, csr_fl == 1]) else 'red'
+            else:
+                csr = [0, 0, 0, 0]
+                color = 'red'
+        except Exception:
+            csr = [0, 0, 0, 0]
+            color = 'red'
+
+        return csr, color
+
     @staticmethod
     def _cylinder_buckling_uf(cylinder_results):
         """Return the governing cylinder buckling UF used for GUI color coding."""
@@ -3255,10 +3715,14 @@ class Application():
                         else 'red'
                 else:
                     sec_mod = [0, 0]
+                    shear_area = 0
+                    min_shear = 0
+                    min_sec_mod = 0
                     rec_for_color[current_line]['section modulus'] = 0.0
                     rec_for_color[current_line]['shear'] = 0
                     return_dict['slamming'][current_line] = dict()
                     fatigue_obj, p_int, p_ext, damage, dff = [None for dummy in range(5)]
+                    color_fatigue = 'green'
                     color_sec = 'green' if all_obj.Stiffener is None else 'black'
                     color_shear = 'green' if all_obj.Stiffener is None else 'black'
                     return_dict['slamming'][current_line]['state'] = False
@@ -3364,6 +3828,17 @@ class Application():
                     'buckling': 'red',
                     'ultimate': 'red',
                 }
+
+                if selected_buckling_method in ['ML-Numeric (PULS based)', 'SemiAnalytical S3/U3']:
+                    csr_values, csr_color = self._predict_csr_requirement(
+                        obj_scnt_calc_pl,
+                        obj_scnt_calc_stf,
+                        design_pressure,
+                        active_mat_fac,
+                        use_semi_analytical_equation=selected_buckling_method == 'SemiAnalytical S3/U3',
+                    )
+                    return_dict['ML buckling class'][current_line]['CSR'] = csr_values
+                    return_dict['ML buckling colors'][current_line]['CSR requirement'] = csr_color
 
                 if selected_buckling_method == 'ML-Numeric (PULS based)':
                     mat_fac_error = ''
@@ -3492,18 +3967,12 @@ class Application():
 
                         numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
 
-                        # -------------------------------------------------------------------------
-                        # CSR prediction
-                        # -------------------------------------------------------------------------
-                        try:
-                            x_csr = obj_scnt_calc_pl.get_buckling_ml_input(
-                                design_lat_press=design_pressure,
-                                csr=True,
-                            )
-                            x_csr = self._ML_buckling[mat_fac]['CSR scaler UP'].transform(x_csr)
-                            csr_pl = self._ML_buckling[mat_fac]['CSR predictor UP'].predict(x_csr)[0]
-                        except Exception:
-                            csr_pl = 0
+                        csr_values, csr_color = self._predict_csr_requirement(
+                            obj_scnt_calc_pl,
+                            obj_scnt_calc_stf,
+                            design_pressure,
+                            mat_fac,
+                        )
 
                         if mat_fac == 1.1:
                             accept = 'below or equal 0.91'
@@ -3513,13 +3982,13 @@ class Application():
                         return_dict['ML buckling colors'][current_line] = {
                             'buckling': 'green' if y_pred_buc == accept else 'red',
                             'ultimate': 'green' if y_pred_ult == accept else 'red',
-                            'CSR requirement': 'green' if csr_pl == 1 else 'red',
+                            'CSR requirement': csr_color,
                         }
 
                         return_dict['ML buckling class'][current_line] = {
                             'buckling': str(y_pred_buc) + mat_fac_error,
                             'ultimate': str(y_pred_ult) + mat_fac_error,
-                            'CSR': [csr_pl, float('inf'), float('inf'), float('inf')],
+                            'CSR': csr_values,
                         }
 
                         # -------------------------------------------------------------------------
@@ -3687,21 +4156,12 @@ class Application():
 
                             numeric_pred = _apply_material_factor_to_numeric_pred(numeric_pred, mat_fac)
 
-                            # ---------------------------------------------------------------------
-                            # CSR prediction
-                            # ---------------------------------------------------------------------
-                            try:
-                                x_csr = obj_scnt_calc_stf.get_buckling_ml_input(
-                                    design_lat_press=design_pressure,
-                                    csr=True,
-                                )
-
-                                x_csr = self._ML_buckling[mat_fac]['CSR scaler SP'].transform(x_csr)
-                                csr_pl, csr_web, csr_web_fl, csr_fl = self._ML_buckling[mat_fac][
-                                    'CSR predictor SP'
-                                ].predict(x_csr)[0]
-                            except Exception:
-                                csr_pl, csr_web, csr_web_fl, csr_fl = 0, 0, 0, 0
+                            csr_values, csr_color = self._predict_csr_requirement(
+                                obj_scnt_calc_pl,
+                                obj_scnt_calc_stf,
+                                design_pressure,
+                                mat_fac,
+                            )
 
                             if mat_fac == 1.1:
                                 accept = 'below or equal 0.91'
@@ -3711,15 +4171,13 @@ class Application():
                             return_dict['ML buckling colors'][current_line] = {
                                 'buckling': 'green' if y_pred_buc == accept else 'red',
                                 'ultimate': 'green' if y_pred_ult == accept else 'red',
-                                'CSR requirement': 'green' if all(
-                                    [csr_pl == 1, csr_web == 1, csr_web_fl == 1, csr_fl == 1]
-                                ) else 'red',
+                                'CSR requirement': csr_color,
                             }
 
                             return_dict['ML buckling class'][current_line] = {
                                 'buckling': str(y_pred_buc) + mat_fac_error,
                                 'ultimate': str(y_pred_ult) + mat_fac_error,
-                                'CSR': [csr_pl, csr_web, csr_web_fl, csr_fl],
+                                'CSR': csr_values,
                             }
 
                             # ---------------------------------------------------------------------
@@ -4043,6 +4501,8 @@ class Application():
                 if self._line_to_struc[line][0].Stiffener is not None:
                     spacings.append(self._line_to_struc[line][0].Stiffener.get_s())
             spacing = np.unique(spacings).tolist()
+            max_spacing = max(spacing) if len(spacing) != 0 else 0
+            min_spacing = min(spacing) if len(spacing) != 0 else 0
             structure_type = [self._line_to_struc[line][0].Plate.get_structure_type() for line in
                               self._line_to_struc.keys()]
 
@@ -4065,7 +4525,7 @@ class Application():
                                          'cyl sections in model': cyl_sec_in_model,
                                          'recorded sections': recorded_sections,
                                          'recorded cylinder long sections': recorded_cyl_sections,
-                                         'spacings': spacing, 'max spacing': max(spacing), 'min spacing': min(spacing)}
+                                         'spacings': spacing, 'max spacing': max_spacing, 'min spacing': min_spacing}
             line_color_coding = {}
             cmap_sections = plt.get_cmap('jet')
             thk_sort_unique = return_dict['color code']['all thicknesses']
@@ -4185,7 +4645,8 @@ class Application():
                 weight_mult_dist_y += return_dict['weights'][line]['line weight'] \
                                       * return_dict['weights'][line]['mid_coord'][1]
 
-            tot_cog = [weight_mult_dist_x / tot_weight, weight_mult_dist_y / tot_weight]
+            tot_cog = [0, 0] if tot_weight == 0 else [weight_mult_dist_x / tot_weight,
+                                                      weight_mult_dist_y / tot_weight]
         else:
             tot_cog = [0, 0]
             tot_weight = 0
@@ -5745,6 +6206,14 @@ class Application():
         The result canvas on the lower-right must remain visible for result text.
         """
         try:
+            if getattr(self, '_simplified_calculation_mode', False):
+                return {
+                    'relx': self._place_info_float(self._main_canvas, 'relx', 0.26),
+                    'rely': self._place_info_float(self._main_canvas, 'rely', 0),
+                    'relwidth': self._place_info_float(self._main_canvas, 'relwidth', 0.523),
+                    'relheight': self._place_info_float(self._main_canvas, 'relheight', 0.73),
+                }
+
             prop_relx = self._place_info_float(self._prop_canvas, 'relx', 0.26)
             prop_rely = self._place_info_float(self._prop_canvas, 'rely', 0.73)
             prop_relw = self._place_info_float(self._prop_canvas, 'relwidth', 0.38)
@@ -6201,7 +6670,8 @@ class Application():
         if not self._line_is_active or self._active_line not in self._line_to_struc:
             return
 
-        self.set_selected_variables(self._active_line)
+        if not getattr(self, '_simplified_calculation_mode', False):
+            self.set_selected_variables(self._active_line)
 
         try:
             if self._line_to_struc[self._active_line][5] is not None:
@@ -6368,7 +6838,21 @@ class Application():
             ax.plot_surface(r_outer * np.cos(theta_grid), r_outer * np.sin(theta_grid), z_grid,
                             alpha=0.82, linewidth=0.2, edgecolor='black', color='darkgrey')
 
-    def _add_cylinder_ring_stiffener_3d(self, ax, radius, z_pos, dims, is_frame=False):
+    @staticmethod
+    def _is_cylinder_panel_preview(cyl_obj):
+        try:
+            domain = api_helpers.domain_for_geometry_id(cyl_obj.geometry)
+        except Exception:
+            return False
+        return 'panel' in domain.lower() and 'shell' not in domain.lower()
+
+    def _cylinder_preview_theta_range(self, cyl_obj):
+        if self._is_cylinder_panel_preview(cyl_obj):
+            half_span = math.radians(60.0) / 2.0
+            return -half_span, half_span
+        return 0.0, 2.0 * math.pi
+
+    def _add_cylinder_ring_stiffener_3d(self, ax, radius, z_pos, dims, is_frame=False, theta_range=None):
         """Draw a simplified ring stiffener/frame as annular web + outer flange."""
         web_h = max(dims.get('web_h', 0.0), 0.0)
         web_t = max(dims.get('web_thk', 0.0), 0.0)
@@ -6376,7 +6860,8 @@ class Application():
         fl_t = max(dims.get('flange_thk', 0.0), 0.0)
         if web_h <= 0.0:
             return
-        theta = np.linspace(0.0, 2.0 * math.pi, 64)
+        theta_start, theta_end = theta_range if theta_range is not None else (0.0, 2.0 * math.pi)
+        theta = np.linspace(theta_start, theta_end, 64)
         rr = np.linspace(radius, radius + web_h, 3)
         theta_grid, rr_grid = np.meshgrid(theta, rr)
         z_grid = np.full_like(theta_grid, z_pos)
@@ -6405,7 +6890,10 @@ class Application():
         shell_length = float(shell.length_of_shell)
         thk = float(shell.thk)
         length = max(shell_length, 0.1)
-        theta = np.linspace(0.0, 2.0 * math.pi, 64)
+        theta_range = self._cylinder_preview_theta_range(cyl_obj)
+        theta_start, theta_end = theta_range
+        is_panel_preview = self._is_cylinder_panel_preview(cyl_obj)
+        theta = np.linspace(theta_start, theta_end, 30 if is_panel_preview else 64)
         z = np.linspace(0.0, length, 22)
         theta_grid, z_grid = np.meshgrid(theta, z)
         x_grid = radius * np.cos(theta_grid)
@@ -6424,15 +6912,25 @@ class Application():
                         np.full_like(theta, zz), color='black', linewidth=0.5, linestyle='dotted')
 
         radial_extension = max(thk, 0.01)
+        if is_panel_preview:
+            for angle in (theta_start, theta_end):
+                ax.plot([radius * math.cos(angle), radius * math.cos(angle)],
+                        [radius * math.sin(angle), radius * math.sin(angle)],
+                        [0.0, length], color='black', linewidth=0.8)
 
         if cyl_obj.LongStfObj is not None:
             long_obj = cyl_obj.LongStfObj
             long_dims = self._get_section_3d_dimensions(long_obj)
             spacing = max(long_dims.get('spacing', 0.0), 1e-6)
-            num_stf = max(4, min(72, int(round(2.0 * math.pi * radius / spacing))))
             radial_extension = max(radial_extension, long_dims['web_h'] + long_dims['flange_thk'])
-            for idx in range(num_stf):
-                ang = 2.0 * math.pi * idx / num_stf
+            if is_panel_preview:
+                arc_length = abs(theta_end - theta_start) * radius
+                num_stf = max(2, min(24, int(round(arc_length / spacing)) + 1))
+                stiffener_angles = np.linspace(theta_start, theta_end, num_stf)
+            else:
+                num_stf = max(4, min(72, int(round(2.0 * math.pi * radius / spacing))))
+                stiffener_angles = [2.0 * math.pi * idx / num_stf for idx in range(num_stf)]
+            for ang in stiffener_angles:
                 self._add_cylinder_longitudinal_stiffener_3d(ax, radius, length, ang, long_dims)
 
         if cyl_obj.RingStfObj is not None:
@@ -6451,7 +6949,8 @@ class Application():
                     ring_spacing = 0.0
             for zz in self._positions_from_length_and_spacing(
                     length, ring_spacing, include_ends=False, max_count=30):
-                self._add_cylinder_ring_stiffener_3d(ax, radius, zz, ring_dims, is_frame=False)
+                self._add_cylinder_ring_stiffener_3d(
+                    ax, radius, zz, ring_dims, is_frame=False, theta_range=theta_range)
 
         if cyl_obj.RingFrameObj is not None:
             frame_dims = self._get_section_3d_dimensions(cyl_obj.RingFrameObj)
@@ -6476,20 +6975,33 @@ class Application():
                     length, girder_spacing, include_ends=False, max_count=16
                 )
             for zz in girder_positions:
-                self._add_cylinder_ring_stiffener_3d(ax, radius, zz, frame_dims, is_frame=True)
+                self._add_cylinder_ring_stiffener_3d(
+                    ax, radius, zz, frame_dims, is_frame=True, theta_range=theta_range)
 
         ax.text2D(0.02, 0.92, 'SELECTED: ' + str(self._active_line), transform=ax.transAxes,
                   fontsize=8, color='red')
-        ax.set_title('3D cylinder / curved plate preview', fontsize=8)
+        title = '3D cylinder panel preview (60 deg)' if is_panel_preview else '3D cylinder / curved plate preview'
+        ax.set_title(title, fontsize=8)
         ax.set_xlabel('x [m]', fontsize=7, labelpad=-1)
         ax.set_ylabel('y [m]', fontsize=7, labelpad=-1)
         ax.set_zlabel('length [m]', fontsize=7, labelpad=-2)
         ax.tick_params(labelsize=6)
         lim = radius + radial_extension * 1.25 + max(thk, 0.01)
-        ax.set_xlim(-lim, lim)
-        ax.set_ylim(-lim, lim)
+        if is_panel_preview:
+            x_values = lim * np.cos(theta)
+            y_values = lim * np.sin(theta)
+            pad = max(0.10 * lim, 0.05)
+            ax.set_xlim(float(np.min(x_values) - pad), float(np.max(x_values) + pad))
+            ax.set_ylim(float(np.min(y_values) - pad), float(np.max(y_values) + pad))
+            layout_width = max(float(np.max(x_values) - np.min(x_values) + 2.0 * pad), 1e-6)
+            layout_depth = max(float(np.max(y_values) - np.min(y_values) + 2.0 * pad), 1e-6)
+        else:
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            layout_width = 2.0 * lim
+            layout_depth = 2.0 * lim
         ax.set_zlim(0.0, length)
-        self._apply_prop_3d_layout(fig, ax, 2.0 * lim, 2.0 * lim, max(length, 1e-6), zoom=1.32)
+        self._apply_prop_3d_layout(fig, ax, layout_width, layout_depth, max(length, 1e-6), zoom=1.32)
         ax.view_init(elev=20, azim=-45)
 
         self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
@@ -7280,8 +7792,10 @@ class Application():
     def _structure_input_is_missing(self):
         if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
             return False
-        return any([self._new_stf_spacing.get() == 0, self._new_plate_thk.get() == 0,
-                    self._new_stf_web_h.get() == 0, self._new_stf_web_t.get() == 0])
+        required_inputs = [self._new_stf_spacing.get(), self._new_plate_thk.get()]
+        if self._new_calculation_domain.get() != 'Flat plate, unstiffened':
+            required_inputs.extend([self._new_stf_web_h.get(), self._new_stf_web_t.get()])
+        return any(value == 0 for value in required_inputs)
 
     @staticmethod
     def _show_missing_structure_input_warning():
@@ -7334,7 +7848,7 @@ class Application():
 
     def _resolve_new_structure_properties(self, pasted_structure=None, multi_return=None, toggle_multi=None,
                                           cylinder_return=None):
-        CylinderObj = None
+        cylinder_obj = None
         obj_dict_stf = None
         main_dict_cyl = shell_dict = long_dict = ring_stf_dict = ring_frame_dict = geometry = None
 
@@ -7347,43 +7861,44 @@ class Application():
         elif pasted_structure is None:
             prop_dict, obj_dict_stf = self._build_flat_structure_properties()
 
-            if not self._is_flat_calculation_domain(self._new_calculation_domain.get()) and cylinder_return is None:
-                CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
+            if cylinder_return is None and not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
+                cylinder_obj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
                     self._build_cylinder_structure_properties()
-            elif cylinder_return is not None:
-                main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
-                    cylinder_return.get_all_properties()
-                geometry = main_dict_cyl['geometry'][0]
         else:
             prop_dict = pasted_structure.get_main_properties()
 
         if cylinder_return is not None:
-            CylinderObj = cylinder_return
-            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = \
-                cylinder_return.get_all_properties()
-            geometry = main_dict_cyl['geometry'][0]
+            cylinder_obj = cylinder_return
+            main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry = \
+                self._cylinder_property_parts(cylinder_return)
 
         if obj_dict_stf is None and isinstance(prop_dict, dict):
             obj_dict_stf = prop_dict.get('Stiffener')
 
-        return (prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict,
-                ring_frame_dict, geometry)
+        return NewStructureProperties(prop_dict, obj_dict_stf, cylinder_obj, main_dict_cyl, shell_dict, long_dict,
+                                      ring_stf_dict, ring_frame_dict, geometry)
 
-    def _add_structure_to_active_line(self, prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict,
-                                      long_dict, ring_stf_dict, ring_frame_dict, geometry):
-        All = self._create_all_structure_from_properties(prop_dict)
+    @staticmethod
+    def _cylinder_property_parts(cylinder_obj):
+        main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict = cylinder_obj.get_all_properties()
+        return main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, main_dict_cyl['geometry'][0]
+
+    def _add_structure_to_active_line(self, resolved):
+        All = self._create_all_structure_from_properties(resolved.prop_dict)
         line_structures = project_services.LineStructureService(self._line_to_struc)
-        line_structures.assign_structure(self._active_line, All, cylinder=CylinderObj)
+        line_structures.assign_structure(self._active_line, All, cylinder=resolved.cylinder_obj)
 
-        self._sections = add_new_section(self._sections, struc.Section(obj_dict_stf))  # TODO error when pasting
+        self._sections = add_new_section(self._sections, struc.Section(resolved.obj_dict_stf))  # TODO error when pasting
         if line_structures.structure(self._active_line).Plate.get_structure_type() not in \
                 self._structure_types['non-wt']:
             self._clear_tanks_and_grid()
         if not self._is_flat_calculation_domain(self._new_calculation_domain.get()):
-            if CylinderObj is None:
-                CylinderObj = self._create_cylinder_structure_from_properties(
-                    main_dict_cyl, shell_dict, long_dict, ring_stf_dict, ring_frame_dict, geometry)
-            line_structures.set_cylinder(self._active_line, CylinderObj)
+            cylinder_obj = resolved.cylinder_obj
+            if cylinder_obj is None:
+                cylinder_obj = self._create_cylinder_structure_from_properties(
+                    resolved.main_dict_cyl, resolved.shell_dict, resolved.long_dict, resolved.ring_stf_dict,
+                    resolved.ring_frame_dict, resolved.geometry)
+            line_structures.set_cylinder(self._active_line, cylinder_obj)
 
     def _scale_existing_flat_structure_if_needed(self, prev_all_obj):
         line_structures = project_services.LineStructureService(self._line_to_struc)
@@ -7408,27 +7923,28 @@ class Application():
         project_services.LineStructureService(self._line_to_struc).sync_fatigue_after_structure_update(
             self._active_line, prop_dict)
 
-    def _sync_cylinder_object_after_structure_update(self, CylinderObj, cylinder_return):
+    def _sync_cylinder_object_after_structure_update(self, cylinder_obj, cylinder_return):
         line_structures = project_services.LineStructureService(self._line_to_struc)
-        if all([CylinderObj is None, cylinder_return is None,
+        if all([cylinder_obj is None, cylinder_return is None,
                 line_structures.cylinder(self._active_line) is not None]):
             line_structures.set_cylinder(self._active_line, None)
-        elif CylinderObj is not None:
+        elif cylinder_obj is not None:
             if line_structures.cylinder(self._active_line) is not None and self._new_scale_stresses.get():
                 NewCylinderObj = op.create_new_cylinder_obj(line_structures.cylinder(self._active_line),
-                                                            CylinderObj.get_x_opt())
-                NewCylinderObj.LongStfObj = None if CylinderObj.LongStfObj is None \
+                                                            cylinder_obj.get_x_opt())
+                NewCylinderObj.LongStfObj = None if cylinder_obj.LongStfObj is None \
                     else NewCylinderObj.LongStfObj
-                NewCylinderObj.RingStfObj = None if CylinderObj.RingStfObj is None \
+                NewCylinderObj.RingStfObj = None if cylinder_obj.RingStfObj is None \
                     else NewCylinderObj.RingStfObj
-                NewCylinderObj.RingFrameObj = None if CylinderObj.RingFrameObj is None \
+                NewCylinderObj.RingFrameObj = None if cylinder_obj.RingFrameObj is None \
                     else NewCylinderObj.RingFrameObj
-            line_structures.set_cylinder(self._active_line, CylinderObj)
+            line_structures.set_cylinder(self._active_line, cylinder_obj)
         elif cylinder_return is not None:
             line_structures.set_cylinder(self._active_line, cylinder_return)
 
-    def _update_existing_active_line_structure(self, prop_dict, CylinderObj, cylinder_return):
+    def _update_existing_active_line_structure(self, resolved, cylinder_return):
         line_structures = project_services.LineStructureService(self._line_to_struc)
+        prop_dict = resolved.prop_dict
         prev_type = line_structures.structure(self._active_line).Plate.get_structure_type()
         prev_all_obj = copy.deepcopy(line_structures.structure(self._active_line))
         line_structures.update_structure_properties(self._active_line, prop_dict)
@@ -7441,13 +7957,56 @@ class Application():
                 self._structure_types['vertical']:
             self._clear_tanks_and_grid()
 
-        self._sync_cylinder_object_after_structure_update(CylinderObj, cylinder_return)
+        self._sync_cylinder_object_after_structure_update(resolved.cylinder_obj, cylinder_return)
+
+    def _apply_resolved_new_structure(self, resolved, cylinder_return=None):
+        if self._active_line not in self._line_to_struc:
+            self._add_structure_to_active_line(resolved)
+        else:
+            self._update_existing_active_line_structure(resolved, cylinder_return)
+        self._calculate_load_combinations_after_structure_update()
+
+    def _replace_active_line_with_optimized_structure(self, optimized_structure):
+        """Replace the active single-line structure with the optimizer result object."""
+        if optimized_structure is None:
+            return False
+
+        line_structures = project_services.LineStructureService(self._line_to_struc)
+        if self._active_line in self._line_to_struc:
+            line_structures.replace_structure(self._active_line, optimized_structure)
+            line_structures.set_cylinder(self._active_line, None)
+        else:
+            line_structures.assign_structure(self._active_line, optimized_structure, cylinder=None)
+
+        try:
+            self._sync_fatigue_object_after_structure_update(optimized_structure.get_main_properties())
+        except Exception:
+            pass
+
+        self._calculate_load_combinations_after_structure_update()
+        project_services.mark_line_for_recalculation(self._line_to_struc, self._active_line)
+        return True
 
     def _calculate_load_combinations_after_structure_update(self):
         try:
             self.calculate_all_load_combinations_for_line_all_lines()
         except (KeyError, AttributeError):
             pass
+
+    def _prepare_new_structure_context(self, multi_return=None):
+        if multi_return is not None:
+            return
+
+        self.save_no_dialogue(backup=True)  # keeping a backup
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._ensure_single_dummy_line()
+            self._select_single_calculation_line()
+            self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+
+    @staticmethod
+    def _uses_visible_structure_inputs(pasted_structure=None, multi_return=None, toggle_multi=None,
+                                       cylinder_return=None):
+        return all(value is None for value in (pasted_structure, multi_return, toggle_multi, cylinder_return))
 
     def new_structure(self, event=None, pasted_structure=None, multi_return=None, toggle_multi=None,
                       suspend_recalc=False, cylinder_return=None):
@@ -7464,31 +8023,20 @@ class Application():
             [5] Cylinder buckling data
         :return:
         '''
-        if multi_return is None:
-            self.save_no_dialogue(backup=True)  # keeping a backup
+        self._prepare_new_structure_context(multi_return)
 
-        if all([pasted_structure == None, multi_return == None, toggle_multi == None]):
+        if self._uses_visible_structure_inputs(pasted_structure, multi_return, toggle_multi, cylinder_return):
             if self._structure_input_is_missing():
                 self._show_missing_structure_input_warning()
                 return
 
-        if self._line_is_active or multi_return != None:
+        if self._line_is_active or multi_return is not None:
             # structure dictionary: name of line : [ 0.Structure class, 1.calc scantling class,
             # 2.calc fatigue class, 3.load object, 4.load combinations result ]
-            prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict, long_dict, ring_stf_dict, \
-                ring_frame_dict, geometry = self._resolve_new_structure_properties(
+            resolved = self._resolve_new_structure_properties(
                 pasted_structure=pasted_structure, multi_return=multi_return, toggle_multi=toggle_multi,
                 cylinder_return=cylinder_return)
-
-            if self._active_line not in self._line_to_struc.keys():
-                self._add_structure_to_active_line(prop_dict, obj_dict_stf, CylinderObj, main_dict_cyl, shell_dict,
-                                                   long_dict, ring_stf_dict, ring_frame_dict, geometry)
-            else:
-                self._update_existing_active_line_structure(prop_dict, CylinderObj, cylinder_return)
-            self._calculate_load_combinations_after_structure_update()
-
-        else:
-            pass
+            self._apply_resolved_new_structure(resolved, cylinder_return)
 
         self._refresh_after_structure_change(suspend_recalc)
 
@@ -8165,7 +8713,7 @@ class Application():
 
         return ['p' + str(point1) + 'p' + str(point2), 'p' + str(point2) + 'p' + str(point1)]
 
-    def reset(self):
+    def reset(self, activate_simplified=True):
         '''
         Resetting the script.
         :return:
@@ -8195,11 +8743,15 @@ class Application():
         self._line_point_to_point_string = []  # This one ensures that a line is not created on top of a line
         self._accelerations_dict = {'static': 9.81, 'dyn_loaded': 0, 'dyn_ballast': 0}
         self._multiselect_lines = []
-        self.update_frame()
 
         # Initsializing the calculation grid used for tank definition
         self._main_grid = grid.Grid(self._grid_dimensions[0], self._grid_dimensions[1])
         self._grid_calc = None
+
+        if getattr(self, '_simplified_calculation_mode', False) and activate_simplified:
+            self._activate_simplified_calculation_pipeline()
+        else:
+            self.update_frame()
 
     def controls(self):
         '''
@@ -8328,6 +8880,11 @@ class Application():
         When clicking the right button, this method is called.
         method is referenced in
         '''
+
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._select_single_calculation_line()
+            self.update_frame()
+            return
 
         self._previous_drag_mouse = [event.x, event.y]
         click_x = self._main_canvas.winfo_pointerx() - self._main_canvas.winfo_rootx()
@@ -8718,6 +9275,12 @@ class Application():
     def _finalize_open_project(self, open_transfer, filename):
         self._new_buckling_method.set(open_transfer.buckling_method)
         self._weight_logger = open_transfer.weight_and_cog
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._ensure_single_dummy_line()
+            self._select_single_calculation_line()
+            self._ensure_manual_pressure_combination(self._active_line, default_enabled=True)
+            self._apply_simplified_calculation_layout()
+            self._new_show_prop_3d.set(True)
         self.get_cob()
         self._parent.wm_title('| ANYstructure |     ' + str(filename))
         self.update_frame()
@@ -8748,7 +9311,7 @@ class Application():
         open_transfer = opened_project.transfer
         hydration = opened_project.hydration
 
-        self.reset()
+        self.reset(activate_simplified=False)
         self._apply_open_project_text_and_theme(open_transfer)
         self._apply_open_project_geometry_and_objects(open_transfer, hydration)
         self._apply_open_project_accelerations(open_transfer)
@@ -9131,7 +9694,11 @@ class Application():
         '''
         self.save_no_dialogue(backup=True)  # keeping a backup
 
-        self.new_structure(multi_return=returned_object[0:2])
+        simplified_replacement = self._prepare_simplified_optimizer_replacement()
+        if simplified_replacement:
+            self._replace_active_line_with_optimized_structure(returned_object[0])
+        else:
+            self.new_structure(multi_return=returned_object[0:2])
         # self._line_to_struc[self._active_line][1]=returned_objects[0]
         # self._line_to_struc[self._active_line][1]=returned_objects[1]
         # self._line_to_struc[self._active_line][0].need_recalc = True
@@ -9140,7 +9707,8 @@ class Application():
         #     self._line_to_struc[self._active_line][2] = CalcFatigue(returned_objects[0].get_structure_prop(),
         #                                                             returned_objects[2])
         # self.new_structure()
-        self.update_frame()
+        if not self._refresh_simplified_optimizer_replacement():
+            self.update_frame()
 
     def on_close_opt_cyl_window(self, returned_object):
         '''
@@ -9149,9 +9717,11 @@ class Application():
         :return:
         '''
 
+        self._prepare_simplified_optimizer_replacement()
         self.new_structure(cylinder_return=returned_object[0])
 
-        self.update_frame()
+        if not self._refresh_simplified_optimizer_replacement():
+            self.update_frame()
 
     def on_close_opt_multiple_window(self, returned_objects):
         '''

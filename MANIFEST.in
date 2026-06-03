@@ -24,6 +24,7 @@ include anystruct\images\ANYstructure_logo.jpg
 include anystruct\images\current_comps_NONE.png
 include anystruct\images\Buckling_Strength_of_Shells.png
 include anystruct\images\Panel_geometry_definitions.png
+include anystruct\images\buckling_cylinder_panel.png
 include anystruct\ship_section_example.txt
 include anystruct\ANYstructure_documentation.pdf
 include anystruct\sections.csv

@@ -275,6 +275,38 @@ def test_cylinder_cost_filter_uses_weight_and_selected_weld_metric(monkeypatch):
     assert result[1] == 'Cost filter'
 
 
+def test_cylinder_constraints_request_optimizer_tuple_for_full_cylinder(monkeypatch):
+    class FakeCylinder:
+        RingStfObj = object()
+        RingFrameObj = object()
+
+        def __init__(self):
+            self.optimizing_values = []
+
+        def get_utilization_factors(self, optimizing=False, empty_result_dict=False):
+            self.optimizing_values.append(optimizing)
+            if empty_result_dict:
+                return {}
+            if optimizing:
+                return True, 'Check OK', {}
+            return {'Check OK': True}
+
+    fake_cylinder = FakeCylinder()
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, x: fake_cylinder)
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda x: 100.0)
+
+    result = opt.any_constraints_cylinder(
+        x='candidate',
+        obj=object(),
+        init_weight=False,
+        chk=(True, False, False, False, False, False, False, False, False, False),
+    )
+
+    assert result[0] is True
+    assert result[1] == 'Check OK'
+    assert fake_cylinder.optimizing_values == [True]
+
+
 def test_mixed_weld_bias_skips_initial_filter(monkeypatch, opt_input):
     obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
     captured = {}
