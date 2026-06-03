@@ -415,7 +415,7 @@ class Application():
 
         # ----------------------INITIATION OF THE SMALLER PARTS OF THE GUI STARTS HERE--------------------------
         # Help tab
-        ttk.Label(self._tab_help, text='Buckling paramenter, flat plates', font="Text 10 bold", ) \
+        ttk.Label(self._tab_help, text='Buckling paramenter, flat plates', font=self._text_size["Text 10 bold"], ) \
             .place(relx=0.01, rely=0.05, )
         try:
             img_file_name = 'Panel_geometry_definitions.png'
@@ -429,7 +429,7 @@ class Application():
             label.place(relx=0.01, rely=0.1)
         except TclError:
             pass
-        ttk.Label(self._tab_help, text='Buckling parameters, cylinders', font="Text 10 bold", ) \
+        ttk.Label(self._tab_help, text='Buckling parameters, cylinders', font=self._text_size["Text 10 bold"], ) \
             .place(relx=0.01, rely=0.33)
         try:
             img_file_name = 'Buckling_Strength_of_Shells.png'
@@ -443,7 +443,7 @@ class Application():
             label.place(relx=0.01, rely=0.35)
         except TclError:
             pass
-        ttk.Label(self._tab_help, text='Buckling cylinder panels', font="Text 10 bold", ) \
+        ttk.Label(self._tab_help, text='Buckling cylinder panels', font=self._text_size["Text 10 bold"], ) \
             .place(relx=0.01, rely=0.6)
         try:
             img_file_name = 'buckling_cylinder_panel.png'
@@ -475,9 +475,9 @@ class Application():
         ttk.Label(self._tab_geo, text='Input point coordinates [mm]', font=self._text_size['Text 9 bold'],
                   ) \
             .place(rely=point_start, relx=point_x_start, anchor=tk.NW)
-        ttk.Label(self._tab_geo, text='Point x (horizontal) [mm]:', font="Text 9", ) \
+        ttk.Label(self._tab_geo, text='Point x (horizontal) [mm]:', font=self._text_size["Text 9"], ) \
             .place(relx=point_x_start, rely=point_start + delta_y, )
-        ttk.Label(self._tab_geo, text='Point y (vertical)   [mm]:', font="Text 9", ) \
+        ttk.Label(self._tab_geo, text='Point y (vertical)   [mm]:', font=self._text_size["Text 9"], ) \
             .place(relx=point_x_start, rely=point_start + delta_y * 2)
 
         ttk.Entry(self._tab_geo, textvariable=self._new_point_x, width=int(ent_width * 1.5)) \
@@ -496,7 +496,7 @@ class Application():
 
         self._new_draw_point_name = tk.BooleanVar()
         self._new_draw_point_name.set(False)
-        ttk.Label(self._tab_geo, text='Show point names in GUI', font="Text 9") \
+        ttk.Label(self._tab_geo, text='Show point names in GUI', font=self._text_size["Text 9"]) \
             .place(relx=point_x_start, rely=point_start + 3 * delta_y)
         ttk.Checkbutton(self._tab_geo, variable=self._new_draw_point_name, command=self.on_color_code_check) \
             .place(relx=ent_x, rely=point_start + 3 * delta_y)
@@ -508,11 +508,11 @@ class Application():
         ttk.Label(self._tab_geo, text='Input line from "point number" to "point number"',
                   font=self._text_size['Text 9 bold'], ) \
             .place(rely=line_start, relx=line_x, anchor=tk.NW)
-        ttk.Label(self._tab_geo, text='Line from point number:', font="Text 9", ) \
+        ttk.Label(self._tab_geo, text='Line from point number:', font=self._text_size["Text 9"], ) \
             .place(relx=line_x, rely=line_start + delta_y)
-        ttk.Label(self._tab_geo, text='Line to point number:', font="Text 9", ) \
+        ttk.Label(self._tab_geo, text='Line to point number:', font=self._text_size["Text 9"], ) \
             .place(relx=line_x, rely=line_start + 2 * delta_y)
-        ttk.Label(self._tab_geo, text='Show line names in GUI', font="Text 9").place(relx=point_x_start,
+        ttk.Label(self._tab_geo, text='Show line names in GUI', font=self._text_size["Text 9"]).place(relx=point_x_start,
                                                                                      rely=line_start + 3 * delta_y)
         ttk.Checkbutton(self._tab_geo, variable=self._new_line_name,
                         command=self.on_color_code_check).place(relx=ent_x, rely=line_start + 3 * delta_y)
@@ -607,9 +607,9 @@ class Application():
                                              width=int(ent_width * 1))
         self._ent_delete_point.place(relx=ent_x, rely=del_start + delta_y * 2)
 
-        ttk.Label(self._tab_geo, text='Line number (left click):', font="Text 9") \
+        ttk.Label(self._tab_geo, text='Line number (left click):', font=self._text_size["Text 9"]) \
             .place(relx=del_x, rely=del_start + delta_y)
-        ttk.Label(self._tab_geo, text='Point number (right click):', font="Text 9", ) \
+        ttk.Label(self._tab_geo, text='Point number (right click):', font=self._text_size["Text 9"], ) \
             .place(relx=del_x, rely=del_start + delta_y * 2)
 
         ttk.Button(self._tab_geo, text='Delete line', command=self.delete_line, style="Bold.TButton"
@@ -649,7 +649,7 @@ class Application():
         self._ent_shift_hor.place(relx=ent_x, rely=shift_y + delta_y * 2)
         self._ent_shift_ver.place(relx=ent_x, rely=shift_y + delta_y * 3)
 
-        ttk.Label(self._tab_geo, text='Use shifted coordinates', font="Text 9") \
+        ttk.Label(self._tab_geo, text='Use shifted coordinates', font=self._text_size["Text 9"]) \
             .place(relx=shift_x, rely=shift_y + delta_y * 4)
         ttk.Checkbutton(self._tab_geo, variable=self._new_shifted_coords, command=self.update_frame) \
             .place(relx=ent_x, rely=shift_y + delta_y * 4)
@@ -1071,7 +1071,7 @@ class Application():
 
         chk_deltax = 0.1
         chk_deltay = 0.025
-        (ttk.Label(self._tab_information, text='Labelling and color code options ', font="Text 9")
+        (ttk.Label(self._tab_information, text='Labelling and color code options ', font=self._text_size["Text 9"])
          .place(relx=0.02, rely=2 * chk_deltay))
         self._information_gui_chk_structure = [
             ttk.Checkbutton(self._tab_information,
@@ -1112,16 +1112,16 @@ class Application():
             self._chk_button_puls_acceptance]
 
         self._information_gui_lab_chk_structure = [
-            ttk.Label(self._tab_information, text='Label color code', font="Text 9"),
-            ttk.Label(self._tab_information, text='Show COG/COB', font="Text 9"),
-            ttk.Label(self._tab_information, text='Check to see avaliable shortcuts', font="Text 9"),
-            ttk.Label(self._tab_information, text='Beam prop.', font="Text 9"),
-            ttk.Label(self._tab_information, text='Plate thk.', font="Text 9"),
-            ttk.Label(self._tab_information, text='Pressure', font="Text 9"),
-            ttk.Label(self._tab_information, text='Buckling UF', font="Text 9"),
-            ttk.Label(self._tab_information, text='Sec. mod. UF', font="Text 9"),
-            ttk.Label(self._tab_information, text='Fatigue UF', font="Text 9"),
-            ttk.Label(self._tab_information, text='Total UF', font="Text 9"),
+            ttk.Label(self._tab_information, text='Label color code', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Show COG/COB', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Check to see avaliable shortcuts', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Beam prop.', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Plate thk.', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Pressure', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Buckling UF', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Sec. mod. UF', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Fatigue UF', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Total UF', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Stiffener spacing'),
             ttk.Label(self._tab_information, text='Stresses, sigma x1'),
             ttk.Label(self._tab_information, text='Stresses, sigma x2'),
@@ -4811,7 +4811,7 @@ class Application():
                                                   self.get_point_canvas_coord(key)[1] - 40,
                                                   text='(' + str(x_coord) + ' , ' +
                                                        str(y_coord) + ')',
-                                                  font="Text 14", fill='red')
+                                                  font=self._text_size["Text 14"], fill='red')
 
             else:
                 self._main_canvas.create_oval(self.get_point_canvas_coord(key)[0] - pt_size,
@@ -4823,13 +4823,13 @@ class Application():
                     self._main_canvas.create_text(self.get_point_canvas_coord(key)[0] + 15,
                                                   self.get_point_canvas_coord(key)[1] - 10,
                                                   text='pt.' + str(get_num(key)),
-                                                  font="Text 10", fill=self._color_text)
+                                                  font=self._text_size["Text 10"], fill=self._color_text)
                     # printing the coordinates of the point
                     self._main_canvas.create_text(self.get_point_canvas_coord(key)[0] + 35,
                                                   self.get_point_canvas_coord(key)[1] + 10,
                                                   text='(' + str(x_coord) + ' , ' +
                                                        str(y_coord) + ')',
-                                                  font="Text 10", fill=coord_color)
+                                                  font=self._text_size["Text 10"], fill=coord_color)
         # drawing the line dictionary.
 
         if len(self._line_dict) != 0:
@@ -4936,7 +4936,7 @@ class Application():
                     if self._new_line_name.get():
                         self._main_canvas.create_text(coord1[0] - 20 + vector[0] / 2 + 5,
                                                       coord1[1] + vector[1] / 2 + 10,
-                                                      text='l.' + str(get_num(line)), font="Text 8",
+                                                      text='l.' + str(get_num(line)), font=self._text_size["Text 8"],
                                                       fill=self._color_text)
                 if line in self._multiselect_lines:
                     self._main_canvas.create_text(coord1[0] + vector[0] / 2 + 5, coord1[1] + vector[1] / 2 - 10,
@@ -5567,17 +5567,16 @@ class Application():
                 x1, x2, x3 = 15, 25, 35
 
                 self._result_canvas.create_text([x + 0 * dx, (y + 0 * dy) * 1],
-                                                text='Special provisions - DNV-OS-C101 - checks for section, '
-                                                     'web thickness and plate thickness.',
+                                                text='-----  Special provisions - DNV-OS-C101 -----',
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
                 self._result_canvas.create_text([x + 0 * dx, (y + 2 * dy) * 1],
-                                                text='Section modulus check',
+                                                text='Section modulus [mm^3]' ,
                                                 font=self._text_size["Text 9"], anchor='nw', fill=self._color_text)
                 self._result_canvas.create_text([x + 0 * dx, (y + 3 * dy) * 1],
-                                                text='Shear area check',
+                                                text='Shear area [mm^2]',
                                                 font=self._text_size["Text 9"], anchor='nw', fill=self._color_text)
                 self._result_canvas.create_text([x + 0 * dx, (y + 4 * dy) * 1],
-                                                text='Plate thickness check',
+                                                text='Plate thickness check [mm]',
                                                 font=self._text_size["Text 9"], anchor='nw', fill=self._color_text)
                 self._result_canvas.create_text([x + x1 * dx, (y + 1 * dy) * 1],
                                                 text='Minimum value',
@@ -5592,8 +5591,8 @@ class Application():
                 if state['slamming'][current_line]['state'] and slm_text_min_zpl is False:
                     text = '(shear issue, change thickness or web height)'
                 else:
-                    text = str('%.4E' % decimal.Decimal(min_sec_mod * m3_to_mm3)) + \
-                           ' [mm^3] ' if not slm_text_min_zpl else slm_text_min_zpl
+                    text = str('%.4E' % decimal.Decimal(min_sec_mod * m3_to_mm3)) \
+                        if not slm_text_min_zpl else slm_text_min_zpl
                 self._result_canvas.create_text([x + x1 * dx, (y + 2 * dy) * 1], text=text,
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
 
@@ -5601,7 +5600,7 @@ class Application():
                 if state['slamming'][current_line]['state'] and slm_text_min_zpl is False:
                     text = ''
                 else:
-                    text = str('%.4E' % decimal.Decimal(min(sec_mod[1], sec_mod[0]) * m3_to_mm3)) + ' [mm^3]' \
+                    text = str('%.4E' % decimal.Decimal(min(sec_mod[1], sec_mod[0]) * m3_to_mm3))\
                         if not slm_text_min_zpl else str(slm_zpl) + '- zpl [cm^3]'
                 self._result_canvas.create_text([x + x2 * dx, (y + 2 * dy) * 1],
                                                 text=text, font=self._text_size['Text 9 bold'], anchor='nw',
@@ -5613,13 +5612,13 @@ class Application():
                                                     font=self._text_size['Text 9 bold'], anchor='nw',
                                                     fill=color_sec)
                 # minimum shear area
-                text = str('%.4E' % decimal.Decimal(min_shear * m2_to_mm2)) + ' [mm^2] ' \
-                    if not slm_text_min_web_thk else str(round(slm_min_web_thk, 1)) + ' [mm]'
+                text = str('%.4E' % decimal.Decimal(min_shear * m2_to_mm2)) \
+                    if not slm_text_min_web_thk else str(round(slm_min_web_thk, 1))
                 self._result_canvas.create_text([x + x1 * dx, (y + 3 * dy) * 1],
                                                 text=text,
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
-                text = str('%.4E' % decimal.Decimal(shear_area * m2_to_mm2)) + ' [mm^2]' \
-                    if not slm_text_min_web_thk else str(obj_scnt_calc_stf.get_web_thk() * 1000) + ' [mm]'
+                text = str('%.4E' % decimal.Decimal(shear_area * m2_to_mm2)) \
+                    if not slm_text_min_web_thk else str(obj_scnt_calc_stf.get_web_thk() * 1000)
                 self._result_canvas.create_text([x + x2 * dx, (y + 3 * dy) * 1],
                                                 text=text,
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=color_shear)
@@ -5630,21 +5629,21 @@ class Application():
                                                     font=self._text_size["Text 9 bold"], anchor='nw', fill=color_shear)
 
                 # minimum thickness for plate
-                text = str(round(min_thk, 1)) + ' [mm]' if not state['slamming'][current_line]['state'] else \
-                    'Slamming minimum thickness: ' + str(round(slm_min_pl_thk, 2)) + ' [mm]'
+                text = str(round(min_thk, 1))  if not state['slamming'][current_line]['state'] else \
+                    'Slamming minimum thickness: ' + str(round(slm_min_pl_thk, 2))
                 self._result_canvas.create_text([x + x1 * dx, (y + 4 * dy) * 1],
                                                 text=text,
                                                 font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
 
                 if not state['slamming'][current_line]['state']:
                     self._result_canvas.create_text([x + x2 * dx, (y + 4 * dy) * 1],
-                                                    text=str(obj_scnt_calc_pl.get_pl_thk() * 1000) + ' [mm] ',
+                                                    text=str(obj_scnt_calc_pl.get_pl_thk() * 1000) ,
                                                     font=self._text_size["Text 9 bold"], anchor='nw', fill=color_shear)
 
                     self._result_canvas.create_text([x + x3 * dx, (y + 4 * dy) * 1],
                                                     text='Ok' if obj_scnt_calc_pl.get_pl_thk() * 1000 > min_thk
                                                     else 'Not ok',
-                                                    font=self._text_size["Text 9 bold"], anchor='nw', fill=color_shear)
+                                                    font=self._text_size["Text 9 bold"], anchor='nw', fill=color_thk)
 
                 # buckling results
                 start_y, y = 5, 10
@@ -6038,35 +6037,25 @@ class Application():
                             line_offset += 1
 
                     # Keep fatigue below the ML result block, with the old default as a minimum.
-                    fatigue_start_offset = max(8, line_offset + 1)
+                    fatigue_start_offset = max(8, line_offset + 1.5)
 
                 # fatigue results
 
-                self._result_canvas.create_text([x * 1, (y + (start_y + fatigue_start_offset) * dy) * 1],
-                                                text='Fatigue results (DNVGL-RP-C203): ',
-                                                font=self._text_size["Text 9 bold"], anchor='nw', fill=self._color_text)
-
-                if self._line_to_struc[current_line][2] != None:
-                    if state['fatigue'][current_line]['damage'] is not None:
-                        damage = state['fatigue'][current_line]['damage']
-                        dff = state['fatigue'][current_line]['dff']
-                        self._result_canvas.create_text([x * 1, (y + (start_y + fatigue_start_offset + 1) * dy) * 1],
-                                                        text='Total damage (DFF not included): ' + str(
-                                                            round(damage, 3)) +
-                                                             '  |  With DFF = ' + str(dff) + ' --> Damage: ' +
-                                                             str(round(damage * dff, 3)),
-                                                        font=self._text_size["Text 9 bold"], anchor='nw',
-                                                        fill=color_fatigue)
-                    else:
-                        self._result_canvas.create_text([x * 1, (y + (start_y + fatigue_start_offset + 1) * dy) * 1],
-                                                        text='Total damage: NO RESULTS ',
-                                                        font=self._text_size["Text 9 bold"],
-                                                        anchor='nw', fill=self._color_text)
+                if self._line_to_struc[current_line][2] is not None and state['fatigue'][current_line][
+                    'damage'] is not None:
+                    damage = state['fatigue'][current_line]['damage']
+                    dff = state['fatigue'][current_line]['dff']
+                    fatigue_text = f"Fatigue DNVGL-RP-C203: Damage = {damage:.3f}  |  DFF = {dff}  |  DFF damage = {damage * dff:.3f}"
                 else:
-                    self._result_canvas.create_text([x * 1, (y + (start_y + fatigue_start_offset + 1) * dy) * 1],
-                                                    text='Total damage: NO RESULTS ',
-                                                    font=self._text_size["Text 9 bold"],
-                                                    anchor='nw', fill=self._color_text)
+                    fatigue_text = "Fatigue DNVGL-RP-C203: NO RESULTS"
+
+                self._result_canvas.create_text(
+                    [x, y + (start_y + fatigue_start_offset) * dy],
+                    text=fatigue_text,
+                    font=self._text_size["Text 9 bold"],
+                    anchor='nw',
+                    fill=color_fatigue if "NO RESULTS" not in fatigue_text else self._color_text
+                )
 
             elif self._active_line in self._line_to_struc and self._line_to_struc[self._active_line][5] is not None:
 
