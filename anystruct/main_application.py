@@ -6471,7 +6471,8 @@ class Application():
             pass
 
     @staticmethod
-    def _add_box_3d(ax, x0, x1, y0, y1, z0, z1, facecolor='lightgrey', alpha=0.75):
+    def _add_box_3d(ax, x0, x1, y0, y1, z0, z1, facecolor='lightgrey', alpha=0.75,
+                    edgecolor='black', linewidth=0.35):
         """Add a rectangular solid to a Matplotlib 3D axis."""
         vertices = [
             [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)],
@@ -6482,7 +6483,7 @@ class Application():
             [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)],
         ]
         poly = Poly3DCollection(vertices, alpha=alpha, facecolor=facecolor,
-                                edgecolor='black', linewidths=0.35)
+                                edgecolor=edgecolor, linewidths=linewidth, antialiaseds=True)
         try:
             poly.set_clip_on(False)
             poly.set_clip_box(None)
@@ -6646,7 +6647,7 @@ class Application():
             if x1 <= x0:
                 return
             self._add_box_3d(ax, x0, x1, y_center - web_t / 2.0, y_center + web_t / 2.0,
-                             plate_thk, plate_thk + web_h, facecolor=facecolor_web, alpha=0.84)
+                             plate_thk, plate_thk + web_h, facecolor=facecolor_web, alpha=1.0)
             if fl_w > 0.0 and fl_t > 0.0:
                 if sec_type in ['L', 'L-bulb']:
                     y0 = y_center - web_t / 2.0
@@ -6656,7 +6657,7 @@ class Application():
                     y1 = y_center + fl_w / 2.0
                 self._add_box_3d(ax, x0, x1, y0, y1,
                                  plate_thk + web_h, plate_thk + web_h + fl_t,
-                                 facecolor=facecolor_flange, alpha=0.84)
+                                 facecolor=facecolor_flange, alpha=1.0)
         else:
             y0, y1 = y_center - length / 2.0, y_center + length / 2.0
             if y_limits is not None:
@@ -6665,7 +6666,7 @@ class Application():
             if y1 <= y0:
                 return
             self._add_box_3d(ax, x_center - web_t / 2.0, x_center + web_t / 2.0, y0, y1,
-                             plate_thk, plate_thk + web_h, facecolor=facecolor_web, alpha=0.84)
+                             plate_thk, plate_thk + web_h, facecolor=facecolor_web, alpha=1.0)
             if fl_w > 0.0 and fl_t > 0.0:
                 if sec_type in ['L', 'L-bulb']:
                     x0 = x_center - web_t / 2.0
@@ -6675,7 +6676,7 @@ class Application():
                     x1 = x_center + fl_w / 2.0
                 self._add_box_3d(ax, x0, x1, y0, y1,
                                  plate_thk + web_h, plate_thk + web_h + fl_t,
-                                 facecolor=facecolor_flange, alpha=0.84)
+                                 facecolor=facecolor_flange, alpha=1.0)
 
     def draw_prop_3d(self):
         """Route 3D property preview based on the active line type."""

@@ -12,15 +12,11 @@ from os import path
 
 here = path.abspath(path.dirname(__file__))
 
-# Get the long description from the README file
-with open(path.join(here, 'README.md'), encoding='utf-8') as f:
-    long_description = f.read()
-
 # Arguments marked as "Required" below must be included for upload to PyPI.
 # Fields marked as "Optional" may be commented out...
 
 def readme():
-    with open('README.rst') as file:
+    with open(path.join(here, 'README.md'), encoding='utf-8') as file:
         return file.read()
 
 core_requires = ['matplotlib', 'numpy', 'Pillow', 'reportlab', 'scipy']
@@ -32,10 +28,11 @@ setup(
     name='ANYstructure',  # Required
     url = 'https://github.com/audunarn/ANYstructure',
     entry_points={"console_scripts": ['ANYstructure = anystruct.__main__:main']},
-    version='6.0.3',  # Required
+    version='6.1.0',  # Required
     license='MIT',
     description='A plate field optimization tool for offshore structures calculated according to DNV standards',
     long_description = readme(),
+    long_description_content_type='text/markdown',
     author='Audun Arnesen Nyhus',  # Optional
     author_email='audunarn@gmail.com',  # Optional
     classifiers=[  # Optional

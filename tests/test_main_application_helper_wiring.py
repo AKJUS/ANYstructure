@@ -15,6 +15,16 @@ def test_main_application_uses_shared_geometry_menu_helpers():
     assert "Longitudinal Stiffened shell  (Force input)" not in source
 
 
+def test_release_package_metadata_uses_current_markdown_readme():
+    setup_source = Path(__file__).resolve().parents[1] / "setup.py"
+    source = setup_source.read_text(encoding="utf-8")
+
+    assert "version='6.1.0'" in source
+    assert "README.md" in source[source.index("def readme"):source.index("core_requires")]
+    assert "README.rst" not in source
+    assert "long_description_content_type='text/markdown'" in source
+
+
 def test_functional_modes_keep_3d_section_checkbox_visible():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -202,6 +212,26 @@ def test_simplified_3d_preview_uses_main_canvas_place():
     assert "getattr(self, '_simplified_calculation_mode', False)" in placement_block
     assert "self._place_info_float(self._main_canvas, 'relx', 0.26)" in placement_block
     assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
+
+
+def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    flat_3d_block = source[
+        source.index("def draw_flat_panel_prop_3d"):
+        source.index("def _add_cylinder_longitudinal_stiffener_3d")
+    ]
+    section_block = source[
+        source.index("def _draw_section_web_and_flange_3d"):
+        source.index("def draw_prop_3d")
+    ]
+
+    assert "alpha=1.0" in section_block
+    assert "section_base_z" not in flat_3d_block
+    assert "visual_z_span" not in flat_3d_block
+    assert "self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top, zoom=1.52)" in flat_3d_block
+    assert "ax.view_init(elev=22, azim=-55)" in flat_3d_block
+    assert "self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))" in flat_3d_block
 
 
 def test_cylinder_panel_domains_render_as_angular_sector_preview():

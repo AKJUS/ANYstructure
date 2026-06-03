@@ -2,8 +2,17 @@
 
 # ANYstructure #
 ANYstructure is the ultimate steel structure design tool for plate fields and cylinders! 
-Weight optimization for all structures with machine learning capabilities. 
-Calculations are based on DNV standards and rules
+Weight, weld and cost optimization.
+Calculations are based on DNV standards and recommended practices.
+
+### What's new in 6.1.0 ###
+* Simplified GUI input option.
+* Weld/weight optimization.
+* Cost optimization.
+* 3D representation of panels/cylinders.
+* Improved Semi-analytical buckling implementation.
+* Optimization of stiffened plate with girder.
+* Bug fixing.
 ### What's new in 6.0.3 ###
 * New buckling method: Semi-analytical buckling for flat plates.
 * Updated ML buckling to numerical instead of classification. Improved accuracy of the neural network.
