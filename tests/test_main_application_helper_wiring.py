@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import re
 from types import SimpleNamespace
 from anystruct.main_application import Application
@@ -215,6 +216,84 @@ def test_simplified_3d_preview_uses_main_canvas_place():
     assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
 
 
+def test_simplified_mode_draws_prepomax_imperfection_guidance_in_lower_pane():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def draw_prepomax_imperfection_recommendations(self):" in source
+    assert "PrePoMax imperfection input, DNVGL-OS-C401" in source
+    assert "Use the value as initial geometry amplitude" in source
+    assert "self.draw_prepomax_imperfection_recommendations()" in source
+    assert "def _select_prepomax_imperfection_row(self, row_index):" in source
+    assert "def _draw_prepomax_imperfection_sketch(self, canvas, row, x0, y0, x1, y1" in source
+    assert "canvas.tag_bind(tag, '<Button-1>'" in source
+    assert "self._selected_prepomax_imperfection_row = 0" in source
+    assert "def _draw_prepomax_tolerance_table_button(self, canvas, canvas_width):" in source
+    assert "text='Open DNV table'" in source
+    assert "self.open_dnv_tolerance_table_image()" in source
+    assert "def _dnv_tolerance_table_image_path(self):" in source
+    assert "tolerances.png" in source
+    assert "def open_dnv_tolerance_table_image(self):" in source
+    assert "ImageTk.PhotoImage(resized)" in source
+    assert "table_right = max(300, canvas_width * 0.74)" in source
+    assert "row_height = max(22, min(32" in source
+    assert "image_canvas = tk.Canvas(window" in source
+    assert "x_scroll = ttk.Scrollbar(window, orient=tk.HORIZONTAL" in source
+    assert "y_scroll = ttk.Scrollbar(window, orient=tk.VERTICAL" in source
+    assert "def zoom_to(scale):" in source
+    assert "def zoom_by(factor):" in source
+    assert "text='Original size'" in source
+    assert "image_canvas.configure(scrollregion=(0, 0, photo.width(), photo.height()))" in source
+    assert "delta = 0.005 s" in source
+    assert "delta = 0.0015 l" in source
+    assert "delta = 0.02 s" in source
+    assert "delta = 0.005 r" in source
+    assert "delta = 0.01 g / (1 + g/r)" in source
+    assert "sketch='plate_out_of_plane'" in source
+    assert "sketch='parallel_misalignment'" in source
+    assert "sketch='cylinder_stiffener_misalignment'" in source
+    assert "sketch='local_roundness'" in source
+
+
+def test_flat_panel_imperfection_recommendations_follow_dnvgl_os_c401():
+    plate = SimpleNamespace(get_s=lambda: 0.7, get_span=lambda: 4.0)
+    stiffener = SimpleNamespace(get_s=lambda: 0.7, get_span=lambda: 4.0, get_fl_w=lambda: 0.12)
+    girder = SimpleNamespace(spacing=2.5, girder_lg=10.0, b=0.2)
+    all_obj = SimpleNamespace(Plate=plate, Stiffener=stiffener, Girder=girder)
+
+    rows = Application._flat_panel_imperfection_recommendations(all_obj)
+    values = {row["detail"]: row["value_mm"] for row in rows}
+
+    assert values["Plate out-of-plane"] == 3.5
+    assert values["Stiffener web straightness"] == 6.0
+    assert values["Stiffener flange straightness"] == 6.0
+    assert values["Parallel stiffener misalignment"] == 14.0
+    assert values["Girder web straightness"] == 15.0
+    assert values["Parallel girder misalignment"] == 50.0
+    sketches = {row["detail"]: row["sketch"] for row in rows}
+    assert sketches["Plate out-of-plane"] == "plate_out_of_plane"
+    assert sketches["Parallel stiffener misalignment"] == "parallel_misalignment"
+
+
+def test_cylinder_imperfection_recommendations_follow_dnvgl_os_c401():
+    shell = SimpleNamespace(radius=6.5, thk=0.019, dist_between_rings=3.3, length_of_shell=20.0)
+    long_stiffener = SimpleNamespace(spacing=680.0, b=49.0)
+    cylinder = SimpleNamespace(ShellObj=shell, LongStfObj=long_stiffener, panel_spacing=0.68)
+
+    rows = Application._cylinder_imperfection_recommendations(cylinder)
+    values = {row["detail"]: row["value_mm"] for row in rows}
+    local_g = min(680.0, 1.15 * math.sqrt(3300.0 * 6500.0 * 19.0), math.pi * 6500.0 / 2.0)
+
+    assert values["Radius deviation at ring"] == 32.5
+    assert abs(values["Local out-of-roundness"] - (0.01 * local_g / (1.0 + local_g / 6500.0))) < 1e-12
+    assert values["Longitudinal stiffener straightness"] == 4.95
+    assert values["Longitudinal flange straightness"] == 4.95
+    assert values["Longitudinal stiffener misalignment"] == 13.6
+    sketches = {row["detail"]: row["sketch"] for row in rows}
+    assert sketches["Local out-of-roundness"] == "local_roundness"
+    assert sketches["Longitudinal stiffener misalignment"] == "cylinder_stiffener_misalignment"
+
+
 def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -239,16 +318,28 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
 
-    assert "ttk.Button(view_row, text='STL shell'" in source
-    assert "ttk.Button(view_row, text='UNV shell'" in source
+    assert "import anystruct.solid_export as solid_export" in source
+    assert "ttk.Button(view_row, text='Solid export'" in source
+    assert "ttk.Button(view_row, text='Shell export'" in source
+    assert "ttk.Button(view_row, text='FE buckling'" not in source
+    assert "run_prop_3d_opensees_buckling" not in source
     assert "ttk.Button(view_row, text='STL solid'" not in source
+    assert "ttk.Button(view_row, text='Mesh solid'" not in source
+    assert "ttk.Button(view_row, text='STL shell'" not in source
+    assert "ttk.Button(view_row, text='UNV shell'" not in source
     assert "ttk.Button(view_row, text='UNV solid'" not in source
-    assert "def export_prop_3d_stl(self):" in source
+    assert "def export_prop_3d_ifc_model(self):" in source
+    assert "def export_prop_3d_ifc_shell_model(self):" in source
+    assert "def _export_prop_3d_ifc_model_common(self, shell_export=False):" in source
+    assert "confirmoverwrite=False" in source
+    assert "if os.path.exists(filename):" in source
+    assert "messagebox.askyesno(" in source
+    assert "ifc_model_export.export_selected_structure_from_application" in source
+    assert "shell_export=shell_export" in source
     assert "def export_prop_3d_unv(self):" in source
+    assert "self.export_prop_3d_ifc_model()" in source
     assert "def _get_prop_3d_shell_export_mesh(self):" in source
-    assert "mesh = self._get_prop_3d_shell_export_mesh()" in source
-    assert "filetypes=[(\"Stereolithography STL\", \"*.stl\"), (\"All files\", \"*.*\")]" in source
-    assert "filetypes=[(\"Universal UNV\", \"*.unv\"), (\"All files\", \"*.*\")]" in source
+    assert "def _get_prop_3d_solid_export_mesh(self):" in source
     assert "def _write_prop_3d_stl_file(filename, mesh):" in source
     assert "def _write_prop_3d_unv_file(filename, mesh):" in source
     assert "stl_file.write('solid ' + name + '\\n')" in source
@@ -257,7 +348,6 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "'  2412\\n'" in source
     assert "unv_file.writelines(lines)" in source
     assert "element_id, 91, 1, 1, 7, 3" in source
-    assert "STEP" not in source
     assert "VERTEX_POINT" not in source
     assert "def _deduplicate_export_mesh(mesh):" in source
     assert "def _format_unv_float(value):" in source
@@ -276,6 +366,36 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "self._init_prop_3d_export_mesh(ax, 'flat_panel_preview')" in source
     assert "self._init_prop_3d_export_mesh(ax, 'cylinder_preview')" in source
     assert "self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)" in source
+
+
+def test_ifc_solid_and_shell_exports_use_separate_geometry_paths():
+    ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
+    source = ifc_source.read_text(encoding="utf-8")
+
+    assert "@functools.lru_cache(maxsize=1)\ndef _resource_ifcconvert_candidates" in source
+    assert "@functools.lru_cache(maxsize=8)\ndef _ifcconvert_candidate_paths" in source
+    assert "def _product_shape_from_closed_faces" in source
+    assert "ctx.model.createIfcFacetedBrep" in source
+    assert "def _temporary_filename_near" in source
+    assert "def _write_ifc_atomic" in source
+    assert "def _convert_ifc_atomic" in source
+    assert "os.replace(temp_filename, target_filename)" in source
+    assert "timeout=timeout_seconds" in source
+    assert "def _add_cylindrical_wall_solid" in source
+    assert "def _add_plate_box" in source and "shell_export: bool = True" in source
+    assert "if not shell_export:\n        props = {" in source
+    assert '"model_type": "swept_solid"' in source
+    assert '"model_type": "hollow_swept_solid"' in source
+    assert 'base_r = radius if shell_export else max(radius + sign * shell_thk, EPS)' in source
+    assert 'base_radius = radius if shell_export else max(radius + sign * max(shell_thk, 0.0), EPS)' in source
+    assert "_add_cylinder_structure(ctx, app, cylinder_obj, active_line, side_sign, shell_export=shell_export)" in source
+    assert "_add_flat_structure(ctx, app, all_obj, active_line, side_sign, shell_export=shell_export)" in source
+    assert "_convert_ifc_with_ifcconvert(native_ifc_filename, requested_filename" not in source
+    assert "_convert_ifc_atomic(native_ifc_filename, requested_filename" in source
+    assert "_write_ifc_atomic(ctx.model, native_ifc_filename)" in source
+    assert '"thickness_exported_as_geometry": not bool(shell_export)' in source
+    assert 'predefined_type="RING"' not in source
+    assert "This exporter currently uses zero-thickness shell/surface" not in source
 
 
 def test_shell_export_mesh_is_separate_from_solid_preview_mesh():
@@ -377,11 +497,22 @@ def test_3d_flat_section_geometry_uses_exact_web_and_flange_dimensions():
 
 def test_3d_member_positions_keep_exact_spacing_and_end_boundary():
     positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=True)
-    assert positions == [0.0, 3.0, 6.0, 9.0, 10.0]
-    assert [round(positions[idx + 1] - positions[idx], 12) for idx in range(3)] == [3.0, 3.0, 3.0]
+    assert positions == [0.0, 2.5, 5.0, 7.5, 10.0]
+    gaps = [round(positions[idx + 1] - positions[idx], 12) for idx in range(len(positions) - 1)]
+    assert gaps == [2.5, 2.5, 2.5, 2.5]
+    assert max(gaps) <= 3.0
 
     internal_positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=False)
     assert internal_positions == [3.0, 6.0, 9.0]
+
+    regular_end_positions = Application._positions_from_length_and_spacing(12.0, 3.0, include_ends=True)
+    assert regular_end_positions == [0.0, 3.0, 6.0, 9.0, 12.0]
+
+    dense_end_positions = Application._positions_from_length_and_spacing(10.0, 0.75, include_ends=True)
+    dense_gaps = [dense_end_positions[idx + 1] - dense_end_positions[idx]
+                  for idx in range(len(dense_end_positions) - 1)]
+    assert round(max(dense_gaps) - min(dense_gaps), 12) == 0.0
+    assert max(dense_gaps) <= 0.75
 
 
 def test_unv_export_writes_nodes_and_elements(tmp_path):
