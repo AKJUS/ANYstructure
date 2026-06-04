@@ -301,11 +301,15 @@ class Application():
         # to the large main pane; otherwise it remains in the lower property canvas.
         self._new_show_prop_3d = tk.BooleanVar()
         self._new_show_prop_3d.set(self._simplified_calculation_mode)
+        self._new_prop_3d_opposite_side = tk.BooleanVar()
+        self._new_prop_3d_opposite_side.set(False)
         self._prop_3d_canvas_widget = None
         self._prop_3d_fig_canvas = None
         self._prop_3d_frame = None
         self._prop_3d_toolbar = None
         self._prop_3d_axes = None
+        self._prop_3d_export_mesh = None
+        self._prop_3d_shell_export_mesh = None
         self._prop_3d_default_view = (22, -55)
         self._prop_3d_resize_after_id = None
 
@@ -6274,6 +6278,8 @@ class Application():
         leaving the lower-right result canvas visible.
         """
         self._prop_3d_axes = ax
+        self._prop_3d_export_mesh = getattr(ax, '_anystruct_export_mesh', None)
+        self._prop_3d_shell_export_mesh = getattr(ax, '_anystruct_shell_export_mesh', None)
         self._prop_3d_default_view = default_view
 
         # Hide only the old 2D property sketch.
@@ -6339,6 +6345,12 @@ class Application():
                    command=lambda: self._set_prop_3d_view(0, 0)).pack(side=tk.LEFT)
         ttk.Button(view_row, text='Reset', width=6,
                    command=self._reset_prop_3d_view).pack(side=tk.LEFT)
+        ttk.Checkbutton(view_row, text='Opposite side', variable=self._new_prop_3d_opposite_side,
+                        command=self.update_frame).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(view_row, text='STL shell', width=9,
+                   command=self.export_prop_3d_stl).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='UNV shell', width=9,
+                   command=self.export_prop_3d_unv).pack(side=tk.LEFT)
 
         self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
         self._prop_3d_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -6364,6 +6376,324 @@ class Application():
                 pass
         if getattr(self, '_prop_3d_fig_canvas', None) is not None:
             self._prop_3d_fig_canvas.draw_idle()
+
+    def _prop_3d_member_side_sign(self):
+        try:
+            return -1.0 if self._new_prop_3d_opposite_side.get() else 1.0
+        except Exception:
+            return 1.0
+
+    def export_prop_3d_obj(self):
+        """Export the current 3D preview mesh as an open Wavefront OBJ file."""
+        mesh = getattr(self, '_prop_3d_export_mesh', None)
+        if not mesh or len(mesh.get('faces', [])) == 0:
+            messagebox.showinfo('3D export', 'No 3D preview mesh is available to export.')
+            return
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".obj",
+            filetypes=[("Wavefront OBJ", "*.obj"), ("All files", "*.*")],
+        )
+        if filename in [None, '']:
+            return
+
+        try:
+            self._write_prop_3d_obj_file(filename, mesh)
+        except Exception as error:
+            messagebox.showerror('3D export', 'Could not export 3D preview:\n' + str(error))
+        else:
+            messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
+
+    def export_prop_3d_stl(self):
+        """Export the current 3D preview as a reduced ASCII STL shell mesh."""
+        mesh = self._get_prop_3d_shell_export_mesh()
+        if not mesh or len(mesh.get('faces', [])) == 0:
+            messagebox.showinfo('3D export', 'No 3D preview mesh is available to export.')
+            return
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".stl",
+            filetypes=[("Stereolithography STL", "*.stl"), ("All files", "*.*")],
+        )
+        if filename in [None, '']:
+            return
+
+        try:
+            self._write_prop_3d_stl_file(filename, mesh)
+        except Exception as error:
+            messagebox.showerror('3D export', 'Could not export 3D preview:\n' + str(error))
+        else:
+            messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
+
+    def export_prop_3d_unv(self):
+        """Export the current 3D preview mesh as an I-DEAS UNV shell mesh."""
+        mesh = self._get_prop_3d_shell_export_mesh()
+        if not mesh or len(mesh.get('faces', [])) == 0:
+            messagebox.showinfo('3D export', 'No 3D preview mesh is available to export.')
+            return
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".unv",
+            filetypes=[("Universal UNV", "*.unv"), ("All files", "*.*")],
+        )
+        if filename in [None, '']:
+            return
+
+        try:
+            self._write_prop_3d_unv_file(filename, mesh)
+        except Exception as error:
+            messagebox.showerror('3D export', 'Could not export 3D preview:\n' + str(error))
+        else:
+            messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
+
+    def _get_prop_3d_shell_export_mesh(self):
+        return getattr(self, '_prop_3d_shell_export_mesh', None)
+
+    @staticmethod
+    def _write_prop_3d_obj_file(filename, mesh):
+        export_mesh = Application._refined_export_mesh(mesh)
+        with open(filename, 'w', encoding='utf-8') as obj_file:
+            obj_file.write('# ANYstructure 3D preview export\n')
+            obj_file.write('o ' + str(mesh.get('name', 'ANYstructure_preview')).replace(' ', '_') + '\n')
+            for x, y, z in export_mesh.get('vertices', []):
+                obj_file.write('v {:.9g} {:.9g} {:.9g}\n'.format(float(x), float(y), float(z)))
+            for face in export_mesh.get('faces', []):
+                obj_file.write('f ' + ' '.join(str(index) for index in face) + '\n')
+
+    @staticmethod
+    def _write_prop_3d_stl_file(filename, mesh):
+        name = str(mesh.get('name', 'ANYstructure_preview')).replace(' ', '_')
+        export_mesh = Application._refined_export_mesh(mesh)
+        vertices = export_mesh.get('vertices', [])
+        with open(filename, 'w', encoding='utf-8') as stl_file:
+            stl_file.write('solid ' + name + '\n')
+            for face in export_mesh.get('faces', []):
+                face_vertices = [vertices[index - 1] for index in face]
+                for tri in Application._triangulate_export_face(face_vertices):
+                    normal = Application._stl_triangle_normal(tri)
+                    stl_file.write('  facet normal {:.9g} {:.9g} {:.9g}\n'.format(*normal))
+                    stl_file.write('    outer loop\n')
+                    for x, y, z in tri:
+                        stl_file.write('      vertex {:.9g} {:.9g} {:.9g}\n'.format(float(x), float(y), float(z)))
+                    stl_file.write('    endloop\n')
+                    stl_file.write('  endfacet\n')
+            stl_file.write('endsolid ' + name + '\n')
+
+    @staticmethod
+    def _write_prop_3d_unv_file(filename, mesh):
+        unique_vertices, face_indices = Application._deduplicate_export_mesh(Application._refined_export_mesh(mesh))
+        triangles = []
+        for face in face_indices:
+            triangles.extend(Application._triangulate_export_face(face))
+
+        if not unique_vertices or not triangles:
+            raise ValueError('No valid mesh nodes or shell elements are available for UNV export.')
+
+        lines = ['    -1\n', '  2411\n']
+        for node_id, (x, y, z) in enumerate(unique_vertices, start=1):
+            lines.append('{:10d}{:10d}{:10d}{:10d}\n'.format(node_id, 1, 1, 11))
+            lines.append('{}{}{}\n'.format(
+                Application._format_unv_float(x),
+                Application._format_unv_float(y),
+                Application._format_unv_float(z),
+            ))
+        lines.extend(['    -1\n', '    -1\n', '  2412\n'])
+        for element_id, tri in enumerate(triangles, start=1):
+            lines.append('{:10d}{:10d}{:10d}{:10d}{:10d}{:10d}\n'.format(
+                element_id, 91, 1, 1, 7, 3
+            ))
+            lines.append('{:10d}{:10d}{:10d}\n'.format(*tri))
+        lines.append('    -1\n')
+
+        with open(filename, 'w', encoding='utf-8') as unv_file:
+            unv_file.writelines(lines)
+
+    @staticmethod
+    def _format_unv_float(value):
+        return '{:25.16E}'.format(float(value)).replace('E', 'D')
+
+    @staticmethod
+    def _deduplicate_export_mesh(mesh):
+        unique_vertices = []
+        index_by_vertex = {}
+        face_indices = []
+        for face in mesh.get('faces', []):
+            current_face = []
+            for vertex_index in face:
+                vertex = mesh['vertices'][vertex_index - 1]
+                key = tuple(round(float(coord), 12) for coord in vertex)
+                if key not in index_by_vertex:
+                    index_by_vertex[key] = len(unique_vertices) + 1
+                    unique_vertices.append(tuple(float(coord) for coord in vertex))
+                current_face.append(index_by_vertex[key])
+            face_indices.append(current_face)
+        return unique_vertices, face_indices
+
+    @staticmethod
+    def _triangulate_export_face(face_vertices):
+        if len(face_vertices) < 3:
+            return []
+        if len(face_vertices) == 3:
+            return [face_vertices]
+        return [[face_vertices[0], face_vertices[idx], face_vertices[idx + 1]]
+                for idx in range(1, len(face_vertices) - 1)]
+
+    @staticmethod
+    def _stl_triangle_normal(triangle):
+        p0 = np.asarray(triangle[0], dtype=float)
+        p1 = np.asarray(triangle[1], dtype=float)
+        p2 = np.asarray(triangle[2], dtype=float)
+        normal = np.cross(p1 - p0, p2 - p0)
+        norm = np.linalg.norm(normal)
+        if norm <= 1e-12:
+            return 0.0, 0.0, 0.0
+        normal = normal / norm
+        return float(normal[0]), float(normal[1]), float(normal[2])
+
+    @staticmethod
+    def _init_prop_3d_export_mesh(ax, name):
+        mesh = {'name': name, 'vertices': [], 'faces': [], 'max_edge_length': None}
+        shell_mesh = {'name': name + '_shell', 'vertices': [], 'faces': [], 'max_edge_length': None}
+        ax._anystruct_export_mesh = mesh
+        ax._anystruct_shell_export_mesh = shell_mesh
+        return mesh
+
+    @staticmethod
+    def _update_prop_3d_export_mesh_size(ax, dims):
+        mesh = getattr(ax, '_anystruct_export_mesh', None)
+        shell_mesh = getattr(ax, '_anystruct_shell_export_mesh', None)
+        if mesh is None and shell_mesh is None:
+            return
+        candidates = []
+        try:
+            flange_w = float(dims.get('flange_w', 0.0))
+            if flange_w > 1e-9:
+                candidates.append(flange_w / 2.0)
+        except Exception:
+            pass
+        try:
+            web_h = float(dims.get('web_h', 0.0))
+            if web_h > 1e-9:
+                candidates.append(web_h / 2.0)
+        except Exception:
+            pass
+        if not candidates:
+            return
+        candidate = min(candidates)
+        for export_mesh in (mesh, shell_mesh):
+            if export_mesh is None:
+                continue
+            current = export_mesh.get('max_edge_length', None)
+            export_mesh['max_edge_length'] = candidate if current in [None, 0] else min(float(current), candidate)
+
+    @staticmethod
+    def _append_faces_to_prop_3d_export_mesh(ax, face_vertices, shell_model=False):
+        mesh = getattr(ax, '_anystruct_shell_export_mesh' if shell_model else '_anystruct_export_mesh', None)
+        if mesh is None:
+            return
+        for face in face_vertices:
+            start_index = len(mesh['vertices']) + 1
+            mesh['vertices'].extend([(float(x), float(y), float(z)) for x, y, z in face])
+            mesh['faces'].append(list(range(start_index, start_index + len(face))))
+
+    @staticmethod
+    def _append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=False):
+        mesh = getattr(ax, '_anystruct_shell_export_mesh' if shell_model else '_anystruct_export_mesh', None)
+        if mesh is None:
+            return
+        x_grid = np.asarray(x_grid)
+        y_grid = np.asarray(y_grid)
+        z_grid = np.asarray(z_grid)
+        if x_grid.ndim != 2 or x_grid.shape[0] < 2 or x_grid.shape[1] < 2:
+            return
+        rows, cols = x_grid.shape
+        for row in range(rows - 1):
+            for col in range(cols - 1):
+                face = [
+                    (x_grid[row, col], y_grid[row, col], z_grid[row, col]),
+                    (x_grid[row, col + 1], y_grid[row, col + 1], z_grid[row, col + 1]),
+                    (x_grid[row + 1, col + 1], y_grid[row + 1, col + 1], z_grid[row + 1, col + 1]),
+                    (x_grid[row + 1, col], y_grid[row + 1, col], z_grid[row + 1, col]),
+                ]
+                start_index = len(mesh['vertices']) + 1
+                mesh['vertices'].extend([(float(x), float(y), float(z)) for x, y, z in face])
+                mesh['faces'].append(list(range(start_index, start_index + 4)))
+
+    @staticmethod
+    def _append_flat_plate_shell_grid_to_prop_3d_export_mesh(ax, x_breaks, y_breaks, z_value=0.0):
+        mesh = getattr(ax, '_anystruct_shell_export_mesh', None)
+        if mesh is None:
+            return
+
+        def unique_sorted(values):
+            result = []
+            for value in sorted(float(item) for item in values):
+                if not result or abs(value - result[-1]) > 1e-9:
+                    result.append(value)
+            return result
+
+        x_values = unique_sorted(x_breaks)
+        y_values = unique_sorted(y_breaks)
+        if len(x_values) < 2 or len(y_values) < 2:
+            return
+
+        for x0, x1 in zip(x_values[:-1], x_values[1:]):
+            if x1 - x0 <= 1e-9:
+                continue
+            for y0, y1 in zip(y_values[:-1], y_values[1:]):
+                if y1 - y0 <= 1e-9:
+                    continue
+                start_index = len(mesh['vertices']) + 1
+                mesh['vertices'].extend([
+                    (x0, y0, float(z_value)), (x1, y0, float(z_value)),
+                    (x1, y1, float(z_value)), (x0, y1, float(z_value)),
+                ])
+                mesh['faces'].append(list(range(start_index, start_index + 4)))
+
+    @staticmethod
+    def _refined_export_mesh(mesh):
+        max_edge_length = mesh.get('max_edge_length', None)
+        if max_edge_length in [None, 0]:
+            return mesh
+        refined = {'name': mesh.get('name', 'ANYstructure_preview'), 'vertices': [], 'faces': [],
+                   'max_edge_length': max_edge_length}
+        for face in mesh.get('faces', []):
+            face_vertices = [mesh['vertices'][index - 1] for index in face]
+            for refined_face in Application._subdivide_export_face(face_vertices, max_edge_length):
+                start_index = len(refined['vertices']) + 1
+                refined['vertices'].extend([(float(x), float(y), float(z)) for x, y, z in refined_face])
+                refined['faces'].append(list(range(start_index, start_index + len(refined_face))))
+        return refined
+
+    @staticmethod
+    def _subdivide_export_face(face_vertices, max_edge_length):
+        if len(face_vertices) != 4:
+            return [face_vertices]
+        p00 = np.asarray(face_vertices[0], dtype=float)
+        p10 = np.asarray(face_vertices[1], dtype=float)
+        p11 = np.asarray(face_vertices[2], dtype=float)
+        p01 = np.asarray(face_vertices[3], dtype=float)
+        u_len = max(np.linalg.norm(p10 - p00), np.linalg.norm(p11 - p01))
+        v_len = max(np.linalg.norm(p01 - p00), np.linalg.norm(p11 - p10))
+        u_count = max(1, int(math.ceil(u_len / max_edge_length)))
+        v_count = max(1, int(math.ceil(v_len / max_edge_length)))
+
+        def interp(u_value, v_value):
+            return ((1.0 - u_value) * (1.0 - v_value) * p00 +
+                    u_value * (1.0 - v_value) * p10 +
+                    u_value * v_value * p11 +
+                    (1.0 - u_value) * v_value * p01)
+
+        faces = []
+        for u_idx in range(u_count):
+            u0 = u_idx / u_count
+            u1 = (u_idx + 1) / u_count
+            for v_idx in range(v_count):
+                v0 = v_idx / v_count
+                v1 = (v_idx + 1) / v_count
+                faces.append([tuple(interp(u0, v0)), tuple(interp(u1, v0)),
+                              tuple(interp(u1, v1)), tuple(interp(u0, v1))])
+        return faces
 
     @staticmethod
     def _disable_prop_3d_artist_clipping(ax):
@@ -6480,6 +6810,7 @@ class Application():
         except Exception:
             pass
         ax.add_collection3d(poly)
+        Application._append_faces_to_prop_3d_export_mesh(ax, vertices)
         return poly
 
     @staticmethod
@@ -6546,13 +6877,7 @@ class Application():
 
     @staticmethod
     def _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80):
-        """Create member positions based on actual length and spacing.
-
-        This is used by the 3D preview only.  The count is governed by the
-        physical length (for example LG) and the specified spacing.  The final
-        span is adjusted slightly by using linspace so the preview ends exactly
-        at the panel/cylinder boundary instead of leaving an odd visual gap.
-        """
+        """Create member positions using the exact specified spacing."""
         try:
             length = float(length)
             spacing = float(spacing)
@@ -6563,14 +6888,19 @@ class Application():
         if spacing <= 1e-9:
             return [0.0, length] if include_ends else [length / 2.0]
 
-        n_intervals = max(1, int(math.ceil(length / spacing)))
-        n_intervals = min(n_intervals, max(1, max_count - 1))
-        positions = np.linspace(0.0, length, n_intervals + 1).tolist()
+        tol = 1e-9
+        positions = [0.0] if include_ends else []
+        next_pos = spacing
+        while next_pos < length - tol:
+            positions.append(float(next_pos))
+            next_pos += spacing
         if include_ends:
+            if abs(positions[-1] - length) > tol:
+                positions.append(float(length))
             return positions
-        if len(positions) <= 2:
+        if not positions:
             return [length / 2.0]
-        return positions[1:-1]
+        return positions
 
     def _flat_preview_lg_from_objects(self, girder, stiffener, spacing):
         """Return LG in metres, preferring the selected line object over GUI defaults."""
@@ -6613,7 +6943,7 @@ class Application():
 
     def _draw_section_web_and_flange_3d(self, ax, orientation, x_center, y_center, length,
                                         plate_thk, dims, x_limits=None, y_limits=None,
-                                        facecolor_web='silver', facecolor_flange='darkgrey'):
+                                        facecolor_web='silver', facecolor_flange='darkgrey', side_sign=1.0):
         """
         Draw a simplified T/L/flat-bar stiffener or girder.
 
@@ -6627,6 +6957,17 @@ class Application():
         sec_type = dims.get('type', 'T')
         if length <= 0.0 or (web_h <= 0.0 and fl_t <= 0.0):
             return
+        self._update_prop_3d_export_mesh_size(ax, dims)
+        if side_sign >= 0:
+            web_z = (plate_thk, plate_thk + web_h)
+            flange_z = (plate_thk + web_h, plate_thk + web_h + fl_t)
+            shell_web_z = (0.0, web_h)
+            shell_flange_z = web_h
+        else:
+            web_z = (-web_h, 0.0)
+            flange_z = (-(web_h + fl_t), -web_h)
+            shell_web_z = (0.0, -web_h)
+            shell_flange_z = -web_h
 
         if orientation == 'x':
             x0, x1 = x_center - length / 2.0, x_center + length / 2.0
@@ -6636,17 +6977,24 @@ class Application():
             if x1 <= x0:
                 return
             self._add_box_3d(ax, x0, x1, y_center - web_t / 2.0, y_center + web_t / 2.0,
-                             plate_thk, plate_thk + web_h, facecolor=facecolor_web, alpha=1.0)
+                             web_z[0], web_z[1], facecolor=facecolor_web, alpha=1.0)
+            self._append_faces_to_prop_3d_export_mesh(ax, [[
+                (x0, y_center, shell_web_z[0]), (x1, y_center, shell_web_z[0]),
+                (x1, y_center, shell_web_z[1]), (x0, y_center, shell_web_z[1])
+            ]], shell_model=True)
             if fl_w > 0.0 and fl_t > 0.0:
                 if sec_type in ['L', 'L-bulb']:
                     y0 = y_center - web_t / 2.0
-                    y1 = y_center + fl_w
+                    y1 = y0 + fl_w
                 else:
                     y0 = y_center - fl_w / 2.0
                     y1 = y_center + fl_w / 2.0
                 self._add_box_3d(ax, x0, x1, y0, y1,
-                                 plate_thk + web_h, plate_thk + web_h + fl_t,
-                                 facecolor=facecolor_flange, alpha=1.0)
+                                 flange_z[0], flange_z[1], facecolor=facecolor_flange, alpha=1.0)
+                self._append_faces_to_prop_3d_export_mesh(ax, [[
+                    (x0, y0, shell_flange_z), (x1, y0, shell_flange_z),
+                    (x1, y1, shell_flange_z), (x0, y1, shell_flange_z)
+                ]], shell_model=True)
         else:
             y0, y1 = y_center - length / 2.0, y_center + length / 2.0
             if y_limits is not None:
@@ -6655,17 +7003,24 @@ class Application():
             if y1 <= y0:
                 return
             self._add_box_3d(ax, x_center - web_t / 2.0, x_center + web_t / 2.0, y0, y1,
-                             plate_thk, plate_thk + web_h, facecolor=facecolor_web, alpha=1.0)
+                             web_z[0], web_z[1], facecolor=facecolor_web, alpha=1.0)
+            self._append_faces_to_prop_3d_export_mesh(ax, [[
+                (x_center, y0, shell_web_z[0]), (x_center, y1, shell_web_z[0]),
+                (x_center, y1, shell_web_z[1]), (x_center, y0, shell_web_z[1])
+            ]], shell_model=True)
             if fl_w > 0.0 and fl_t > 0.0:
                 if sec_type in ['L', 'L-bulb']:
                     x0 = x_center - web_t / 2.0
-                    x1 = x_center + fl_w
+                    x1 = x0 + fl_w
                 else:
                     x0 = x_center - fl_w / 2.0
                     x1 = x_center + fl_w / 2.0
                 self._add_box_3d(ax, x0, x1, y0, y1,
-                                 plate_thk + web_h, plate_thk + web_h + fl_t,
-                                 facecolor=facecolor_flange, alpha=1.0)
+                                 flange_z[0], flange_z[1], facecolor=facecolor_flange, alpha=1.0)
+                self._append_faces_to_prop_3d_export_mesh(ax, [[
+                    (x0, y0, shell_flange_z), (x1, y0, shell_flange_z),
+                    (x1, y1, shell_flange_z), (x0, y1, shell_flange_z)
+                ]], shell_model=True)
 
     def draw_prop_3d(self):
         """Route 3D property preview based on the active line type."""
@@ -6707,8 +7062,11 @@ class Application():
 
         fig = plt.Figure(figsize=(7.2, 2.35), dpi=100)
         ax = fig.add_axes([0.035, 0.11, 0.94, 0.81], projection='3d')
+        self._init_prop_3d_export_mesh(ax, 'flat_panel_preview')
 
         max_z = plate_thk
+        min_z = 0.0
+        member_side_sign = self._prop_3d_member_side_sign()
 
         if girder is not None:
             # For panels with girder, follow the conventional sketch:
@@ -6728,7 +7086,7 @@ class Application():
 
             gdims = self._get_section_3d_dimensions(girder)
             sdims = self._get_section_3d_dimensions(stiffener) if stiffener is not None else None
-            girder_gap = max(gdims.get('web_thk', 0.0), gdims.get('flange_w', 0.0) * 0.35, 0.02)
+            girder_gap = max(gdims.get('web_thk', 0.0), 0.0)
 
             self._add_box_3d(ax, 0.0, width, 0.0, length, 0.0, plate_thk,
                              facecolor='lightgrey', alpha=0.55)
@@ -6736,8 +7094,13 @@ class Application():
             # Central girder, one plate field on each side.
             self._draw_section_web_and_flange_3d(
                 ax, 'y', x_mid, length / 2.0, length, plate_thk, gdims,
-                y_limits=(0.0, length), facecolor_web='silver', facecolor_flange='darkgrey')
-            max_z = max(max_z, plate_thk + gdims['web_h'] + gdims['flange_thk'])
+                y_limits=(0.0, length), facecolor_web='silver', facecolor_flange='darkgrey',
+                side_sign=member_side_sign)
+            member_z_extent = gdims['web_h'] + gdims['flange_thk']
+            if member_side_sign >= 0:
+                max_z = max(max_z, plate_thk + member_z_extent)
+            else:
+                min_z = min(min_z, -member_z_extent)
 
             # Stiffeners run between panel edges/girder. Draw both fields separately.
             if sdims is not None:
@@ -6746,18 +7109,27 @@ class Application():
                 )
                 left_x0, left_x1 = 0.0, max(x_mid - girder_gap / 2.0, 0.0)
                 right_x0, right_x1 = min(x_mid + girder_gap / 2.0, width), width
+                self._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
+                    ax, [0.0, left_x1, x_mid, right_x0, width], [0.0, length] + stiffener_ys)
                 for y in stiffener_ys:
                     if left_x1 > left_x0:
                         self._draw_section_web_and_flange_3d(
                             ax, 'x', (left_x0 + left_x1) / 2.0, y, left_x1 - left_x0,
                             plate_thk, sdims, x_limits=(left_x0, left_x1),
-                            facecolor_web='silver', facecolor_flange='darkgrey')
+                            facecolor_web='silver', facecolor_flange='darkgrey', side_sign=member_side_sign)
                     if right_x1 > right_x0:
                         self._draw_section_web_and_flange_3d(
                             ax, 'x', (right_x0 + right_x1) / 2.0, y, right_x1 - right_x0,
                             plate_thk, sdims, x_limits=(right_x0, right_x1),
-                            facecolor_web='silver', facecolor_flange='darkgrey')
-                max_z = max(max_z, plate_thk + sdims['web_h'] + sdims['flange_thk'])
+                            facecolor_web='silver', facecolor_flange='darkgrey', side_sign=member_side_sign)
+                member_z_extent = sdims['web_h'] + sdims['flange_thk']
+                if member_side_sign >= 0:
+                    max_z = max(max_z, plate_thk + member_z_extent)
+                else:
+                    min_z = min(min_z, -member_z_extent)
+            else:
+                self._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
+                    ax, [0.0, x_mid, width], [0.0, length])
 
             title = '3D stiffened panel with girder'
             ax.set_xlabel('panel length, Lp [m]', fontsize=7, labelpad=-1)
@@ -6781,14 +7153,24 @@ class Application():
 
             if stiffener is not None:
                 dims = self._get_section_3d_dimensions(stiffener)
-                max_z = max(max_z, plate_thk + dims['web_h'] + dims['flange_thk'])
+                member_z_extent = dims['web_h'] + dims['flange_thk']
+                if member_side_sign >= 0:
+                    max_z = max(max_z, plate_thk + member_z_extent)
+                else:
+                    min_z = min(min_z, -member_z_extent)
                 stiffener_ys = self._positions_from_length_and_spacing(
                     length, spacing, include_ends=True, max_count=80
                 )
+                self._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
+                    ax, [0.0, width], [0.0, length] + stiffener_ys)
                 for y in stiffener_ys:
                     self._draw_section_web_and_flange_3d(
                         ax, 'x', width / 2.0, y, width, plate_thk, dims,
-                        x_limits=(0.0, width), facecolor_web='silver', facecolor_flange='darkgrey')
+                        x_limits=(0.0, width), facecolor_web='silver', facecolor_flange='darkgrey',
+                        side_sign=member_side_sign)
+            else:
+                self._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
+                    ax, [0.0, width], [0.0, length])
 
             title = '3D stiffened panel' if stiffener is not None else '3D plate preview'
             if stiffener is not None:
@@ -6810,15 +7192,16 @@ class Application():
         x_pad = max(0.14 * width, 0.08)
         y_pad = max(0.08 * length, 0.08)
         z_top = max(max_z * 1.28, plate_thk * 7.0, 0.08)
+        z_bottom = min(-0.02 * z_top, min_z * 1.08)
         ax.set_xlim(-x_pad, width + x_pad)
         ax.set_ylim(-y_pad, length + y_pad)
-        ax.set_zlim(-0.02 * z_top, z_top)
-        self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top, zoom=1.52)
+        ax.set_zlim(z_bottom, z_top)
+        self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top - z_bottom, zoom=1.52)
         ax.view_init(elev=22, azim=-55)
 
         self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
 
-    def _add_cylinder_longitudinal_stiffener_3d(self, ax, radius, length, angle, dims):
+    def _add_cylinder_longitudinal_stiffener_3d(self, ax, radius, length, angle, dims, side_sign=1.0):
         """Draw a simplified longitudinal stiffener on a shell as radial web + outer flange."""
         web_h = max(dims.get('web_h', 0.0), 0.0)
         web_t = max(dims.get('web_thk', 0.0), 0.0)
@@ -6826,22 +7209,32 @@ class Application():
         fl_t = max(dims.get('flange_thk', 0.0), 0.0)
         if web_h <= 0.0:
             return
+        self._update_prop_3d_export_mesh_size(ax, dims)
 
         z = np.linspace(0.0, length, 16)
-        r = np.linspace(radius, radius + web_h, 3)
+        r = np.linspace(radius, radius + side_sign * web_h, 3)
         r_grid, z_grid = np.meshgrid(r, z)
         x_grid = r_grid * np.cos(angle)
         y_grid = r_grid * np.sin(angle)
         ax.plot_surface(x_grid, y_grid, z_grid, alpha=0.82, linewidth=0.2,
                         edgecolor='black', color='silver')
+        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
 
         if fl_w > 0.0 and fl_t > 0.0 and radius > 0.0:
-            theta_half = min(max(fl_w / max(radius + web_h, 1e-9) / 2.0, 0.002), 0.20)
+            flange_radius = max(radius + side_sign * web_h, 1e-9)
+            theta_half = fl_w / flange_radius / 2.0
             theta = np.linspace(angle - theta_half, angle + theta_half, 4)
             z_grid, theta_grid = np.meshgrid(z, theta)
-            r_outer = radius + web_h + fl_t / 2.0
-            ax.plot_surface(r_outer * np.cos(theta_grid), r_outer * np.sin(theta_grid), z_grid,
+            r_outer = radius + side_sign * (web_h + fl_t / 2.0)
+            x_grid = r_outer * np.cos(theta_grid)
+            y_grid = r_outer * np.sin(theta_grid)
+            ax.plot_surface(x_grid, y_grid, z_grid,
                             alpha=0.82, linewidth=0.2, edgecolor='black', color='darkgrey')
+            self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+            x_grid = flange_radius * np.cos(theta_grid)
+            y_grid = flange_radius * np.sin(theta_grid)
+            self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
 
     @staticmethod
     def _is_cylinder_panel_preview(cyl_obj):
@@ -6857,7 +7250,8 @@ class Application():
             return -half_span, half_span
         return 0.0, 2.0 * math.pi
 
-    def _add_cylinder_ring_stiffener_3d(self, ax, radius, z_pos, dims, is_frame=False, theta_range=None):
+    def _add_cylinder_ring_stiffener_3d(self, ax, radius, z_pos, dims, is_frame=False, theta_range=None,
+                                        side_sign=1.0):
         """Draw a simplified ring stiffener/frame as annular web + outer flange."""
         web_h = max(dims.get('web_h', 0.0), 0.0)
         web_t = max(dims.get('web_thk', 0.0), 0.0)
@@ -6865,28 +7259,41 @@ class Application():
         fl_t = max(dims.get('flange_thk', 0.0), 0.0)
         if web_h <= 0.0:
             return
+        self._update_prop_3d_export_mesh_size(ax, dims)
         theta_start, theta_end = theta_range if theta_range is not None else (0.0, 2.0 * math.pi)
         theta = np.linspace(theta_start, theta_end, 64)
-        rr = np.linspace(radius, radius + web_h, 3)
+        rr = np.linspace(radius, radius + side_sign * web_h, 3)
         theta_grid, rr_grid = np.meshgrid(theta, rr)
         z_grid = np.full_like(theta_grid, z_pos)
         ax.plot_surface(rr_grid * np.cos(theta_grid), rr_grid * np.sin(theta_grid), z_grid,
                         alpha=0.86, linewidth=0.15, edgecolor='black',
                         color='dimgray' if is_frame else 'silver')
+        self._append_grid_surface_to_prop_3d_export_mesh(
+            ax, rr_grid * np.cos(theta_grid), rr_grid * np.sin(theta_grid), z_grid)
+        self._append_grid_surface_to_prop_3d_export_mesh(
+            ax, rr_grid * np.cos(theta_grid), rr_grid * np.sin(theta_grid), z_grid, shell_model=True)
 
         if web_t > 0.0:
             # Two axial edges make the ring thickness visible.
             for z_edge in [z_pos - web_t / 2.0, z_pos + web_t / 2.0]:
-                ax.plot((radius + web_h) * np.cos(theta), (radius + web_h) * np.sin(theta),
+                outer_radius = radius + side_sign * web_h
+                ax.plot(outer_radius * np.cos(theta), outer_radius * np.sin(theta),
                         np.full_like(theta, z_edge), color='black', linewidth=0.8 if is_frame else 0.5)
 
         if fl_w > 0.0 and fl_t > 0.0:
             z_band = np.linspace(z_pos - fl_w / 2.0, z_pos + fl_w / 2.0, 3)
             theta_grid, z_grid = np.meshgrid(theta, z_band)
-            r_outer = radius + web_h + fl_t / 2.0
-            ax.plot_surface(r_outer * np.cos(theta_grid), r_outer * np.sin(theta_grid), z_grid,
+            r_outer = radius + side_sign * (web_h + fl_t / 2.0)
+            x_grid = r_outer * np.cos(theta_grid)
+            y_grid = r_outer * np.sin(theta_grid)
+            ax.plot_surface(x_grid, y_grid, z_grid,
                             alpha=0.82, linewidth=0.15, edgecolor='black',
                             color='black' if is_frame else 'darkgrey')
+            self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+            shell_radius = radius + side_sign * web_h
+            self._append_grid_surface_to_prop_3d_export_mesh(
+                ax, shell_radius * np.cos(theta_grid), shell_radius * np.sin(theta_grid), z_grid,
+                shell_model=True)
 
     def draw_cylinder_prop_3d(self, cyl_obj):
         """Draw shell/curved plate with optional longitudinal stiffeners, ring stiffeners and ring frames."""
@@ -6898,6 +7305,7 @@ class Application():
         theta_range = self._cylinder_preview_theta_range(cyl_obj)
         theta_start, theta_end = theta_range
         is_panel_preview = self._is_cylinder_panel_preview(cyl_obj)
+        member_side_sign = self._prop_3d_member_side_sign()
         theta = np.linspace(theta_start, theta_end, 30 if is_panel_preview else 64)
         z = np.linspace(0.0, length, 22)
         theta_grid, z_grid = np.meshgrid(theta, z)
@@ -6906,8 +7314,11 @@ class Application():
 
         fig = plt.Figure(figsize=(7.2, 2.35), dpi=100)
         ax = fig.add_axes([0.035, 0.11, 0.94, 0.81], projection='3d')
+        self._init_prop_3d_export_mesh(ax, 'cylinder_preview')
         ax.plot_surface(x_grid, y_grid, z_grid, alpha=0.30, linewidth=0.12,
                         edgecolor='grey', color='lightgrey')
+        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
 
         if thk > 0 and radius > thk:
             for zz in [0.0, length]:
@@ -6936,7 +7347,8 @@ class Application():
                 num_stf = max(4, min(72, int(round(2.0 * math.pi * radius / spacing))))
                 stiffener_angles = [2.0 * math.pi * idx / num_stf for idx in range(num_stf)]
             for ang in stiffener_angles:
-                self._add_cylinder_longitudinal_stiffener_3d(ax, radius, length, ang, long_dims)
+                self._add_cylinder_longitudinal_stiffener_3d(
+                    ax, radius, length, ang, long_dims, side_sign=member_side_sign)
 
         if cyl_obj.RingStfObj is not None:
             ring_dims = self._get_section_3d_dimensions(cyl_obj.RingStfObj)
@@ -6955,7 +7367,8 @@ class Application():
             for zz in self._positions_from_length_and_spacing(
                     length, ring_spacing, include_ends=False, max_count=30):
                 self._add_cylinder_ring_stiffener_3d(
-                    ax, radius, zz, ring_dims, is_frame=False, theta_range=theta_range)
+                    ax, radius, zz, ring_dims, is_frame=False, theta_range=theta_range,
+                    side_sign=member_side_sign)
 
         if cyl_obj.RingFrameObj is not None:
             frame_dims = self._get_section_3d_dimensions(cyl_obj.RingFrameObj)
@@ -6981,7 +7394,8 @@ class Application():
                 )
             for zz in girder_positions:
                 self._add_cylinder_ring_stiffener_3d(
-                    ax, radius, zz, frame_dims, is_frame=True, theta_range=theta_range)
+                    ax, radius, zz, frame_dims, is_frame=True, theta_range=theta_range,
+                    side_sign=member_side_sign)
 
         ax.text2D(0.02, 0.92, 'SELECTED: ' + str(self._active_line), transform=ax.transAxes,
                   fontsize=8, color='red')

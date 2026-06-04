@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 from types import SimpleNamespace
+from anystruct.main_application import Application
 
 
 def test_main_application_uses_shared_geometry_menu_helpers():
@@ -229,9 +230,213 @@ def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners(
     assert "alpha=1.0" in section_block
     assert "section_base_z" not in flat_3d_block
     assert "visual_z_span" not in flat_3d_block
-    assert "self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top, zoom=1.52)" in flat_3d_block
+    assert "self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top - z_bottom, zoom=1.52)" in flat_3d_block
     assert "ax.view_init(elev=22, azim=-55)" in flat_3d_block
     assert "self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))" in flat_3d_block
+
+
+def test_3d_preview_can_export_prepomax_stl_mesh():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "ttk.Button(view_row, text='STL shell'" in source
+    assert "ttk.Button(view_row, text='UNV shell'" in source
+    assert "ttk.Button(view_row, text='STL solid'" not in source
+    assert "ttk.Button(view_row, text='UNV solid'" not in source
+    assert "def export_prop_3d_stl(self):" in source
+    assert "def export_prop_3d_unv(self):" in source
+    assert "def _get_prop_3d_shell_export_mesh(self):" in source
+    assert "mesh = self._get_prop_3d_shell_export_mesh()" in source
+    assert "filetypes=[(\"Stereolithography STL\", \"*.stl\"), (\"All files\", \"*.*\")]" in source
+    assert "filetypes=[(\"Universal UNV\", \"*.unv\"), (\"All files\", \"*.*\")]" in source
+    assert "def _write_prop_3d_stl_file(filename, mesh):" in source
+    assert "def _write_prop_3d_unv_file(filename, mesh):" in source
+    assert "stl_file.write('solid ' + name + '\\n')" in source
+    assert "stl_file.write('      vertex {:.9g} {:.9g} {:.9g}\\n'.format(float(x), float(y), float(z)))" in source
+    assert "'  2411\\n'" in source
+    assert "'  2412\\n'" in source
+    assert "unv_file.writelines(lines)" in source
+    assert "element_id, 91, 1, 1, 7, 3" in source
+    assert "STEP" not in source
+    assert "VERTEX_POINT" not in source
+    assert "def _deduplicate_export_mesh(mesh):" in source
+    assert "def _format_unv_float(value):" in source
+    assert "def _refined_export_mesh(mesh):" in source
+    assert "def _subdivide_export_face(face_vertices, max_edge_length):" in source
+    assert "def _update_prop_3d_export_mesh_size(ax, dims):" in source
+    assert "flange_w / 2.0" in source
+    assert "def _triangulate_export_face(face_vertices):" in source
+    assert "def _stl_triangle_normal(triangle):" in source
+    assert "def _init_prop_3d_export_mesh(ax, name):" in source
+    assert "ax._anystruct_shell_export_mesh = shell_mesh" in source
+    assert "self._prop_3d_shell_export_mesh" in source
+    assert "_anystruct_shell_export_mesh' if shell_model else '_anystruct_export_mesh" in source
+    assert "def _append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=False):" in source
+    assert "Application._append_faces_to_prop_3d_export_mesh(ax, vertices)" in source
+    assert "self._init_prop_3d_export_mesh(ax, 'flat_panel_preview')" in source
+    assert "self._init_prop_3d_export_mesh(ax, 'cylinder_preview')" in source
+    assert "self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)" in source
+
+
+def test_shell_export_mesh_is_separate_from_solid_preview_mesh():
+    ax = SimpleNamespace()
+    Application._init_prop_3d_export_mesh(ax, "preview")
+
+    Application._append_faces_to_prop_3d_export_mesh(ax, [[
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (1.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0),
+    ]], shell_model=True)
+
+    assert ax._anystruct_export_mesh["faces"] == []
+    assert len(ax._anystruct_shell_export_mesh["faces"]) == 1
+    assert ax._anystruct_shell_export_mesh["name"] == "preview_shell"
+
+
+def test_flat_shell_plate_export_is_split_on_member_attachment_lines():
+    ax = SimpleNamespace()
+    Application._init_prop_3d_export_mesh(ax, "plate")
+
+    Application._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
+        ax, x_breaks=[0.0, 2.0], y_breaks=[0.0, 0.75, 1.5, 2.0])
+
+    faces = ax._anystruct_shell_export_mesh["faces"]
+    vertices = ax._anystruct_shell_export_mesh["vertices"]
+    assert len(faces) == 3
+    face_edges = []
+    for face in faces:
+        face_vertices = [vertices[index - 1] for index in face]
+        face_edges.append((face_vertices[0][1], face_vertices[2][1]))
+    assert face_edges == [(0.0, 0.75), (0.75, 1.5), (1.5, 2.0)]
+
+
+def test_3d_export_box_geometry_uses_exact_extents():
+    class FakeAxis(SimpleNamespace):
+        def add_collection3d(self, collection):
+            self.collections.append(collection)
+
+    ax = FakeAxis(collections=[])
+    Application._init_prop_3d_export_mesh(ax, "box")
+
+    Application._add_box_3d(ax, 1.25, 3.75, -0.4, 2.6, 0.015, 0.047)
+
+    xs = [vertex[0] for vertex in ax._anystruct_export_mesh["vertices"]]
+    ys = [vertex[1] for vertex in ax._anystruct_export_mesh["vertices"]]
+    zs = [vertex[2] for vertex in ax._anystruct_export_mesh["vertices"]]
+    assert abs(min(xs) - 1.25) < 1e-12
+    assert abs(max(xs) - 3.75) < 1e-12
+    assert abs(min(ys) + 0.4) < 1e-12
+    assert abs(max(ys) - 2.6) < 1e-12
+    assert abs(min(zs) - 0.015) < 1e-12
+    assert abs(max(zs) - 0.047) < 1e-12
+    assert abs((max(zs) - min(zs)) - 0.032) < 1e-12
+
+
+def test_3d_flat_section_geometry_uses_exact_web_and_flange_dimensions():
+    class FakeAxis(SimpleNamespace):
+        def add_collection3d(self, collection):
+            self.collections.append(collection)
+
+    app = object.__new__(Application)
+    ax = FakeAxis(collections=[])
+    Application._init_prop_3d_export_mesh(ax, "section")
+    dims = {
+        "web_h": 0.42,
+        "web_thk": 0.014,
+        "flange_w": 0.18,
+        "flange_thk": 0.025,
+        "type": "L",
+    }
+
+    app._draw_section_web_and_flange_3d(
+        ax, "x", x_center=5.0, y_center=2.0, length=3.0,
+        plate_thk=0.016, dims=dims, side_sign=1.0,
+    )
+
+    solid_vertices = ax._anystruct_export_mesh["vertices"]
+    solid_ys = sorted({round(vertex[1], 12) for vertex in solid_vertices})
+    solid_zs = sorted({round(vertex[2], 12) for vertex in solid_vertices})
+    assert 1.993 in solid_ys
+    assert 2.007 in solid_ys
+    assert round(1.993 + 0.18, 12) in solid_ys
+    assert 0.016 in solid_zs
+    assert round(0.016 + 0.42, 12) in solid_zs
+    assert round(0.016 + 0.42 + 0.025, 12) in solid_zs
+
+    shell_faces = ax._anystruct_shell_export_mesh["faces"]
+    shell_vertices = ax._anystruct_shell_export_mesh["vertices"]
+    web_face = [shell_vertices[index - 1] for index in shell_faces[0]]
+    flange_face = [shell_vertices[index - 1] for index in shell_faces[1]]
+    assert {round(vertex[1], 12) for vertex in web_face} == {2.0}
+    assert {round(vertex[2], 12) for vertex in web_face} == {0.0, 0.42}
+    assert {round(vertex[2], 12) for vertex in flange_face} == {0.42}
+    flange_ys = [vertex[1] for vertex in flange_face]
+    assert abs((max(flange_ys) - min(flange_ys)) - 0.18) < 1e-12
+
+
+def test_3d_member_positions_keep_exact_spacing_and_end_boundary():
+    positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=True)
+    assert positions == [0.0, 3.0, 6.0, 9.0, 10.0]
+    assert [round(positions[idx + 1] - positions[idx], 12) for idx in range(3)] == [3.0, 3.0, 3.0]
+
+    internal_positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=False)
+    assert internal_positions == [3.0, 6.0, 9.0]
+
+
+def test_unv_export_writes_nodes_and_elements(tmp_path):
+    mesh = {
+        "name": "unv_smoke",
+        "vertices": [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ],
+        "faces": [[1, 2, 3, 4]],
+        "max_edge_length": None,
+    }
+    filename = tmp_path / "preview.unv"
+
+    Application._write_prop_3d_unv_file(filename, mesh)
+
+    content = filename.read_text(encoding="utf-8")
+    assert "  2411\n" in content
+    assert "  2412\n" in content
+    assert "         1         1         1        11\n" in content
+    assert "         1        91         1         1         7         3\n" in content
+    assert len(content.splitlines()) > 8
+
+
+def test_3d_preview_can_swap_flat_and_cylinder_member_side():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    flat_3d_block = source[
+        source.index("def draw_flat_panel_prop_3d"):
+        source.index("def _add_cylinder_longitudinal_stiffener_3d")
+    ]
+    section_block = source[
+        source.index("def _draw_section_web_and_flange_3d"):
+        source.index("def draw_prop_3d")
+    ]
+    cylinder_block = source[
+        source.index("def _add_cylinder_longitudinal_stiffener_3d"):
+        source.index("def draw_prop", source.index("def draw_cylinder_prop_3d"))
+    ]
+
+    assert "self._new_prop_3d_opposite_side = tk.BooleanVar()" in source
+    assert "ttk.Checkbutton(view_row, text='Opposite side'" in source
+    assert "def _prop_3d_member_side_sign(self):" in source
+    assert "side_sign=1.0" in section_block
+    assert "web_z = (-web_h, 0.0)" in section_block
+    assert "flange_z = (-(web_h + fl_t), -web_h)" in section_block
+    assert "member_side_sign = self._prop_3d_member_side_sign()" in flat_3d_block
+    assert "side_sign=member_side_sign" in flat_3d_block
+    assert "z_bottom = min(-0.02 * z_top, min_z * 1.08)" in flat_3d_block
+    assert "side_sign=1.0" in cylinder_block
+    assert "radius + side_sign * web_h" in cylinder_block
+    assert "member_side_sign = self._prop_3d_member_side_sign()" in cylinder_block
+    assert "side_sign=member_side_sign" in cylinder_block
 
 
 def test_cylinder_panel_domains_render_as_angular_sector_preview():
