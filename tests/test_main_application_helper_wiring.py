@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import re
 from types import SimpleNamespace
 from anystruct.main_application import Application
@@ -215,6 +216,84 @@ def test_simplified_3d_preview_uses_main_canvas_place():
     assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
 
 
+def test_simplified_mode_draws_prepomax_imperfection_guidance_in_lower_pane():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def draw_prepomax_imperfection_recommendations(self):" in source
+    assert "PrePoMax imperfection input, DNVGL-OS-C401" in source
+    assert "Use the value as initial geometry amplitude" in source
+    assert "self.draw_prepomax_imperfection_recommendations()" in source
+    assert "def _select_prepomax_imperfection_row(self, row_index):" in source
+    assert "def _draw_prepomax_imperfection_sketch(self, canvas, row, x0, y0, x1, y1" in source
+    assert "canvas.tag_bind(tag, '<Button-1>'" in source
+    assert "self._selected_prepomax_imperfection_row = 0" in source
+    assert "def _draw_prepomax_tolerance_table_button(self, canvas, canvas_width):" in source
+    assert "text='Open DNV table'" in source
+    assert "self.open_dnv_tolerance_table_image()" in source
+    assert "def _dnv_tolerance_table_image_path(self):" in source
+    assert "tolerances.png" in source
+    assert "def open_dnv_tolerance_table_image(self):" in source
+    assert "ImageTk.PhotoImage(resized)" in source
+    assert "table_right = max(300, canvas_width * 0.74)" in source
+    assert "row_height = max(22, min(32" in source
+    assert "image_canvas = tk.Canvas(window" in source
+    assert "x_scroll = ttk.Scrollbar(window, orient=tk.HORIZONTAL" in source
+    assert "y_scroll = ttk.Scrollbar(window, orient=tk.VERTICAL" in source
+    assert "def zoom_to(scale):" in source
+    assert "def zoom_by(factor):" in source
+    assert "text='Original size'" in source
+    assert "image_canvas.configure(scrollregion=(0, 0, photo.width(), photo.height()))" in source
+    assert "delta = 0.005 s" in source
+    assert "delta = 0.0015 l" in source
+    assert "delta = 0.02 s" in source
+    assert "delta = 0.005 r" in source
+    assert "delta = 0.01 g / (1 + g/r)" in source
+    assert "sketch='plate_out_of_plane'" in source
+    assert "sketch='parallel_misalignment'" in source
+    assert "sketch='cylinder_stiffener_misalignment'" in source
+    assert "sketch='local_roundness'" in source
+
+
+def test_flat_panel_imperfection_recommendations_follow_dnvgl_os_c401():
+    plate = SimpleNamespace(get_s=lambda: 0.7, get_span=lambda: 4.0)
+    stiffener = SimpleNamespace(get_s=lambda: 0.7, get_span=lambda: 4.0, get_fl_w=lambda: 0.12)
+    girder = SimpleNamespace(spacing=2.5, girder_lg=10.0, b=0.2)
+    all_obj = SimpleNamespace(Plate=plate, Stiffener=stiffener, Girder=girder)
+
+    rows = Application._flat_panel_imperfection_recommendations(all_obj)
+    values = {row["detail"]: row["value_mm"] for row in rows}
+
+    assert values["Plate out-of-plane"] == 3.5
+    assert values["Stiffener web straightness"] == 6.0
+    assert values["Stiffener flange straightness"] == 6.0
+    assert values["Parallel stiffener misalignment"] == 14.0
+    assert values["Girder web straightness"] == 15.0
+    assert values["Parallel girder misalignment"] == 50.0
+    sketches = {row["detail"]: row["sketch"] for row in rows}
+    assert sketches["Plate out-of-plane"] == "plate_out_of_plane"
+    assert sketches["Parallel stiffener misalignment"] == "parallel_misalignment"
+
+
+def test_cylinder_imperfection_recommendations_follow_dnvgl_os_c401():
+    shell = SimpleNamespace(radius=6.5, thk=0.019, dist_between_rings=3.3, length_of_shell=20.0)
+    long_stiffener = SimpleNamespace(spacing=680.0, b=49.0)
+    cylinder = SimpleNamespace(ShellObj=shell, LongStfObj=long_stiffener, panel_spacing=0.68)
+
+    rows = Application._cylinder_imperfection_recommendations(cylinder)
+    values = {row["detail"]: row["value_mm"] for row in rows}
+    local_g = min(680.0, 1.15 * math.sqrt(3300.0 * 6500.0 * 19.0), math.pi * 6500.0 / 2.0)
+
+    assert values["Radius deviation at ring"] == 32.5
+    assert abs(values["Local out-of-roundness"] - (0.01 * local_g / (1.0 + local_g / 6500.0))) < 1e-12
+    assert values["Longitudinal stiffener straightness"] == 4.95
+    assert values["Longitudinal flange straightness"] == 4.95
+    assert values["Longitudinal stiffener misalignment"] == 13.6
+    sketches = {row["detail"]: row["sketch"] for row in rows}
+    assert sketches["Local out-of-roundness"] == "local_roundness"
+    assert sketches["Longitudinal stiffener misalignment"] == "cylinder_stiffener_misalignment"
+
+
 def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -242,6 +321,8 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "import anystruct.solid_export as solid_export" in source
     assert "ttk.Button(view_row, text='Solid export'" in source
     assert "ttk.Button(view_row, text='Shell export'" in source
+    assert "ttk.Button(view_row, text='FE buckling'" not in source
+    assert "run_prop_3d_opensees_buckling" not in source
     assert "ttk.Button(view_row, text='STL solid'" not in source
     assert "ttk.Button(view_row, text='Mesh solid'" not in source
     assert "ttk.Button(view_row, text='STL shell'" not in source

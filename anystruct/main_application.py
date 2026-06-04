@@ -314,6 +314,7 @@ class Application():
         self._prop_3d_shell_export_mesh = None
         self._prop_3d_default_view = (22, -55)
         self._prop_3d_resize_after_id = None
+        self._selected_prepomax_imperfection_row = 0
 
         # Point frame
         self._pt_frame = tk.Frame(self._main_canvas, width=100, height=100, bg="black", relief='raised')
@@ -7077,6 +7078,184 @@ class Application():
         return value / 1000.0 if value > 100.0 else value
 
     @staticmethod
+    def _normalise_imperfection_length_to_mm(value, default=0.0):
+        """Return an imperfection basis length in mm from m or mm inputs."""
+        try:
+            value = float(value)
+        except Exception:
+            return float(default)
+        if value <= 0.0:
+            return float(default)
+        return value * 1000.0 if value < 50.0 else value
+
+    @staticmethod
+    def _imperfection_row(detail, formula, value_mm, basis, sketch='member_straightness'):
+        return {
+            'detail': detail,
+            'formula': formula,
+            'value_mm': max(float(value_mm), 0.0),
+            'basis': basis,
+            'sketch': sketch,
+        }
+
+    @staticmethod
+    def _format_imperfection_value(value_mm):
+        if value_mm >= 10.0:
+            return str(round(value_mm, 1)) + ' mm'
+        if value_mm >= 1.0:
+            return str(round(value_mm, 2)) + ' mm'
+        return str(round(value_mm, 3)) + ' mm'
+
+    @staticmethod
+    def _flat_panel_imperfection_recommendations(all_obj):
+        """Return DNVGL-OS-C401 imperfection amplitudes for the active flat panel."""
+        rows = []
+        if all_obj is None or getattr(all_obj, 'Plate', None) is None:
+            return rows
+
+        plate = all_obj.Plate
+        spacing_mm = Application._normalise_imperfection_length_to_mm(
+            Application._safe_obj_float(plate, ('get_s',), ('spacing',), 0.0)
+        )
+        span_mm = Application._normalise_imperfection_length_to_mm(
+            Application._safe_obj_float(plate, ('get_span',), ('span',), 0.0)
+        )
+
+        if spacing_mm > 0.0:
+            rows.append(Application._imperfection_row(
+                'Plate out-of-plane',
+                'delta = 0.005 s',
+                0.005 * spacing_mm,
+                's = ' + Application._format_imperfection_value(spacing_mm),
+                sketch='plate_out_of_plane',
+            ))
+
+        for label, member in [('Stiffener', getattr(all_obj, 'Stiffener', None)),
+                              ('Girder', getattr(all_obj, 'Girder', None))]:
+            if member is None:
+                continue
+            member_spacing_mm = Application._normalise_imperfection_length_to_mm(
+                Application._safe_obj_float(member, ('get_s',), ('spacing', 's'), spacing_mm)
+            )
+            if label == 'Girder':
+                member_span = Application._safe_obj_float(member, (), ('girder_lg', '_girder_lg'), 0.0)
+                if member_span <= 0.0:
+                    member_span = Application._safe_obj_float(member, ('get_span',), ('span',), span_mm)
+            else:
+                member_span = Application._safe_obj_float(member, ('get_span',), ('span',), span_mm)
+            member_span_mm = Application._normalise_imperfection_length_to_mm(member_span)
+            if member_span_mm > 0.0:
+                rows.append(Application._imperfection_row(
+                    label + ' web straightness',
+                    'delta = 0.0015 l',
+                    0.0015 * member_span_mm,
+                    'l = ' + Application._format_imperfection_value(member_span_mm),
+                    sketch='member_straightness',
+                ))
+                flange_width_mm = Application._normalise_imperfection_length_to_mm(
+                    Application._safe_obj_float(member, ('get_fl_w',), ('fl_w', 'b'), 0.0)
+                )
+                if flange_width_mm > 0.0:
+                    rows.append(Application._imperfection_row(
+                        label + ' flange straightness',
+                        'delta = 0.0015 l',
+                        0.0015 * member_span_mm,
+                        'l = ' + Application._format_imperfection_value(member_span_mm),
+                        sketch='flange_straightness',
+                    ))
+            if member_spacing_mm > 0.0:
+                rows.append(Application._imperfection_row(
+                    'Parallel ' + label.lower() + ' misalignment',
+                    'delta = 0.02 s',
+                    0.02 * member_spacing_mm,
+                    's = ' + Application._format_imperfection_value(member_spacing_mm),
+                    sketch='parallel_misalignment',
+                ))
+        return rows
+
+    @staticmethod
+    def _cylinder_imperfection_recommendations(cyl_obj):
+        """Return DNVGL-OS-C401 imperfection amplitudes for the active cylinder."""
+        rows = []
+        if cyl_obj is None or getattr(cyl_obj, 'ShellObj', None) is None:
+            return rows
+
+        shell = cyl_obj.ShellObj
+        radius_mm = Application._normalise_imperfection_length_to_mm(
+            Application._safe_obj_float(shell, (), ('radius',), 0.0)
+        )
+        thickness_mm = Application._normalise_imperfection_length_to_mm(
+            Application._safe_obj_float(shell, (), ('thk', 't'), 0.0)
+        )
+        ring_spacing_mm = Application._normalise_imperfection_length_to_mm(
+            Application._safe_obj_float(shell, (), ('dist_between_rings', 'length_of_shell', 'tot_cyl_length'), 0.0)
+        )
+        panel_spacing_mm = Application._normalise_imperfection_length_to_mm(
+            Application._safe_obj_float(cyl_obj, (), ('panel_spacing',), 0.0)
+        )
+
+        long_stiffener = getattr(cyl_obj, 'LongStfObj', None)
+        if long_stiffener is not None:
+            panel_spacing_mm = Application._normalise_imperfection_length_to_mm(
+                Application._safe_obj_float(long_stiffener, (), ('spacing', 's'), panel_spacing_mm)
+            )
+
+        if radius_mm > 0.0:
+            rows.append(Application._imperfection_row(
+                'Radius deviation at ring',
+                'delta = 0.005 r',
+                0.005 * radius_mm,
+                'r = ' + Application._format_imperfection_value(radius_mm),
+                sketch='radius_deviation',
+            ))
+
+        g_candidates = []
+        if panel_spacing_mm > 0.0:
+            g_candidates.append(panel_spacing_mm)
+        if ring_spacing_mm > 0.0 and radius_mm > 0.0 and thickness_mm > 0.0:
+            g_candidates.append(1.15 * math.sqrt(ring_spacing_mm * radius_mm * thickness_mm))
+        if radius_mm > 0.0:
+            g_candidates.append(math.pi * radius_mm / 2.0)
+        if radius_mm > 0.0 and g_candidates:
+            template_length_mm = min(g_candidates)
+            rows.append(Application._imperfection_row(
+                'Local out-of-roundness',
+                'delta = 0.01 g / (1 + g/r)',
+                0.01 * template_length_mm / (1.0 + template_length_mm / radius_mm),
+                'g = ' + Application._format_imperfection_value(template_length_mm),
+                sketch='local_roundness',
+            ))
+
+        if long_stiffener is not None and ring_spacing_mm > 0.0:
+            rows.append(Application._imperfection_row(
+                'Longitudinal stiffener straightness',
+                'delta = 0.0015 l',
+                0.0015 * ring_spacing_mm,
+                'l = ' + Application._format_imperfection_value(ring_spacing_mm),
+                sketch='member_straightness',
+            ))
+            flange_width_mm = Application._normalise_imperfection_length_to_mm(
+                Application._safe_obj_float(long_stiffener, (), ('b', 'fl_w'), 0.0)
+            )
+            if flange_width_mm > 0.0:
+                rows.append(Application._imperfection_row(
+                    'Longitudinal flange straightness',
+                    'delta = 0.0015 l',
+                    0.0015 * ring_spacing_mm,
+                    'l = ' + Application._format_imperfection_value(ring_spacing_mm),
+                    sketch='flange_straightness',
+                ))
+            if panel_spacing_mm > 0.0:
+                rows.append(Application._imperfection_row(
+                    'Longitudinal stiffener misalignment',
+                    'delta = 0.02 s',
+                    0.02 * panel_spacing_mm,
+                    's = ' + Application._format_imperfection_value(panel_spacing_mm),
+                    sketch='cylinder_stiffener_misalignment',
+                ))
+        return rows
+
+    @staticmethod
     def _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80):
         """Create member positions with even end bays when boundary members are shown."""
         try:
@@ -7257,6 +7436,324 @@ class Application():
                 font=self._text_size['Text 10 bold'],
                 fill='red',
             )
+            return
+
+        if getattr(self, '_simplified_calculation_mode', False):
+            self.draw_prepomax_imperfection_recommendations()
+
+    def draw_prepomax_imperfection_recommendations(self):
+        """Draw DNVGL-OS-C401 imperfection guidance for PrePoMax in the lower pane."""
+        canvas = self._prop_canvas
+        canvas.delete('all')
+        canvas_width = max(canvas.winfo_width(), 360)
+        canvas_height = max(canvas.winfo_height(), 170)
+        text_color = getattr(self, '_color_text', 'black')
+
+        rows = []
+        if self._line_is_active and self._active_line in self._line_to_struc:
+            if self._line_to_struc[self._active_line][5] is not None:
+                rows = self._cylinder_imperfection_recommendations(self._line_to_struc[self._active_line][5])
+            else:
+                rows = self._flat_panel_imperfection_recommendations(self._line_to_struc[self._active_line][0])
+
+        canvas.create_rectangle(4, 4, canvas_width - 4, canvas_height - 4,
+                                outline='#9aa5b1', fill='#f8fafc')
+        canvas.create_text(
+            12, 10,
+            text='PrePoMax imperfection input, DNVGL-OS-C401',
+            anchor='nw',
+            font=self._text_size['Text 10 bold'],
+            fill=text_color,
+        )
+        canvas.create_text(
+            12, 31,
+            text='Use the value as initial geometry amplitude for the matching imperfection shape.',
+            anchor='nw',
+            width=max(canvas_width - 160, 120),
+            font=self._text_size['Text 8'],
+            fill=text_color,
+        )
+        self._draw_prepomax_tolerance_table_button(canvas, canvas_width)
+
+        if not rows:
+            canvas.create_text(
+                12, 62,
+                text='No active single panel/cylinder geometry is available.',
+                anchor='nw',
+                width=canvas_width - 24,
+                font=self._text_size['Text 9'],
+                fill='red',
+            )
+            return
+
+        selected = int(getattr(self, '_selected_prepomax_imperfection_row', 0))
+        if selected < 0 or selected >= len(rows):
+            selected = 0
+            self._selected_prepomax_imperfection_row = selected
+
+        top = 64
+        left = 12
+        table_right = max(300, canvas_width * 0.74)
+        sketch_left = table_right + 8
+        value_x = left + (table_right - left) * 0.52
+        formula_x = left + (table_right - left) * 0.68
+        row_height = max(22, min(32, int((canvas_height - top - 12) / max(len(rows) + 1, 1))))
+        header_font = self._text_size['Text 8 bold']
+        row_font = self._text_size['Text 8']
+
+        canvas.create_text(left, top, text='Click row', anchor='nw', font=header_font, fill=text_color)
+        canvas.create_text(value_x, top, text='Amplitude', anchor='nw', font=header_font, fill=text_color)
+        canvas.create_text(formula_x, top, text='Formula / basis', anchor='nw', font=header_font, fill=text_color)
+        y = top + row_height
+        for index, row in enumerate(rows):
+            if y + row_height > canvas_height - 8:
+                remaining = len(rows) - index
+                canvas.create_text(
+                    left, y,
+                    text='+ ' + str(remaining) + ' more tolerance items',
+                    anchor='nw',
+                    font=row_font,
+                    fill=text_color,
+                )
+                break
+            fill = '#dbeafe' if index == selected else ('#eef2f7' if index % 2 == 0 else '#ffffff')
+            outline = '#2563eb' if index == selected else ''
+            tag = 'prep_imperf_row_' + str(index)
+            canvas.create_rectangle(8, y - 2, table_right - 4, y + row_height - 2,
+                                    outline=outline, fill=fill, tags=(tag,))
+            canvas.create_text(left, y, text=row['detail'], anchor='nw',
+                               width=max(value_x - left - 8, 80), font=row_font, fill=text_color, tags=(tag,))
+            canvas.create_text(value_x, y, text=self._format_imperfection_value(row['value_mm']),
+                               anchor='nw', width=max(formula_x - value_x - 6, 60),
+                               font=row_font, fill=text_color, tags=(tag,))
+            canvas.create_text(formula_x, y, text=row['formula'] + ', ' + row['basis'], anchor='nw',
+                               width=max(table_right - formula_x - 8, 70), font=row_font, fill=text_color,
+                               tags=(tag,))
+            canvas.tag_bind(tag, '<Button-1>',
+                            lambda _event, row_index=index: self._select_prepomax_imperfection_row(row_index))
+            canvas.tag_bind(tag, '<Enter>', lambda _event: canvas.configure(cursor='hand2'))
+            canvas.tag_bind(tag, '<Leave>', lambda _event: canvas.configure(cursor=''))
+            y += row_height
+
+        self._draw_prepomax_imperfection_sketch(
+            canvas, rows[selected],
+            sketch_left, top - 4,
+            canvas_width - 10, canvas_height - 10,
+            text_color=text_color,
+        )
+
+    def _draw_prepomax_tolerance_table_button(self, canvas, canvas_width):
+        """Draw a small Canvas button opening the source tolerance table image."""
+        x1 = canvas_width - 12
+        x0 = max(x1 - 128, 150)
+        y0 = 30
+        y1 = 52
+        tag = 'prep_imperf_tolerance_table_button'
+        canvas.create_rectangle(x0, y0, x1, y1, outline='#64748b', fill='#e2e8f0', tags=(tag,))
+        canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text='Open DNV table',
+                           font=self._text_size['Text 8 bold'], fill='#0f172a', tags=(tag,))
+        canvas.tag_bind(tag, '<Button-1>', lambda _event: self.open_dnv_tolerance_table_image())
+        canvas.tag_bind(tag, '<Enter>', lambda _event: canvas.configure(cursor='hand2'))
+        canvas.tag_bind(tag, '<Leave>', lambda _event: canvas.configure(cursor=''))
+
+    def _dnv_tolerance_table_image_path(self):
+        return os.path.join(self._root_dir, 'images', 'tolerances.png')
+
+    def open_dnv_tolerance_table_image(self):
+        """Open the DNVGL-OS-C401 tolerance table image in a scrollable zoom viewer."""
+        image_path = self._dnv_tolerance_table_image_path()
+        if not os.path.isfile(image_path):
+            messagebox.showwarning('DNV tolerance table', 'Could not find image:\n' + image_path)
+            return
+
+        window = tk.Toplevel(self._parent)
+        window.title('DNVGL-OS-C401 tolerance table')
+        window.configure(background='#f8fafc')
+
+        try:
+            from PIL import Image, ImageTk
+            original_image = Image.open(image_path)
+        except Exception:
+            original_image = None
+
+        screen_width = self._parent.winfo_screenwidth()
+        screen_height = self._parent.winfo_screenheight()
+        window.geometry(str(min(1200, max(760, screen_width - 120))) + 'x' +
+                        str(min(900, max(560, screen_height - 160))))
+
+        toolbar = ttk.Frame(window)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 2))
+        zoom_state = {'scale': 1.0, 'photo': None, 'image_id': None}
+
+        image_canvas = tk.Canvas(window, background='#e5e7eb', highlightthickness=0)
+        x_scroll = ttk.Scrollbar(window, orient=tk.HORIZONTAL, command=image_canvas.xview)
+        y_scroll = ttk.Scrollbar(window, orient=tk.VERTICAL, command=image_canvas.yview)
+        image_canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
+        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        image_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=(2, 8))
+
+        def render_image():
+            image_canvas.delete('all')
+            if original_image is None:
+                photo = tk.PhotoImage(file=image_path)
+            else:
+                width = max(1, int(original_image.width * zoom_state['scale']))
+                height = max(1, int(original_image.height * zoom_state['scale']))
+                resized = original_image.resize((width, height), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(resized)
+            zoom_state['photo'] = photo
+            zoom_state['image_id'] = image_canvas.create_image(0, 0, image=photo, anchor='nw')
+            image_canvas.configure(scrollregion=(0, 0, photo.width(), photo.height()))
+
+        def zoom_to(scale):
+            zoom_state['scale'] = min(max(float(scale), 0.25), 4.0)
+            render_image()
+
+        def zoom_by(factor):
+            zoom_to(zoom_state['scale'] * factor)
+
+        ttk.Button(toolbar, text='Zoom +', width=8, command=lambda: zoom_by(1.25)).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text='Zoom -', width=8, command=lambda: zoom_by(0.8)).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(toolbar, text='Original size', width=13, command=lambda: zoom_to(1.0)).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(toolbar, text='Scroll to inspect the full source tolerance table.').pack(side=tk.LEFT, padx=(10, 0))
+
+        def mousewheel_scroll(event):
+            if getattr(event, 'state', 0) & 0x0004:
+                zoom_by(1.1 if event.delta > 0 else 0.9)
+            else:
+                image_canvas.yview_scroll(-1 * int(event.delta / 120), 'units')
+
+        image_canvas.bind('<MouseWheel>', mousewheel_scroll)
+        render_image()
+
+    def _select_prepomax_imperfection_row(self, row_index):
+        self._selected_prepomax_imperfection_row = int(row_index)
+        self.draw_prepomax_imperfection_recommendations()
+
+    def _draw_prepomax_imperfection_sketch(self, canvas, row, x0, y0, x1, y1, text_color='black'):
+        """Draw one simplified DNV tolerance sketch for the selected recommendation row."""
+        x0 = max(float(x0), 0.0)
+        y0 = max(float(y0), 0.0)
+        x1 = max(float(x1), x0 + 80.0)
+        y1 = max(float(y1), y0 + 80.0)
+        canvas.create_rectangle(x0, y0, x1, y1, outline='#cbd5e1', fill='#ffffff')
+        canvas.create_text(
+            x0 + 8, y0 + 6,
+            text=row['detail'],
+            anchor='nw',
+            width=max(x1 - x0 - 16, 80),
+            font=self._text_size['Text 8 bold'],
+            fill=text_color,
+        )
+        canvas.create_text(
+            x0 + 8, y1 - 20,
+            text='Sketch only, use amplitude ' + self._format_imperfection_value(row['value_mm']),
+            anchor='nw',
+            width=max(x1 - x0 - 16, 80),
+            font=self._text_size['Text 8'],
+            fill=text_color,
+        )
+
+        sketch = row.get('sketch', 'member_straightness')
+        draw_area = (x0 + 14, y0 + 34, x1 - 14, y1 - 28)
+        if sketch == 'plate_out_of_plane':
+            self._draw_plate_out_of_plane_sketch(canvas, draw_area)
+        elif sketch == 'parallel_misalignment':
+            self._draw_parallel_misalignment_sketch(canvas, draw_area, curved=False)
+        elif sketch == 'cylinder_stiffener_misalignment':
+            self._draw_parallel_misalignment_sketch(canvas, draw_area, curved=True)
+        elif sketch == 'radius_deviation':
+            self._draw_radius_deviation_sketch(canvas, draw_area)
+        elif sketch == 'local_roundness':
+            self._draw_local_roundness_sketch(canvas, draw_area)
+        else:
+            self._draw_member_straightness_sketch(canvas, draw_area, flange=sketch == 'flange_straightness')
+
+    @staticmethod
+    def _draw_delta_arrow(canvas, x0, y0, x1, y1, label='delta'):
+        canvas.create_line(x0, y0, x1, y1, fill='#dc2626', width=2, arrow=tk.BOTH)
+        canvas.create_text((x0 + x1) / 2 + 7, (y0 + y1) / 2, text=label, fill='#dc2626',
+                           anchor='w', font='Verdana 8 bold')
+
+    @staticmethod
+    def _draw_dimension_line(canvas, x0, y0, x1, y1, label):
+        canvas.create_line(x0, y0, x1, y1, fill='#334155', width=1, arrow=tk.BOTH)
+        canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2 + 10, text=label, fill='#334155',
+                           font='Verdana 8')
+
+    def _draw_plate_out_of_plane_sketch(self, canvas, area):
+        x0, y0, x1, y1 = area
+        mid_y = y0 + 0.58 * (y1 - y0)
+        left = x0 + 0.16 * (x1 - x0)
+        right = x1 - 0.16 * (x1 - x0)
+        canvas.create_line(left, y0 + 10, left, mid_y + 22, fill='#475569', width=4)
+        canvas.create_line(right, y0 + 10, right, mid_y + 22, fill='#475569', width=4)
+        canvas.create_line(left, mid_y, right, mid_y, fill='#111827', dash=(4, 3))
+        canvas.create_line(left, mid_y, (left + right) / 2, mid_y - 20, right, mid_y,
+                           fill='#dc2626', width=3, smooth=True)
+        self._draw_delta_arrow(canvas, (left + right) / 2, mid_y, (left + right) / 2, mid_y - 20)
+        self._draw_dimension_line(canvas, left, mid_y + 32, right, mid_y + 32, 's')
+
+    def _draw_member_straightness_sketch(self, canvas, area, flange=False):
+        x0, y0, x1, y1 = area
+        left = x0 + 0.10 * (x1 - x0)
+        right = x1 - 0.10 * (x1 - x0)
+        mid_y = y0 + 0.52 * (y1 - y0)
+        thickness = 6 if flange else 11
+        canvas.create_line(left, mid_y, right, mid_y, fill='#111827', dash=(4, 3))
+        canvas.create_line(left, mid_y - thickness, (left + right) / 2, mid_y - thickness - 18,
+                           right, mid_y - thickness, fill='#475569', width=3, smooth=True)
+        canvas.create_line(left, mid_y + thickness, (left + right) / 2, mid_y + thickness + 18,
+                           right, mid_y + thickness, fill='#dc2626', width=3, smooth=True)
+        self._draw_delta_arrow(canvas, (left + right) / 2, mid_y, (left + right) / 2, mid_y + thickness + 18)
+        self._draw_dimension_line(canvas, left, y1 - 16, right, y1 - 16, 'l')
+
+    def _draw_parallel_misalignment_sketch(self, canvas, area, curved=False):
+        x0, y0, x1, y1 = area
+        mid_y = y0 + 0.55 * (y1 - y0)
+        xs = [x0 + (x1 - x0) * value for value in (0.18, 0.34, 0.50, 0.66, 0.82)]
+        if curved:
+            canvas.create_arc(x0 + 6, mid_y - 58, x1 - 6, mid_y + 46, start=20, extent=140,
+                              style=tk.ARC, width=2, outline='#475569')
+        else:
+            canvas.create_line(x0 + 8, mid_y, x1 - 8, mid_y, fill='#475569', width=2)
+        for idx, x in enumerate(xs):
+            shift = -16 if idx == 2 else 0
+            color = '#dc2626' if idx == 2 else '#475569'
+            canvas.create_line(x + shift, mid_y - 30, x + shift, mid_y + 28, fill=color, width=4)
+            canvas.create_line(x + shift - 12, mid_y - 30, x + shift + 12, mid_y - 30, fill=color, width=3)
+        self._draw_delta_arrow(canvas, xs[2], mid_y - 8, xs[2] - 16, mid_y - 8)
+        self._draw_dimension_line(canvas, xs[1], y1 - 16, xs[2], y1 - 16, 's')
+
+    def _draw_radius_deviation_sketch(self, canvas, area):
+        x0, y0, x1, y1 = area
+        cx = (x0 + x1) / 2
+        cy = y1 + 18
+        r = min((x1 - x0) * 0.48, (y1 - y0) * 1.05)
+        canvas.create_arc(cx - r, cy - r, cx + r, cy + r, start=32, extent=116,
+                          style=tk.ARC, width=3, outline='#111827')
+        canvas.create_arc(cx - r - 10, cy - r - 10, cx + r + 10, cy + r + 10, start=42, extent=96,
+                          style=tk.ARC, width=3, outline='#dc2626')
+        angle = math.radians(90)
+        self._draw_delta_arrow(canvas, cx + math.cos(angle) * r, cy - r,
+                               cx + math.cos(angle) * r, cy - r - 10)
+        canvas.create_line(cx, cy, cx, cy - r, fill='#334155', width=1, dash=(3, 3))
+        canvas.create_text(cx + 6, cy - r / 2, text='r', anchor='w', fill='#334155', font='Verdana 8')
+
+    def _draw_local_roundness_sketch(self, canvas, area):
+        x0, y0, x1, y1 = area
+        base_y = y0 + 0.64 * (y1 - y0)
+        left = x0 + 0.12 * (x1 - x0)
+        right = x1 - 0.12 * (x1 - x0)
+        mid = (left + right) / 2
+        canvas.create_line(left, base_y, mid - 28, base_y - 6, mid, base_y - 24,
+                           mid + 28, base_y - 6, right, base_y, fill='#dc2626', width=3, smooth=True)
+        canvas.create_line(left, base_y + 8, right, base_y + 8, fill='#111827', dash=(4, 3))
+        template_y = y0 + 0.22 * (y1 - y0)
+        canvas.create_line(left + 18, template_y, right - 18, template_y, fill='#475569', width=5)
+        self._draw_dimension_line(canvas, left + 18, template_y - 14, right - 18, template_y - 14, 'g')
+        self._draw_delta_arrow(canvas, mid, base_y + 8, mid, base_y - 24)
 
     def draw_flat_panel_prop_3d(self, all_obj):
         """Draw flat plate, stiffener and optional girder as extruded 3D preview solids."""
