@@ -6349,12 +6349,10 @@ class Application():
                    command=self._reset_prop_3d_view).pack(side=tk.LEFT)
         ttk.Checkbutton(view_row, text='Opposite side', variable=self._new_prop_3d_opposite_side,
                         command=self.update_frame).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(view_row, text='IFC export', width=10,
+        ttk.Button(view_row, text='Solid export', width=10,
                    command=self.export_prop_3d_ifc_model).pack(side=tk.LEFT)
-        ttk.Button(view_row, text='STL shell', width=9,
-                   command=self.export_prop_3d_stl).pack(side=tk.LEFT)
-        ttk.Button(view_row, text='UNV shell', width=9,
-                   command=self.export_prop_3d_unv).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Shell export', width=11,
+                   command=self.export_prop_3d_ifc_shell_model).pack(side=tk.LEFT)
 
         self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
         self._prop_3d_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -6409,28 +6407,22 @@ class Application():
             messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
 
     def export_prop_3d_stl(self):
-        """Export the current 3D preview as a reduced ASCII STL shell mesh."""
-        mesh = self._get_prop_3d_shell_export_mesh()
-        if not mesh or len(mesh.get('faces', [])) == 0:
-            messagebox.showinfo('3D export', 'No 3D preview mesh is available to export.')
-            return
+        """Deprecated compatibility wrapper for the old shell STL export.
 
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".stl",
-            filetypes=[("Stereolithography STL", "*.stl"), ("All files", "*.*")],
-        )
-        if filename in [None, '']:
-            return
-
-        try:
-            self._write_prop_3d_stl_file(filename, mesh)
-        except Exception as error:
-            messagebox.showerror('3D export', 'Could not export 3D preview:\n' + str(error))
-        else:
-            messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
+        The old implementation exported the Matplotlib preview shell mesh.  That
+        path is intentionally disabled because the CAD export shall be model-based
+        only.  Existing keyboard shortcuts or external calls are redirected to the
+        proper IFC/CAD exporter.
+        """
+        self.export_prop_3d_ifc_model()
 
     def _ask_prop_3d_ifc_export_options(self):
-        """Ask for IFC/CAD export format and optional IfcConvert executable."""
+        """Ask for IFC/CAD export format.
+
+        IfcConvert is intentionally not exposed to the user.  For converted
+        formats ANYstructure writes a proper IFC model first and then resolves
+        the bundled/package IfcConvert executable automatically.
+        """
         formats = [
             ('ifc', '.ifc', 'Native IFC-SPF model', 'IfcOpenShell-Python'),
             ('obj', '.obj', 'Wavefront OBJ', 'IfcConvert'),
@@ -6459,111 +6451,49 @@ class Application():
         result = {'value': None}
         selected_format = tk.StringVar(value=list(format_by_label.keys())[0])
         keep_ifc = tk.BooleanVar(value=True)
-        converter_path = tk.StringVar(value='')
-
-        # Automatic IfcConvert discovery.  The preferred deployment is to place
-        # IfcConvert.exe next to this module, normally:
-        #     C:\\Github\\ANYstructure\\anystruct\\IfcConvert.exe
-        # In an installed/PyInstaller build, self._root_dir should also point to
-        # the bundled anystruct directory.  PATH is only used as fallback.
-        try:
-            import os
-            import shutil
-            candidates = []
-            try:
-                candidates.append(os.path.join(self._root_dir, 'IfcConvert.exe'))
-                candidates.append(os.path.join(self._root_dir, 'IfcConvert'))
-            except Exception:
-                pass
-            try:
-                candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'IfcConvert.exe'))
-                candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'IfcConvert'))
-            except Exception:
-                pass
-            detected = None
-            for candidate in candidates:
-                if candidate and os.path.isfile(candidate):
-                    detected = candidate
-                    break
-            if detected is None:
-                detected = shutil.which('IfcConvert') or shutil.which('IfcConvert.exe')
-            if detected:
-                converter_path.set(detected)
-            else:
-                try:
-                    converter_path.set(os.path.join(self._root_dir, 'IfcConvert.exe'))
-                except Exception:
-                    converter_path.set('IfcConvert.exe')
-        except Exception:
-            try:
-                converter_path.set(os.path.join(self._root_dir, 'IfcConvert.exe'))
-            except Exception:
-                converter_path.set('IfcConvert.exe')
 
         pad = {'padx': 10, 'pady': 4}
         ttk.Label(
             dialog,
-            text='Export the selected ANYstructure object as a proper IFC model.\n'
-                 'For OBJ/DAE/GLB/STP/IGS/XML/SVG/H5/TTL/RDB/JSON, ANYstructure first writes IFC, '
-                 'then runs IfcConvert.',
+            text='Export the selected ANYstructure object as a proper IFC/CAD model.\n'
+                 'Legacy shell STL/UNV preview-mesh export is disabled. '                 'For OBJ/DAE/GLB/STP/IGS/XML/SVG/H5/TTL/RDB/JSON, ANYstructure first writes IFC, '
+                 'then automatically runs the bundled/package IfcConvert executable.',
             justify=tk.LEFT,
-        ).grid(row=0, column=0, columnspan=3, sticky='w', **pad)
+        ).grid(row=0, column=0, columnspan=2, sticky='w', **pad)
 
         ttk.Label(dialog, text='Output format').grid(row=1, column=0, sticky='w', **pad)
         format_box = ttk.Combobox(
             dialog,
             textvariable=selected_format,
             values=list(format_by_label.keys()),
-            width=54,
+            width=58,
             state='readonly',
         )
-        format_box.grid(row=1, column=1, columnspan=2, sticky='we', **pad)
-
-        ttk.Label(dialog, text='IfcConvert executable').grid(row=2, column=0, sticky='w', **pad)
-        converter_entry = ttk.Entry(dialog, textvariable=converter_path, width=47)
-        converter_entry.grid(row=2, column=1, sticky='we', **pad)
-
-        def browse_converter():
-            path = filedialog.askopenfilename(
-                title='Select IfcConvert executable',
-                filetypes=[
-                    ('IfcConvert executable', 'IfcConvert.exe IfcConvert'),
-                    ('Executable files', '*.exe'),
-                    ('All files', '*.*'),
-                ],
-            )
-            if path not in [None, '']:
-                converter_path.set(path)
-
-        browse_btn = ttk.Button(dialog, text='Browse', command=browse_converter)
-        browse_btn.grid(row=2, column=2, sticky='we', **pad)
+        format_box.grid(row=1, column=1, sticky='we', **pad)
 
         keep_chk = ttk.Checkbutton(
             dialog,
             text='Keep intermediate .ifc file when converting to another format',
             variable=keep_ifc,
         )
-        keep_chk.grid(row=3, column=1, columnspan=2, sticky='w', **pad)
+        keep_chk.grid(row=2, column=1, sticky='w', **pad)
 
         note_var = tk.StringVar()
         ttk.Label(dialog, textvariable=note_var, justify=tk.LEFT, foreground='gray25').grid(
-            row=4, column=0, columnspan=3, sticky='w', **pad
+            row=3, column=0, columnspan=2, sticky='w', **pad
         )
 
         def update_state(*_args):
-            key, _ext, _desc, tool = format_by_label[selected_format.get()]
+            key, _ext, _desc, _tool = format_by_label[selected_format.get()]
             needs_ifcconvert = key != 'ifc'
-            state = 'normal' if needs_ifcconvert else 'disabled'
             try:
-                converter_entry.configure(state=state)
-                browse_btn.configure(state=state)
-                keep_chk.configure(state=state)
+                keep_chk.configure(state='normal' if needs_ifcconvert else 'disabled')
             except Exception:
                 pass
             if needs_ifcconvert:
                 note_var.set(
-                    'Automatic processing: ANYstructure writes the IFC model first, then runs IfcConvert. '
-                    'Default location is the local anystruct\\IfcConvert.exe; PATH is used as fallback.'
+                    'Automatic processing: no user path is required. IfcConvert.exe is resolved from the installed '
+                    'anystruct package, the PyInstaller bundle, or PATH. Include IfcConvert.exe as package data.'
                 )
             else:
                 note_var.set('Native IFC export does not require IfcConvert.')
@@ -6572,7 +6502,7 @@ class Application():
         update_state()
 
         button_row = ttk.Frame(dialog)
-        button_row.grid(row=5, column=0, columnspan=3, sticky='e', padx=10, pady=(8, 10))
+        button_row.grid(row=4, column=0, columnspan=2, sticky='e', padx=10, pady=(8, 10))
 
         def accept():
             key, ext, desc, tool = format_by_label[selected_format.get()]
@@ -6581,7 +6511,6 @@ class Application():
                 'extension': ext,
                 'description': desc,
                 'tool': tool,
-                'ifcconvert_path': converter_path.get().strip(),
                 'keep_intermediate_ifc': bool(keep_ifc.get()),
             }
             dialog.destroy()
@@ -6608,12 +6537,30 @@ class Application():
         return result['value']
 
     def export_prop_3d_ifc_model(self):
-        """Export the selected structure as a proper IFC/CAD model.
+        """Export the selected structure as a proper model-based IFC/CAD file.
 
-        This is intentionally not based on _get_prop_3d_solid_export_mesh().
-        The IFC file is rebuilt from the ANYstructure plate/stiffener/girder/
-        cylinder objects as swept solids using IfcOpenShell.  Optional secondary
-        outputs are produced by running IfcConvert on the generated IFC model.
+        This button keeps the existing CAD-format workflow: the user selects IFC,
+        STEP, IGES, OBJ, GLB, etc.  The geometry is still generated from the
+        ANYstructure model parameters, not from the Matplotlib preview mesh.
+        """
+        self._export_prop_3d_ifc_model_common(shell_export=False)
+
+    def export_prop_3d_ifc_shell_model(self):
+        """Export the selected structure as a zero-thickness shell/surface model.
+
+        Plate, stiffener web, stiffener flange, girder web and girder flange are
+        exported as single shell plates.  Nominal thicknesses are written only as
+        IFC properties.  The Opposite side checkbox is respected by flipping the
+        web/flange surfaces to the other side of the plate interface.
+        """
+        self._export_prop_3d_ifc_model_common(shell_export=True)
+
+    def _export_prop_3d_ifc_model_common(self, shell_export=False):
+        """Common IFC/CAD export implementation for model and shell buttons.
+
+        The exporter is intentionally not based on _get_prop_3d_solid_export_mesh()
+        or _get_prop_3d_shell_export_mesh().  Geometry is rebuilt from the selected
+        ANYstructure plate/stiffener/girder/cylinder objects.
         """
         if not self._line_is_active or self._active_line not in self._line_to_struc:
             messagebox.showinfo(
@@ -6627,10 +6574,11 @@ class Application():
             return
 
         ext = options['extension']
+        title = 'Shell surface export' if shell_export else options['description']
         filename = filedialog.asksaveasfilename(
             defaultextension=ext,
             filetypes=[
-                (options['description'], '*' + ext),
+                (title, '*' + ext),
                 ('Industry Foundation Classes', '*.ifc'),
                 ('All files', '*.*'),
             ],
@@ -6648,8 +6596,8 @@ class Application():
                 self,
                 filename,
                 output_format=options['format'],
-                ifcconvert_path=options['ifcconvert_path'] or None,
                 keep_intermediate_ifc=options['keep_intermediate_ifc'],
+                shell_export=shell_export,
             )
         except ImportError as error:
             messagebox.showerror(
@@ -6667,9 +6615,11 @@ class Application():
                 'Could not export IFC/CAD model:\n' + str(error)
             )
         else:
+            export_kind = 'Shell/surface model' if shell_export else 'Model-based CAD/IFC export'
             message = (
                 'Export completed:\n' + filename +
-                '\n\nFormat: ' + options['extension'] + ' via ' + options['tool'] +
+                '\n\nExport type: ' + export_kind +
+                '\nFormat: ' + options['extension'] + ' via ' + options['tool'] +
                 '\nElements exported: ' + str(summary.element_count)
             )
             if getattr(summary, 'native_ifc_filename', None) and summary.native_ifc_filename != filename:
@@ -6679,25 +6629,14 @@ class Application():
             messagebox.showinfo('IFC export', message)
 
     def export_prop_3d_unv(self):
-        """Export the current 3D preview mesh as an I-DEAS UNV shell mesh."""
-        mesh = self._get_prop_3d_shell_export_mesh()
-        if not mesh or len(mesh.get('faces', [])) == 0:
-            messagebox.showinfo('3D export', 'No 3D preview mesh is available to export.')
-            return
+        """Deprecated compatibility wrapper for the old shell UNV export.
 
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".unv",
-            filetypes=[("Universal UNV", "*.unv"), ("All files", "*.*")],
-        )
-        if filename in [None, '']:
-            return
-
-        try:
-            self._write_prop_3d_unv_file(filename, mesh)
-        except Exception as error:
-            messagebox.showerror('3D export', 'Could not export 3D preview:\n' + str(error))
-        else:
-            messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
+        The old implementation exported the Matplotlib preview shell mesh.  That
+        path is intentionally disabled because the CAD export shall be model-based
+        only.  Existing keyboard shortcuts or external calls are redirected to the
+        proper IFC/CAD exporter.
+        """
+        self.export_prop_3d_ifc_model()
 
     def _get_prop_3d_shell_export_mesh(self):
         return getattr(self, '_prop_3d_shell_export_mesh', None)
@@ -7133,7 +7072,14 @@ class Application():
 
     @staticmethod
     def _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80):
-        """Create member positions using the exact specified spacing."""
+        """Create member positions without a near-duplicate at the far end.
+
+        The preview/export convention keeps the boundary member at the far end,
+        but if the last regular spacing position is too close to that boundary
+        member, the regular member is replaced by the boundary member.  This
+        avoids the visual/export issue where two stiffeners appear almost on top
+        of each other near the upper/far end of the panel.
+        """
         try:
             length = float(length)
             spacing = float(spacing)
@@ -7147,16 +7093,31 @@ class Application():
         tol = 1e-9
         positions = [0.0] if include_ends else []
         next_pos = spacing
-        while next_pos < length - tol:
+        count_guard = 0
+        while next_pos < length - tol and count_guard < max_count:
             positions.append(float(next_pos))
             next_pos += spacing
+            count_guard += 1
+
         if include_ends:
-            if abs(positions[-1] - length) > tol:
+            min_far_end_gap = max(0.5 * spacing, 10.0 * tol)
+            if not positions:
+                positions = [0.0, float(length)]
+            elif abs(positions[-1] - length) <= tol:
+                positions[-1] = float(length)
+            elif length - positions[-1] < min_far_end_gap:
+                positions[-1] = float(length)
+            else:
                 positions.append(float(length))
-            return positions
-        if not positions:
-            return [length / 2.0]
-        return positions
+        elif not positions:
+            positions = [length / 2.0]
+
+        clean_positions = []
+        for pos in sorted(float(p) for p in positions):
+            pos = min(max(pos, 0.0), float(length))
+            if not clean_positions or abs(pos - clean_positions[-1]) > max(10.0 * tol, 1.0e-9):
+                clean_positions.append(pos)
+        return clean_positions or [length / 2.0]
 
     def _flat_preview_lg_from_objects(self, girder, stiffener, spacing):
         """Return LG in metres, preferring the selected line object over GUI defaults."""

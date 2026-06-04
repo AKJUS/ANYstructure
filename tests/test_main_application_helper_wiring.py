@@ -240,24 +240,22 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     source = main_source.read_text(encoding="utf-8")
 
     assert "import anystruct.solid_export as solid_export" in source
-    assert "ttk.Button(view_row, text='STL solid'" in source
-    assert "ttk.Button(view_row, text='Mesh solid'" in source
-    assert "ttk.Button(view_row, text='STL shell'" in source
-    assert "ttk.Button(view_row, text='UNV shell'" in source
+    assert "ttk.Button(view_row, text='CAD export'" in source
+    assert "ttk.Button(view_row, text='Shell export'" in source
+    assert "ttk.Button(view_row, text='STL solid'" not in source
+    assert "ttk.Button(view_row, text='Mesh solid'" not in source
+    assert "ttk.Button(view_row, text='STL shell'" not in source
+    assert "ttk.Button(view_row, text='UNV shell'" not in source
     assert "ttk.Button(view_row, text='UNV solid'" not in source
-    assert "def export_prop_3d_solid_stl(self):" in source
-    assert "def export_prop_3d_solid_meshio(self):" in source
-    assert "def export_prop_3d_stl(self):" in source
+    assert "def export_prop_3d_ifc_model(self):" in source
+    assert "def export_prop_3d_ifc_shell_model(self):" in source
+    assert "def _export_prop_3d_ifc_model_common(self, shell_export=False):" in source
+    assert "ifc_model_export.export_selected_structure_from_application" in source
+    assert "shell_export=shell_export" in source
     assert "def export_prop_3d_unv(self):" in source
+    assert "self.export_prop_3d_ifc_model()" in source
     assert "def _get_prop_3d_shell_export_mesh(self):" in source
     assert "def _get_prop_3d_solid_export_mesh(self):" in source
-    assert "mesh = self._get_prop_3d_shell_export_mesh()" in source
-    assert "mesh = self._get_prop_3d_solid_export_mesh()" in source
-    assert "solid_export.write_numpy_stl(filename, mesh, binary=True)" in source
-    assert "solid_export.write_meshio(filename, mesh)" in source
-    assert "solid_export.connected_component_count(mesh)" in source
-    assert "filetypes=[(\"Stereolithography STL\", \"*.stl\"), (\"All files\", \"*.*\")]" in source
-    assert "filetypes=[(\"Universal UNV\", \"*.unv\"), (\"All files\", \"*.*\")]" in source
     assert "def _write_prop_3d_stl_file(filename, mesh):" in source
     assert "def _write_prop_3d_unv_file(filename, mesh):" in source
     assert "stl_file.write('solid ' + name + '\\n')" in source
@@ -266,7 +264,6 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "'  2412\\n'" in source
     assert "unv_file.writelines(lines)" in source
     assert "element_id, 91, 1, 1, 7, 3" in source
-    assert "STEP" not in source
     assert "VERTEX_POINT" not in source
     assert "def _deduplicate_export_mesh(mesh):" in source
     assert "def _format_unv_float(value):" in source
@@ -386,11 +383,14 @@ def test_3d_flat_section_geometry_uses_exact_web_and_flange_dimensions():
 
 def test_3d_member_positions_keep_exact_spacing_and_end_boundary():
     positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=True)
-    assert positions == [0.0, 3.0, 6.0, 9.0, 10.0]
-    assert [round(positions[idx + 1] - positions[idx], 12) for idx in range(3)] == [3.0, 3.0, 3.0]
+    assert positions == [0.0, 3.0, 6.0, 10.0]
+    assert [round(positions[idx + 1] - positions[idx], 12) for idx in range(2)] == [3.0, 3.0]
 
     internal_positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=False)
     assert internal_positions == [3.0, 6.0, 9.0]
+
+    regular_end_positions = Application._positions_from_length_and_spacing(12.0, 3.0, include_ends=True)
+    assert regular_end_positions == [0.0, 3.0, 6.0, 9.0, 12.0]
 
 
 def test_unv_export_writes_nodes_and_elements(tmp_path):
