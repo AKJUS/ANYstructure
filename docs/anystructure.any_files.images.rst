@@ -1,10 +1,10 @@
-anystructure.any\_files.images package
-======================================
+anystruct.images package
+========================
 
 Module contents
 ---------------
 
-.. automodule:: anystructure.anystruct.images
+.. automodule:: anystruct.images
    :members:
    :undoc-members:
    :show-inheritance:

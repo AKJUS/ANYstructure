@@ -1,7 +1,7 @@
-anystructure
-============
+Source Modules
+==============
 
 .. toctree::
    :maxdepth: 4
 
-   anystruct.any_api
+   anystructure

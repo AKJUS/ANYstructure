@@ -4,7 +4,8 @@
 
 Welcome to ANYstructure's documentation!
 ========================================
-This page mainly document the API.
+This documentation focuses on the Python API and the current public
+functionality exposed by the ``anystruct`` package.
 
 For GUI documentation, see the following link:
 
@@ -20,11 +21,15 @@ To install ANYstructure use PIP:
 
 API basic usage:
 
-.. code:: shell
+.. code:: python
 
    from anystruct import api
-   FlatStruct = api.Flatstru(*INPUT CALCULATION DOMAIN*)
-   CylStru = api.CylStru(*INPUT CALCULATION DOMAIN*)
+   flat = api.FlatStru("Flat plate, stiffened")
+   cylinder = api.CylStru("Orthogonally Stiffened shell")
+
+See :doc:`api_examples` for complete flat plate, cylinder, buckling method,
+and project file examples. See :doc:`api_manual_report` for a compact
+manual/report version.
 
 The GUI can be started by:
 
@@ -41,7 +46,7 @@ ANYstructure.exe in your python installation (Scripts).
 
 Windows executable
 ------------------
-The latets release of ANYstructure can be downloaded here:
+The latest release of ANYstructure can be downloaded here:
 
 `Github releases <https://github.com/audunarn/ANYstructure/releases>`_
 
@@ -52,4 +57,7 @@ Install and launch the app.
 
    install
    support
+   api_examples
+   api_manual_report
    api
+   modules

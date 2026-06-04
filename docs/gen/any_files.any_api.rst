@@ -1,7 +1,7 @@
-any\_files.any\_api
-===================
+anystruct.api
+=============
 
-.. automodule:: anystruct.any_api
+.. automodule:: anystruct.api
 
    
    

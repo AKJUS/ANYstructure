@@ -1,12 +1,31 @@
 Installation
 ************
 
-Install using PIP:
+Install from PyPI
+=================
 
-pip install anystructure
-------------------------
+.. code-block:: shell
 
-The API can be accessed using:
+   pip install anystructure
 
-import anystruct.api
-....................
+Use the API
+===========
+
+.. code-block:: python
+
+   from anystruct import api
+
+   flat = api.FlatStru("Flat plate, stiffened")
+   cylinder = api.CylStru("Orthogonally Stiffened shell")
+
+Start the GUI
+=============
+
+.. code-block:: python
+
+   from anystruct import gui
+
+   gui.main()
+
+After installation, the ``ANYstructure`` console command is also available from
+the Python environment's scripts directory.
