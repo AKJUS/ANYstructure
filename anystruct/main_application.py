@@ -41,6 +41,7 @@ try:
     import anystruct.ml_models as ml_models
     import anystruct.project_application as project_application
     import anystruct.project_services as project_services
+    import anystruct.solid_export as solid_export
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -62,6 +63,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.ml_models as ml_models
     import ANYstructure.anystruct.project_application as project_application
     import ANYstructure.anystruct.project_services as project_services
+    import ANYstructure.anystruct.solid_export as solid_export
 
 
 @dataclass(frozen=True)
@@ -6347,6 +6349,8 @@ class Application():
                    command=self._reset_prop_3d_view).pack(side=tk.LEFT)
         ttk.Checkbutton(view_row, text='Opposite side', variable=self._new_prop_3d_opposite_side,
                         command=self.update_frame).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(view_row, text='IFC model', width=9,
+                   command=self.export_prop_3d_ifc_model).pack(side=tk.LEFT)
         ttk.Button(view_row, text='STL shell', width=9,
                    command=self.export_prop_3d_stl).pack(side=tk.LEFT)
         ttk.Button(view_row, text='UNV shell', width=9,
@@ -6425,6 +6429,56 @@ class Application():
         else:
             messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
 
+    def export_prop_3d_ifc_model(self):
+        """Export the selected structure as a proper IFC solid model.
+
+        This is intentionally not based on _get_prop_3d_solid_export_mesh().
+        The IFC file is rebuilt from the ANYstructure plate/stiffener/girder/
+        cylinder objects as swept solids using IfcOpenShell.
+        """
+        if not self._line_is_active or self._active_line not in self._line_to_struc:
+            messagebox.showinfo(
+                'IFC export',
+                'Select a line with assigned structure properties before exporting IFC.'
+            )
+            return
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".ifc",
+            filetypes=[
+                ("Industry Foundation Classes", "*.ifc"),
+                ("All files", "*.*"),
+            ],
+        )
+        if filename in [None, '']:
+            return
+
+        try:
+            try:
+                from anystruct import ifc_model_export
+            except ModuleNotFoundError:
+                from ANYstructure.anystruct import ifc_model_export
+
+            summary = ifc_model_export.export_selected_structure_from_application(self, filename)
+        except ImportError as error:
+            messagebox.showerror(
+                'IFC export',
+                str(error)
+            )
+        except Exception as error:
+            messagebox.showerror(
+                'IFC export',
+                'Could not export IFC model:\n' + str(error)
+            )
+        else:
+            message = (
+                'IFC model exported to:\n' + filename +
+                '\n\nElements exported: ' + str(summary.element_count)
+            )
+            if getattr(summary, 'warnings', None):
+                message += '\n\nWarnings:\n' + '\n'.join('- ' + str(item) for item in summary.warnings)
+            messagebox.showinfo('IFC export', message)
+
     def export_prop_3d_unv(self):
         """Export the current 3D preview mesh as an I-DEAS UNV shell mesh."""
         mesh = self._get_prop_3d_shell_export_mesh()
@@ -6448,6 +6502,9 @@ class Application():
 
     def _get_prop_3d_shell_export_mesh(self):
         return getattr(self, '_prop_3d_shell_export_mesh', None)
+
+    def _get_prop_3d_solid_export_mesh(self):
+        return getattr(self, '_prop_3d_export_mesh', None)
 
     @staticmethod
     def _write_prop_3d_obj_file(filename, mesh):

@@ -239,14 +239,23 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
 
+    assert "import anystruct.solid_export as solid_export" in source
+    assert "ttk.Button(view_row, text='STL solid'" in source
+    assert "ttk.Button(view_row, text='Mesh solid'" in source
     assert "ttk.Button(view_row, text='STL shell'" in source
     assert "ttk.Button(view_row, text='UNV shell'" in source
-    assert "ttk.Button(view_row, text='STL solid'" not in source
     assert "ttk.Button(view_row, text='UNV solid'" not in source
+    assert "def export_prop_3d_solid_stl(self):" in source
+    assert "def export_prop_3d_solid_meshio(self):" in source
     assert "def export_prop_3d_stl(self):" in source
     assert "def export_prop_3d_unv(self):" in source
     assert "def _get_prop_3d_shell_export_mesh(self):" in source
+    assert "def _get_prop_3d_solid_export_mesh(self):" in source
     assert "mesh = self._get_prop_3d_shell_export_mesh()" in source
+    assert "mesh = self._get_prop_3d_solid_export_mesh()" in source
+    assert "solid_export.write_numpy_stl(filename, mesh, binary=True)" in source
+    assert "solid_export.write_meshio(filename, mesh)" in source
+    assert "solid_export.connected_component_count(mesh)" in source
     assert "filetypes=[(\"Stereolithography STL\", \"*.stl\"), (\"All files\", \"*.*\")]" in source
     assert "filetypes=[(\"Universal UNV\", \"*.unv\"), (\"All files\", \"*.*\")]" in source
     assert "def _write_prop_3d_stl_file(filename, mesh):" in source
