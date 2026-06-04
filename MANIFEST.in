@@ -28,6 +28,7 @@ include anystruct\images\buckling_cylinder_panel.png
 include anystruct\ship_section_example.txt
 include anystruct\ANYstructure_documentation.pdf
 include anystruct\sections.csv
+include anystruct\IfcConvert.exe
 include anystruct\bulb_anglebar_tbar_flatbar.csv
 # Include all machine-learning model files
 recursive-include anystruct/ml_files *.pickle
