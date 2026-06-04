@@ -6349,7 +6349,7 @@ class Application():
                    command=self._reset_prop_3d_view).pack(side=tk.LEFT)
         ttk.Checkbutton(view_row, text='Opposite side', variable=self._new_prop_3d_opposite_side,
                         command=self.update_frame).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(view_row, text='IFC model', width=9,
+        ttk.Button(view_row, text='IFC export', width=10,
                    command=self.export_prop_3d_ifc_model).pack(side=tk.LEFT)
         ttk.Button(view_row, text='STL shell', width=9,
                    command=self.export_prop_3d_stl).pack(side=tk.LEFT)
@@ -6429,12 +6429,191 @@ class Application():
         else:
             messagebox.showinfo('3D export', '3D preview exported to:\n' + filename)
 
+    def _ask_prop_3d_ifc_export_options(self):
+        """Ask for IFC/CAD export format and optional IfcConvert executable."""
+        formats = [
+            ('ifc', '.ifc', 'Native IFC-SPF model', 'IfcOpenShell-Python'),
+            ('obj', '.obj', 'Wavefront OBJ', 'IfcConvert'),
+            ('dae', '.dae', 'Collada DAE', 'IfcConvert'),
+            ('glb', '.glb', 'Binary glTF GLB', 'IfcConvert'),
+            ('stp', '.stp', 'STEP', 'IfcConvert'),
+            ('igs', '.igs', 'IGES', 'IfcConvert'),
+            ('xml', '.xml', 'XML', 'IfcConvert'),
+            ('svg', '.svg', 'SVG', 'IfcConvert'),
+            ('h5', '.h5', 'HDF5', 'IfcConvert'),
+            ('ttl', '.ttl', 'TTL/WKT', 'IfcConvert'),
+            ('rdb', '.rdb', 'RDB', 'IfcConvert'),
+            ('json', '.json', 'JSON', 'IfcConvert'),
+        ]
+        format_by_label = {
+            (ext + ' - ' + desc + ' (' + tool + ')'): (key, ext, desc, tool)
+            for key, ext, desc, tool in formats
+        }
+
+        dialog = tk.Toplevel(self._parent)
+        dialog.title('IFC / CAD export options')
+        dialog.transient(self._parent)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        result = {'value': None}
+        selected_format = tk.StringVar(value=list(format_by_label.keys())[0])
+        keep_ifc = tk.BooleanVar(value=True)
+        converter_path = tk.StringVar(value='')
+
+        # Automatic IfcConvert discovery.  The preferred deployment is to place
+        # IfcConvert.exe next to this module, normally:
+        #     C:\\Github\\ANYstructure\\anystruct\\IfcConvert.exe
+        # In an installed/PyInstaller build, self._root_dir should also point to
+        # the bundled anystruct directory.  PATH is only used as fallback.
+        try:
+            import os
+            import shutil
+            candidates = []
+            try:
+                candidates.append(os.path.join(self._root_dir, 'IfcConvert.exe'))
+                candidates.append(os.path.join(self._root_dir, 'IfcConvert'))
+            except Exception:
+                pass
+            try:
+                candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'IfcConvert.exe'))
+                candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'IfcConvert'))
+            except Exception:
+                pass
+            detected = None
+            for candidate in candidates:
+                if candidate and os.path.isfile(candidate):
+                    detected = candidate
+                    break
+            if detected is None:
+                detected = shutil.which('IfcConvert') or shutil.which('IfcConvert.exe')
+            if detected:
+                converter_path.set(detected)
+            else:
+                try:
+                    converter_path.set(os.path.join(self._root_dir, 'IfcConvert.exe'))
+                except Exception:
+                    converter_path.set('IfcConvert.exe')
+        except Exception:
+            try:
+                converter_path.set(os.path.join(self._root_dir, 'IfcConvert.exe'))
+            except Exception:
+                converter_path.set('IfcConvert.exe')
+
+        pad = {'padx': 10, 'pady': 4}
+        ttk.Label(
+            dialog,
+            text='Export the selected ANYstructure object as a proper IFC model.\n'
+                 'For OBJ/DAE/GLB/STP/IGS/XML/SVG/H5/TTL/RDB/JSON, ANYstructure first writes IFC, '
+                 'then runs IfcConvert.',
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=3, sticky='w', **pad)
+
+        ttk.Label(dialog, text='Output format').grid(row=1, column=0, sticky='w', **pad)
+        format_box = ttk.Combobox(
+            dialog,
+            textvariable=selected_format,
+            values=list(format_by_label.keys()),
+            width=54,
+            state='readonly',
+        )
+        format_box.grid(row=1, column=1, columnspan=2, sticky='we', **pad)
+
+        ttk.Label(dialog, text='IfcConvert executable').grid(row=2, column=0, sticky='w', **pad)
+        converter_entry = ttk.Entry(dialog, textvariable=converter_path, width=47)
+        converter_entry.grid(row=2, column=1, sticky='we', **pad)
+
+        def browse_converter():
+            path = filedialog.askopenfilename(
+                title='Select IfcConvert executable',
+                filetypes=[
+                    ('IfcConvert executable', 'IfcConvert.exe IfcConvert'),
+                    ('Executable files', '*.exe'),
+                    ('All files', '*.*'),
+                ],
+            )
+            if path not in [None, '']:
+                converter_path.set(path)
+
+        browse_btn = ttk.Button(dialog, text='Browse', command=browse_converter)
+        browse_btn.grid(row=2, column=2, sticky='we', **pad)
+
+        keep_chk = ttk.Checkbutton(
+            dialog,
+            text='Keep intermediate .ifc file when converting to another format',
+            variable=keep_ifc,
+        )
+        keep_chk.grid(row=3, column=1, columnspan=2, sticky='w', **pad)
+
+        note_var = tk.StringVar()
+        ttk.Label(dialog, textvariable=note_var, justify=tk.LEFT, foreground='gray25').grid(
+            row=4, column=0, columnspan=3, sticky='w', **pad
+        )
+
+        def update_state(*_args):
+            key, _ext, _desc, tool = format_by_label[selected_format.get()]
+            needs_ifcconvert = key != 'ifc'
+            state = 'normal' if needs_ifcconvert else 'disabled'
+            try:
+                converter_entry.configure(state=state)
+                browse_btn.configure(state=state)
+                keep_chk.configure(state=state)
+            except Exception:
+                pass
+            if needs_ifcconvert:
+                note_var.set(
+                    'Automatic processing: ANYstructure writes the IFC model first, then runs IfcConvert. '
+                    'Default location is the local anystruct\\IfcConvert.exe; PATH is used as fallback.'
+                )
+            else:
+                note_var.set('Native IFC export does not require IfcConvert.')
+
+        selected_format.trace_add('write', update_state)
+        update_state()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=5, column=0, columnspan=3, sticky='e', padx=10, pady=(8, 10))
+
+        def accept():
+            key, ext, desc, tool = format_by_label[selected_format.get()]
+            result['value'] = {
+                'format': key,
+                'extension': ext,
+                'description': desc,
+                'tool': tool,
+                'ifcconvert_path': converter_path.get().strip(),
+                'keep_intermediate_ifc': bool(keep_ifc.get()),
+            }
+            dialog.destroy()
+
+        def cancel():
+            result['value'] = None
+            dialog.destroy()
+
+        ttk.Button(button_row, text='Cancel', command=cancel).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(button_row, text='Continue', command=accept).pack(side=tk.RIGHT)
+
+        dialog.bind('<Return>', lambda _event: accept())
+        dialog.bind('<Escape>', lambda _event: cancel())
+
+        try:
+            self._parent.update_idletasks()
+            x = self._parent.winfo_rootx() + 120
+            y = self._parent.winfo_rooty() + 90
+            dialog.geometry('+' + str(x) + '+' + str(y))
+        except Exception:
+            pass
+
+        self._parent.wait_window(dialog)
+        return result['value']
+
     def export_prop_3d_ifc_model(self):
-        """Export the selected structure as a proper IFC solid model.
+        """Export the selected structure as a proper IFC/CAD model.
 
         This is intentionally not based on _get_prop_3d_solid_export_mesh().
         The IFC file is rebuilt from the ANYstructure plate/stiffener/girder/
-        cylinder objects as swept solids using IfcOpenShell.
+        cylinder objects as swept solids using IfcOpenShell.  Optional secondary
+        outputs are produced by running IfcConvert on the generated IFC model.
         """
         if not self._line_is_active or self._active_line not in self._line_to_struc:
             messagebox.showinfo(
@@ -6443,11 +6622,17 @@ class Application():
             )
             return
 
+        options = self._ask_prop_3d_ifc_export_options()
+        if options is None:
+            return
+
+        ext = options['extension']
         filename = filedialog.asksaveasfilename(
-            defaultextension=".ifc",
+            defaultextension=ext,
             filetypes=[
-                ("Industry Foundation Classes", "*.ifc"),
-                ("All files", "*.*"),
+                (options['description'], '*' + ext),
+                ('Industry Foundation Classes', '*.ifc'),
+                ('All files', '*.*'),
             ],
         )
         if filename in [None, '']:
@@ -6459,8 +6644,19 @@ class Application():
             except ModuleNotFoundError:
                 from ANYstructure.anystruct import ifc_model_export
 
-            summary = ifc_model_export.export_selected_structure_from_application(self, filename)
+            summary = ifc_model_export.export_selected_structure_from_application(
+                self,
+                filename,
+                output_format=options['format'],
+                ifcconvert_path=options['ifcconvert_path'] or None,
+                keep_intermediate_ifc=options['keep_intermediate_ifc'],
+            )
         except ImportError as error:
+            messagebox.showerror(
+                'IFC export',
+                str(error)
+            )
+        except FileNotFoundError as error:
             messagebox.showerror(
                 'IFC export',
                 str(error)
@@ -6468,13 +6664,16 @@ class Application():
         except Exception as error:
             messagebox.showerror(
                 'IFC export',
-                'Could not export IFC model:\n' + str(error)
+                'Could not export IFC/CAD model:\n' + str(error)
             )
         else:
             message = (
-                'IFC model exported to:\n' + filename +
-                '\n\nElements exported: ' + str(summary.element_count)
+                'Export completed:\n' + filename +
+                '\n\nFormat: ' + options['extension'] + ' via ' + options['tool'] +
+                '\nElements exported: ' + str(summary.element_count)
             )
+            if getattr(summary, 'native_ifc_filename', None) and summary.native_ifc_filename != filename:
+                message += '\nSource IFC: ' + str(summary.native_ifc_filename)
             if getattr(summary, 'warnings', None):
                 message += '\n\nWarnings:\n' + '\n'.join('- ' + str(item) for item in summary.warnings)
             messagebox.showinfo('IFC export', message)

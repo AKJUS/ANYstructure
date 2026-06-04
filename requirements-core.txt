@@ -1,5 +1,7 @@
 matplotlib
+meshio
 numpy
+numpy-stl
 Pillow
 reportlab
 scipy
