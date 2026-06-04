@@ -173,6 +173,10 @@ class CreateOptimizeCylinderWindow():
                 all_geos.append(these_ents)
             self._new_entries.append(all_geos)
 
+        self._is_conical_optimizer = getattr(self._initial_cylinder_obj, 'geometry', None) == 9
+        if self._is_conical_optimizer:
+            self._set_conical_optimizer_shell_defaults()
+
         self._predefined_stiffener_iter = None
         self._running_time_after_id = None
 
@@ -290,8 +294,10 @@ class CreateOptimizeCylinderWindow():
                               [ring_stf_upper_bounds, ring_stf_deltas, ring_stf_lower_bounds],
                               [ring_frame_upper_bounds, ring_frame_deltas, ring_frame_lower_bounds]]
         '''
-        shell = ['Shell thk. [mm]', 'Shell radius [mm]', 'l rings [mm]', 'L shell [mm]', 'L tot. [mm]', 'N/A - future',
-                 'N/A - future', 'N/A - future']
+        shell = ['Shell thk. [mm]', 'Eq. radius [mm]', 'Eq. length [mm]', 'Eq. shell L [mm]', 'Eq. total L [mm]',
+                 'Cone r1 [mm]', 'Cone r2 [mm]', 'Cone l [mm]'] if self._is_conical_optimizer else \
+            ['Shell thk. [mm]', 'Shell radius [mm]', 'l rings [mm]', 'L shell [mm]', 'L tot. [mm]', 'N/A - future',
+             'N/A - future', 'N/A - future']
         stf_long = ['Spacing [mm]', 'N/A', 'Web height [mm]', 'Web thk. [mm]', 'Flange width [mm]',
                     'Flange thk. [mm]', 'N/A - future', 'N/A - future']
         stf_ring = ['N/A', 'N/A', 'Web height [mm]', 'Web thk. [mm]', 'Flange width [mm]',
@@ -314,7 +320,8 @@ class CreateOptimizeCylinderWindow():
                             .place(x=start_x + dx * 2 + idx_3 * dx, y=start_y + dy * idx_1 * 4 + dy * idx_2 - dy * 0.5)
 
                     entry_i.place(x=start_x + dx * 2 + idx_3 * dx, y=start_y + dy * idx_1 * 4 + dy * idx_2)
-                    if 'N/A' in all_label[idx_1][idx_3]:
+                    if 'N/A' in all_label[idx_1][idx_3] or (
+                            self._is_conical_optimizer and idx_1 == 0 and idx_3 in [1, 2, 3, 4]):
                         entry_i.configure(bg='grey')
 
         ###
@@ -645,6 +652,30 @@ class CreateOptimizeCylinderWindow():
                 entry.place(x=entry_x, y=y0 + idx * step, width=80)
 
         self.schedule_running_time_update()
+
+    def _set_conical_optimizer_shell_defaults(self):
+        """Keep cone geometry explicit in the cylinder optimizer shell slots."""
+        try:
+            shell = self._initial_cylinder_obj.get_x_opt()[0]
+        except Exception:
+            return
+
+        for idx, value in enumerate(shell):
+            if idx == 0:
+                continue
+            try:
+                value_mm = 0 if value is None or np.isnan(value) else float(value) * 1000
+            except Exception:
+                value_mm = 0
+            for bounds_idx in [0, 2]:
+                try:
+                    self._new_geo_data[0][bounds_idx][idx].set(value_mm)
+                except Exception:
+                    pass
+            try:
+                self._new_geo_data[0][1][idx].set(0)
+            except Exception:
+                pass
 
     def modify_structure_object(self):
         ''' Chaning parameters in the structure object before running. '''
@@ -1330,7 +1361,8 @@ class CreateOptimizeCylinderWindow():
             return max(n0, 1) * max(n1, 1) * len(self._predefined_stiffener_iter)
 
         count = 1
-        for low, up, dlt in zip(lower[:6], upper[:6], delta[:6]):
+        component_values = zip(lower[:8], upper[:8], delta[:8]) if idx == 0 else zip(lower[:6], upper[:6], delta[:6])
+        for low, up, dlt in component_values:
             n_steps = self._count_steps(low, up, dlt)
             count *= max(n_steps, 0)
 

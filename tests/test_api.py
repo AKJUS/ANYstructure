@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import numpy as np
 
@@ -312,6 +314,77 @@ def test_cylinder_api_returns_unstiffened_shell_buckling_golden_result():
     assert results["Column stability UF"] is None
 
 
+def test_cylinder_api_returns_unstiffened_conical_shell_buckling_result():
+    cyl = CylStru(calculation_domain="Unstiffened conical shell")
+    cyl.set_material(mat_yield=355, emodule=210000, material_factor=1.15, poisson=0.3)
+    cyl.set_imperfection(delta_0=0.005)
+    cyl.set_fabrication_method(stiffener="Fabricated", girder="Fabricated")
+    cyl.set_end_cap_pressure_included_in_stress(is_included=True)
+    cyl.set_uls_or_als(kind="ULS")
+    cyl.set_conical_shell_geometry(r1=4000, r2=6500, length=5000, thickness=20)
+    cyl.set_shell_buckling_parmeters(eff_buckling_length_factor=1.0)
+    cyl.set_conical_forces(Nsd=-1000, M1sd=2000, M2sd=1000, Tsd=500, Q1sd=200, Q2sd=100, psd=-0.1)
+
+    results = cyl.get_buckling_results()
+    details = results["Unstiffened conical shell detailed"]
+
+    assert results["Unstiffened conical shell"] == pytest.approx(1.5186769907266833)
+    assert results["Unstiffened shell"] is None
+    assert details["equivalent radius"] == pytest.approx(5.869678440936948)
+    assert details["equivalent length"] == pytest.approx(5.5901699437494745)
+    assert details["governing radius"] == pytest.approx(4.0)
+
+
+def test_cylinder_api_accepts_labelled_conical_domain():
+    cyl = CylStru(calculation_domain="Unstiffened conical shell (Force input)")
+
+    assert cyl._calculation_domain == "Unstiffened conical shell (Force input)"
+    assert cyl._load_type == "Force"
+    assert cyl._CylinderMain.geometry == 9
+    assert cyl._CylinderMain.LongStfObj is None
+    assert cyl._CylinderMain.RingStfObj is None
+    assert cyl._CylinderMain.RingFrameObj is None
+
+
+def test_cylinder_api_generic_force_input_routes_to_conical_adapter():
+    cyl = CylStru(calculation_domain="Unstiffened conical shell")
+    cyl.set_conical_shell_geometry(r1=4000, r2=6500, length=5000, thickness=20)
+
+    cyl.set_forces(Nsd=-1000, Msd=2000, Tsd=500, Qsd=200, psd=-0.1)
+
+    assert cyl._CylinderMain._cone_Nsd == -1000
+    assert cyl._CylinderMain._cone_M1sd == 2000
+    assert cyl._CylinderMain._cone_M2sd == 0
+    assert cyl._CylinderMain._cone_Tsd == 500
+    assert cyl._CylinderMain._cone_Q1sd == 200
+    assert cyl._CylinderMain._cone_Q2sd == 0
+    assert cyl._CylinderMain.psd == pytest.approx(-0.1e6)
+
+
+def test_cylinder_api_accepts_conical_stress_input():
+    cyl = CylStru(calculation_domain="Unstiffened conical shell")
+    cyl.set_material(mat_yield=355, emodule=210000, material_factor=1.15, poisson=0.3)
+    cyl.set_imperfection(delta_0=0.005)
+    cyl.set_fabrication_method(stiffener="Fabricated", girder="Fabricated")
+    cyl.set_end_cap_pressure_included_in_stress(is_included=True)
+    cyl.set_uls_or_als(kind="ULS")
+    cyl.set_conical_shell_geometry(r1=4000, r2=6500, length=5000, thickness=20)
+    cyl.set_shell_buckling_parmeters(eff_buckling_length_factor=1.0)
+
+    cyl.set_stresses(sasd=-60, smsd=20, tTsd=3, tQsd=2, psd=0, shsd=0)
+    results = cyl.get_buckling_results()
+    details = results["Unstiffened conical shell detailed"]
+
+    assert math.isfinite(results["Unstiffened conical shell"])
+    assert cyl._CylinderMain._cone_M2sd == 0
+    assert cyl._CylinderMain._cone_Q2sd == 0
+    assert details["governing radius"] == pytest.approx(4.0)
+    assert details["sasd"] == pytest.approx(-60e6)
+    assert details["smsd"] == pytest.approx(20e6)
+    assert details["tTsd"] == pytest.approx(3e6)
+    assert details["tQsd"] == pytest.approx(2e6)
+
+
 def test_cylinder_api_force_input_converts_pressure_to_pa():
     cyl = CylStru(calculation_domain="Unstiffened shell")
     cyl.set_shell_geometry(radius=6500, thickness=20, distance_between_rings=3000, tot_length_of_shell=12000)
@@ -344,7 +417,7 @@ def test_cylinder_api_force_input_supports_ring_stiffened_without_longitudinal_s
 
 
 def test_cylinder_api_rejects_unknown_domain():
-    with pytest.raises(AssertionError):
+    with pytest.raises(KeyError):
         CylStru(calculation_domain="not a domain")
 
 

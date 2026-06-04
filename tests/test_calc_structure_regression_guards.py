@@ -306,6 +306,7 @@ def test_column_buckling_reduction_formula_stays_positive_for_moderate_slenderne
         "Ring Stiffened panel",
         "Orthogonally Stiffened shell",
         "Orthogonally Stiffened panel",
+        "Unstiffened conical shell",
     ],
 )
 def test_cylinder_api_domains_return_finite_results(domain):
@@ -315,10 +316,16 @@ def test_cylinder_api_domains_return_finite_results(domain):
     cylinder.set_fabrication_method(stiffener="Fabricated", girder="Fabricated")
     cylinder.set_end_cap_pressure_included_in_stress(is_included=True)
     cylinder.set_uls_or_als(kind="ULS")
-    cylinder.set_shell_geometry(radius=6500, thickness=20, distance_between_rings=3300, tot_length_of_shell=20000)
+    if domain == "Unstiffened conical shell":
+        cylinder.set_conical_shell_geometry(r1=4000, r2=6500, length=5000, thickness=20)
+    else:
+        cylinder.set_shell_geometry(radius=6500, thickness=20, distance_between_rings=3300, tot_length_of_shell=20000)
     cylinder.set_panel_spacing(700)
     cylinder.set_shell_buckling_parmeters(eff_buckling_length_factor=1.0)
-    cylinder.set_stresses(sasd=-80, smsd=20, tTsd=10, tQsd=5, psd=-0.1, shsd=0)
+    if domain == "Unstiffened conical shell":
+        cylinder.set_conical_forces(Nsd=-1000, M1sd=2000, M2sd=1000, Tsd=500, Q1sd=200, Q2sd=100, psd=-0.1)
+    else:
+        cylinder.set_stresses(sasd=-80, smsd=20, tTsd=10, tQsd=5, psd=-0.1, shsd=0)
     if "Longitudinal" in domain or "Orthogonally" in domain:
         cylinder.set_longitudinal_stiffener(hw=260, tw=12, bf=80, tf=20, spacing=700)
     if "Ring Stiffened" in domain:

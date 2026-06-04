@@ -2,6 +2,8 @@ import math
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import anystruct.helper as hlp
@@ -59,3 +61,62 @@ def test_round_trip_longitudinal_stiffened_shell():
 
     for original, recovered in zip(forces, converted[:4]):
         assert math.isclose(original, recovered, rel_tol=1e-9)
+
+
+def test_conical_force_conversion_uses_section_4_stress_components():
+    dummy = _DummyCylinder(12.1)
+    alpha = math.degrees(math.atan((6.5 - 4.0) / 5.0))
+    kwargs = dict(
+        geometry=9,
+        shell_t=0.02,
+        shell_radius=4.0,
+        shell_spacing=5.0,
+        CylinderAndCurvedPlate=dummy,
+        conical=True,
+        psd=-0.1,
+        cone_r1=4.0,
+        cone_r2=6.5,
+        cone_alpha=alpha,
+        shell_lenght_l=5.0,
+    )
+    forces = (-1000, 2000, 1000, 500, 200, 100)
+
+    sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+        forces=forces,
+        **kwargs,
+    )
+
+    te = 0.02 * math.cos(math.radians(alpha))
+    assert sasd == pytest.approx(-0.1e6 * 4.0 / (2 * te) - 1000 * 1000 / (2 * math.pi * 4.0 * te))
+    assert smsd == pytest.approx(math.sqrt(2000 ** 2 + 1000 ** 2) * 1000 / (math.pi * 4.0 ** 2 * te))
+    assert tTsd == pytest.approx(500 * 1000 / (2 * math.pi * 4.0 ** 2 * te))
+    assert tQsd == pytest.approx(math.sqrt(200 ** 2 + 100 ** 2) * 1000 / (math.pi * 4.0 * te))
+    assert shsd == pytest.approx(-0.1e6 * 4.0 / te)
+
+
+def test_conical_stress_input_converts_to_equivalent_axis_one_forces():
+    dummy = _DummyCylinder(12.1)
+    alpha = math.degrees(math.atan((6.5 - 4.0) / 5.0))
+    kwargs = dict(
+        geometry=9,
+        shell_t=0.02,
+        shell_radius=4.0,
+        shell_spacing=5.0,
+        CylinderAndCurvedPlate=dummy,
+        conical=True,
+        psd=-0.1,
+        cone_r1=4.0,
+        cone_r2=6.5,
+        cone_alpha=alpha,
+        shell_lenght_l=5.0,
+    )
+    stresses = (-60e6, 20e6, 3e6, 2e6, -11e6)
+
+    forces = hlp.helper_cylinder_stress_to_force_to_stress(stresses=stresses, **kwargs)
+    converted = hlp.helper_cylinder_stress_to_force_to_stress(forces=forces[:6], **kwargs)
+
+    assert forces[2] == 0
+    assert forces[5] == 0
+    for expected, actual in zip(stresses[:4], converted[:4]):
+        assert actual == pytest.approx(expected)
+    assert converted[4] == pytest.approx(-0.1e6 * 4.0 / (0.02 * math.cos(math.radians(alpha))))

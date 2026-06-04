@@ -17,6 +17,28 @@ def test_main_application_uses_shared_geometry_menu_helpers():
     assert "Longitudinal Stiffened shell  (Force input)" not in source
 
 
+def test_conical_shell_uses_single_domain_and_existing_force_stress_toggle():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    conical_branch = source[
+        source.index("elif self._new_calculation_domain.get() == 'Unstiffened conical shell (Force input)'"):
+        source.index("elif self._new_calculation_domain.get() in ['Longitudinal Stiffened shell (Force input)'")
+    ]
+    cylinder_sync_block = source[
+        source.index("if struc_obj.geometry == 9:"):
+        source.index("elif self._new_shell_stress_or_force.get() == 1:")
+    ]
+
+    assert "Unstiffened conical shell (Stress input)" not in source
+    assert "conical=True" in conical_branch
+    assert "_new_shell_stress_or_force.set" not in conical_branch
+    assert "helper_cylinder_stress_to_force_to_stress(" in cylinder_sync_block
+    assert "self._new_shell_M2sd.set(M2sd)" in cylinder_sync_block
+    assert "self._new_shell_Q2sd.set(Q2sd)" in cylinder_sync_block
+    assert "if 'Need to check column buckling' not in results.keys() and value is None:" in source
+
+
 def test_release_package_metadata_uses_current_markdown_readme():
     setup_source = Path(__file__).resolve().parents[1] / "setup.py"
     source = setup_source.read_text(encoding="utf-8")
@@ -221,7 +243,7 @@ def test_simplified_mode_draws_prepomax_imperfection_guidance_in_lower_pane():
     source = main_source.read_text(encoding="utf-8")
 
     assert "def draw_prepomax_imperfection_recommendations(self):" in source
-    assert "PrePoMax imperfection input, DNVGL-OS-C401" in source
+    assert "FE-model imperfection input, DNVGL-OS-C401" in source
     assert "Use the value as initial geometry amplitude" in source
     assert "self.draw_prepomax_imperfection_recommendations()" in source
     assert "def _select_prepomax_imperfection_row(self, row_index):" in source

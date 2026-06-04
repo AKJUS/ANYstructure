@@ -1,6 +1,7 @@
 """Application services for project edits that do not depend on Tkinter."""
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
@@ -355,7 +356,7 @@ class CylinderStructurePropertyResult:
     ring_frame_dict: dict[str, Any]
     geometry: int
     derived_stresses: tuple[Any, Any, Any, Any, Any]
-    derived_forces: tuple[Any, Any, Any, Any]
+    derived_forces: tuple[Any, ...]
 
 
 class CylinderStructurePropertyService:
@@ -378,6 +379,7 @@ class CylinderStructurePropertyService:
         )
         sasd, smsd, tTsd, tQsd, shsd = derived_stresses
         main_values = request.main_values
+        main_forces = derived_forces if geometry == 9 else ()
         main_dict_cyl = {
             'sasd': [api_helpers.mpa_to_pa(sasd), 'Pa'],
             'smsd': [api_helpers.mpa_to_pa(smsd), 'Pa'],
@@ -399,6 +401,12 @@ class CylinderStructurePropertyService:
             'ring frame excluded': [main_values['ring_frame_excluded'], ''],
             'ULS or ALS': [main_values['uls_or_als'], ''],
             'end cap pressure': [main_values['end_cap_pressure'], ''],
+            'cone Nsd': [main_forces[0] if len(main_forces) == 6 else request.load_input.get('Nsd'), 'kN'],
+            'cone M1sd': [main_forces[1] if len(main_forces) == 6 else request.load_input.get('M1sd'), 'kNm'],
+            'cone M2sd': [main_forces[2] if len(main_forces) == 6 else request.load_input.get('M2sd'), 'kNm'],
+            'cone Tsd': [main_forces[3] if len(main_forces) == 6 else request.load_input.get('Tsd'), 'kNm'],
+            'cone Q1sd': [main_forces[4] if len(main_forces) == 6 else request.load_input.get('Q1sd'), 'kN'],
+            'cone Q2sd': [main_forces[5] if len(main_forces) == 6 else request.load_input.get('Q2sd'), 'kN'],
         }
 
         for key, value in dummy_data.items():
@@ -450,14 +458,34 @@ class CylinderStructurePropertyService:
     @staticmethod
     def _shell_dict(request):
         values = request.shell_values
+        cone_r1 = values.get('cone_r1')
+        cone_r2 = values.get('cone_r2')
+        cone_length = values.get('cone_length')
+        if cone_r1 not in [None, 0] and cone_r2 not in [None, 0] and cone_length not in [None, 0]:
+            alpha = math.degrees(math.atan(abs(cone_r2 - cone_r1) / cone_length))
+            cos_alpha = math.cos(math.radians(alpha))
+            radius = (cone_r1 + cone_r2) / (2 * cos_alpha)
+            distance_between_rings = cone_length / cos_alpha
+            length = distance_between_rings
+            total_length = distance_between_rings
+        else:
+            alpha = None
+            radius = values['radius']
+            distance_between_rings = values['distance_between_rings']
+            length = values['length']
+            total_length = values['total_length']
         return {
             'plate_thk': [api_helpers.mm_to_m(values['thickness']), 'm'],
-            'radius': [api_helpers.mm_to_m(values['radius']), 'm'],
-            'distance between rings, l': [api_helpers.mm_to_m(values['distance_between_rings']), 'm'],
-            'length of shell, L': [api_helpers.mm_to_m(values['length']), 'm'],
-            'tot cyl length, Lc': [api_helpers.mm_to_m(values['total_length']), 'm'],
+            'radius': [api_helpers.mm_to_m(radius), 'm'],
+            'distance between rings, l': [api_helpers.mm_to_m(distance_between_rings), 'm'],
+            'length of shell, L': [api_helpers.mm_to_m(length), 'm'],
+            'tot cyl length, Lc': [api_helpers.mm_to_m(total_length), 'm'],
             'eff. buckling lenght factor': [values['k_factor'], ''],
             'mat_yield': [api_helpers.mpa_to_pa(request.main_values['yield']), 'Pa'],
+            'cone r1': [None if cone_r1 is None else api_helpers.mm_to_m(cone_r1), 'm'],
+            'cone r2': [None if cone_r2 is None else api_helpers.mm_to_m(cone_r2), 'm'],
+            'cone length, l': [None if cone_length is None else api_helpers.mm_to_m(cone_length), 'm'],
+            'cone alpha': [alpha, 'deg'],
         }
 
     @staticmethod
@@ -518,6 +546,50 @@ class CylinderStructurePropertyService:
             'tf': longitudinal['fl_t'],
             'CylinderAndCurvedPlate': cylinder_class,
         }
+        if geometry == 9:
+            cone_r1 = shell.get('cone_r1', shell['radius'])
+            cone_r2 = shell.get('cone_r2', shell['radius'])
+            cone_length = shell.get('cone_length', shell['distance_between_rings'])
+            alpha = math.degrees(math.atan(abs(cone_r2 - cone_r1) / cone_length)) if cone_length else 0
+            conical_kwargs = dict(converter_kwargs)
+            conical_kwargs['shell_radius'] = min(cone_r1, cone_r2)
+            common_conical_kwargs = {
+                'conical': True,
+                'psd': load_input['psd'],
+                'cone_r1': cone_r1,
+                'cone_r2': cone_r2,
+                'cone_alpha': alpha,
+                'shell_lenght_l': cone_length,
+                **conical_kwargs,
+            }
+            if load_input['mode'] == 1:
+                forces = (
+                    load_input['Nsd'],
+                    load_input['M1sd'],
+                    load_input['M2sd'],
+                    load_input['Tsd'],
+                    load_input['Q1sd'],
+                    load_input['Q2sd'],
+                )
+                stresses = hlp.helper_cylinder_stress_to_force_to_stress(
+                    stresses=None,
+                    forces=forces,
+                    **common_conical_kwargs,
+                )
+                return stresses, forces
+
+            stresses = (
+                load_input['sasd'],
+                load_input['smsd'],
+                abs(load_input['tTsd']),
+                load_input['tQsd'],
+                load_input['shsd'],
+            )
+            forces_with_shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+                stresses=stresses,
+                **common_conical_kwargs,
+            )
+            return stresses, tuple(forces_with_shsd[:6])
         if load_input['mode'] == 1:
             forces = (
                 load_input['Nsd'],

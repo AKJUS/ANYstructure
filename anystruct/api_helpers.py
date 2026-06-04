@@ -13,6 +13,7 @@ CYLINDER_STRUCTURE_DOMAINS = (
     "Ring Stiffened panel",
     "Orthogonally Stiffened shell",
     "Orthogonally Stiffened panel",
+    "Unstiffened conical shell",
 )
 
 BUCKLING_CALCULATION_METHODS = (
@@ -83,6 +84,11 @@ CYLINDER_GEOMETRY_IDS = {
     "Ring Stiffened panel (Stress input)": 6,
     "Orthogonally Stiffened shell (Force input)": 7,
     "Orthogonally Stiffened panel (Stress input)": 8,
+    "Unstiffened conical shell (Force input)": 9,
+}
+
+CYLINDER_GEOMETRY_ALIASES = {
+    "Unstiffened conical shell (Stress input)": 9,
 }
 
 CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT = tuple(CYLINDER_GEOMETRY_IDS.keys())
@@ -105,6 +111,8 @@ def assert_choice(value, choices, label):
 
 def cylinder_input_mode(calculation_domain):
     calculation_domain = normalize_domain_string(calculation_domain)
+    if calculation_domain in CYLINDER_GEOMETRY_IDS or calculation_domain in CYLINDER_GEOMETRY_ALIASES:
+        return "Stress" if "Stress input" in calculation_domain else "Force"
     assert_choice(calculation_domain, CYLINDER_STRUCTURE_DOMAINS, "calculation_domain")
     return "Stress" if "panel" in calculation_domain.lower() else "Force"
 
@@ -120,6 +128,9 @@ def geometry_id_for_domain(calculation_domain):
 
     if calculation_domain in GEOMETRY_IDS:
         return GEOMETRY_IDS[calculation_domain]
+
+    if calculation_domain in CYLINDER_GEOMETRY_ALIASES:
+        return CYLINDER_GEOMETRY_ALIASES[calculation_domain]
 
     if calculation_domain in CYLINDER_STRUCTURE_DOMAINS:
         calculation_domain = cylinder_domain_with_input_mode(calculation_domain)

@@ -1542,6 +1542,16 @@ def _get_longitudinal_spacing_mm(long_obj, panel_spacing_m):
     return float(panel_spacing_m) * 1000.0
 
 
+def _candidate_value_or_default(value, default):
+    try:
+        value = float(value)
+    except Exception:
+        return default
+    if math.isnan(value) or value <= 0.0:
+        return default
+    return value
+
+
 def create_new_cylinder_obj(init_obj, x_new):
     """
     Create a new cylinder object for a candidate geometry.
@@ -1552,11 +1562,21 @@ def create_new_cylinder_obj(init_obj, x_new):
     stress_press = [init_obj.sasd, init_obj.smsd, init_obj.tTsd, init_obj.tQsd, init_obj.shsd]
     shell_obj = init_obj.ShellObj
     long_obj = init_obj.LongStfObj
+    is_conical = getattr(init_obj, 'geometry', None) == 9
 
     old_long_spacing_mm = _get_longitudinal_spacing_mm(long_obj, init_obj.panel_spacing)
+    old_stress_radius = min(shell_obj.cone_r1, shell_obj.cone_r2) if is_conical and \
+        None not in [shell_obj.cone_r1, shell_obj.cone_r2] else shell_obj.radius
+    new_cone_r1 = _candidate_value_or_default(x_new[0][5], getattr(shell_obj, 'cone_r1', None)) if is_conical else None
+    new_cone_r2 = _candidate_value_or_default(x_new[0][6], getattr(shell_obj, 'cone_r2', None)) if is_conical else None
+    new_cone_length = _candidate_value_or_default(
+        x_new[0][7], getattr(shell_obj, 'cone_length', None)
+    ) if is_conical else None
+    new_stress_radius = min(new_cone_r1, new_cone_r2) if is_conical and \
+        None not in [new_cone_r1, new_cone_r2] else x_new[0][1]
     x_old = (
         shell_obj.thk,
-        shell_obj.radius,
+        old_stress_radius,
         old_long_spacing_mm / 1000.0,
         0.0 if long_obj is None else _get_mm_attr(long_obj, 'hw') / 1000.0,
         0.0 if long_obj is None else _get_mm_attr(long_obj, 'tw') / 1000.0,
@@ -1566,8 +1586,8 @@ def create_new_cylinder_obj(init_obj, x_new):
 
     x_new_stress_scaling = (
         x_new[0][0] if not np.isnan(x_new[0][0]) else shell_obj.thk,
-        x_new[0][1] if not np.isnan(x_new[0][1]) else shell_obj.radius,
-        x_new[0][5] if long_obj is None else x_new[1][0],
+        new_stress_radius if not np.isnan(new_stress_radius) else old_stress_radius,
+        0.0 if is_conical else x_new[0][5] if long_obj is None else x_new[1][0],
         0.0 if long_obj is None else x_new[1][2],
         0.0 if long_obj is None else x_new[1][3],
         0.0 if long_obj is None else x_new[1][4],
@@ -1577,11 +1597,16 @@ def create_new_cylinder_obj(init_obj, x_new):
     new_stresses = stress_scaling_cylinder(x_old, x_new_stress_scaling, stress_press)
     new_obj = copy.deepcopy(init_obj)
     new_obj.sasd, new_obj.smsd, new_obj.tTsd, new_obj.tQsd, new_obj.shsd = new_stresses
-    new_obj.ShellObj.radius = x_new[0][1]
     new_obj.ShellObj.thk = x_new[0][0]
+    if is_conical:
+        new_obj.ShellObj.set_conical_geometry(new_cone_r1, new_cone_r2, new_cone_length)
+        new_obj.panel_spacing = new_obj.ShellObj.cone_equivalent_length()
+    else:
+        new_obj.ShellObj.radius = x_new[0][1]
 
     if long_obj is None:
-        new_obj.panel_spacing = x_new[0][5]
+        if not is_conical:
+            new_obj.panel_spacing = x_new[0][5]
     else:
         _set_mm_attr(new_obj.LongStfObj, 'spacing', x_new[1][0] * 1000.0)
         _set_mm_attr(new_obj.LongStfObj, 'hw', x_new[1][2] * 1000.0)
@@ -2239,28 +2264,47 @@ def calc_weight_cylinder(x):
     ring        (nan, nan, 0.3, 0.01, 0.1, 0.01, nan, nan),
     ring        (nan, nan, 0.7, 0.02, 0.2, 0.02, nan, nan)]
     '''
+    shell = x[0]
+    is_conical = _candidate_value_or_default(shell[5], 0.0) > 0.0 and \
+        _candidate_value_or_default(shell[6], 0.0) > 0.0 and \
+        _candidate_value_or_default(shell[7], 0.0) > 0.0
+    if is_conical:
+        cone_r1 = _candidate_value_or_default(shell[5], shell[1])
+        cone_r2 = _candidate_value_or_default(shell[6], shell[1])
+        cone_length = _candidate_value_or_default(shell[7], shell[4])
+        shell_length = math.sqrt(math.pow(cone_length, 2) + math.pow(cone_r2 - cone_r1, 2))
+        representative_radius = (cone_r1 + cone_r2) / 2.0
+    else:
+        shell_length = x[0][4]
+        representative_radius = x[0][1]
+
     if sum(x[1][0:8]) != 0:
-        num_long_stf = 2 * math.pi * x[0][1] / x[1][0]
+        num_long_stf = 2 * math.pi * representative_radius / x[1][0]
         long_stf_area = x[1][2] * x[1][3] + x[1][4] * x[1][5]
-        long_stf_volume = long_stf_area * x[0][4] * num_long_stf
+        long_stf_volume = long_stf_area * shell_length * num_long_stf
     else:
         long_stf_volume = 0
     if sum(x[2][0:8]) != 0:
-        num_ring_stf = x[0][4] / x[0][2]
-        ring_stf_volume = math.pi * (math.pow(x[0][1], 2) - math.pow(x[0][1] - x[2][2], 2)) * x[2][3] + \
-                          2 * math.pi * (x[0][1] - x[2][2]) * x[2][4] * x[2][5]
+        num_ring_stf = shell_length / x[0][2]
+        ring_stf_volume = math.pi * (math.pow(representative_radius, 2) -
+                                     math.pow(representative_radius - x[2][2], 2)) * x[2][3] + \
+                          2 * math.pi * (representative_radius - x[2][2]) * x[2][4] * x[2][5]
         ring_stf_tot_vol = ring_stf_volume * num_ring_stf
     else:
         ring_stf_tot_vol = 0
     if sum(x[3][0:8]) != 0:
-        num_ring_girder = x[0][4] / x[0][3]
-        ring_frame_volume = math.pi * (math.pow(x[0][1], 2) - math.pow(x[0][1] - x[3][2], 2)) * x[3][3] + \
-                            2 * math.pi * (x[0][1] - x[3][2]) * x[3][4] * x[3][5]
+        num_ring_girder = shell_length / x[0][3]
+        ring_frame_volume = math.pi * (math.pow(representative_radius, 2) -
+                                       math.pow(representative_radius - x[3][2], 2)) * x[3][3] + \
+                            2 * math.pi * (representative_radius - x[3][2]) * x[3][4] * x[3][5]
         tot_ring_frame_vol = ring_frame_volume * num_ring_girder
     else:
         tot_ring_frame_vol = 0
 
-    shell_volume = 2 * math.pi * x[0][1] * x[0][0] * x[0][4]
+    if is_conical:
+        shell_volume = math.pi * (cone_r1 + cone_r2) * shell_length * x[0][0]
+    else:
+        shell_volume = 2 * math.pi * x[0][1] * x[0][0] * x[0][4]
 
     return (long_stf_volume + ring_stf_tot_vol + tot_ring_frame_vol + shell_volume) * 7850
 

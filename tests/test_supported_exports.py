@@ -70,3 +70,26 @@ def test_letter_report_renderer_reads_snapshot_shape_directly():
     assert "self.data._" not in source
     assert "self.data.get_color_and_calc_state(" not in source
     assert "self.data.get_highest_pressure(" not in source
+
+
+def test_ifc_export_has_conical_shell_model_branch():
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "def _conical_faces(" in source
+    assert "def _conical_wall_solid_faces(" in source
+    assert "def _add_conical_shell_surface(" in source
+    assert "def _add_conical_wall_solid(" in source
+    assert 'getattr(cyl_obj, "geometry", None) == 9' in source
+    assert "Unstiffened conical shell" in source
+
+
+def test_report_generator_accounts_for_conical_shell_results():
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "report_generator.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Unstiffened conical shell r1/r2" in source
+    assert "Unstiffened conical shell detailed" in source
+    assert "results['Unstiffened conical shell'] if cyl_obj.geometry == 9" in source

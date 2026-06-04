@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from anystruct import optimize as opt, example_data as ex, calc_structure as calc
+from anystruct.api import CylStru
 import numpy as np
 import pytest
 
@@ -63,6 +64,58 @@ def test_unstiffened_flat_plate_optimization_keeps_plate_only_structure():
     assert results[0] is not None
     assert results[0].Stiffener is None
     assert results[0].Plate.get_pl_thk() == pytest.approx(obj.Plate.get_pl_thk())
+
+
+def _conical_optimization_object():
+    cyl = CylStru(calculation_domain="Unstiffened conical shell")
+    cyl.set_material(mat_yield=355, emodule=210000, material_factor=1.15, poisson=0.3)
+    cyl.set_conical_shell_geometry(r1=4000, r2=6500, length=5000, thickness=20)
+    cyl.set_conical_forces(Nsd=-1000, M1sd=2000, M2sd=1000, Tsd=500, Q1sd=200, Q2sd=100, psd=-0.1)
+    return cyl._CylinderMain
+
+
+def test_conical_cylinder_optimizer_tuple_preserves_cone_geometry():
+    cylinder = _conical_optimization_object()
+
+    shell, long_stf, ring_stf, ring_frame = cylinder.get_x_opt()
+
+    assert shell[1] == pytest.approx(cylinder.ShellObj.cone_equivalent_radius())
+    assert shell[2] == pytest.approx(cylinder.ShellObj.cone_equivalent_length())
+    assert shell[5] == pytest.approx(4.0)
+    assert shell[6] == pytest.approx(6.5)
+    assert shell[7] == pytest.approx(5.0)
+    assert long_stf == [0 for _ in range(8)]
+    assert ring_stf == [0 for _ in range(8)]
+    assert ring_frame == [0 for _ in range(8)]
+
+
+def test_create_new_cylinder_obj_keeps_conical_candidate_as_conical():
+    cylinder = _conical_optimization_object()
+    candidate = cylinder.get_x_opt()
+    candidate[0][0] = 0.025
+    candidate[0][5] = 4.2
+    candidate[0][6] = 6.8
+    candidate[0][7] = 5.4
+
+    new_cylinder = opt.create_new_cylinder_obj(cylinder, candidate)
+
+    assert new_cylinder.geometry == 9
+    assert new_cylinder.ShellObj.thk == pytest.approx(0.025)
+    assert new_cylinder.ShellObj.cone_r1 == pytest.approx(4.2)
+    assert new_cylinder.ShellObj.cone_r2 == pytest.approx(6.8)
+    assert new_cylinder.ShellObj.cone_length == pytest.approx(5.4)
+    assert new_cylinder.ShellObj.radius == pytest.approx(new_cylinder.ShellObj.cone_equivalent_radius())
+
+
+def test_calc_weight_cylinder_uses_frustum_shell_area_for_conical_tuple():
+    cylinder = _conical_optimization_object()
+    x = cylinder.get_x_opt()
+
+    weight = opt.calc_weight_cylinder(x)
+
+    slant_length = ((6.5 - 4.0) ** 2 + 5.0 ** 2) ** 0.5
+    expected = 3.141592653589793 * (4.0 + 6.5) * slant_length * 0.02 * 7850
+    assert weight == pytest.approx(expected)
 
 
 def test_stiffened_plate_with_girder_optimization_preserves_and_iterates_girder():

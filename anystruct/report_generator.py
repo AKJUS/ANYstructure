@@ -379,16 +379,33 @@ class LetterMaker(object):
                     textobject.setTextOrigin(30, vpos)
                     textobject.setFont("Helvetica-Oblique", 10)
                     textobject.textLine('*********** ' + line + ' ***********')
-                    textobject.textLine('Cylinder radius: ' + str(round(cyl_obj.ShellObj.radius*1000,2)) +
-                                        ' mm , thickness: ' +str(round(cyl_obj.ShellObj.thk*1000,2)) + ' mm')
-                    textobject.textLine('Longitudinal stiffener: ' + cyl_obj.LongStfObj.get_beam_string())
-                    textobject.textLine('Ring stiffener: ' + cyl_obj.LongStfObj.get_beam_string())
-                    textobject.textLine('Heavy ring girder: ' + cyl_obj.LongStfObj.get_beam_string())
-                    textobject.textLine(
-                        'Dist. between rings/length, l: ' + str(round(cyl_obj.ShellObj.dist_between_rings, 1)))
-                    textobject.textLine(
-                        'Lenght of shell, L: ' + str(round(cyl_obj.ShellObj.length_of_shell, 1)) + ' '
-                        +'Total cyl. lenght, Lc: ' + str(round(cyl_obj.ShellObj.tot_cyl_length, 1)))
+                    if cyl_obj.geometry == 9:
+                        textobject.textLine(
+                            'Unstiffened conical shell r1/r2: ' +
+                            str(round(cyl_obj.ShellObj.cone_r1 * 1000, 2)) + ' / ' +
+                            str(round(cyl_obj.ShellObj.cone_r2 * 1000, 2)) +
+                            ' mm , thickness: ' + str(round(cyl_obj.ShellObj.thk * 1000, 2)) + ' mm')
+                        textobject.textLine(
+                            'Cone length, l: ' + str(round(cyl_obj.ShellObj.cone_length * 1000, 1)) +
+                            ' mm , alpha: ' + str(round(cyl_obj.ShellObj.cone_alpha, 3)) + ' deg')
+                        textobject.textLine(
+                            'Equivalent cylinder r/l: ' +
+                            str(round(cyl_obj.ShellObj.cone_equivalent_radius() * 1000, 2)) + ' / ' +
+                            str(round(cyl_obj.ShellObj.cone_equivalent_length() * 1000, 1)) + ' mm')
+                    else:
+                        textobject.textLine('Cylinder radius: ' + str(round(cyl_obj.ShellObj.radius*1000,2)) +
+                                            ' mm , thickness: ' +str(round(cyl_obj.ShellObj.thk*1000,2)) + ' mm')
+                        textobject.textLine('Longitudinal stiffener: ' + (
+                            'None' if cyl_obj.LongStfObj is None else cyl_obj.LongStfObj.get_beam_string()))
+                        textobject.textLine('Ring stiffener: ' + (
+                            'None' if cyl_obj.RingStfObj is None else cyl_obj.RingStfObj.get_beam_string()))
+                        textobject.textLine('Heavy ring girder: ' + (
+                            'None' if cyl_obj.RingFrameObj is None else cyl_obj.RingFrameObj.get_beam_string()))
+                        textobject.textLine(
+                            'Dist. between rings/length, l: ' + str(round(cyl_obj.ShellObj.dist_between_rings, 1)))
+                        textobject.textLine(
+                            'Lenght of shell, L: ' + str(round(cyl_obj.ShellObj.length_of_shell, 1)) + ' '
+                            +'Total cyl. lenght, Lc: ' + str(round(cyl_obj.ShellObj.tot_cyl_length, 1)))
 
                     results = cyl_obj.get_utilization_factors()
                     textobject.textLine('Design axial stress/force:     ' + str(cyl_obj.sasd / 1e6) + ' MPa')
@@ -399,12 +416,15 @@ class LetterMaker(object):
                     textobject.textLine('Additional hoop stress         ' + str(cyl_obj.shsd / 1e6) + ' MPa')
                     vpos -= 40
                     for key, value in results.items():
-                        if key in ['Weight', 'Need to check column buckling']:
+                        if key in ['Weight', 'Need to check column buckling', 'Unstiffened conical shell detailed']:
+                            continue
+                        if isinstance(value, dict):
                             continue
                         if key not in ['Stiffener check', 'Stiffener check detailed']:
                             text_key = key
                             if key == 'Column stability check':
-                                if results['Need to check column buckling'] == False:
+                                need_column_check = results.get('Need to check column buckling', value)
+                                if need_column_check == False or value is None:
                                     continue
                                 uf_text = 'N/A' if value is None else 'OK' if value else 'Not ok'
                             else:
@@ -905,10 +925,16 @@ class LetterMaker(object):
 
                 cyl_obj = line_structure.cylinder(line_bundle)
 
-                radius = round(cyl_obj.ShellObj.radius * 1000, 2)
+                if cyl_obj.geometry == 9:
+                    radius = 'r1/r2 ' + str(round(cyl_obj.ShellObj.cone_r1 * 1000, 2)) + '/' + \
+                             str(round(cyl_obj.ShellObj.cone_r2 * 1000, 2))
+                    span = round(cyl_obj.ShellObj.cone_length, 1)
+                    tot_length = round(cyl_obj.ShellObj.cone_equivalent_length(), 1)
+                else:
+                    radius = round(cyl_obj.ShellObj.radius * 1000, 2)
+                    span = round(cyl_obj.ShellObj.dist_between_rings, 1)
+                    tot_length = round(cyl_obj.ShellObj.length_of_shell, 1)
                 thickness = round(cyl_obj.ShellObj.thk * 1000, 2)
-                span = round(cyl_obj.ShellObj.dist_between_rings, 1)
-                tot_length = round(cyl_obj.ShellObj.length_of_shell, 1)
 
                 sigma_axial = cyl_obj.sasd / 1e6
                 sigma_bend = cyl_obj.smsd / 1e6
@@ -919,6 +945,7 @@ class LetterMaker(object):
 
                 results = cyl_obj.get_utilization_factors()
 
+                shell_uf = results['Unstiffened conical shell'] if cyl_obj.geometry == 9 else results['Unstiffened shell']
                 data = [
                     line,
                     radius,
@@ -931,7 +958,7 @@ class LetterMaker(object):
                     tau_xy,
                     lat_press,
                     sigma_hoop,
-                    round(0 if results['Unstiffened shell'] is None else results['Unstiffened shell'], 2),
+                    round(0 if shell_uf is None else shell_uf, 2),
                     round(0 if results['Longitudinal stiffened shell'] is None else results[
                         'Longitudinal stiffened shell'], 2),
                     round(0 if results['Ring stiffened shell'] is None else results['Ring stiffened shell'], 2),
