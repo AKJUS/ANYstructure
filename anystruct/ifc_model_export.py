@@ -21,6 +21,7 @@ Typical use from Application:
 from __future__ import annotations
 
 import importlib.resources as importlib_resources
+import functools
 import math
 import os
 import shutil
@@ -147,7 +148,8 @@ def _existing_executable(path: str) -> str | None:
     return None
 
 
-def _resource_ifcconvert_candidates() -> list[str]:
+@functools.lru_cache(maxsize=1)
+def _resource_ifcconvert_candidates() -> tuple[str, ...]:
     """Return IfcConvert candidates shipped inside the installed anystruct package.
 
     This is the important path for PyPI wheels/sdists.  If ``IfcConvert.exe`` is
@@ -175,9 +177,10 @@ def _resource_ifcconvert_candidates() -> list[str]:
                     candidates.append(str(resolved))
             except Exception:
                 pass
-    return candidates
+    return tuple(candidates)
 
 
+@functools.lru_cache(maxsize=8)
 def _ifcconvert_candidate_paths(ifcconvert_path: str | None = None) -> list[str]:
     """Return automatic IfcConvert locations.
 
@@ -249,7 +252,8 @@ def _ifcconvert_candidate_paths(ifcconvert_path: str | None = None) -> list[str]
 
 
 def _resolve_ifcconvert_executable(ifcconvert_path: str | None = None) -> str:
-    for candidate in _ifcconvert_candidate_paths(ifcconvert_path):
+    candidates = _ifcconvert_candidate_paths(ifcconvert_path)
+    for candidate in candidates:
         expanded = os.path.expanduser(os.path.expandvars(candidate))
         local = _existing_executable(expanded)
         if local:
@@ -258,7 +262,7 @@ def _resolve_ifcconvert_executable(ifcconvert_path: str | None = None) -> str:
         if found:
             return found
 
-    searched = "\n".join("  - " + path for path in _ifcconvert_candidate_paths(ifcconvert_path)[:20])
+    searched = "\n".join("  - " + path for path in candidates[:20])
     raise FileNotFoundError(
         "IfcConvert was not found automatically. Users should not have to select it manually.\n\n"
         "For PyPI, include IfcConvert.exe as package data inside the anystruct package, e.g.\n"
@@ -272,22 +276,80 @@ def _convert_ifc_with_ifcconvert(
     native_ifc_filename: str,
     output_filename: str,
     ifcconvert_path: str | None = None,
+    timeout_seconds: float = 300.0,
 ) -> None:
     converter = _resolve_ifcconvert_executable(ifcconvert_path)
     command = [converter, native_ifc_filename, output_filename]
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            "IfcConvert did not finish within " + str(int(timeout_seconds)) +
+            " seconds. The export was cancelled."
+        ) from error
     if completed.returncode != 0:
         details = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(
             "IfcConvert failed with return code " + str(completed.returncode) +
             ("\n" + details if details else "")
         )
+
+
+def _temporary_filename_near(target_filename: str, suffix: str | None = None) -> str:
+    """Return a unique temporary path beside ``target_filename``.
+
+    Converters can hang or prompt internally when writing directly to an existing
+    file.  A same-directory temporary file keeps the final replace atomic on the
+    same filesystem while avoiding an existing output path during conversion.
+    """
+    target_dir = os.path.dirname(os.path.abspath(target_filename)) or os.getcwd()
+    os.makedirs(target_dir, exist_ok=True)
+    final_suffix = suffix if suffix is not None else os.path.splitext(target_filename)[1]
+    fd, temp_filename = tempfile.mkstemp(
+        prefix="anystructure_export_",
+        suffix=final_suffix,
+        dir=target_dir,
+    )
+    os.close(fd)
+    try:
+        os.remove(temp_filename)
+    except OSError:
+        pass
+    return temp_filename
+
+
+def _write_ifc_atomic(model: Any, target_filename: str) -> None:
+    temp_filename = _temporary_filename_near(target_filename, ".ifc")
+    try:
+        model.write(temp_filename)
+        os.replace(temp_filename, target_filename)
+    except Exception:
+        try:
+            os.remove(temp_filename)
+        except OSError:
+            pass
+        raise
+
+
+def _convert_ifc_atomic(native_ifc_filename: str, target_filename: str,
+                        ifcconvert_path: str | None = None) -> None:
+    temp_filename = _temporary_filename_near(target_filename)
+    try:
+        _convert_ifc_with_ifcconvert(native_ifc_filename, temp_filename, ifcconvert_path=ifcconvert_path)
+        os.replace(temp_filename, target_filename)
+    except Exception:
+        try:
+            os.remove(temp_filename)
+        except OSError:
+            pass
+        raise
 
 
 
@@ -378,19 +440,11 @@ def _section_dimensions_from_app(app: Any, section_obj: Any) -> SectionDimension
 
 def _positions_from_length_and_spacing(length: float, spacing: float, include_ends: bool = True,
                                        max_count: int = 80) -> list[float]:
-    """Return stiffener/ring positions without creating a near-duplicate at the far end.
+    """Return stiffener/ring positions.
 
-    The first IFC exporter version appended an explicit end stiffener after all regular
-    spacing positions. If the panel/girder length was not an exact multiple of the
-    spacing, this could produce two stiffeners very close to the upper/far end, e.g.
-    positions [..., 9.75, 10.00] for LG=10 m and s=0.75 m.
-
-    Behaviour now:
-    - regular spacing is still used over the field;
-    - when end stiffeners are requested, the far-end boundary stiffener is kept;
-    - if the last regular stiffener is closer than 0.5 * spacing to the far-end
-      boundary stiffener, the last regular stiffener is replaced by the boundary
-      stiffener instead of adding an extra one.
+    When boundary members are requested, the input spacing is treated as the
+    maximum target spacing. Positions are spread evenly between 0 and length so
+    the last bay is not larger than the rest.
     """
     length = _pos_float(length, 0.0)
     spacing = _pos_float(spacing, 0.0)
@@ -399,6 +453,11 @@ def _positions_from_length_and_spacing(length: float, spacing: float, include_en
     if spacing <= EPS:
         return [0.0, length] if include_ends else [length / 2.0]
 
+    if include_ends:
+        interval_count = max(1, int(math.ceil(length / spacing)))
+        interval_count = min(interval_count, max(1, int(max_count)))
+        return [float(length) * idx / interval_count for idx in range(interval_count + 1)]
+
     positions: list[float] = [0.0] if include_ends else []
     next_pos = spacing
     count_guard = 0
@@ -406,19 +465,6 @@ def _positions_from_length_and_spacing(length: float, spacing: float, include_en
         positions.append(float(next_pos))
         next_pos += spacing
         count_guard += 1
-
-    if include_ends:
-        min_far_end_gap = max(0.5 * spacing, 10.0 * EPS)
-        if not positions:
-            positions = [0.0, float(length)]
-        elif abs(positions[-1] - length) <= EPS:
-            positions[-1] = float(length)
-        elif length - positions[-1] < min_far_end_gap:
-            # Avoid two stiffeners/rings very close to the far end. Keep the
-            # boundary member because it defines the model extent cleanly.
-            positions[-1] = float(length)
-        else:
-            positions.append(float(length))
 
     if not positions:
         return [length / 2.0]
@@ -605,12 +651,7 @@ def _product_shape_from_solid(ctx: IfcContext, solid: Any) -> Any:
     return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
 
 
-def _product_shape_from_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> Any:
-    """Create an IFC surface model from rectangular/planar faces.
-
-    This is the core of the shell export.  Each face is a zero-thickness IFC face.
-    The result is a FaceBasedSurfaceModel, not a solid and not the preview mesh.
-    """
+def _ifc_faces_from_points(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> list[Any]:
     ifc_faces = []
     for face_points in faces:
         pts = []
@@ -623,7 +664,32 @@ def _product_shape_from_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[fl
         poly_loop = ctx.model.createIfcPolyLoop(pts)
         outer_bound = ctx.model.createIfcFaceOuterBound(poly_loop, True)
         ifc_faces.append(ctx.model.createIfcFace([outer_bound]))
+    return ifc_faces
 
+
+def _product_shape_from_closed_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> Any:
+    """Create a faceted B-rep solid from closed polygon faces."""
+    ifc_faces = _ifc_faces_from_points(ctx, faces)
+    if not ifc_faces:
+        raise ValueError("No valid IFC solid faces were generated.")
+    closed_shell = ctx.model.createIfcClosedShell(ifc_faces)
+    brep = ctx.model.createIfcFacetedBrep(closed_shell)
+    rep = ctx.model.createIfcShapeRepresentation(
+        ctx.body_context,
+        "Body",
+        "Brep",
+        [brep],
+    )
+    return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
+
+
+def _product_shape_from_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> Any:
+    """Create an IFC surface model from rectangular/planar faces.
+
+    This is the core of the shell export.  Each face is a zero-thickness IFC face.
+    The result is a FaceBasedSurfaceModel, not a solid and not the preview mesh.
+    """
+    ifc_faces = _ifc_faces_from_points(ctx, faces)
     if not ifc_faces:
         raise ValueError("No valid IFC surface faces were generated.")
 
@@ -656,6 +722,26 @@ def _add_surface_element(ctx: IfcContext, ifc_class: str, name: str,
     props = {
         "model_type": "zero_thickness_shell_surface",
         "thickness_exported_as_geometry": False,
+    }
+    if extra_properties:
+        props.update(extra_properties)
+    _add_property_set(ctx, element, "ANYstructureDimensions", props)
+    ctx.summary.elements.append(name)
+    return element
+
+
+def _add_faceted_solid_element(ctx: IfcContext, ifc_class: str, name: str,
+                               faces: Iterable[Iterable[tuple[float, float, float]]],
+                               predefined_type: str | None = None,
+                               extra_properties: dict[str, Any] | None = None) -> Any:
+    shape = _product_shape_from_closed_faces(ctx, faces)
+    placement = _local_placement(ctx.model)
+    element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
+    _assign_to_storey(ctx, element)
+    _assign_material(ctx, element)
+    props = {
+        "model_type": "faceted_brep_solid",
+        "thickness_exported_as_geometry": True,
     }
     if extra_properties:
         props.update(extra_properties)
@@ -709,6 +795,35 @@ def _annular_radial_faces(radius0: float, radius1: float, z: float, theta_start:
             _cyl_point(radius1, a1, z),
             _cyl_point(radius1, a0, z),
         ])
+    return faces
+
+
+def _cylindrical_wall_solid_faces(radius0: float, radius1: float, z0: float, z1: float,
+                                  theta_start: float, theta_end: float,
+                                  segments: int) -> list[list[tuple[float, float, float]]]:
+    """Return closed faceted faces for a cylindrical/sector wall solid."""
+    r0, r1 = sorted((max(float(radius0), EPS), max(float(radius1), EPS)))
+    z0, z1 = sorted((float(z0), float(z1)))
+    segments = max(1, int(segments))
+    faces: list[list[tuple[float, float, float]]] = []
+
+    for i in range(segments):
+        a0 = theta_start + (theta_end - theta_start) * i / segments
+        a1 = theta_start + (theta_end - theta_start) * (i + 1) / segments
+        faces.append([_cyl_point(r1, a0, z0), _cyl_point(r1, a1, z0),
+                      _cyl_point(r1, a1, z1), _cyl_point(r1, a0, z1)])
+        faces.append([_cyl_point(r0, a1, z0), _cyl_point(r0, a0, z0),
+                      _cyl_point(r0, a0, z1), _cyl_point(r0, a1, z1)])
+        faces.append([_cyl_point(r0, a0, z0), _cyl_point(r1, a0, z0),
+                      _cyl_point(r1, a1, z0), _cyl_point(r0, a1, z0)])
+        faces.append([_cyl_point(r0, a0, z1), _cyl_point(r0, a1, z1),
+                      _cyl_point(r1, a1, z1), _cyl_point(r1, a0, z1)])
+
+    is_full_circle = abs(abs(theta_end - theta_start) - 2.0 * math.pi) <= 1.0e-7
+    if not is_full_circle:
+        for angle in (theta_start, theta_end):
+            faces.append([_cyl_point(r0, angle, z0), _cyl_point(r0, angle, z1),
+                          _cyl_point(r1, angle, z1), _cyl_point(r1, angle, z0)])
     return faces
 
 
@@ -840,16 +955,29 @@ def _add_oriented_box_element(ctx: IfcContext, ifc_class: str, name: str, center
 
 
 def _add_plate_box(ctx: IfcContext, name: str, x0: float, x1: float, y0: float, y1: float,
-                   z0: float, z1: float, extra_properties: dict[str, Any] | None = None) -> Any:
-    """Add a plate as one zero-thickness shell face.
-
-    z0/z1 are accepted for compatibility with the previous solid exporter.  The
-    exported geometry uses the mid-surface/interface plane z=0.  The original
-    thickness is kept as metadata only.
-    """
+                   z0: float, z1: float, extra_properties: dict[str, Any] | None = None,
+                   shell_export: bool = True) -> Any:
+    """Add a plate either as a shell face or as a rectangular swept solid."""
     x0, x1 = sorted((float(x0), float(x1)))
     y0, y1 = sorted((float(y0), float(y1)))
+    z0, z1 = sorted((float(z0), float(z1)))
     nominal_thickness = abs(float(z1) - float(z0))
+    if not shell_export:
+        props = {
+            "nominal_thickness_m": nominal_thickness,
+            "shell_export": False,
+            "role": "plate",
+            "model_type": "swept_solid",
+            "thickness_exported_as_geometry": True,
+        }
+        if extra_properties:
+            props.update(extra_properties)
+        return _add_box_element(
+            ctx, "IfcPlate", name, x0, x1, y0, y1, z0, z1,
+            predefined_type="SHEET",
+            extra_properties=props,
+        )
+
     props = {
         "nominal_thickness_m": nominal_thickness,
         "shell_export": True,
@@ -870,13 +998,9 @@ def _add_member_web_and_flange(ctx: IfcContext, base_name: str, orientation: str
                                x_limits: tuple[float, float] | None = None,
                                y_limits: tuple[float, float] | None = None,
                                side_sign: float = 1.0,
-                               member_role: str = "stiffener") -> None:
-    """Add web/flange as zero-thickness shell plates with shared interfaces.
-
-    The plate surface is z=0.  The web starts exactly at z=0 and the flange lies
-    exactly at the web tip z=+/-web_h.  No gap is introduced for web thickness or
-    flange thickness.  Thicknesses remain metadata only.
-    """
+                               member_role: str = "stiffener",
+                               shell_export: bool = True) -> None:
+    """Add member web/flange either as shell plates or swept rectangular solids."""
     web_h = max(dims.web_h, 0.0)
     web_t = max(dims.web_thk, 0.0)
     fl_w = max(dims.flange_w, 0.0)
@@ -888,6 +1012,15 @@ def _add_member_web_and_flange(ctx: IfcContext, base_name: str, orientation: str
     sign = 1.0 if side_sign >= 0.0 else -1.0
     z_base = 0.0
     z_tip = sign * web_h
+    if shell_export:
+        web_z = (z_base, z_tip)
+        flange_z = z_tip
+    elif sign >= 0.0:
+        web_z = (plate_thk, plate_thk + web_h)
+        flange_z = (plate_thk + web_h, plate_thk + web_h + fl_t)
+    else:
+        web_z = (-web_h, 0.0)
+        flange_z = (-(web_h + fl_t), -web_h)
 
     if orientation == "x":
         x0 = x_center - length / 2.0
@@ -898,19 +1031,33 @@ def _add_member_web_and_flange(ctx: IfcContext, base_name: str, orientation: str
         if x1 <= x0:
             return
 
-        _add_surface_element(
-            ctx, "IfcMember", base_name + " Web",
-            [_rect_face_xz(x0, x1, y_center, z_base, z_tip)],
-            predefined_type="STUD",
-            extra_properties={
-                "role": member_role,
-                "part": "web",
-                "section_type": sec_type,
-                "nominal_web_thickness_m": web_t,
-                "web_height_m": web_h,
-                "plate_interface_z_m": 0.0,
-            },
-        )
+        web_props = {
+            "role": member_role,
+            "part": "web",
+            "section_type": sec_type,
+            "nominal_web_thickness_m": web_t,
+            "web_height_m": web_h,
+            "plate_interface_z_m": 0.0,
+        }
+        if shell_export:
+            _add_surface_element(
+                ctx, "IfcMember", base_name + " Web",
+                [_rect_face_xz(x0, x1, y_center, web_z[0], web_z[1])],
+                predefined_type="STUD",
+                extra_properties=web_props,
+            )
+        else:
+            web_props.update({
+                "model_type": "swept_solid",
+                "thickness_exported_as_geometry": True,
+            })
+            _add_box_element(
+                ctx, "IfcMember", base_name + " Web",
+                x0, x1, y_center - web_t / 2.0, y_center + web_t / 2.0,
+                web_z[0], web_z[1],
+                predefined_type="STUD",
+                extra_properties=web_props,
+            )
 
         if fl_w > EPS and sec_type.upper() not in {"FB", "FLAT", "FLATBAR"}:
             if sec_type in ["L", "L-bulb"]:
@@ -919,19 +1066,32 @@ def _add_member_web_and_flange(ctx: IfcContext, base_name: str, orientation: str
             else:
                 y0 = y_center - fl_w / 2.0
                 y1 = y_center + fl_w / 2.0
-            _add_surface_element(
-                ctx, "IfcMember", base_name + " Flange",
-                [_rect_face_xy(x0, x1, y0, y1, z_tip)],
-                predefined_type="STUD",
-                extra_properties={
-                    "role": member_role,
-                    "part": "flange",
-                    "section_type": sec_type,
-                    "nominal_flange_thickness_m": fl_t,
-                    "flange_width_m": fl_w,
-                    "web_interface_z_m": z_tip,
-                },
-            )
+            flange_props = {
+                "role": member_role,
+                "part": "flange",
+                "section_type": sec_type,
+                "nominal_flange_thickness_m": fl_t,
+                "flange_width_m": fl_w,
+                "web_interface_z_m": z_tip,
+            }
+            if shell_export:
+                _add_surface_element(
+                    ctx, "IfcMember", base_name + " Flange",
+                    [_rect_face_xy(x0, x1, y0, y1, flange_z)],
+                    predefined_type="STUD",
+                    extra_properties=flange_props,
+                )
+            elif fl_t > EPS:
+                flange_props.update({
+                    "model_type": "swept_solid",
+                    "thickness_exported_as_geometry": True,
+                })
+                _add_box_element(
+                    ctx, "IfcMember", base_name + " Flange",
+                    x0, x1, y0, y1, flange_z[0], flange_z[1],
+                    predefined_type="STUD",
+                    extra_properties=flange_props,
+                )
     else:
         y0 = y_center - length / 2.0
         y1 = y_center + length / 2.0
@@ -941,19 +1101,33 @@ def _add_member_web_and_flange(ctx: IfcContext, base_name: str, orientation: str
         if y1 <= y0:
             return
 
-        _add_surface_element(
-            ctx, "IfcMember", base_name + " Web",
-            [_rect_face_yz(x_center, y0, y1, z_base, z_tip)],
-            predefined_type="STUD",
-            extra_properties={
-                "role": member_role,
-                "part": "web",
-                "section_type": sec_type,
-                "nominal_web_thickness_m": web_t,
-                "web_height_m": web_h,
-                "plate_interface_z_m": 0.0,
-            },
-        )
+        web_props = {
+            "role": member_role,
+            "part": "web",
+            "section_type": sec_type,
+            "nominal_web_thickness_m": web_t,
+            "web_height_m": web_h,
+            "plate_interface_z_m": 0.0,
+        }
+        if shell_export:
+            _add_surface_element(
+                ctx, "IfcMember", base_name + " Web",
+                [_rect_face_yz(x_center, y0, y1, web_z[0], web_z[1])],
+                predefined_type="STUD",
+                extra_properties=web_props,
+            )
+        else:
+            web_props.update({
+                "model_type": "swept_solid",
+                "thickness_exported_as_geometry": True,
+            })
+            _add_box_element(
+                ctx, "IfcMember", base_name + " Web",
+                x_center - web_t / 2.0, x_center + web_t / 2.0,
+                y0, y1, web_z[0], web_z[1],
+                predefined_type="STUD",
+                extra_properties=web_props,
+            )
 
         if fl_w > EPS and sec_type.upper() not in {"FB", "FLAT", "FLATBAR"}:
             if sec_type in ["L", "L-bulb"]:
@@ -962,22 +1136,36 @@ def _add_member_web_and_flange(ctx: IfcContext, base_name: str, orientation: str
             else:
                 x0 = x_center - fl_w / 2.0
                 x1 = x_center + fl_w / 2.0
-            _add_surface_element(
-                ctx, "IfcMember", base_name + " Flange",
-                [_rect_face_xy(x0, x1, y0, y1, z_tip)],
-                predefined_type="STUD",
-                extra_properties={
-                    "role": member_role,
-                    "part": "flange",
-                    "section_type": sec_type,
-                    "nominal_flange_thickness_m": fl_t,
-                    "flange_width_m": fl_w,
-                    "web_interface_z_m": z_tip,
-                },
-            )
+            flange_props = {
+                "role": member_role,
+                "part": "flange",
+                "section_type": sec_type,
+                "nominal_flange_thickness_m": fl_t,
+                "flange_width_m": fl_w,
+                "web_interface_z_m": z_tip,
+            }
+            if shell_export:
+                _add_surface_element(
+                    ctx, "IfcMember", base_name + " Flange",
+                    [_rect_face_xy(x0, x1, y0, y1, flange_z)],
+                    predefined_type="STUD",
+                    extra_properties=flange_props,
+                )
+            elif fl_t > EPS:
+                flange_props.update({
+                    "model_type": "swept_solid",
+                    "thickness_exported_as_geometry": True,
+                })
+                _add_box_element(
+                    ctx, "IfcMember", base_name + " Flange",
+                    x0, x1, y0, y1, flange_z[0], flange_z[1],
+                    predefined_type="STUD",
+                    extra_properties=flange_props,
+                )
 
 
-def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: str, side_sign: float) -> None:
+def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: str, side_sign: float,
+                        shell_export: bool) -> None:
     plate = getattr(all_obj, "Plate", None)
     stiffener = getattr(all_obj, "Stiffener", None)
     girder = getattr(all_obj, "Girder", None)
@@ -997,10 +1185,12 @@ def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: st
         _add_plate_box(
             ctx, f"{active_line} Plate field", 0.0, width, 0.0, length, 0.0, plate_thk,
             extra_properties={"active_line": active_line, "panel_type": "flat panel with girder"},
+            shell_export=shell_export,
         )
         _add_member_web_and_flange(
             ctx, f"{active_line} Girder", "y", x_mid, length / 2.0, length,
             plate_thk, gdims, y_limits=(0.0, length), side_sign=side_sign, member_role="girder",
+            shell_export=shell_export,
         )
         if sdims is not None:
             stiffener_ys = _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80)
@@ -1014,14 +1204,14 @@ def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: st
                         ctx, f"{active_line} Stiffener {index:03d} Left", "x",
                         (left_x0 + left_x1) / 2.0, y, left_x1 - left_x0, plate_thk,
                         sdims, x_limits=(left_x0, left_x1), side_sign=side_sign,
-                        member_role="stiffener",
+                        member_role="stiffener", shell_export=shell_export,
                     )
                 if right_x1 > right_x0:
                     _add_member_web_and_flange(
                         ctx, f"{active_line} Stiffener {index:03d} Right", "x",
                         (right_x0 + right_x1) / 2.0, y, right_x1 - right_x0, plate_thk,
                         sdims, x_limits=(right_x0, right_x1), side_sign=side_sign,
-                        member_role="stiffener",
+                        member_role="stiffener", shell_export=shell_export,
                     )
     else:
         if stiffener is not None:
@@ -1033,6 +1223,7 @@ def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: st
         _add_plate_box(
             ctx, f"{active_line} Plate field", 0.0, width, 0.0, length, 0.0, plate_thk,
             extra_properties={"active_line": active_line, "panel_type": "flat stiffened panel" if stiffener else "flat plate"},
+            shell_export=shell_export,
         )
         if stiffener is not None:
             sdims = _section_dimensions_from_app(app, stiffener)
@@ -1041,7 +1232,7 @@ def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: st
                 _add_member_web_and_flange(
                     ctx, f"{active_line} Stiffener {index:03d}", "x", width / 2.0, y,
                     width, plate_thk, sdims, x_limits=(0.0, width), side_sign=side_sign,
-                    member_role="stiffener",
+                    member_role="stiffener", shell_export=shell_export,
                 )
 
 
@@ -1093,116 +1284,252 @@ def _add_cylindrical_shell_surface(ctx: IfcContext, ifc_class: str, name: str, r
     )
 
 
+def _add_cylindrical_wall_solid(ctx: IfcContext, ifc_class: str, name: str, radius: float, thickness: float,
+                                z0: float, z1: float, theta_start: float, theta_end: float,
+                                side_sign: float, predefined_type: str | None = None,
+                                extra_properties: dict[str, Any] | None = None) -> None:
+    """Add a cylindrical wall as true thickness geometry.
+
+    ``radius`` is the plate/member interface radius.  Positive side exports the
+    wall outside that interface, negative side exports it inside.  This keeps the
+    model connected at the same radius used by the shell export.
+    """
+    radius = max(float(radius), EPS)
+    thickness = max(float(thickness), EPS)
+    z0 = float(z0)
+    z1 = float(z1)
+    sign = 1.0 if side_sign >= 0.0 else -1.0
+    if sign >= 0.0:
+        inner_radius = radius
+        outer_radius = radius + thickness
+    else:
+        inner_radius = max(radius - thickness, EPS)
+        outer_radius = radius
+
+    props = {
+        "interface_radius_m": radius,
+        "inner_radius_m": inner_radius,
+        "outer_radius_m": outer_radius,
+        "thickness_m": thickness,
+        "z0_m": z0,
+        "z1_m": z1,
+        "theta_start_rad": float(theta_start),
+        "theta_end_rad": float(theta_end),
+        "shell_export": False,
+    }
+    if extra_properties:
+        props.update(extra_properties)
+
+    is_full_circle = abs(abs(theta_end - theta_start) - 2.0 * math.pi) <= 1.0e-7
+    if is_full_circle:
+        solid = _create_circle_hollow_swept_solid(ctx, outer_radius, outer_radius - inner_radius, abs(z1 - z0))
+        shape = _product_shape_from_solid(ctx, solid)
+        placement = _local_placement(ctx.model, (0.0, 0.0, min(z0, z1)))
+        element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
+        _assign_to_storey(ctx, element)
+        _assign_material(ctx, element)
+        props.update({
+            "model_type": "hollow_swept_solid",
+            "thickness_exported_as_geometry": True,
+        })
+        _add_property_set(ctx, element, "ANYstructureDimensions", props)
+        ctx.summary.elements.append(name)
+        return
+
+    segments = _segment_count_for_arc(radius, theta_start, theta_end)
+    props.update({
+        "model_type": "faceted_brep_solid",
+        "surface_segments": int(segments),
+        "thickness_exported_as_geometry": True,
+    })
+    _add_faceted_solid_element(
+        ctx, ifc_class, name,
+        _cylindrical_wall_solid_faces(inner_radius, outer_radius, z0, z1, theta_start, theta_end, segments),
+        predefined_type=predefined_type,
+        extra_properties=props,
+    )
+
+
 def _add_cylinder_longitudinal_members(ctx: IfcContext, active_line: str, radius: float, length: float,
                                        angles: Iterable[float], dims: SectionDimensions,
-                                       shell_thk: float, side_sign: float) -> None:
-    """Add longitudinal stiffeners as shell surfaces.
+                                       shell_thk: float, side_sign: float,
+                                       shell_export: bool) -> None:
+    """Add longitudinal stiffeners as shell surfaces or true solids.
 
     The web begins exactly on the shell surface at radius R.  The flange is a
-    tangential zero-thickness plate at radius R +/- web_h.  shell_thk is kept only
-    for metadata; it does not offset the member.
+    tangential plate at radius R +/- web_h.  For solid export the web and flange
+    touch at their interface dimensions without gaps.
     """
     sign = 1.0 if side_sign >= 0.0 else -1.0
     for index, angle in enumerate(angles, start=1):
         c = math.cos(angle)
         s = math.sin(angle)
+        radial = (sign * c, sign * s, 0.0)
         tangential = (-s, c, 0.0)
-        base_r = radius
+        base_r = radius if shell_export else max(radius + sign * shell_thk, EPS)
         tip_r = max(radius + sign * dims.web_h, EPS)
+        if not shell_export:
+            tip_r = max(base_r + sign * dims.web_h, EPS)
 
         if dims.web_h > EPS:
-            web_face = [
-                _cyl_point(base_r, angle, 0.0),
-                _cyl_point(base_r, angle, length),
-                _cyl_point(tip_r, angle, length),
-                _cyl_point(tip_r, angle, 0.0),
-            ]
-            _add_surface_element(
-                ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Web",
-                [web_face], predefined_type="STUD",
-                extra_properties={
-                    "role": "longitudinal stiffener",
-                    "part": "web",
-                    "angle_rad": float(angle),
-                    "web_height_m": float(dims.web_h),
-                    "nominal_web_thickness_m": float(dims.web_thk),
-                    "shell_interface_radius_m": float(radius),
-                },
-            )
+            web_props = {
+                "role": "longitudinal stiffener",
+                "part": "web",
+                "angle_rad": float(angle),
+                "web_height_m": float(dims.web_h),
+                "nominal_web_thickness_m": float(dims.web_thk),
+                "shell_interface_radius_m": float(radius),
+                "member_base_radius_m": float(base_r),
+                "shell_thickness_m": float(shell_thk),
+            }
+            if shell_export:
+                web_face = [
+                    _cyl_point(base_r, angle, 0.0),
+                    _cyl_point(base_r, angle, length),
+                    _cyl_point(tip_r, angle, length),
+                    _cyl_point(tip_r, angle, 0.0),
+                ]
+                _add_surface_element(
+                    ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Web",
+                    [web_face], predefined_type="STUD", extra_properties=web_props,
+                )
+            else:
+                web_props.update({
+                    "model_type": "swept_solid",
+                    "thickness_exported_as_geometry": True,
+                })
+                web_center_r = base_r + sign * dims.web_h / 2.0
+                _add_oriented_box_element(
+                    ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Web",
+                    (web_center_r * c, web_center_r * s, 0.0),
+                    radial, (0.0, 0.0, 1.0),
+                    dims.web_h, max(dims.web_thk, EPS), length,
+                    predefined_type="STUD", extra_properties=web_props,
+                )
 
         if dims.flange_w > EPS and str(dims.type or "T").upper() not in {"FB", "FLAT", "FLATBAR"}:
             half = dims.flange_w / 2.0
-            # Tangential strip at the web tip.  This shares its centreline with the web tip.
-            p0 = (tip_r * c - half * tangential[0], tip_r * s - half * tangential[1], 0.0)
-            p1 = (tip_r * c + half * tangential[0], tip_r * s + half * tangential[1], 0.0)
-            p2 = (tip_r * c + half * tangential[0], tip_r * s + half * tangential[1], length)
-            p3 = (tip_r * c - half * tangential[0], tip_r * s - half * tangential[1], length)
-            _add_surface_element(
-                ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Flange",
-                [[p0, p1, p2, p3]], predefined_type="STUD",
-                extra_properties={
-                    "role": "longitudinal stiffener",
-                    "part": "flange",
-                    "angle_rad": float(angle),
-                    "flange_width_m": float(dims.flange_w),
-                    "nominal_flange_thickness_m": float(dims.flange_thk),
-                    "web_interface_radius_m": float(tip_r),
-                },
-            )
+            flange_props = {
+                "role": "longitudinal stiffener",
+                "part": "flange",
+                "angle_rad": float(angle),
+                "flange_width_m": float(dims.flange_w),
+                "nominal_flange_thickness_m": float(dims.flange_thk),
+                "web_interface_radius_m": float(tip_r),
+            }
+            if shell_export:
+                # Tangential strip at the web tip.  This shares its centreline with the web tip.
+                p0 = (tip_r * c - half * tangential[0], tip_r * s - half * tangential[1], 0.0)
+                p1 = (tip_r * c + half * tangential[0], tip_r * s + half * tangential[1], 0.0)
+                p2 = (tip_r * c + half * tangential[0], tip_r * s + half * tangential[1], length)
+                p3 = (tip_r * c - half * tangential[0], tip_r * s - half * tangential[1], length)
+                _add_surface_element(
+                    ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Flange",
+                    [[p0, p1, p2, p3]], predefined_type="STUD", extra_properties=flange_props,
+                )
+            elif dims.flange_thk > EPS:
+                flange_props.update({
+                    "model_type": "swept_solid",
+                    "thickness_exported_as_geometry": True,
+                })
+                flange_center_r = tip_r + sign * dims.flange_thk / 2.0
+                _add_oriented_box_element(
+                    ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Flange",
+                    (flange_center_r * c, flange_center_r * s, 0.0),
+                    tangential, (0.0, 0.0, 1.0),
+                    dims.flange_w, dims.flange_thk, length,
+                    predefined_type="STUD", extra_properties=flange_props,
+                )
 
 
 def _add_ring_set(ctx: IfcContext, active_line: str, role: str, radius: float, positions: Iterable[float],
                   dims: SectionDimensions, side_sign: float,
-                  theta_start: float = 0.0, theta_end: float = 2.0 * math.pi) -> None:
-    """Add ring stiffeners/frames as shell surfaces.
+                  theta_start: float = 0.0, theta_end: float = 2.0 * math.pi,
+                  shell_export: bool = True, shell_thk: float = 0.0) -> None:
+    """Add ring stiffeners/frames as shell surfaces or true solids.
 
     Ring web: annular radial plate at z = ring position.\n
     Ring flange: cylindrical surface at the web tip with axial width = flange_w.\n
-    These surfaces intersect at shared lines; no solid thickness gap is generated.
+    Shell surfaces intersect at shared lines; solid boxes/walls share interface
+    radii and axial faces.
     """
     sign = 1.0 if side_sign >= 0.0 else -1.0
     segments = _segment_count_for_arc(radius, theta_start, theta_end)
+    base_radius = radius if shell_export else max(radius + sign * max(shell_thk, 0.0), EPS)
     for index, z_pos in enumerate(positions, start=1):
         z_pos = float(z_pos)
-        tip_r = max(radius + sign * dims.web_h, EPS)
-        r0, r1 = sorted((radius, tip_r))
+        tip_r = max(base_radius + sign * dims.web_h, EPS)
+        r0, r1 = sorted((base_radius, tip_r))
         if dims.web_h > EPS:
-            _add_surface_element(
-                ctx, "IfcMember", f"{active_line} {role} {index:03d} Web",
-                _annular_radial_faces(r0, r1, z_pos, theta_start, theta_end, segments),
-                predefined_type="RING",
-                extra_properties={
-                    "role": role,
-                    "part": "web",
-                    "z_position_m": z_pos,
-                    "web_height_m": float(dims.web_h),
-                    "nominal_web_thickness_m": float(dims.web_thk),
-                    "shell_interface_radius_m": float(radius),
-                    "theta_start_rad": float(theta_start),
-                    "theta_end_rad": float(theta_end),
-                },
-            )
+            web_props = {
+                "role": role,
+                "part": "web",
+                "z_position_m": z_pos,
+                "web_height_m": float(dims.web_h),
+                "nominal_web_thickness_m": float(dims.web_thk),
+                "shell_interface_radius_m": float(radius),
+                "member_base_radius_m": float(base_radius),
+                "theta_start_rad": float(theta_start),
+                "theta_end_rad": float(theta_end),
+            }
+            if shell_export:
+                _add_surface_element(
+                    ctx, "IfcMember", f"{active_line} {role} {index:03d} Web",
+                    _annular_radial_faces(r0, r1, z_pos, theta_start, theta_end, segments),
+                    predefined_type="MEMBER",
+                    extra_properties=web_props,
+                )
+            else:
+                web_props.update({
+                    "model_type": "faceted_brep_solid",
+                    "surface_segments": int(segments),
+                    "thickness_exported_as_geometry": True,
+                })
+                _add_faceted_solid_element(
+                    ctx, "IfcMember", f"{active_line} {role} {index:03d} Web",
+                    _cylindrical_wall_solid_faces(r0, r1,
+                                                  z_pos - max(dims.web_thk, EPS) / 2.0,
+                                                  z_pos + max(dims.web_thk, EPS) / 2.0,
+                                                  theta_start, theta_end, segments),
+                    predefined_type="MEMBER",
+                    extra_properties=web_props,
+                )
         if dims.flange_w > EPS and str(dims.type or "T").upper() not in {"FB", "FLAT", "FLATBAR"}:
-            _add_cylindrical_shell_surface(
-                ctx, "IfcMember", f"{active_line} {role} {index:03d} Flange",
-                radius=tip_r,
-                z0=z_pos - dims.flange_w / 2.0,
-                z1=z_pos + dims.flange_w / 2.0,
-                theta_start=theta_start,
-                theta_end=theta_end,
-                predefined_type="RING",
-                extra_properties={
-                    "role": role,
-                    "part": "flange",
-                    "z_position_m": z_pos,
-                    "flange_width_m": float(dims.flange_w),
-                    "nominal_flange_thickness_m": float(dims.flange_thk),
-                    "web_interface_radius_m": float(tip_r),
-                },
-            )
+            flange_props = {
+                "role": role,
+                "part": "flange",
+                "z_position_m": z_pos,
+                "flange_width_m": float(dims.flange_w),
+                "nominal_flange_thickness_m": float(dims.flange_thk),
+                "web_interface_radius_m": float(tip_r),
+            }
+            if shell_export:
+                _add_cylindrical_shell_surface(
+                    ctx, "IfcMember", f"{active_line} {role} {index:03d} Flange",
+                    radius=tip_r,
+                    z0=z_pos - dims.flange_w / 2.0,
+                    z1=z_pos + dims.flange_w / 2.0,
+                    theta_start=theta_start,
+                    theta_end=theta_end,
+                    predefined_type="MEMBER",
+                    extra_properties=flange_props,
+                )
+            elif dims.flange_thk > EPS:
+                _add_cylindrical_wall_solid(
+                    ctx, "IfcMember", f"{active_line} {role} {index:03d} Flange",
+                    radius=tip_r, thickness=dims.flange_thk,
+                    z0=z_pos - dims.flange_w / 2.0,
+                    z1=z_pos + dims.flange_w / 2.0,
+                    theta_start=theta_start,
+                    theta_end=theta_end,
+                    side_sign=side_sign,
+                    predefined_type="MEMBER",
+                    extra_properties=flange_props,
+                )
 
 
-def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line: str, side_sign: float) -> None:
+def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line: str, side_sign: float,
+                            shell_export: bool) -> None:
     shell = getattr(cyl_obj, "ShellObj", None)
     if shell is None:
         raise ValueError("The selected cylinder line has no ShellObj to export.")
@@ -1212,27 +1539,27 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
     is_panel = _is_cylinder_panel(app, cyl_obj)
     theta_start, theta_end = _cylinder_theta_range(app, cyl_obj)
 
-    if is_panel:
+    shell_name = f"{active_line} Cylindrical panel shell" if is_panel else f"{active_line} Cylindrical shell"
+    shell_props = {
+        "active_line": active_line,
+        "panel_type": "cylindrical panel shell" if is_panel else "full cylindrical shell",
+        "nominal_shell_thickness_m": thk,
+    }
+    if shell_export:
         _add_cylindrical_shell_surface(
-            ctx, "IfcPlate", f"{active_line} Cylindrical panel shell",
-            radius=radius, z0=0.0, z1=length, theta_start=theta_start, theta_end=theta_end,
-            predefined_type="SHEET",
-            extra_properties={
-                "active_line": active_line,
-                "panel_type": "cylindrical panel shell",
-                "nominal_shell_thickness_m": thk,
-            },
+            ctx, "IfcPlate", shell_name,
+            radius=radius, z0=0.0, z1=length,
+            theta_start=theta_start if is_panel else 0.0,
+            theta_end=theta_end if is_panel else 2.0 * math.pi,
+            predefined_type="SHEET", extra_properties=shell_props,
         )
     else:
-        _add_cylindrical_shell_surface(
-            ctx, "IfcPlate", f"{active_line} Cylindrical shell",
-            radius=radius, z0=0.0, z1=length, theta_start=0.0, theta_end=2.0 * math.pi,
-            predefined_type="SHEET",
-            extra_properties={
-                "active_line": active_line,
-                "panel_type": "full cylindrical shell",
-                "nominal_shell_thickness_m": thk,
-            },
+        _add_cylindrical_wall_solid(
+            ctx, "IfcPlate", shell_name,
+            radius=radius, thickness=thk, z0=0.0, z1=length,
+            theta_start=theta_start if is_panel else 0.0,
+            theta_end=theta_end if is_panel else 2.0 * math.pi,
+            side_sign=side_sign, predefined_type="SHEET", extra_properties=shell_props,
         )
 
     if getattr(cyl_obj, "LongStfObj", None) is not None:
@@ -1245,7 +1572,8 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
         else:
             num_stf = max(4, min(144, int(round(2.0 * math.pi * radius / spacing))))
             angles = [2.0 * math.pi * idx / num_stf for idx in range(num_stf)]
-        _add_cylinder_longitudinal_members(ctx, active_line, radius, length, angles, long_dims, thk, side_sign)
+        _add_cylinder_longitudinal_members(ctx, active_line, radius, length, angles, long_dims, thk, side_sign,
+                                           shell_export=shell_export)
 
     if getattr(cyl_obj, "RingStfObj", None) is not None:
         ring_dims = _section_dimensions_from_app(app, cyl_obj.RingStfObj)
@@ -1261,7 +1589,8 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
         ring_positions = _positions_from_length_and_spacing(length, ring_spacing, include_ends=False, max_count=80)
         _add_ring_set(ctx, active_line, "Ring stiffener", radius, ring_positions, ring_dims, side_sign,
                       theta_start=theta_start if is_panel else 0.0,
-                      theta_end=theta_end if is_panel else 2.0 * math.pi)
+                      theta_end=theta_end if is_panel else 2.0 * math.pi,
+                      shell_export=shell_export, shell_thk=thk)
 
     if getattr(cyl_obj, "RingFrameObj", None) is not None:
         frame_dims = _section_dimensions_from_app(app, cyl_obj.RingFrameObj)
@@ -1279,7 +1608,8 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
         )
         _add_ring_set(ctx, active_line, "Ring frame", radius, frame_positions, frame_dims, side_sign,
                       theta_start=theta_start if is_panel else 0.0,
-                      theta_end=theta_end if is_panel else 2.0 * math.pi)
+                      theta_end=theta_end if is_panel else 2.0 * math.pi,
+                      shell_export=shell_export, shell_thk=thk)
 
 
 def export_selected_structure_from_application(
@@ -1290,13 +1620,14 @@ def export_selected_structure_from_application(
     keep_intermediate_ifc: bool = True,
     shell_export: bool = True,
 ) -> ExportSummary:
-    """Export the active ANYstructure line as a proper IFC shell/surface model.
+    """Export the active ANYstructure line as an IFC solid or shell model.
 
     The exporter reads the selected line's real structural objects.  It does not use
     _prop_3d_export_mesh, _prop_3d_shell_export_mesh, STL, UNV, meshio,
-    numpy-stl, or any Matplotlib preview geometry.  The exported geometry is
-    zero-thickness shell/surface modelling: plate, web and flange are single plates
-    with shared interface lines and no gaps from solid thickness offsets.
+    numpy-stl, or any Matplotlib preview geometry.  Shell export creates
+    zero-thickness plates with shared interface lines.  Solid export creates true
+    thickness geometry with swept solids where possible and closed BReps where a
+    cylindrical sector requires faceting.
 
     Parameters
     ----------
@@ -1314,10 +1645,9 @@ def export_selected_structure_from_application(
         Keep the generated IFC beside converted output.  Recommended for audit and
         for re-conversion later.
     shell_export:
-        Kept as an explicit API argument so the GUI can expose a separate shell
-        export button.  This exporter currently uses zero-thickness shell/surface
-        modelling for all plate/web/flange geometry, with nominal thickness stored
-        only as IFC metadata.
+        When True, export zero-thickness shell/surface geometry with nominal
+        thickness stored as metadata.  When False, export plate/web/flange
+        thickness as geometry.
     """
     output_format = _normalise_export_format(output_format, filename)
     requested_filename = filename
@@ -1326,8 +1656,9 @@ def export_selected_structure_from_application(
         native_ifc_filename = filename
     else:
         root, _ext = os.path.splitext(filename)
-        native_ifc_filename = root + ".ifc" if keep_intermediate_ifc else os.path.join(
-            tempfile.gettempdir(), os.path.basename(root) + "_anystructure_export.ifc"
+        native_ifc_filename = root + ".ifc" if keep_intermediate_ifc else _temporary_filename_near(
+            os.path.join(tempfile.gettempdir(), os.path.basename(root) + "_anystructure_export.ifc"),
+            ".ifc",
         )
     if not getattr(app, "_line_is_active", False):
         raise ValueError("No active line selected. Select a line before exporting IFC.")
@@ -1361,13 +1692,13 @@ def export_selected_structure_from_application(
         cylinder_obj = None
 
     if cylinder_obj is not None:
-        _add_cylinder_structure(ctx, app, cylinder_obj, active_line, side_sign)
+        _add_cylinder_structure(ctx, app, cylinder_obj, active_line, side_sign, shell_export=shell_export)
     else:
         try:
             all_obj = line_data[0]
         except Exception as error:
             raise ValueError("Could not read flat panel structure object from selected line.") from error
-        _add_flat_structure(ctx, app, all_obj, active_line, side_sign)
+        _add_flat_structure(ctx, app, all_obj, active_line, side_sign, shell_export=shell_export)
 
     _add_property_set(ctx, ctx.project, "ANYstructureExport", {
         "active_line": active_line,
@@ -1377,17 +1708,17 @@ def export_selected_structure_from_application(
         "opposite_side": side_sign < 0.0,
         "export_model_type": "zero_thickness_shell_surface" if shell_export else "model_based_cad",
         "shell_export": bool(shell_export),
-        "thickness_exported_as_geometry": False,
+        "thickness_exported_as_geometry": not bool(shell_export),
     })
 
-    ctx.model.write(native_ifc_filename)
+    _write_ifc_atomic(ctx.model, native_ifc_filename)
 
     ctx.summary.output_format = output_format
     ctx.summary.native_ifc_filename = native_ifc_filename
     ctx.summary.filename = requested_filename
 
     if output_format != "ifc":
-        _convert_ifc_with_ifcconvert(native_ifc_filename, requested_filename, ifcconvert_path=ifcconvert_path)
+        _convert_ifc_atomic(native_ifc_filename, requested_filename, ifcconvert_path=ifcconvert_path)
         ctx.summary.converted_filename = requested_filename
         if not keep_intermediate_ifc:
             try:

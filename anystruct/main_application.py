@@ -6577,6 +6577,7 @@ class Application():
         title = 'Shell surface export' if shell_export else options['description']
         filename = filedialog.asksaveasfilename(
             defaultextension=ext,
+            confirmoverwrite=False,
             filetypes=[
                 (title, '*' + ext),
                 ('Industry Foundation Classes', '*.ifc'),
@@ -6585,6 +6586,11 @@ class Application():
         )
         if filename in [None, '']:
             return
+        if os.path.exists(filename):
+            if not messagebox.askyesno(
+                    'IFC export',
+                    'The selected file already exists:\n' + filename + '\n\nOverwrite it?'):
+                return
 
         try:
             try:
@@ -7072,14 +7078,7 @@ class Application():
 
     @staticmethod
     def _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80):
-        """Create member positions without a near-duplicate at the far end.
-
-        The preview/export convention keeps the boundary member at the far end,
-        but if the last regular spacing position is too close to that boundary
-        member, the regular member is replaced by the boundary member.  This
-        avoids the visual/export issue where two stiffeners appear almost on top
-        of each other near the upper/far end of the panel.
-        """
+        """Create member positions with even end bays when boundary members are shown."""
         try:
             length = float(length)
             spacing = float(spacing)
@@ -7091,6 +7090,11 @@ class Application():
             return [0.0, length] if include_ends else [length / 2.0]
 
         tol = 1e-9
+        if include_ends:
+            interval_count = max(1, int(math.ceil(length / spacing)))
+            interval_count = min(interval_count, max(1, int(max_count)))
+            return [float(length) * idx / interval_count for idx in range(interval_count + 1)]
+
         positions = [0.0] if include_ends else []
         next_pos = spacing
         count_guard = 0
@@ -7099,17 +7103,7 @@ class Application():
             next_pos += spacing
             count_guard += 1
 
-        if include_ends:
-            min_far_end_gap = max(0.5 * spacing, 10.0 * tol)
-            if not positions:
-                positions = [0.0, float(length)]
-            elif abs(positions[-1] - length) <= tol:
-                positions[-1] = float(length)
-            elif length - positions[-1] < min_far_end_gap:
-                positions[-1] = float(length)
-            else:
-                positions.append(float(length))
-        elif not positions:
+        if not positions:
             positions = [length / 2.0]
 
         clean_positions = []

@@ -240,7 +240,7 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     source = main_source.read_text(encoding="utf-8")
 
     assert "import anystruct.solid_export as solid_export" in source
-    assert "ttk.Button(view_row, text='CAD export'" in source
+    assert "ttk.Button(view_row, text='Solid export'" in source
     assert "ttk.Button(view_row, text='Shell export'" in source
     assert "ttk.Button(view_row, text='STL solid'" not in source
     assert "ttk.Button(view_row, text='Mesh solid'" not in source
@@ -250,6 +250,9 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "def export_prop_3d_ifc_model(self):" in source
     assert "def export_prop_3d_ifc_shell_model(self):" in source
     assert "def _export_prop_3d_ifc_model_common(self, shell_export=False):" in source
+    assert "confirmoverwrite=False" in source
+    assert "if os.path.exists(filename):" in source
+    assert "messagebox.askyesno(" in source
     assert "ifc_model_export.export_selected_structure_from_application" in source
     assert "shell_export=shell_export" in source
     assert "def export_prop_3d_unv(self):" in source
@@ -282,6 +285,36 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "self._init_prop_3d_export_mesh(ax, 'flat_panel_preview')" in source
     assert "self._init_prop_3d_export_mesh(ax, 'cylinder_preview')" in source
     assert "self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)" in source
+
+
+def test_ifc_solid_and_shell_exports_use_separate_geometry_paths():
+    ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
+    source = ifc_source.read_text(encoding="utf-8")
+
+    assert "@functools.lru_cache(maxsize=1)\ndef _resource_ifcconvert_candidates" in source
+    assert "@functools.lru_cache(maxsize=8)\ndef _ifcconvert_candidate_paths" in source
+    assert "def _product_shape_from_closed_faces" in source
+    assert "ctx.model.createIfcFacetedBrep" in source
+    assert "def _temporary_filename_near" in source
+    assert "def _write_ifc_atomic" in source
+    assert "def _convert_ifc_atomic" in source
+    assert "os.replace(temp_filename, target_filename)" in source
+    assert "timeout=timeout_seconds" in source
+    assert "def _add_cylindrical_wall_solid" in source
+    assert "def _add_plate_box" in source and "shell_export: bool = True" in source
+    assert "if not shell_export:\n        props = {" in source
+    assert '"model_type": "swept_solid"' in source
+    assert '"model_type": "hollow_swept_solid"' in source
+    assert 'base_r = radius if shell_export else max(radius + sign * shell_thk, EPS)' in source
+    assert 'base_radius = radius if shell_export else max(radius + sign * max(shell_thk, 0.0), EPS)' in source
+    assert "_add_cylinder_structure(ctx, app, cylinder_obj, active_line, side_sign, shell_export=shell_export)" in source
+    assert "_add_flat_structure(ctx, app, all_obj, active_line, side_sign, shell_export=shell_export)" in source
+    assert "_convert_ifc_with_ifcconvert(native_ifc_filename, requested_filename" not in source
+    assert "_convert_ifc_atomic(native_ifc_filename, requested_filename" in source
+    assert "_write_ifc_atomic(ctx.model, native_ifc_filename)" in source
+    assert '"thickness_exported_as_geometry": not bool(shell_export)' in source
+    assert 'predefined_type="RING"' not in source
+    assert "This exporter currently uses zero-thickness shell/surface" not in source
 
 
 def test_shell_export_mesh_is_separate_from_solid_preview_mesh():
@@ -383,14 +416,22 @@ def test_3d_flat_section_geometry_uses_exact_web_and_flange_dimensions():
 
 def test_3d_member_positions_keep_exact_spacing_and_end_boundary():
     positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=True)
-    assert positions == [0.0, 3.0, 6.0, 10.0]
-    assert [round(positions[idx + 1] - positions[idx], 12) for idx in range(2)] == [3.0, 3.0]
+    assert positions == [0.0, 2.5, 5.0, 7.5, 10.0]
+    gaps = [round(positions[idx + 1] - positions[idx], 12) for idx in range(len(positions) - 1)]
+    assert gaps == [2.5, 2.5, 2.5, 2.5]
+    assert max(gaps) <= 3.0
 
     internal_positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=False)
     assert internal_positions == [3.0, 6.0, 9.0]
 
     regular_end_positions = Application._positions_from_length_and_spacing(12.0, 3.0, include_ends=True)
     assert regular_end_positions == [0.0, 3.0, 6.0, 9.0, 12.0]
+
+    dense_end_positions = Application._positions_from_length_and_spacing(10.0, 0.75, include_ends=True)
+    dense_gaps = [dense_end_positions[idx + 1] - dense_end_positions[idx]
+                  for idx in range(len(dense_end_positions) - 1)]
+    assert round(max(dense_gaps) - min(dense_gaps), 12) == 0.0
+    assert max(dense_gaps) <= 0.75
 
 
 def test_unv_export_writes_nodes_and_elements(tmp_path):
