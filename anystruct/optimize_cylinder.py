@@ -209,7 +209,7 @@ class CreateOptimizeCylinderWindow():
 
         self._canvas_opt.place(x=1050, y=500)
 
-        algorithms = ('anysmart cylinder', 'random', 'random_no_delta')
+        algorithms = ('anysmart cylinder', 'scipy_de cylinder', 'random', 'random_no_delta')
 
         tk.Label(self._frame, text='-- Cylinder optimizer --', font='Verdana 15 bold').place(x=10, y=10)
 
@@ -442,7 +442,7 @@ class CreateOptimizeCylinderWindow():
         # self._ent_algorithm.place(x=start_x+dx*11, y=start_y+dy*8)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
 
-        # tk.Button(self._frame,text='algorith information',command=self.algorithm_info,bg='white')\
+        # tk.Button(self._frame,text='algorithm information',command=self.algorithm_info,bg='white')\
         #     .place(x=start_x+dx*12.5, y=start_y+dy*7)
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
                                     font='Verdana 10 bold', fg='Yellow', relief="raised")
@@ -628,6 +628,12 @@ class CreateOptimizeCylinderWindow():
         self._ent_minfunc.place_forget()
 
         if self._new_algorithm.get() in ('random', 'random_no_delta'):
+            self.algorithm_random_label.config(text='Number of trials')
+            self.algorithm_random_label.place(x=1490, y=165)
+            self._ent_random_trials.place(x=1490, y=190, width=150)
+
+        elif self._new_algorithm.get() == 'scipy_de cylinder':
+            self.algorithm_random_label.config(text='Max evaluations')
             self.algorithm_random_label.place(x=1490, y=165)
             self._ent_random_trials.place(x=1490, y=190, width=150)
 
@@ -900,6 +906,7 @@ class CreateOptimizeCylinderWindow():
     def _build_cost_study_report(self, cost_factors, result_x, result_weight, result_weld,
                                  steel_cost, weld_cost, result_cost, elapsed_seconds):
         seconds, combinations = self.get_running_time()
+        count_label = self._get_optimizer_count_label()
         shell, long_stf, ring_stf, ring_frame = result_x
         return {
             'title': 'Cylinder cost study report',
@@ -916,7 +923,7 @@ class CreateOptimizeCylinderWindow():
                 ('Weld metric', self._get_weld_metric_text()),
                 ('Built-up weld included', str(bool(self._new_include_builtup_weld.get()))),
                 ('Algorithm', self._new_algorithm.get()),
-                ('Estimated combinations', self._format_study_value(combinations, 0)),
+                (count_label, self._format_study_value(combinations, 0)),
                 ('Elapsed [s]', self._format_study_value(elapsed_seconds, 2)),
             ],
             'geometry': [
@@ -1241,11 +1248,12 @@ class CreateOptimizeCylinderWindow():
 
         seconds, combinations = self.get_running_time()
         estimated_minutes = max(round((seconds * len(bias_values)) / 60, 2), 0.1)
+        count_label = self._get_optimizer_count_label().replace('Estimated ', '').lower()
 
         proceed = messagebox.askyesno(
             title='Cylinder weight/weld study',
             message='This will run ' + str(len(bias_values)) + ' optimizer runs over the current slider range.\n'
-                    + 'Each run uses about ' + str(int(combinations)) + ' combinations.\n'
+                    + 'Each run uses about ' + str(int(combinations)) + ' ' + count_label + '.\n'
                     + 'Estimated total time: about ' + str(estimated_minutes) + ' min.\n\n'
                     + 'Continue?'
         )
@@ -1380,7 +1388,7 @@ class CreateOptimizeCylinderWindow():
         except TclError:
             return 0, 0
 
-        if algorithm in ['random', 'random_no_delta']:
+        if algorithm in ['random', 'random_no_delta', 'scipy_de cylinder']:
             try:
                 number_of_combinations = int(self._new_algorithm_random_trials.get())
                 seconds = number_of_combinations * self.running_time_per_item['RP']
@@ -1412,6 +1420,14 @@ class CreateOptimizeCylinderWindow():
             pass
 
         return int(seconds), int(number_of_combinations)
+
+    def _get_optimizer_count_label(self):
+        try:
+            if self._new_algorithm.get() == 'scipy_de cylinder':
+                return 'Estimated max evaluations'
+        except Exception:
+            pass
+        return 'Estimated combinations'
 
     def schedule_running_time_update(self, *args):
         """
@@ -1464,8 +1480,9 @@ class CreateOptimizeCylinderWindow():
             elif weld_bias >= 1.0:
                 warning_text = '\nPure weld objective: initial filter uses ' + self._get_weld_metric_text() + '.'
 
+            count_label = self._get_optimizer_count_label().replace('Estimated ', '').lower()
             self._runnig_time_label.config(
-                text=str(int(number_of_combinations)) + ' combinations\n(about '
+                text=str(int(number_of_combinations)) + ' ' + count_label + '\n(about '
                      + str(max(round(seconds / 60, 2), 0.1))
                      + ' min.)'
                      + warning_text
@@ -1608,6 +1625,10 @@ class CreateOptimizeCylinderWindow():
                                     'RANDOM_NO_BOUNDS:\n'
                                     '           Same as RANDOM, but does not use the defined deltas.\n'
                                     '           The deltas is set to 1 mm for all dimensions/thicknesses.\n\n'
+                                    'SCIPY_DE CYLINDER:\n'
+                                    '           Uses SciPy differential evolution to sample snapped cylinder\n'
+                                    '           candidates from the current bounds and deltas.\n'
+                                    '           Number of trials is used as the max evaluation budget.\n\n'
                                     'ANYDETAIL:\n'
                                     '           Same as for ANYSMART, but will take some more time and\n'
                                     '           provide a chart of weight development during execution.\n\n'

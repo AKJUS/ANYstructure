@@ -188,6 +188,18 @@ def test_girder_constraint_tuple_uses_prescriptive_buckling_only():
     assert window._get_constraint_tuple() == (True, True, True, True, False, False, True, False, False, False)
 
 
+def test_flat_scipy_de_runtime_uses_max_evaluation_budget():
+    window = CreateOptimizeWindow.__new__(CreateOptimizeWindow)
+    window._new_algorithm = Var("scipy_de")
+    window._new_algorithm_random_trials = Var(4321)
+    window.running_time_per_item = {"RP": 0.25}
+
+    seconds, combinations = window.get_running_time()
+
+    assert combinations == 4321
+    assert seconds == 1080
+
+
 def test_multiple_runtime_step_counter_matches_optimizer_ranges():
     window = CreateOptimizeMultipleWindow.__new__(CreateOptimizeMultipleWindow)
     lower = np.array([0.6, 0.015, 0.3, 0.01, 0.1, 0.015, 3.5, 10.0])
@@ -199,6 +211,16 @@ def test_multiple_runtime_step_counter_matches_optimizer_ranges():
         estimated *= window._count_steps(low, up, delta)
 
     assert estimated == len(opt.any_get_all_combs(lower, upper, deltas))
+
+
+def test_multiple_scipy_de_runtime_uses_max_evaluation_budget():
+    window = CreateOptimizeMultipleWindow.__new__(CreateOptimizeMultipleWindow)
+    window._active_lines = ["line1", "line2"]
+    window._new_algorithm = Var("scipy_de")
+    window._new_algorithm_random_trials = Var(2000)
+    window.running_time_per_item = 0.5
+
+    assert window.get_running_time() == 2000
 
 
 def test_cylinder_runtime_component_counter_matches_optimizer_ranges():
@@ -226,3 +248,15 @@ def test_cylinder_runtime_counter_matches_inactive_component_rule():
         [1, 1, 1, 1, 1, 1, 1, 1],
         [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
     ) == 1
+
+
+def test_cylinder_scipy_de_runtime_uses_max_evaluation_budget():
+    window = CreateOptimizeCylinderWindow.__new__(CreateOptimizeCylinderWindow)
+    window._new_algorithm = Var("scipy_de cylinder")
+    window._new_algorithm_random_trials = Var(1234)
+    window.running_time_per_item = {"RP": 0.5}
+
+    seconds, combinations = window.get_running_time()
+
+    assert combinations == 1234
+    assert seconds == 617

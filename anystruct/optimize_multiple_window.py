@@ -158,7 +158,7 @@ class CreateOptimizeMultipleWindow():
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=95)
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=135)
 
-        algorithms = ('anysmart', 'random', 'random_no_delta')
+        algorithms = ('anysmart', 'scipy_de', 'random', 'random_no_delta')
 
         tk.Label(self._frame, text='-- Structural optimizer for multiple selections --',
                  font='Verdana 15 bold').place(x=10, y=10)
@@ -720,6 +720,28 @@ class CreateOptimizeMultipleWindow():
             self._ent_maxiter.place_forget()
             self._ent_minstep.place_forget()
             self._ent_minfunc.place_forget()
+            self.algorithm_random_label.config(text='Number of trials')
+            self._ent_random_trials.place(x=start_x + dx * 11.3, y=start_y + 1.2 * dy)
+            self.algorithm_random_label.place(x=start_x + dx * 11.3, y=start_y + 0.5 * dy)
+
+        elif self._new_algorithm.get() == 'scipy_de':
+            self._ent_random_trials.place_forget()
+            self.algorithm_random_label.place_forget()
+            self._lb_swarm_size.place_forget()
+            self._lb_omega.place_forget()
+            self._lb_phip.place_forget()
+            self._lb_phig.place_forget()
+            self._lb_maxiter.place_forget()
+            self._lb_minstep.place_forget()
+            self._lb_minfunc.place_forget()
+            self._ent_swarm_size.place_forget()
+            self._ent_omega.place_forget()
+            self._ent_phip.place_forget()
+            self._ent_phig.place_forget()
+            self._ent_maxiter.place_forget()
+            self._ent_minstep.place_forget()
+            self._ent_minfunc.place_forget()
+            self.algorithm_random_label.config(text='Max evaluations')
             self._ent_random_trials.place(x=start_x + dx * 11.3, y=start_y + 1.2 * dy)
             self.algorithm_random_label.place(x=start_x + dx * 11.3, y=start_y + 0.5 * dy)
 
@@ -789,7 +811,7 @@ class CreateOptimizeMultipleWindow():
                     slamming_pressure = 0
                 else:
                     slamming_pressure = self.app.get_highest_pressure(line)['slamming']
-            except [KeyError, AttributeError]:
+            except (KeyError, AttributeError):
                 slamming_pressure = 0
 
         fat_press = ((fat_press['p_ext']['loaded'], fat_press['p_ext']['ballast'],
@@ -1169,7 +1191,7 @@ class CreateOptimizeMultipleWindow():
         except Exception:
             return 0
 
-        if algorithm in ['random', 'random_no_delta']:
+        if algorithm in ['random', 'random_no_delta', 'scipy_de']:
             try:
                 return int(self._new_algorithm_random_trials.get() * self.running_time_per_item) * active_line_count
             except Exception:
@@ -1799,6 +1821,10 @@ class CreateOptimizeMultipleWindow():
                                     'RANDOM_NO_BOUNDS:\n'
                                     '           Same as RANDOM, but does not use the defined deltas.\n'
                                     '           The deltas is set to 1 mm for all dimensions/thicknesses.\n\n'
+                                    'SCIPY_DE:\n'
+                                    '           Uses SciPy differential evolution to sample snapped candidates\n'
+                                    '           from the current bounds and deltas.\n'
+                                    '           Number of trials is used as the max evaluation budget.\n\n'
                                     'ANYDETAIL:\n'
                                     '           Same as for ANYSMART, but will take some more time and\n'
                                     '           provide a chart of weight development during execution.\n\n'

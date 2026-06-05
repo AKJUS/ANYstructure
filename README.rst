@@ -4,15 +4,16 @@ ANYstructure
 
 Save cost and time by efficient optimization and reporting!
 
-### What's new in 6.0.3 ###
-* New buckling method: Semi-analytical buckling for flat plates.
-* Updated ML buckling to numerical instead of classification. Improved accuracy of the neural network.
-* Updated color coding option.
-* Implemented extended testing regime.
-* Started work on separating calculation code from the GUI.
-* Python 3.14 supported.
-* Addressed some calculation bugs.
-* Updated API.
+### What's new in 6.1.0 ###
+* Simplified GUI input option.
+* Weld/weight optimization.
+* Cost optimization.
+* 3D representation of panels/cylinders.
+* Improved Semi-analytical buckling implementation.
+* Optimization of stiffened plate with girder.
+* Bug fixing.
+* Export 3D shell model.
+* SciPy Differential Evolution Optimizer added.
 
 ANYstructure is the ultimate steel structure design tool for plate fields and cylinders!
 Weight optimization for all structures with machine learning capabilities.
@@ -20,7 +21,7 @@ Calculations are based on DNV standards and rules.
 
 It is based on DNV standards and recommended practices.
 
-The following is caluculated:
+The following is calculated:
 
 * Minimum plate thickness (DNV-OS-C101)
 * Minimum section modulus of stiffener/plate (DNVGL-OS-C101)

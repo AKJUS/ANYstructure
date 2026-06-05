@@ -81,3 +81,13 @@ def test_single_optimizer_has_cost_study_button_and_dialog():
     assert "self._last_cost_study_report = report" in source
     assert "self._last_study_type = 'cost'" in source
     assert "self._show_cost_study_report(self._last_cost_study_report)" in source
+
+
+def test_single_optimizer_has_scipy_de_algorithm_option_and_study_wiring():
+    source = read_optimize_window_source()
+
+    assert "'scipy_de'" in source
+    assert "self.algorithm_random_label.config(text='Max evaluations')" in source
+    assert "SCIPY_DE" in source
+    assert "def _get_optimizer_count_label(self):" in source
+    assert "Estimated max evaluations" in source

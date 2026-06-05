@@ -107,7 +107,7 @@ class CreateOptimizeWindow():
 
         self._canvas_opt.place(x=10, y=300)
 
-        algorithms = ('anysmart', 'random', 'random_no_delta', 'anydetail')
+        algorithms = ('anysmart', 'scipy_de', 'random', 'random_no_delta', 'anydetail')
 
         tk.Label(self._frame, text='-- Structural optimizer --', font='Verdana 15 bold').place(x=10, y=10)
 
@@ -648,7 +648,7 @@ class CreateOptimizeWindow():
         self._ent_algorithm.place(x=1120, y=150)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
 
-        tk.Button(self._frame, text='algorith information', command=self.algorithm_info, bg='white') \
+        tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
             .place(x=1120, y=195, width=140)
 
         # ---------------------------------------------------------------------
@@ -978,6 +978,27 @@ class CreateOptimizeWindow():
             self._ent_maxiter.place_forget()
             self._ent_minstep.place_forget()
             self._ent_minfunc.place_forget()
+            self.algorithm_random_label.config(text='Number of trials')
+            self.algorithm_random_label.place(x=1320, y=300)
+            self._ent_random_trials.place(x=1320, y=325, width=120)
+        elif self._new_algorithm.get() == 'scipy_de':
+            self._ent_random_trials.place_forget()
+            self.algorithm_random_label.place_forget()
+            self._lb_swarm_size.place_forget()
+            self._lb_omega.place_forget()
+            self._lb_phip.place_forget()
+            self._lb_phig.place_forget()
+            self._lb_maxiter.place_forget()
+            self._lb_minstep.place_forget()
+            self._lb_minfunc.place_forget()
+            self._ent_swarm_size.place_forget()
+            self._ent_omega.place_forget()
+            self._ent_phip.place_forget()
+            self._ent_phig.place_forget()
+            self._ent_maxiter.place_forget()
+            self._ent_minstep.place_forget()
+            self._ent_minfunc.place_forget()
+            self.algorithm_random_label.config(text='Max evaluations')
             self.algorithm_random_label.place(x=1320, y=300)
             self._ent_random_trials.place(x=1320, y=325, width=120)
         elif self._new_algorithm.get() == 'anysmart' or self._new_algorithm.get() == 'anydetail':
@@ -1360,6 +1381,7 @@ class CreateOptimizeWindow():
     def _build_cost_study_report(self, cost_factors, result_x, result_weight, result_weld,
                                  steel_cost, weld_cost, result_cost, elapsed_seconds):
         seconds, combinations = self.get_running_time()
+        count_label = self._get_optimizer_count_label()
         return {
             'title': 'Cost study report',
             'summary': [
@@ -1375,7 +1397,7 @@ class CreateOptimizeWindow():
                 ('Weld metric', self._get_weld_metric_text()),
                 ('Built-up weld included', str(bool(self._new_include_builtup_weld.get()))),
                 ('Algorithm', self._new_algorithm.get()),
-                ('Estimated combinations', self._format_study_value(combinations, 0)),
+                (count_label, self._format_study_value(combinations, 0)),
                 ('Elapsed [s]', self._format_study_value(elapsed_seconds, 2)),
             ],
             'geometry': [
@@ -1754,11 +1776,12 @@ class CreateOptimizeWindow():
 
         seconds, combinations = self.get_running_time()
         estimated_minutes = max(round((seconds * len(bias_values)) / 60, 2), 0.1)
+        count_label = self._get_optimizer_count_label().replace('Estimated ', '').lower()
 
         proceed = messagebox.askyesno(
             title='Weight/weld study',
             message='This will run ' + str(len(bias_values)) + ' optimizer runs over the current slider range.\n'
-                    + 'Each run uses about ' + str(int(combinations)) + ' combinations.\n'
+                    + 'Each run uses about ' + str(int(combinations)) + ' ' + count_label + '.\n'
                     + 'Estimated total time: about ' + str(estimated_minutes) + ' min.\n\n'
                     + 'Continue?'
         )
@@ -1873,7 +1896,7 @@ class CreateOptimizeWindow():
         except TclError:
             return 0, 0
 
-        if algorithm in ['random', 'random_no_delta']:
+        if algorithm in ['random', 'random_no_delta', 'scipy_de']:
             try:
                 number_of_combinations = int(self._new_algorithm_random_trials.get())
                 return (
@@ -1936,6 +1959,14 @@ class CreateOptimizeWindow():
 
         return int(seconds), int(number_of_combinations)
 
+    def _get_optimizer_count_label(self):
+        try:
+            if self._new_algorithm.get() == 'scipy_de':
+                return 'Estimated max evaluations'
+        except Exception:
+            pass
+        return 'Estimated combinations'
+
     def get_deltas(self):
         '''
         Return a numpy array of the deltas.
@@ -1973,8 +2004,9 @@ class CreateOptimizeWindow():
             elif weld_bias >= 1.0:
                 warning_text = '\nPure weld objective: initial filter uses ' + self._get_weld_metric_text() + '.'
 
+            count_label = self._get_optimizer_count_label().replace('Estimated ', '').lower()
             self._runnig_time_label.config(
-                text=str(int(number_of_combinations)) + ' combinations\n(about '
+                text=str(int(number_of_combinations)) + ' ' + count_label + '\n(about '
                      + str(max(round(seconds / 60, 2), 0.1))
                      + ' min.)'
                      + warning_text
@@ -2177,6 +2209,10 @@ class CreateOptimizeWindow():
                                     'RANDOM_NO_BOUNDS:\n'
                                     '           Same as RANDOM, but does not use the defined deltas.\n'
                                     '           The deltas is set to 1 mm for all dimensions/thicknesses.\n\n'
+                                    'SCIPY_DE:\n'
+                                    '           Uses SciPy differential evolution to sample snapped candidates\n'
+                                    '           from the current bounds and deltas.\n'
+                                    '           Number of trials is used as the max evaluation budget.\n\n'
                                     'ANYDETAIL:\n'
                                     '           Same as for ANYSMART, but will take some more time and\n'
                                     '           provide a chart of weight development during execution.\n\n'

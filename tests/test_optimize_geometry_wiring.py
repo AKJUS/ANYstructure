@@ -42,6 +42,14 @@ def test_span_optimizer_uses_imported_allstructure_type_in_result_drawing():
     assert "calc_structure.AllStructure" not in source
 
 
+def test_span_optimizer_non_axis_aligned_midpoint_uses_both_y_coordinates():
+    optimize_geometry_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize_geometry.py"
+    source = optimize_geometry_source.read_text(encoding="utf-8")
+
+    assert "min(p2[1], p1[1]) + abs((p2[1] - p1[1]) * 0.5)" in source
+    assert "min(p2[1] - p1[1])" not in source
+
+
 def test_span_result_drawing_accepts_allstructure_instances(monkeypatch):
     class FakeCanvas:
         def __init__(self):
@@ -94,3 +102,40 @@ def test_geometric_optimizer_forwards_process_count():
 
     assert "opt_girder_prop=opt_girder_prop, processes=processes, ml_algo=ml_algo" in source
     assert "processes=processes,\n                                                           ml_algo=ml_algo" in source
+
+
+def test_geometric_optimizer_has_scipy_de_algorithm_option():
+    optimize_geometry_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize_geometry.py"
+    source = optimize_geometry_source.read_text(encoding="utf-8")
+
+    assert "'scipy_de'" in source
+    assert "algorithm=self._new_algorithm.get()" in source
+    assert "trials=self._new_algorithm_random_trials.get()" in source
+    assert "self.algorithm_random_label.config(text='Max evaluations')" in source
+    assert "SCIPY_DE" in source
+
+
+def test_geometric_optimizer_header_layout_keeps_objective_and_canvas_separate():
+    optimize_geometry_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize_geometry.py"
+    source = optimize_geometry_source.read_text(encoding="utf-8")
+
+    assert "status_y = 170" in source
+    assert "objective_y = 205" in source
+    assert "canvas_y = 300" in source
+    assert "self._running_time_info_label.place(x=start_x, y=status_y)" in source
+    assert "self._result_label.place(x=start_x + 4.8 * dx, y=status_y)" in source
+    assert "self._canvas_select.place(x=start_x + 0 * dx, y=canvas_y)" in source
+    assert "self._canvas_opt.place(x=start_x + 10.5 * dx, y=canvas_y)" in source
+    assert "obj_x, obj_y = 20, objective_y" in source
+    assert "start_y + 5.0 * dy" not in source
+    assert "obj_x, obj_y = 20, 175" not in source
+
+
+def test_geometric_optimizer_routes_scipy_de_to_flat_sampler():
+    optimize_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize.py"
+    source = optimize_source.read_text(encoding="utf-8")
+
+    assert "algorithm in ('anysmart', 'scipy_de') and is_geometric" in source
+    assert "algorithm=algorithm, predefiened_stiffener_iter=predefined_stiffener_iter" in source
+    assert "if algorithm == 'scipy_de':" in source
+    assert "opt_obj = scipy_de_loop_flat(" in source

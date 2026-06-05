@@ -590,6 +590,305 @@ def test_run_optimization_forwards_weld_metric_to_cylinder(monkeypatch, opt_inpu
     assert captured['weld_metric'] == 'weld_length'
 
 
+def test_run_optimization_dispatches_scipy_de_cylinder(monkeypatch, opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
+    captured = {}
+
+    def fake_scipy_de_loop_cylinder(*args, **kwargs):
+        captured['called'] = True
+        captured['trials'] = kwargs['trials']
+        captured['weld_metric'] = kwargs['weld_metric']
+        return 'scipy result'
+
+    monkeypatch.setattr(opt, 'scipy_de_loop_cylinder', fake_scipy_de_loop_cylinder)
+
+    result = opt.run_optmizataion(
+        obj,
+        upper_bounds,
+        lower_bounds,
+        lat_press,
+        deltas,
+        algorithm='scipy_de cylinder',
+        cylinder=True,
+        trials=123,
+        weld_metric='Weld length',
+    )
+
+    assert result == 'scipy result'
+    assert captured == {
+        'called': True,
+        'trials': 123,
+        'weld_metric': 'weld_length',
+    }
+
+
+def test_scipy_de_cylinder_component_candidates_are_snapped_to_grid():
+    class FakeInitialCylinder:
+        LongStfObj = None
+
+    min_var = [
+        [0.02, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    max_var = [
+        [0.03, 2.5, 5.0, 0.8, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    deltas = [
+        [0.01, 1.0, 1.0, 0.1, 1.0, 1.0, 1.0, 1.0],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+    ]
+
+    component_candidates = opt._get_cylinder_component_candidates(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialCylinder(),
+    )
+    candidate = opt._cylinder_candidate_from_indices([4, 0, 0, 0], component_candidates)
+
+    assert candidate[0][0] == pytest.approx(0.03)
+    assert candidate[0][3] == pytest.approx(0.7)
+    assert candidate[1] == (0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def test_scipy_de_cylinder_returns_best_valid_sampled_candidate(monkeypatch):
+    class FakeInitialCylinder:
+        LongStfObj = None
+
+    class FakeOptimizeResult:
+        x = [1, 0, 0, 0]
+
+    min_var = [
+        [0.02, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    max_var = [
+        [0.03, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    deltas = [
+        [0.01, 1.0, 1.0, 0.1, 1.0, 1.0, 1.0, 1.0],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+    ]
+
+    def fake_differential_evolution(func, **kwargs):
+        assert kwargs['integrality'] == [True, True, True, True]
+        assert kwargs['polish'] is False
+        assert kwargs['workers'] == 1
+        func([0, 0, 0, 0])
+        func([1, 0, 0, 0])
+        return FakeOptimizeResult()
+
+    def fake_any_constraints_cylinder(candidate, *args):
+        if abs(candidate[0][0] - 0.02) < 1e-12:
+            return False, 'Rejected', candidate, []
+        return True, 'Check OK', candidate, []
+
+    monkeypatch.setattr(opt, 'differential_evolution', fake_differential_evolution)
+    monkeypatch.setattr(opt, 'any_constraints_cylinder', fake_any_constraints_cylinder)
+    monkeypatch.setattr(opt, 'calc_cylinder_objective_value', lambda candidate, **kwargs: candidate[0][0])
+    monkeypatch.setattr(opt, 'calc_weight_cylinder', lambda candidate: candidate[0][0])
+    monkeypatch.setattr(opt, 'create_new_cylinder_obj', lambda obj, candidate: ('created', candidate))
+
+    result = opt.scipy_de_loop_cylinder(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialCylinder(),
+        trials=50,
+    )
+
+    assert result[0][0] == 'created'
+    assert result[0][1][0][0] == pytest.approx(0.03)
+    assert any(item[1] == 'Rejected' for item in result[1])
+
+
+def test_scipy_de_cylinder_records_optimizer_failures(monkeypatch):
+    class FakeInitialCylinder:
+        LongStfObj = None
+
+    min_var = [
+        [0.02, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    max_var = [
+        [0.03, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    deltas = [
+        [0.01, 1.0, 1.0, 0.1, 1.0, 1.0, 1.0, 1.0],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+    ]
+
+    def fake_differential_evolution(*args, **kwargs):
+        raise RuntimeError("integrality unsupported")
+
+    monkeypatch.setattr(opt, 'differential_evolution', fake_differential_evolution)
+
+    result = opt.scipy_de_loop_cylinder(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialCylinder(),
+        trials=50,
+    )
+
+    assert result[3] is False
+    assert any("SciPy Differential Evolution failed: integrality unsupported" in item[1] for item in result[4])
+
+
+def test_run_optimization_dispatches_scipy_de_flat(monkeypatch, opt_input):
+    obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
+    captured = {}
+
+    def fake_scipy_de_loop_flat(*args, **kwargs):
+        captured['called'] = True
+        captured['trials'] = kwargs['trials']
+        captured['weld_metric'] = kwargs['weld_metric']
+        return 'flat scipy result'
+
+    monkeypatch.setattr(opt, 'scipy_de_loop_flat', fake_scipy_de_loop_flat)
+
+    result = opt.run_optmizataion(
+        obj,
+        upper_bounds,
+        lower_bounds,
+        lat_press,
+        deltas,
+        algorithm='scipy_de',
+        trials=321,
+        weld_metric='Weld length',
+    )
+
+    assert result == 'flat scipy result'
+    assert captured == {
+        'called': True,
+        'trials': 321,
+        'weld_metric': 'weld_length',
+    }
+
+
+def test_scipy_de_flat_component_candidates_are_snapped_to_grid():
+    min_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    max_var = np.array([0.7, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    deltas = np.array([0.05, 0.005, 0.05, 0.005, 0.05, 0.005])
+
+    candidate_space = opt._get_flat_component_candidates(min_var, max_var, deltas)
+    candidate = opt._flat_candidate_from_indices([2, 0, 0, 0, 0, 0, 0, 0], candidate_space)
+
+    assert candidate[0] == pytest.approx(0.7)
+    assert candidate[1:] == pytest.approx((0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0))
+
+
+def test_scipy_de_flat_component_candidates_tolerate_optional_upper_bounds():
+    min_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0], dtype=object)
+    max_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, None, 10.0], dtype=object)
+    deltas = np.array([0.05, 0.005, 0.05, 0.005, 0.05, 0.005])
+
+    candidate_space = opt._get_flat_component_candidates(min_var, max_var, deltas)
+    candidate = opt._flat_candidate_from_indices([0, 0, 0, 0, 0, 0, 0, 0], candidate_space)
+
+    assert candidate[6] == pytest.approx(3.5)
+
+
+def test_scipy_de_flat_returns_best_valid_sampled_candidate(monkeypatch):
+    class FakeInitialStructure:
+        Stiffener = None
+        Plate = type('FakePlate', (), {'mat_factor': 1.15})()
+
+    class FakeOptimizeResult:
+        x = [1, 0, 0, 0, 0, 0, 0, 0]
+
+    class FakeCalcObject:
+        def __init__(self, candidate):
+            self.candidate = candidate
+
+    min_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    max_var = np.array([0.65, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    deltas = np.array([0.05, 0.005, 0.05, 0.005, 0.05, 0.005])
+
+    def fake_differential_evolution(func, **kwargs):
+        assert kwargs['integrality'] == [True for _ in kwargs['bounds']]
+        assert kwargs['polish'] is False
+        assert kwargs['workers'] == 1
+        func([0, 0, 0, 0, 0, 0, 0, 0])
+        func([1, 0, 0, 0, 0, 0, 0, 0])
+        return FakeOptimizeResult()
+
+    def fake_any_constraints_all(candidate, *args):
+        if abs(candidate[0] - 0.6) < 1e-12:
+            return False, 'Rejected', candidate, []
+        return True, 'Check OK', candidate, []
+
+    monkeypatch.setattr(opt, 'differential_evolution', fake_differential_evolution)
+    monkeypatch.setattr(opt, 'any_constraints_all', fake_any_constraints_all)
+    monkeypatch.setattr(opt, 'calc_flat_objective_value', lambda candidate, **kwargs: candidate[0])
+    monkeypatch.setattr(opt, 'calc_weight', lambda candidate: candidate[0])
+    monkeypatch.setattr(opt, 'create_new_calc_obj', lambda obj, candidate, *args, **kwargs: (FakeCalcObject(candidate), None))
+
+    result = opt.scipy_de_loop_flat(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialStructure(),
+        lateral_pressure=1.0,
+        trials=50,
+        const_chk=(False, False, False, False, False, False, False, False, False, False),
+    )
+
+    assert result[0].candidate[0] == pytest.approx(0.65)
+    assert result[0].lat_press == pytest.approx(1.0)
+    assert result[2] is True
+    assert any(item[1] == 'Rejected' for item in result[3])
+
+
+def test_scipy_de_flat_records_optimizer_failures(monkeypatch):
+    class FakeInitialStructure:
+        Stiffener = None
+        Plate = type('FakePlate', (), {'mat_factor': 1.15})()
+
+    min_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    max_var = np.array([0.65, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    deltas = np.array([0.05, 0.005, 0.05, 0.005, 0.05, 0.005])
+
+    def fake_differential_evolution(*args, **kwargs):
+        raise RuntimeError("integrality unsupported")
+
+    monkeypatch.setattr(opt, 'differential_evolution', fake_differential_evolution)
+
+    result = opt.scipy_de_loop_flat(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialStructure(),
+        lateral_pressure=1.0,
+        trials=50,
+        const_chk=(False, False, False, False, False, False, False, False, False, False),
+    )
+
+    assert result[3] is False
+    assert any("SciPy Differential Evolution failed: integrality unsupported" in item[1] for item in result[4])
+
+
 def test_run_optimization_forwards_cost_factors_to_flat_algorithm(monkeypatch, opt_input):
     obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
     captured = {}

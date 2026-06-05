@@ -13,7 +13,9 @@ Calculations are based on DNV standards and recommended practices.
 * Improved Semi-analytical buckling implementation.
 * Optimization of stiffened plate with girder.
 * Bug fixing.
-* Export 3d shell model.
+* Export 3D shell model.
+* SciPy Differential Evolution Optimizer added.
+
 ### What's new in 6.0.3 ###
 * New buckling method: Semi-analytical buckling for flat plates.
 * Updated ML buckling to numerical instead of classification. Improved accuracy of the neural network.
