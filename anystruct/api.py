@@ -694,6 +694,7 @@ class CylStru():
     6.  'Ring Stiffened panel'\n
     7.  'Orthogonally Stiffened shell'\n
     8.  'Orthogonally Stiffened panel'\n
+    9.  'Unstiffened conical shell'\n
      '''
 
     geotypes = api_helpers.CYLINDER_STRUCTURE_DOMAINS
@@ -705,26 +706,28 @@ class CylStru():
         :type calculation_domain: str
         '''
         super().__init__()
-        api_helpers.assert_choice(calculation_domain, self.geotypes, 'calculation_domain')
+        calculation_domain = api_helpers.normalize_domain_string(calculation_domain)
+        geometry = api_helpers.geometry_id_for_domain(calculation_domain)
         self._load_type = api_helpers.cylinder_input_mode(calculation_domain)
 
-        self._calculation_domain = api_helpers.cylinder_domain_with_input_mode(calculation_domain)
+        self._calculation_domain = api_helpers.cylinder_domain_with_input_mode(calculation_domain) \
+            if calculation_domain in api_helpers.CYLINDER_STRUCTURE_DOMAINS else api_helpers.domain_for_geometry_id(geometry)
         self._CylinderMain = CylinderAndCurvedPlate()
-        self._CylinderMain.geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
+        self._CylinderMain.geometry = geometry
         self._CylinderMain.ShellObj = Shell()
-        if  calculation_domain in ['Unstiffened shell', 'Unstiffened panel']:
+        if geometry in [1, 2, 9]:
             self._CylinderMain.LongStfObj = None
             self._CylinderMain.RingStfObj = None
             self._CylinderMain.RingFrameObj = None
-        elif calculation_domain in ['Longitudinal Stiffened shell', 'Longitudinal Stiffened panel']:
+        elif geometry in [3, 4]:
             self._CylinderMain.LongStfObj = Structure()
             self._CylinderMain.RingStfObj = None
             self._CylinderMain.RingFrameObj = None
-        elif calculation_domain in ['Ring Stiffened shell', 'Ring Stiffened panel']:
+        elif geometry in [5, 6]:
             self._CylinderMain.LongStfObj = None
             self._CylinderMain.RingStfObj = Structure()
             self._CylinderMain.RingFrameObj = None
-        elif calculation_domain in ['Orthogonally Stiffened shell', 'Orthogonally Stiffened panel']:
+        elif geometry in [7, 8]:
             self._CylinderMain.LongStfObj = Structure()
             self._CylinderMain.RingStfObj = None
             self._CylinderMain.RingFrameObj = Structure()
@@ -750,6 +753,10 @@ class CylStru():
         :rtype:
         '''
 
+        if self._CylinderMain.geometry == 9:
+            self.set_conical_stresses(sasd=sasd, smsd=smsd, tTsd=tTsd, tQsd=tQsd, psd=psd, shsd=shsd)
+            return
+
         self._CylinderMain.sasd = api_helpers.mpa_to_pa(sasd)
         self._CylinderMain.smsd = api_helpers.mpa_to_pa(smsd)
         self._CylinderMain.tTsd = abs(api_helpers.mpa_to_pa(tTsd))
@@ -771,6 +778,9 @@ class CylStru():
         :return:
         '''
         geometry = api_helpers.geometry_id_for_domain(self._calculation_domain)
+        if geometry == 9:
+            self.set_conical_forces(Nsd=Nsd, M1sd=Msd, M2sd=0, Tsd=Tsd, Q1sd=Qsd, Q2sd=0, psd=psd)
+            return
         forces = [Nsd, Msd, Tsd, Qsd]
         longitudinal_stiffener = self._CylinderMain.LongStfObj
         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
@@ -790,6 +800,91 @@ class CylStru():
         self._CylinderMain.psd = api_helpers.mpa_to_pa(psd)
         self._CylinderMain.shsd = shsd
 
+    def set_conical_shell_geometry(self, r1: float = 0, r2: float = 0, length: float = 0, thickness: float = 0):
+        '''
+        Set unstiffened conical shell geometry.
+
+        :param r1: radius at one end of cone [mm]
+        :param r2: radius at the other end of cone [mm]
+        :param length: axial cone length, l [mm]
+        :param thickness: nominal shell thickness [mm]
+        '''
+        shell = self._CylinderMain.ShellObj
+        shell.thk = api_helpers.mm_to_m(thickness)
+        shell.set_conical_geometry(
+            api_helpers.mm_to_m(r1),
+            api_helpers.mm_to_m(r2),
+            api_helpers.mm_to_m(length),
+        )
+        self._CylinderMain.panel_spacing = shell.cone_equivalent_length()
+
+    def set_conical_forces(self, Nsd: float = 0, M1sd: float = 0, M2sd: float = 0,
+                           Tsd: float = 0, Q1sd: float = 0, Q2sd: float = 0, psd: float = 0):
+        '''
+        Set DNV-RP-C202 Sec. 4.2 conical shell force input.
+
+        :param Nsd: design axial force [kN]
+        :param M1sd: design bending moment about principal axis 1 [kNm]
+        :param M2sd: design bending moment about principal axis 2 [kNm]
+        :param Tsd: design torsional moment [kNm]
+        :param Q1sd: design shear force parallel to principal axis 1 [kN]
+        :param Q2sd: design shear force parallel to principal axis 2 [kN]
+        :param psd: design lateral pressure [N/mm2]
+        '''
+        shell = self._CylinderMain.ShellObj
+        self._CylinderMain._cone_Nsd = Nsd
+        self._CylinderMain._cone_M1sd = M1sd
+        self._CylinderMain._cone_M2sd = M2sd
+        self._CylinderMain._cone_Tsd = Tsd
+        self._CylinderMain._cone_Q1sd = Q1sd
+        self._CylinderMain._cone_Q2sd = Q2sd
+        self._CylinderMain.psd = api_helpers.mpa_to_pa(psd)
+        governing = self._CylinderMain.conical_stress_state(
+            min(val for val in [shell.cone_r1, shell.cone_r2] if val is not None)
+        )
+        self._CylinderMain.sasd = governing['sasd']
+        self._CylinderMain.smsd = governing['smsd']
+        self._CylinderMain.tTsd = abs(governing['tTsd'])
+        self._CylinderMain.tQsd = abs(governing['tQsd'])
+        self._CylinderMain.shsd = governing['shsd']
+
+    def set_conical_stresses(self, sasd: float = 0, smsd: float = 0, tTsd: float = 0,
+                             tQsd: float = 0, psd: float = 0, shsd: float = 0):
+        '''
+        Set conical shell stress input and derive equivalent directional forces.
+
+        Scalar bending and shear stresses are mapped to principal axis 1:
+        ``M2sd = 0`` and ``Q2sd = 0``.
+        '''
+        shell = self._CylinderMain.ShellObj
+        radius = min(val for val in [shell.cone_r1, shell.cone_r2] if val is not None)
+        forces_with_shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+            stresses=(
+                api_helpers.mpa_to_pa(sasd),
+                api_helpers.mpa_to_pa(smsd),
+                abs(api_helpers.mpa_to_pa(tTsd)),
+                abs(api_helpers.mpa_to_pa(tQsd)),
+                api_helpers.mpa_to_pa(shsd),
+            ),
+            geometry=self._CylinderMain.geometry,
+            shell_t=shell.thk,
+            shell_radius=radius,
+            shell_spacing=shell.cone_equivalent_length(),
+            CylinderAndCurvedPlate=CylinderAndCurvedPlate,
+            conical=True,
+            psd=psd,
+            cone_r1=shell.cone_r1,
+            cone_r2=shell.cone_r2,
+            cone_alpha=shell.cone_alpha,
+            shell_lenght_l=shell.cone_length,
+        )
+        Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = forces_with_shsd[:6]
+        self.set_conical_forces(Nsd=Nsd, M1sd=M1sd, M2sd=M2sd, Tsd=Tsd, Q1sd=Q1sd, Q2sd=Q2sd, psd=psd)
+        self._CylinderMain.sasd = api_helpers.mpa_to_pa(sasd)
+        self._CylinderMain.smsd = api_helpers.mpa_to_pa(smsd)
+        self._CylinderMain.tTsd = abs(api_helpers.mpa_to_pa(tTsd))
+        self._CylinderMain.tQsd = abs(api_helpers.mpa_to_pa(tQsd))
+        self._CylinderMain.shsd = api_helpers.mpa_to_pa(shsd)
 
     def set_material(self, mat_yield = 355, emodule = 210000, material_factor = 1.15, poisson = 0.3):
         '''

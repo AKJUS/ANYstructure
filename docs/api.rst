@@ -93,12 +93,14 @@ Supported domains:
 * ``Ring Stiffened panel``
 * ``Orthogonally Stiffened shell``
 * ``Orthogonally Stiffened panel``
+* ``Unstiffened conical shell``
 
 Shell domains use force input mode internally; panel domains use stress input
 mode internally. The API exposes both ``set_stresses`` and ``set_forces`` for
 cylinders. Configure shell geometry and the relevant stiffener/ring objects
 before using force input, because forces are converted to stress from the
-current geometry.
+current geometry. The conical shell domain uses ``set_conical_shell_geometry``
+and ``set_conical_forces``.
 
 Current cylinder setters and result helpers:
 
@@ -112,12 +114,16 @@ Current cylinder setters and result helpers:
      - Set yield, elastic modulus, material factor, and Poisson ratio.
    * - ``set_shell_geometry``
      - Set radius, shell thickness, ring spacing, and total cylinder length.
+   * - ``set_conical_shell_geometry``
+     - Set conical shell radii, axial length, and nominal thickness.
    * - ``set_shell_buckling_parmeters``
      - Set the effective buckling length factor used by column buckling.
    * - ``set_stresses``
      - Set axial, bending, torsional, shear, pressure, and hoop stresses.
    * - ``set_forces``
      - Set axial force, bending moment, torsional moment, shear force, and pressure.
+   * - ``set_conical_forces``
+     - Set conical shell axial force, two bending moments, torsion, two shear forces, and pressure.
    * - ``set_imperfection``
      - Set initial out-of-roundness.
    * - ``set_fabrication_method``

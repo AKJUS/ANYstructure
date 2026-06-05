@@ -782,6 +782,22 @@ def _cylindrical_faces(radius: float, z0: float, z1: float, theta_start: float,
     return faces
 
 
+def _conical_faces(radius0: float, radius1: float, z0: float, z1: float, theta_start: float,
+                   theta_end: float, segments: int) -> list[list[tuple[float, float, float]]]:
+    segments = max(1, int(segments))
+    faces = []
+    for i in range(segments):
+        a0 = theta_start + (theta_end - theta_start) * i / segments
+        a1 = theta_start + (theta_end - theta_start) * (i + 1) / segments
+        faces.append([
+            _cyl_point(radius0, a0, z0),
+            _cyl_point(radius0, a1, z0),
+            _cyl_point(radius1, a1, z1),
+            _cyl_point(radius1, a0, z1),
+        ])
+    return faces
+
+
 def _annular_radial_faces(radius0: float, radius1: float, z: float, theta_start: float,
                           theta_end: float, segments: int) -> list[list[tuple[float, float, float]]]:
     segments = max(1, int(segments))
@@ -795,6 +811,36 @@ def _annular_radial_faces(radius0: float, radius1: float, z: float, theta_start:
             _cyl_point(radius1, a1, z),
             _cyl_point(radius1, a0, z),
         ])
+    return faces
+
+
+def _conical_wall_solid_faces(inner0: float, outer0: float, inner1: float, outer1: float,
+                              z0: float, z1: float, theta_start: float, theta_end: float,
+                              segments: int) -> list[list[tuple[float, float, float]]]:
+    """Return closed faceted faces for a conical/frustum wall solid."""
+    inner0, outer0 = sorted((max(float(inner0), EPS), max(float(outer0), EPS)))
+    inner1, outer1 = sorted((max(float(inner1), EPS), max(float(outer1), EPS)))
+    z0, z1 = float(z0), float(z1)
+    segments = max(1, int(segments))
+    faces: list[list[tuple[float, float, float]]] = []
+
+    for i in range(segments):
+        a0 = theta_start + (theta_end - theta_start) * i / segments
+        a1 = theta_start + (theta_end - theta_start) * (i + 1) / segments
+        faces.append([_cyl_point(outer0, a0, z0), _cyl_point(outer0, a1, z0),
+                      _cyl_point(outer1, a1, z1), _cyl_point(outer1, a0, z1)])
+        faces.append([_cyl_point(inner0, a1, z0), _cyl_point(inner0, a0, z0),
+                      _cyl_point(inner1, a0, z1), _cyl_point(inner1, a1, z1)])
+        faces.append([_cyl_point(inner0, a0, z0), _cyl_point(outer0, a0, z0),
+                      _cyl_point(outer0, a1, z0), _cyl_point(inner0, a1, z0)])
+        faces.append([_cyl_point(inner1, a0, z1), _cyl_point(inner1, a1, z1),
+                      _cyl_point(outer1, a1, z1), _cyl_point(outer1, a0, z1)])
+
+    is_full_circle = abs(abs(theta_end - theta_start) - 2.0 * math.pi) <= 1.0e-7
+    if not is_full_circle:
+        for angle in (theta_start, theta_end):
+            faces.append([_cyl_point(inner0, angle, z0), _cyl_point(inner1, angle, z1),
+                          _cyl_point(outer1, angle, z1), _cyl_point(outer0, angle, z0)])
     return faces
 
 
@@ -1284,6 +1330,36 @@ def _add_cylindrical_shell_surface(ctx: IfcContext, ifc_class: str, name: str, r
     )
 
 
+def _add_conical_shell_surface(ctx: IfcContext, ifc_class: str, name: str, radius0: float, radius1: float,
+                               z0: float, z1: float, theta_start: float, theta_end: float,
+                               predefined_type: str | None = None,
+                               extra_properties: dict[str, Any] | None = None) -> None:
+    radius0 = max(float(radius0), EPS)
+    radius1 = max(float(radius1), EPS)
+    z0 = float(z0)
+    z1 = float(z1)
+    segments = _segment_count_for_arc(max(radius0, radius1), theta_start, theta_end)
+    props = {
+        "radius0_m": radius0,
+        "radius1_m": radius1,
+        "z0_m": z0,
+        "z1_m": z1,
+        "theta_start_rad": float(theta_start),
+        "theta_end_rad": float(theta_end),
+        "surface_segments": int(segments),
+        "shell_export": True,
+        "geometry_role": "conical_shell_frustum",
+    }
+    if extra_properties:
+        props.update(extra_properties)
+    _add_surface_element(
+        ctx, ifc_class, name,
+        _conical_faces(radius0, radius1, z0, z1, theta_start, theta_end, segments),
+        predefined_type=predefined_type,
+        extra_properties=props,
+    )
+
+
 def _add_cylindrical_wall_solid(ctx: IfcContext, ifc_class: str, name: str, radius: float, thickness: float,
                                 z0: float, z1: float, theta_start: float, theta_end: float,
                                 side_sign: float, predefined_type: str | None = None,
@@ -1345,6 +1421,50 @@ def _add_cylindrical_wall_solid(ctx: IfcContext, ifc_class: str, name: str, radi
     _add_faceted_solid_element(
         ctx, ifc_class, name,
         _cylindrical_wall_solid_faces(inner_radius, outer_radius, z0, z1, theta_start, theta_end, segments),
+        predefined_type=predefined_type,
+        extra_properties=props,
+    )
+
+
+def _add_conical_wall_solid(ctx: IfcContext, ifc_class: str, name: str, radius0: float, radius1: float,
+                            thickness: float, z0: float, z1: float, theta_start: float, theta_end: float,
+                            side_sign: float, predefined_type: str | None = None,
+                            extra_properties: dict[str, Any] | None = None) -> None:
+    radius0 = max(float(radius0), EPS)
+    radius1 = max(float(radius1), EPS)
+    thickness = max(float(thickness), EPS)
+    sign = 1.0 if side_sign >= 0.0 else -1.0
+    if sign >= 0.0:
+        inner0, inner1 = radius0, radius1
+        outer0, outer1 = radius0 + thickness, radius1 + thickness
+    else:
+        inner0, inner1 = max(radius0 - thickness, EPS), max(radius1 - thickness, EPS)
+        outer0, outer1 = radius0, radius1
+
+    segments = _segment_count_for_arc(max(radius0, radius1), theta_start, theta_end)
+    props = {
+        "interface_radius0_m": radius0,
+        "interface_radius1_m": radius1,
+        "inner_radius0_m": inner0,
+        "inner_radius1_m": inner1,
+        "outer_radius0_m": outer0,
+        "outer_radius1_m": outer1,
+        "thickness_m": thickness,
+        "z0_m": float(z0),
+        "z1_m": float(z1),
+        "theta_start_rad": float(theta_start),
+        "theta_end_rad": float(theta_end),
+        "surface_segments": int(segments),
+        "model_type": "faceted_brep_solid",
+        "shell_export": False,
+        "thickness_exported_as_geometry": True,
+        "geometry_role": "conical_shell_frustum",
+    }
+    if extra_properties:
+        props.update(extra_properties)
+    _add_faceted_solid_element(
+        ctx, ifc_class, name,
+        _conical_wall_solid_faces(inner0, outer0, inner1, outer1, z0, z1, theta_start, theta_end, segments),
         predefined_type=predefined_type,
         extra_properties=props,
     )
@@ -1533,11 +1653,49 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
     shell = getattr(cyl_obj, "ShellObj", None)
     if shell is None:
         raise ValueError("The selected cylinder line has no ShellObj to export.")
-    radius = max(float(getattr(shell, "radius")), EPS)
-    length = max(float(getattr(shell, "length_of_shell")), EPS)
+    is_conical = getattr(cyl_obj, "geometry", None) == 9
+    if is_conical:
+        radius0 = _normalise_length_to_m(getattr(shell, "cone_r1", None), 0.0)
+        radius1 = _normalise_length_to_m(getattr(shell, "cone_r2", None), 0.0)
+        length = _normalise_length_to_m(getattr(shell, "cone_length", None), 1.0)
+        if radius0 <= EPS or radius1 <= EPS:
+            radius0 = radius1 = max(float(getattr(shell, "radius")), EPS)
+    else:
+        radius = max(float(getattr(shell, "radius")), EPS)
+        length = max(float(getattr(shell, "length_of_shell")), EPS)
     thk = max(float(getattr(shell, "thk")), EPS)
     is_panel = _is_cylinder_panel(app, cyl_obj)
     theta_start, theta_end = _cylinder_theta_range(app, cyl_obj)
+
+    if is_conical:
+        shell_name = f"{active_line} Unstiffened conical shell"
+        shell_props = {
+            "active_line": active_line,
+            "panel_type": "unstiffened conical shell",
+            "nominal_shell_thickness_m": thk,
+            "cone_radius_1_m": float(radius0),
+            "cone_radius_2_m": float(radius1),
+            "cone_length_m": float(length),
+            "cone_alpha_deg": float(getattr(shell, "cone_alpha", 0.0) or 0.0),
+        }
+        if shell_export:
+            _add_conical_shell_surface(
+                ctx, "IfcPlate", shell_name,
+                radius0=radius0, radius1=radius1, z0=0.0, z1=length,
+                theta_start=0.0, theta_end=2.0 * math.pi,
+                predefined_type="SHEET", extra_properties=shell_props,
+            )
+        else:
+            _add_conical_wall_solid(
+                ctx, "IfcPlate", shell_name,
+                radius0=radius0, radius1=radius1, thickness=thk, z0=0.0, z1=length,
+                theta_start=0.0, theta_end=2.0 * math.pi,
+                side_sign=side_sign, predefined_type="SHEET", extra_properties=shell_props,
+            )
+        if getattr(cyl_obj, "LongStfObj", None) is not None or getattr(cyl_obj, "RingStfObj", None) is not None or \
+                getattr(cyl_obj, "RingFrameObj", None) is not None:
+            ctx.summary.warnings.append("Conical shell CAD export v1 exports the unstiffened cone only.")
+        return
 
     shell_name = f"{active_line} Cylindrical panel shell" if is_panel else f"{active_line} Cylindrical shell"
     shell_props = {

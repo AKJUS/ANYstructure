@@ -87,6 +87,24 @@ class Application():
     It is the main part of the code and calls up all other classes etc.
     '''
 
+    @staticmethod
+    def _start_root_fullscreen(parent):
+        """Start the main Tk window maximized while keeping normal window chrome."""
+        try:
+            parent.state('zoomed')
+            return
+        except Exception:
+            pass
+        try:
+            parent.attributes('-zoomed', True)
+            return
+        except Exception:
+            pass
+        try:
+            parent.geometry(f'{parent.winfo_screenwidth()}x{parent.winfo_screenheight()}+0+0')
+        except Exception:
+            pass
+
     def __init__(self, parent):
         '''
         Initaiting the tkinter frame.
@@ -96,6 +114,7 @@ class Application():
 
         super(Application, self).__init__()
         parent.wm_title('| ANYstructure |')
+        self._start_root_fullscreen(parent)
         self._parent = parent
         self._resize_after_id = None
         self._last_resize_size = (0, 0)
@@ -166,6 +185,14 @@ class Application():
         sub_menu.add_command(label='Open project', command=self.openfile)
         sub_menu.add_command(label='Restore previous', command=self.restore_previous)
         sub_menu.add_command(label='Open excel input', command=self.open_excel_file)
+        sub_menu.add_separator()
+        file_export_menu = tk.Menu(sub_menu)
+        sub_menu.add_cascade(label='Export', menu=file_export_menu)
+        file_export_menu.add_command(label='Geometry to SESAM GeniE JS...', command=self.export_to_js)
+        file_export_menu.add_command(label='Selected structure IFC/CAD solid model...',
+                                     command=self.export_prop_3d_ifc_model)
+        file_export_menu.add_command(label='Selected structure IFC/CAD shell/surface model...',
+                                     command=self.export_prop_3d_ifc_shell_model)
         self._shortcut_text = 'CTRL-Z Undo geometry action\n' \
                               'CTRL-P Copy selected point\n' \
                               'CTRL-M Move selected point)\n' \
@@ -1203,6 +1230,9 @@ class Application():
         self._new_shell_thk = tk.DoubleVar()
         self._new_shell_radius = tk.DoubleVar()
         self._new_shell_dist_rings = tk.DoubleVar()
+        self._new_shell_cone_r1 = tk.DoubleVar()
+        self._new_shell_cone_r2 = tk.DoubleVar()
+        self._new_shell_cone_length = tk.DoubleVar()
         self._new_shell_length = tk.DoubleVar()
         self._new_shell_tot_length = tk.DoubleVar()
         self._new_shell_k_factor = tk.DoubleVar()
@@ -1219,6 +1249,9 @@ class Application():
         self._new_shell_thk.set(20)
         self._new_shell_radius.set(5000)
         self._new_shell_dist_rings.set(5000)
+        self._new_shell_cone_r1.set(4000)
+        self._new_shell_cone_r2.set(6000)
+        self._new_shell_cone_length.set(5000)
         self._new_shell_length.set(5000)
         self._new_shell_tot_length.set(5000)
         self._new_shell_k_factor.set(1)
@@ -1238,6 +1271,9 @@ class Application():
 
         self._ent_shell_radius = ttk.Entry(self._tab_prop, textvariable=self._new_shell_radius)
         self._ent_shell_dist_rings = ttk.Entry(self._tab_prop, textvariable=self._new_shell_dist_rings)
+        self._ent_shell_cone_r1 = ttk.Entry(self._tab_prop, textvariable=self._new_shell_cone_r1)
+        self._ent_shell_cone_r2 = ttk.Entry(self._tab_prop, textvariable=self._new_shell_cone_r2)
+        self._ent_shell_cone_length = ttk.Entry(self._tab_prop, textvariable=self._new_shell_cone_length)
         self._ent_shell_length = ttk.Entry(self._tab_prop, textvariable=self._new_shell_length, width=int(5 * 1))
         self._ent_shell_tot_length = ttk.Entry(self._tab_prop, textvariable=self._new_shell_tot_length,
 
@@ -1250,6 +1286,9 @@ class Application():
                                  self._ent_shell_dist_rings,
                                  self._ent_shell_length, self._ent_shell_tot_length, self._ent_shell_k_factor,
                                  self._ent_shell_material_factor]
+        self._shell_conical_gui_items = [self._lab_shell, self._ent_shell_plate_thk, self._ent_shell_cone_r1,
+                                         self._ent_shell_cone_r2, self._ent_shell_cone_length,
+                                         self._ent_shell_k_factor, self._ent_shell_material_factor]
 
         '''
         Shell, lognitudinal stiffeners
@@ -1377,13 +1416,17 @@ class Application():
 
         self._new_shell_Nsd = tk.DoubleVar()
         self._new_shell_Msd = tk.DoubleVar()
+        self._new_shell_M2sd = tk.DoubleVar()
         self._new_shell_Tsd = tk.DoubleVar()
         self._new_shell_Qsd = tk.DoubleVar()
+        self._new_shell_Q2sd = tk.DoubleVar()
         self._new_shell_psd = tk.DoubleVar()
         self._new_shell_Nsd.set(500000)
         self._new_shell_Msd.set(500000)
+        self._new_shell_M2sd.set(0)
         self._new_shell_Tsd.set(40000)
         self._new_shell_Qsd.set(1500)
+        self._new_shell_Q2sd.set(0)
         self._new_shell_psd.set(-0.2)
 
         self._new_shell_uls_or_als = tk.StringVar()
@@ -1432,10 +1475,14 @@ class Application():
                                         width=int(5 * 1), )
         self._ent_shell_Msd = ttk.Entry(self._tab_prop, textvariable=self._new_shell_Msd,
                                         width=int(5 * 1), )
+        self._ent_shell_M2sd = ttk.Entry(self._tab_prop, textvariable=self._new_shell_M2sd,
+                                         width=int(5 * 1), )
         self._ent_shell_Tsd = ttk.Entry(self._tab_prop, textvariable=self._new_shell_Tsd,
                                         width=int(5 * 1), )
         self._ent_shell_Qsd = ttk.Entry(self._tab_prop, textvariable=self._new_shell_Qsd,
                                         width=int(5 * 1), )
+        self._ent_shell_Q2sd = ttk.Entry(self._tab_prop, textvariable=self._new_shell_Q2sd,
+                                         width=int(5 * 1), )
         self._ent_shell_psd = ttk.Entry(self._tab_prop, textvariable=self._new_shell_psd,
                                         width=int(5 * 1), )
 
@@ -1470,6 +1517,10 @@ class Application():
                                              self._ent_shell_stress_input]
         self._shell_loads_forces_gui_items = [self._ent_shell_Nsd, self._ent_shell_Msd,
                                               self._ent_shell_Tsd, self._ent_shell_Qsd, self._ent_shell_psd]
+        self._shell_loads_conical_forces_gui_items = [self._ent_shell_Nsd, self._ent_shell_Msd,
+                                                      self._ent_shell_M2sd, self._ent_shell_Tsd,
+                                                      self._ent_shell_Qsd, self._ent_shell_Q2sd,
+                                                      self._ent_shell_psd]
         self._shell_loads_stress_gui_items = [self._ent_shell_sasd, self._ent_shell_smsd, self._ent_shell_tTsd,
                                               self._ent_shell_tQsd, self._ent_shell_psd, self._ent_shell_shsd]
         self._shell_other_gui_items = [self._ent_shell_end_cap_pressure_included, self._ent_shell_uls_or_als,
@@ -1976,8 +2027,8 @@ class Application():
 
         def add_mode_card(parent, title, subtitle, details, button_text, command, primary=False):
             border = '#1f6feb' if primary else '#cad2df'
-            button_bg = '#1f6feb' if primary else '#eef2f7'
-            button_fg = 'white' if primary else '#172033'
+            button_bg = '#1f6feb' if primary else 'green'
+            button_fg = 'white' #if primary else '#172033'
             card = tk.Frame(parent, background='white', highlightbackground=border,
                             highlightthickness=2 if primary else 1, bd=0)
             tk.Label(card, text=title, background='white', foreground='#111827',
@@ -1999,7 +2050,7 @@ class Application():
             details='For multiple panels/cylinders with advanced load definition.',
             button_text='Start multiple panels',
             command=lambda: choose(False),
-            primary=True,
+            primary=False,
         )
         single_card = add_mode_card(
             content,
@@ -2008,7 +2059,7 @@ class Application():
             details='For single panel/cylinder with simplified load interface.',
             button_text='Start single mode',
             command=lambda: choose(True),
-            primary=False,
+            primary=True,
         )
         standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
         single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
@@ -2207,7 +2258,7 @@ class Application():
 
     def gui_structural_properties(self, flat_panel_stf_girder=False, flat_unstf=False, flat_stf=True,
                                   shell=False, long_stf=False, ring_stf=False,
-                                  ring_frame=False, force_input=False, stress_input=False):
+                                  ring_frame=False, force_input=False, stress_input=False, conical=False):
         vert_start = 0.04
         hor_start = 0.02
 
@@ -2362,21 +2413,25 @@ class Application():
             self._lab_shell.place(relx=hor_start, rely=ent_geo_y + delta_y)
 
             tmp_unit_info = list()
-            for lab in ['Shell plate thickness', 'Shell radius (middle of plate)', 'Distance between rings, l',
-                        'Length of shell, L', 'Total cylinder length, Lc', 'Effective buckling length factor, k',
-                        'Material factor']:
+            shell_labels = ['Shell plate thickness', 'Cone radius r1', 'Cone radius r2', 'Cone length, l',
+                            'Effective buckling length factor, k', 'Material factor'] if conical else \
+                ['Shell plate thickness', 'Shell radius (middle of plate)', 'Distance between rings, l',
+                 'Length of shell, L', 'Total cylinder length, Lc', 'Effective buckling length factor, k',
+                 'Material factor']
+            shell_items = self._shell_conical_gui_items if conical else self._shell_gui_items
+            for lab in shell_labels:
                 tmp_unit_info.append(ttk.Label(self._tab_prop, text=lab))
 
             for lab, idx in zip(tmp_unit_info, range(len(tmp_unit_info))):
                 lab.place(relx=hor_start, rely=ent_geo_y + delta_y * (2 + idx))
                 self._unit_informations_dimensions.append(lab)
 
-            for idx, entry in enumerate(self._shell_gui_items[1:]):
+            for idx, entry in enumerate(shell_items[1:]):
                 entry.place(relx=hor_start + 5 * delta_x, rely=ent_geo_y + delta_y * (2 + idx), relwidth=geo_ent_width)
 
             self._shell_btn_length_info.place(relx=hor_start + 6 * delta_x, rely=ent_geo_y + delta_y * (idx))
 
-            ent_geo_y += delta_y * (len(self._shell_gui_items[1:]) + 1)
+            ent_geo_y += delta_y * (len(shell_items[1:]) + 1)
 
         if long_stf:
 
@@ -2476,13 +2531,16 @@ class Application():
             else:
                 self._new_shell_stress_or_force.set(2)
 
-            lab_force = ['Axial', 'Bending', 'Torsional', 'Shear', 'Lateral']
-            lab_force_unit = ['kN', 'kNm', 'kNm', 'kN', 'N/mm2']
+            lab_force = ['Axial', 'Bending M1', 'Bending M2', 'Torsional', 'Shear Q1', 'Shear Q2', 'Lateral'] \
+                if conical else ['Axial', 'Bending', 'Torsional', 'Shear', 'Lateral']
+            lab_force_unit = ['kN', 'kNm', 'kNm', 'kNm', 'kN', 'kN', 'N/mm2'] if conical else \
+                ['kN', 'kNm', 'kNm', 'kN', 'N/mm2']
             lab_stress = ['Axial', 'Bending', 'Torsional', 'Shear',
                           'Lateral', 'Add hoop']
             lab_stress_unit = ['N/mm2', 'N/mm2', 'N/mm2', 'N/mm2', 'N/mm2', 'N/mm2']
-            to_use = self._shell_loads_forces_gui_items if self._new_shell_stress_or_force.get() == 1 \
-                else self._shell_loads_stress_gui_items
+            to_use = self._shell_loads_conical_forces_gui_items if conical and self._new_shell_stress_or_force.get() == 1 \
+                else self._shell_loads_forces_gui_items if self._new_shell_stress_or_force.get() == 1 \
+                    else self._shell_loads_stress_gui_items
 
             lab_to_use = [lab_force, lab_force_unit] if self._new_shell_stress_or_force.get() == 1 \
                 else [lab_stress, lab_stress_unit]
@@ -2574,9 +2632,11 @@ class Application():
                       self._flat_btn_load_info, self._shell_btn_length_info, self._button_str_type,
                       self._flat_btn_fixation_info]
 
-        to_process = to_process + self._shell_gui_items + self._shell_long_stf_gui_items + self._shell_ring_stf_gui_items + \
+        to_process = to_process + self._shell_gui_items + self._shell_conical_gui_items + \
+                     self._shell_long_stf_gui_items + self._shell_ring_stf_gui_items + \
                      self._shell_ring_frame_gui_items + self._shell_loads_other_gui_items + \
-                     self._shell_loads_forces_gui_items + self._shell_loads_stress_gui_items + \
+                     self._shell_loads_forces_gui_items + self._shell_loads_conical_forces_gui_items + \
+                     self._shell_loads_stress_gui_items + \
                      self._unit_informations_dimensions + self._shell_other_gui_items + self._flat_gui_plate + \
                      self._flat_gui_lab_plate + self._flat_gui_lab_stf + self._flat_gui_stf + self._flat_gui_girder + \
                      self._flat_gui_lab_loads + self._flat_gui_loads + self._flat_gui_lab_os_c101_provisions + \
@@ -2617,6 +2677,10 @@ class Application():
                                                     'Unstiffened panel (Stress input)']:
             self.gui_structural_properties(flat_unstf=False, flat_stf=False, flat_panel_stf_girder=False,
                                            shell=True, long_stf=False, ring_stf=False, ring_frame=False)
+        elif self._new_calculation_domain.get() == 'Unstiffened conical shell (Force input)':
+            self.gui_structural_properties(flat_unstf=False, flat_stf=False, flat_panel_stf_girder=False,
+                                           shell=True, long_stf=False, ring_stf=False, ring_frame=False,
+                                           conical=True)
         elif self._new_calculation_domain.get() in ['Longitudinal Stiffened shell (Force input)',
                                                     'Longitudinal Stiffened panel (Stress input)']:
             self.gui_structural_properties(flat_unstf=False, flat_stf=False, flat_panel_stf_girder=False,
@@ -2632,10 +2696,54 @@ class Application():
 
         if self._line_is_active and self._active_line in self._line_to_struc.keys():
             if sync_cylinder_inputs and event == None and self._line_to_struc[self._active_line][5] is not None:
-                mapper = {1: 'Force', 2: 'Stress'}
-                load = mapper[self._new_shell_stress_or_force.get()]
                 struc_obj = self._line_to_struc[self._active_line][5]
-                if self._new_shell_stress_or_force.get() == 1:
+                if struc_obj.geometry == 9:
+                    cone_r1 = self._new_shell_cone_r1.get()
+                    cone_r2 = self._new_shell_cone_r2.get()
+                    cone_length = self._new_shell_cone_length.get()
+                    cone_alpha = math.degrees(math.atan(abs(cone_r2 - cone_r1) / cone_length)) \
+                        if cone_length else 0
+                    conical_converter_kwargs = dict(
+                        geometry=struc_obj.geometry,
+                        shell_t=self._new_shell_thk.get(),
+                        shell_radius=min(cone_r1, cone_r2),
+                        shell_spacing=cone_length,
+                        hw=self._new_stf_web_h.get(),
+                        tw=self._new_stf_web_t.get(),
+                        b=self._new_stf_fl_w.get(),
+                        tf=self._new_stf_fl_t.get(),
+                        CylinderAndCurvedPlate=CylinderAndCurvedPlate,
+                        conical=True,
+                        psd=self._new_shell_psd.get(),
+                        cone_r1=cone_r1,
+                        cone_r2=cone_r2,
+                        cone_alpha=cone_alpha,
+                        shell_lenght_l=cone_length,
+                    )
+                    if self._new_shell_stress_or_force.get() == 1:
+                        forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(),
+                                  self._new_shell_M2sd.get(), self._new_shell_Tsd.get(),
+                                  self._new_shell_Qsd.get(), self._new_shell_Q2sd.get()]
+                        sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
+                            stresses=None, forces=forces, **conical_converter_kwargs)
+                        self._new_shell_sasd.set(sasd)
+                        self._new_shell_smsd.set(smsd)
+                        self._new_shell_tTsd.set(abs(tTsd))
+                        self._new_shell_tQsd.set(tQsd)
+                        self._new_shell_shsd.set(shsd)
+                    else:
+                        stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(),
+                                    abs(self._new_shell_tTsd.get()), self._new_shell_tQsd.get(),
+                                    self._new_shell_shsd.get()]
+                        Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = hlp.helper_cylinder_stress_to_force_to_stress(
+                            stresses=stresses, **conical_converter_kwargs)[:6]
+                        self._new_shell_Nsd.set(Nsd)
+                        self._new_shell_Msd.set(M1sd)
+                        self._new_shell_M2sd.set(M2sd)
+                        self._new_shell_Tsd.set(Tsd)
+                        self._new_shell_Qsd.set(Q1sd)
+                        self._new_shell_Q2sd.set(Q2sd)
+                elif self._new_shell_stress_or_force.get() == 1:
                     forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(), \
                               self._new_shell_Tsd.get(), self._new_shell_Qsd.get()]
                     sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
@@ -3538,7 +3646,7 @@ class Application():
     def _cylinder_buckling_uf(cylinder_results):
         """Return the governing cylinder buckling UF used for GUI color coding."""
         uf_values = []
-        for key in ['Unstiffened shell', 'Longitudinal stiffened shell',
+        for key in ['Unstiffened shell', 'Unstiffened conical shell', 'Longitudinal stiffened shell',
                     'Ring stiffened shell', 'Heavy ring frame']:
             try:
                 if cylinder_results.get(key, None) is not None:
@@ -4849,10 +4957,11 @@ class Application():
                             cylinder_results = state['cylinder'][line]
                             all_cyl_chks = list()
                             for key, val in cylinder_results.items():
-                                if key in ['Unstiffened shell', 'Longitudinal stiffened shell',
+                                if key in ['Unstiffened shell', 'Unstiffened conical shell',
+                                           'Longitudinal stiffened shell',
                                            'Ring stiffened shell', 'Heavy ring frame', 'Column stability UF']:
                                     if (key == 'Column stability UF' and
-                                            cylinder_results['Need to check column buckling'] is False):
+                                            cylinder_results.get('Need to check column buckling', False) is False):
                                         continue
 
                                     all_cyl_chks.append(True if val is None else val < 1)
@@ -6077,6 +6186,7 @@ class Application():
                 '''
                 cyl_obj = self._line_to_struc[self._active_line][5]
                 key_mapper = {'Unstiffened shell': 'Shell buckling',
+                              'Unstiffened conical shell': 'Conical shell buckling',
                               'Longitudinal stiffened shell': 'Panel Stiffener buckling',
                               'Ring stiffened shell': 'Panel Ring Buckling',
                               'Heavy ring frame': 'Heavy Ring Frame Buckling',
@@ -6091,33 +6201,40 @@ class Application():
                 results = cyl_obj.get_utilization_factors()
 
                 for key, value in results.items():
-                    if key in ['Weight', 'Need to check column buckling', 'Column stability UF']:
+                    if key in ['Weight', 'Need to check column buckling', 'Column stability UF',
+                               'Unstiffened conical shell detailed']:
+                        continue
+                    if key not in key_mapper and key not in ['Stiffener check detailed']:
                         continue
 
                     if all([key != 'Stiffener check', key != 'Stiffener check detailed']):
                         text_key = key
                         if key == 'Column stability check':
-                            if 'Need to check column buckling' in results.keys():
-                                txt_type = 'Text 10'
-                                if results['Need to check column buckling'] == False:
-                                    if results['Column stability UF'] is None:
-                                        text_value = 'N/A'
-                                    else:
-                                        text_value = ('Column buckling does not need to be checked'
-                                                      '\n- but UF = ' + str(round(results['Column stability UF'], 2))
-                                                      )
-                                    uf_col = 'green'
+                            if 'Need to check column buckling' not in results.keys() and value is None:
+                                continue
+                            txt_type = 'Text 10'
+                            if results.get('Need to check column buckling') == False:
+                                if results['Column stability UF'] is None:
+                                    text_value = 'N/A'
                                 else:
-                                    uf_col = 'black'
-                                    if results['Column stability UF'] is None:
-                                        text_value = 'N/A'
+                                    text_value = ('Column buckling does not need to be checked'
+                                                  '\n- but UF = ' + str(round(results['Column stability UF'], 2))
+                                                  )
+                                uf_col = 'green'
+                            elif 'Need to check column buckling' in results.keys():
+                                uf_col = 'black'
+                                if results['Column stability UF'] is None:
+                                    text_value = 'N/A'
+                                else:
+                                    text_value = 'Column buckling need to be checked, UF = ' + str(
+                                        round(results['Column stability UF'], 2))
+                                    if results['Column stability UF'] <= 1.0:
+                                        uf_col = 'green'
                                     else:
-                                        text_value = 'Column buckling need to be checked, UF = ' + str(
-                                            round(results['Column stability UF'], 2))
-                                        if results['Column stability UF'] <= 1.0:
-                                            uf_col = 'green'
-                                        else:
-                                            uf_col = 'red'
+                                        uf_col = 'red'
+                            else:
+                                text_value = 'OK' if value else 'Not ok'
+                                uf_col = 'green' if value else 'red'
                         else:
                             text_value = 'N/A' if value is None else str(round(value, 2))
 
@@ -6357,9 +6474,44 @@ class Application():
 
         self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
         self._prop_3d_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._prop_3d_canvas_widget.bind('<MouseWheel>', self._prop_3d_mouse_scroll)
+            self._prop_3d_canvas_widget.bind('<Button-4>', self._prop_3d_mouse_scroll)
+            self._prop_3d_canvas_widget.bind('<Button-5>', self._prop_3d_mouse_scroll)
 
         self._prop_3d_frame.bind('<Configure>', self._schedule_resize_prop_3d_figure)
         self._prop_3d_frame.after(50, self._resize_prop_3d_figure)
+
+    @staticmethod
+    def _scaled_axis_limits(limits, zoom_factor):
+        center = (float(limits[0]) + float(limits[1])) / 2.0
+        half_span = (float(limits[1]) - float(limits[0])) * float(zoom_factor) / 2.0
+        return center - half_span, center + half_span
+
+    def _zoom_prop_3d_axes(self, zoom_factor):
+        """Zoom the active 3D preview without changing its current view angle."""
+        ax = getattr(self, '_prop_3d_axes', None)
+        canvas = getattr(self, '_prop_3d_fig_canvas', None)
+        if ax is None or canvas is None:
+            return
+        try:
+            factor = min(max(float(zoom_factor), 0.2), 5.0)
+            ax.set_xlim(*self._scaled_axis_limits(ax.get_xlim(), factor))
+            ax.set_ylim(*self._scaled_axis_limits(ax.get_ylim(), factor))
+            ax.set_zlim(*self._scaled_axis_limits(ax.get_zlim(), factor))
+            canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _prop_3d_mouse_scroll(self, event):
+        """Mouse-wheel zoom for the Matplotlib 3D preview in single-line mode."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return
+        delta = getattr(event, 'delta', 0)
+        if delta == 0:
+            delta = 120 if getattr(event, 'num', None) == 4 else -120
+        self._zoom_prop_3d_axes(0.88 if delta > 0 else 1.14)
+        return 'break'
 
     def _set_prop_3d_view(self, elev, azim):
         """Set the active 3D preview to a predefined view angle."""
@@ -7460,7 +7612,7 @@ class Application():
                                 outline='#9aa5b1', fill='#f8fafc')
         canvas.create_text(
             12, 10,
-            text='PrePoMax imperfection input, DNVGL-OS-C401',
+            text='FE-model imperfection input, DNVGL-OS-C401',
             anchor='nw',
             font=self._text_size['Text 10 bold'],
             fill=text_color,
@@ -8006,8 +8158,12 @@ class Application():
     def draw_cylinder_prop_3d(self, cyl_obj):
         """Draw shell/curved plate with optional longitudinal stiffeners, ring stiffeners and ring frames."""
         shell = cyl_obj.ShellObj
-        radius = float(shell.radius)
-        shell_length = float(shell.length_of_shell)
+        is_conical_preview = cyl_obj.geometry == 9
+        cone_r1 = shell.cone_r1 if shell.cone_r1 is not None else shell.radius
+        cone_r2 = shell.cone_r2 if shell.cone_r2 is not None else shell.radius
+        cone_length = shell.cone_length if shell.cone_length is not None else shell.length_of_shell
+        radius = float(shell.radius if not is_conical_preview else max(cone_r1, cone_r2))
+        shell_length = float(shell.length_of_shell if not is_conical_preview else cone_length)
         thk = float(shell.thk)
         length = max(shell_length, 0.1)
         theta_range = self._cylinder_preview_theta_range(cyl_obj)
@@ -8017,8 +8173,14 @@ class Application():
         theta = np.linspace(theta_start, theta_end, 30 if is_panel_preview else 64)
         z = np.linspace(0.0, length, 22)
         theta_grid, z_grid = np.meshgrid(theta, z)
-        x_grid = radius * np.cos(theta_grid)
-        y_grid = radius * np.sin(theta_grid)
+        if is_conical_preview:
+            r1 = float(cone_r1)
+            r2 = float(cone_r2)
+            radius_grid = r1 + (r2 - r1) * (z_grid / length)
+        else:
+            radius_grid = radius
+        x_grid = radius_grid * np.cos(theta_grid)
+        y_grid = radius_grid * np.sin(theta_grid)
 
         fig = plt.Figure(figsize=(7.2, 2.35), dpi=100)
         ax = fig.add_axes([0.035, 0.11, 0.94, 0.81], projection='3d')
@@ -8029,10 +8191,11 @@ class Application():
         self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
 
         if thk > 0 and radius > thk:
-            for zz in [0.0, length]:
-                ax.plot(radius * np.cos(theta), radius * np.sin(theta), np.full_like(theta, zz),
+            for zz, end_radius in [(0.0, float(cone_r1) if is_conical_preview else radius),
+                                   (length, float(cone_r2) if is_conical_preview else radius)]:
+                ax.plot(end_radius * np.cos(theta), end_radius * np.sin(theta), np.full_like(theta, zz),
                         color='black', linewidth=0.8)
-                ax.plot((radius - thk) * np.cos(theta), (radius - thk) * np.sin(theta),
+                ax.plot((end_radius - thk) * np.cos(theta), (end_radius - thk) * np.sin(theta),
                         np.full_like(theta, zz), color='black', linewidth=0.5, linestyle='dotted')
 
         radial_extension = max(thk, 0.01)
@@ -8107,7 +8270,8 @@ class Application():
 
         ax.text2D(0.02, 0.92, 'SELECTED: ' + str(self._active_line), transform=ax.transAxes,
                   fontsize=8, color='red')
-        title = '3D cylinder panel preview (60 deg)' if is_panel_preview else '3D cylinder / curved plate preview'
+        title = '3D conical shell preview' if is_conical_preview else \
+            '3D cylinder panel preview (60 deg)' if is_panel_preview else '3D cylinder / curved plate preview'
         ax.set_title(title, fontsize=8)
         ax.set_xlabel('x [m]', fontsize=7, labelpad=-1)
         ax.set_ylabel('y [m]', fontsize=7, labelpad=-1)
@@ -8268,6 +8432,29 @@ class Application():
         canvas.create_text([text_x, text_y], text=CylObj, font=text_size, fill=text_color)
         # setting the input field to active line properties
         # self.set_selected_variables(self._active_line)
+
+        if CylObj.geometry == 9:
+            shell = CylObj.ShellObj
+            r1 = max(float(shell.cone_r1 or 0), 0.01)
+            r2 = max(float(shell.cone_r2 or 0), 0.01)
+            rmax = max(r1, r2)
+            top_width = radius * r1 / rmax
+            bottom_width = radius * r2 / rmax
+            offset_oval = 30
+            top_x = start_x_cyl + (radius - top_width) / 2
+            bottom_x = start_x_cyl + (radius - bottom_width) / 2
+            top = (top_x, start_y_cyl, top_x + top_width, start_y_cyl + offset_oval)
+            bottom = (bottom_x, start_y_cyl + height,
+                      bottom_x + bottom_width, start_y_cyl + height + offset_oval)
+            canvas.create_oval(top, width=4, fill='grey90')
+            canvas.create_arc(bottom, extent=180, start=180, style=tk.ARC, width=3)
+            canvas.create_line(top[0], top[1] + offset_oval / 2,
+                               bottom[0], bottom[1] + offset_oval / 2, width=3)
+            canvas.create_line(top[2], top[1] + offset_oval / 2,
+                               bottom[2], bottom[1] + offset_oval / 2, width=3)
+            canvas.create_text([start_x_cyl + radius / 2, start_y_cyl + height + offset_oval + 18],
+                               text='Unstiffened conical shell', font=text_size, fill=text_color)
+            return
 
         offset_oval = 30
 
@@ -8787,6 +8974,9 @@ class Application():
                 'length': self._new_shell_length.get(),
                 'total_length': self._new_shell_tot_length.get(),
                 'k_factor': self._new_shell_k_factor.get(),
+                'cone_r1': self._new_shell_cone_r1.get(),
+                'cone_r2': self._new_shell_cone_r2.get(),
+                'cone_length': self._new_shell_cone_length.get(),
             },
             longitudinal_values={
                 'spacing': self._new_stf_spacing.get(),
@@ -8814,8 +9004,12 @@ class Application():
                 'mode': self._new_shell_stress_or_force.get(),
                 'Nsd': self._new_shell_Nsd.get(),
                 'Msd': self._new_shell_Msd.get(),
+                'M1sd': self._new_shell_Msd.get(),
+                'M2sd': self._new_shell_M2sd.get(),
                 'Tsd': self._new_shell_Tsd.get(),
                 'Qsd': self._new_shell_Qsd.get(),
+                'Q1sd': self._new_shell_Qsd.get(),
+                'Q2sd': self._new_shell_Q2sd.get(),
                 'sasd': self._new_shell_sasd.get(),
                 'smsd': self._new_shell_smsd.get(),
                 'tTsd': self._new_shell_tTsd.get(),
@@ -8892,17 +9086,26 @@ class Application():
         )
 
         sasd, smsd, tTsd, tQsd, _ = result.derived_stresses
-        Nsd, Msd, Tsd, Qsd = result.derived_forces
+        if result.geometry == 9:
+            Nsd, Msd, M2sd, Tsd, Qsd, Q2sd = result.derived_forces
+        else:
+            Nsd, Msd, Tsd, Qsd = result.derived_forces[:4]
         if self._new_shell_stress_or_force.get() == 1:
             self._new_shell_sasd.set(sasd)
             self._new_shell_smsd.set(smsd)
             self._new_shell_tTsd.set(tTsd)
             self._new_shell_tQsd.set(tQsd)
+            if result.geometry == 9:
+                self._new_shell_M2sd.set(M2sd)
+                self._new_shell_Q2sd.set(Q2sd)
         else:
             self._new_shell_Nsd.set(Nsd)
             self._new_shell_Msd.set(Msd)
             self._new_shell_Tsd.set(Tsd)
             self._new_shell_Qsd.set(Qsd)
+            if result.geometry == 9:
+                self._new_shell_M2sd.set(M2sd)
+                self._new_shell_Q2sd.set(Q2sd)
 
         cylinder_obj = self._create_cylinder_structure_from_property_result(result)
 
@@ -8946,12 +9149,12 @@ class Application():
         ring_stf_excluded = main_dict_cyl.get('ring stf excluded', [self._new_shell_exclude_ring_stf.get()])[0]
         ring_frame_excluded = main_dict_cyl.get('ring frame excluded', [self._new_shell_exclude_ring_frame.get()])[0]
         return CylinderAndCurvedPlate(main_dict_cyl, Shell(shell_dict),
-                                      long_stf=None if geometry in [1, 2, 5, 6]
+                                      long_stf=None if geometry in [1, 2, 5, 6, 9]
                                       else Structure(long_dict),
-                                      ring_stf=None if any([geometry in [1, 2, 3, 4],
+                                      ring_stf=None if any([geometry in [1, 2, 3, 4, 9],
                                                             ring_stf_excluded])
                                       else Structure(ring_stf_dict),
-                                      ring_frame=None if any([geometry in [1, 2, 3, 4],
+                                      ring_frame=None if any([geometry in [1, 2, 3, 4, 9],
                                                               ring_frame_excluded])
                                       else Structure(ring_frame_dict))
 
@@ -9537,6 +9740,12 @@ class Application():
                 self._new_shell_tot_length.set(shell_dict['tot cyl length, Lc'][0] * 1000)
                 self._new_shell_k_factor.set(shell_dict['eff. buckling lenght factor'][0])
                 self._new_shell_yield.set(shell_dict['mat_yield'][0] / 1e6)
+                if shell_dict.get('cone r1', [None])[0] is not None:
+                    self._new_shell_cone_r1.set(shell_dict['cone r1'][0] * 1000)
+                if shell_dict.get('cone r2', [None])[0] is not None:
+                    self._new_shell_cone_r2.set(shell_dict['cone r2'][0] * 1000)
+                if shell_dict.get('cone length, l', [None])[0] is not None:
+                    self._new_shell_cone_length.set(shell_dict['cone length, l'][0] * 1000)
 
                 main_dict_cyl = all_dicts['Main class']
 
@@ -9546,6 +9755,18 @@ class Application():
                 self._new_shell_tQsd.set(main_dict_cyl['tQsd'][0] / 1e6)
                 self._new_shell_psd.set(main_dict_cyl['psd'][0] / 1e6)
                 self._new_shell_shsd.set(main_dict_cyl['shsd'][0] / 1e6)
+                if main_dict_cyl.get('cone Nsd', [None])[0] is not None:
+                    self._new_shell_Nsd.set(main_dict_cyl['cone Nsd'][0])
+                if main_dict_cyl.get('cone M1sd', [None])[0] is not None:
+                    self._new_shell_Msd.set(main_dict_cyl['cone M1sd'][0])
+                if main_dict_cyl.get('cone M2sd', [None])[0] is not None:
+                    self._new_shell_M2sd.set(main_dict_cyl['cone M2sd'][0])
+                if main_dict_cyl.get('cone Tsd', [None])[0] is not None:
+                    self._new_shell_Tsd.set(main_dict_cyl['cone Tsd'][0])
+                if main_dict_cyl.get('cone Q1sd', [None])[0] is not None:
+                    self._new_shell_Qsd.set(main_dict_cyl['cone Q1sd'][0])
+                if main_dict_cyl.get('cone Q2sd', [None])[0] is not None:
+                    self._new_shell_Q2sd.set(main_dict_cyl['cone Q2sd'][0])
 
                 self._new_calculation_domain.set(api_helpers.domain_for_geometry_id(main_dict_cyl['geometry'][0]))
                 self._new_shell_mat_factor.set(main_dict_cyl['material factor'][0])
@@ -10105,6 +10326,38 @@ class Application():
                 self._new_shell_tQsd.get(),
                 self._new_shell_shsd.get(),
             ]
+            if struc_obj.geometry == 9:
+                cone_r1 = self._new_shell_cone_r1.get()
+                cone_r2 = self._new_shell_cone_r2.get()
+                cone_length = self._new_shell_cone_length.get()
+                cone_alpha = math.degrees(math.atan(abs(cone_r2 - cone_r1) / cone_length)) \
+                    if cone_length else 0
+                Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = hlp.helper_cylinder_stress_to_force_to_stress(
+                    stresses=stresses,
+                    geometry=struc_obj.geometry,
+                    shell_t=self._new_shell_thk.get(),
+                    shell_radius=min(cone_r1, cone_r2),
+                    shell_spacing=cone_length,
+                    hw=self._new_stf_web_h.get(),
+                    tw=self._new_stf_web_t.get(),
+                    b=self._new_stf_fl_w.get(),
+                    tf=self._new_stf_fl_t.get(),
+                    CylinderAndCurvedPlate=CylinderAndCurvedPlate,
+                    conical=True,
+                    psd=self._new_shell_psd.get(),
+                    cone_r1=cone_r1,
+                    cone_r2=cone_r2,
+                    cone_alpha=cone_alpha,
+                    shell_lenght_l=cone_length,
+                )[:6]
+                self._new_shell_Nsd.set(Nsd)
+                self._new_shell_Msd.set(M1sd)
+                self._new_shell_M2sd.set(M2sd)
+                self._new_shell_Tsd.set(Tsd)
+                self._new_shell_Qsd.set(Q1sd)
+                self._new_shell_Q2sd.set(Q2sd)
+                return
+
             Nsd, Msd, Tsd, Qsd, _ = hlp.helper_cylinder_stress_to_force_to_stress(
                 stresses=stresses,
                 geometry=struc_obj.geometry,

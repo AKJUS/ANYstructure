@@ -5,6 +5,32 @@ from types import SimpleNamespace
 from anystruct.main_application import Application
 
 
+class _FullscreenRootProbe:
+    def __init__(self, fail_state=False, fail_attributes=False):
+        self.fail_state = fail_state
+        self.fail_attributes = fail_attributes
+        self.calls = []
+
+    def state(self, value):
+        self.calls.append(("state", value))
+        if self.fail_state:
+            raise RuntimeError("state unavailable")
+
+    def attributes(self, key, value):
+        self.calls.append(("attributes", key, value))
+        if self.fail_attributes:
+            raise RuntimeError("attribute unavailable")
+
+    def winfo_screenwidth(self):
+        return 1920
+
+    def winfo_screenheight(self):
+        return 1080
+
+    def geometry(self, value):
+        self.calls.append(("geometry", value))
+
+
 def test_main_application_uses_shared_geometry_menu_helpers():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -15,6 +41,81 @@ def test_main_application_uses_shared_geometry_menu_helpers():
     assert "CylinderAndCurvedPlate.geomeries.values()" not in source
     assert "CylinderAndCurvedPlate.geomeries_map" not in source
     assert "Longitudinal Stiffened shell  (Force input)" not in source
+
+
+def test_application_starts_root_fullscreen_from_init():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    init_source = source[
+        source.index("def __init__(self, parent):"):
+        source.index("parent.protocol(\"WM_DELETE_WINDOW\"")
+    ]
+
+    assert "def _start_root_fullscreen(parent):" in source
+    assert "parent.state('zoomed')" in source
+    assert "parent.attributes('-zoomed', True)" in source
+    assert "parent.geometry(f'{parent.winfo_screenwidth()}x{parent.winfo_screenheight()}+0+0')" in source
+    assert "self._start_root_fullscreen(parent)" in init_source
+
+
+def test_start_root_fullscreen_prefers_zoomed_state_with_fallbacks():
+    root = _FullscreenRootProbe()
+    Application._start_root_fullscreen(root)
+    assert root.calls == [("state", "zoomed")]
+
+    root = _FullscreenRootProbe(fail_state=True)
+    Application._start_root_fullscreen(root)
+    assert root.calls == [("state", "zoomed"), ("attributes", "-zoomed", True)]
+
+    root = _FullscreenRootProbe(fail_state=True, fail_attributes=True)
+    Application._start_root_fullscreen(root)
+    assert root.calls == [
+        ("state", "zoomed"),
+        ("attributes", "-zoomed", True),
+        ("geometry", "1920x1080+0+0"),
+    ]
+
+
+def test_file_menu_exposes_export_options():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    file_menu_block = source[
+        source.index("menu.add_cascade(label='File', menu=sub_menu)"):
+        source.index("self._shortcut_text =")
+    ]
+
+    assert "sub_menu.add_cascade(label='Export', menu=file_export_menu)" in file_menu_block
+    assert "Geometry to SESAM GeniE JS..." in file_menu_block
+    assert "command=self.export_to_js" in file_menu_block
+    assert "Selected structure IFC/CAD solid model..." in file_menu_block
+    assert "command=self.export_prop_3d_ifc_model" in file_menu_block
+    assert "Selected structure IFC/CAD shell/surface model..." in file_menu_block
+    assert "command=self.export_prop_3d_ifc_shell_model" in file_menu_block
+
+
+def test_conical_shell_uses_single_domain_and_existing_force_stress_toggle():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    conical_branch = source[
+        source.index("elif self._new_calculation_domain.get() == 'Unstiffened conical shell (Force input)'"):
+        source.index("elif self._new_calculation_domain.get() in ['Longitudinal Stiffened shell (Force input)'")
+    ]
+    cylinder_sync_block = source[
+        source.index("if struc_obj.geometry == 9:"):
+        source.index("elif self._new_shell_stress_or_force.get() == 1:")
+    ]
+
+    assert "Unstiffened conical shell (Stress input)" not in source
+    assert "_new_shell_M1sd" not in source
+    assert "self._new_shell_Msd.get()" in cylinder_sync_block
+    assert "self._new_shell_Msd.set(M1sd)" in cylinder_sync_block
+    assert "conical=True" in conical_branch
+    assert "_new_shell_stress_or_force.set" not in conical_branch
+    assert "helper_cylinder_stress_to_force_to_stress(" in cylinder_sync_block
+    assert "self._new_shell_M2sd.set(M2sd)" in cylinder_sync_block
+    assert "self._new_shell_Q2sd.set(Q2sd)" in cylinder_sync_block
+    assert "if 'Need to check column buckling' not in results.keys() and value is None:" in source
 
 
 def test_release_package_metadata_uses_current_markdown_readme():
@@ -216,12 +317,39 @@ def test_simplified_3d_preview_uses_main_canvas_place():
     assert "self._place_info_float(self._main_canvas, 'relheight', 0.73)" in placement_block
 
 
+def test_single_mode_mousewheel_zooms_embedded_3d_preview():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+    embed_block = source[
+        source.index("def _embed_prop_3d_figure"):
+        source.index("def _set_prop_3d_view")
+    ]
+    main_wheel_block = source[
+        source.index("def mouse_scroll(self, event):"):
+        source.index("def button_2_click")
+    ]
+
+    assert "if getattr(self, '_simplified_calculation_mode', False):" in embed_block
+    assert "self._prop_3d_canvas_widget.bind('<MouseWheel>', self._prop_3d_mouse_scroll)" in embed_block
+    assert "self._prop_3d_canvas_widget.bind('<Button-4>', self._prop_3d_mouse_scroll)" in embed_block
+    assert "self._prop_3d_canvas_widget.bind('<Button-5>', self._prop_3d_mouse_scroll)" in embed_block
+    assert "def _prop_3d_mouse_scroll(self, event):" in embed_block
+    assert "self._zoom_prop_3d_axes(0.88 if delta > 0 else 1.14)" in embed_block
+    assert "return 'break'" in embed_block
+    assert "self._canvas_scale += event.delta / 50" in main_wheel_block
+
+
+def test_3d_preview_axis_zoom_scales_around_center():
+    assert Application._scaled_axis_limits((0, 10), 0.5) == (2.5, 7.5)
+    assert Application._scaled_axis_limits((-2, 2), 1.5) == (-3.0, 3.0)
+
+
 def test_simplified_mode_draws_prepomax_imperfection_guidance_in_lower_pane():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
 
     assert "def draw_prepomax_imperfection_recommendations(self):" in source
-    assert "PrePoMax imperfection input, DNVGL-OS-C401" in source
+    assert "FE-model imperfection input, DNVGL-OS-C401" in source
     assert "Use the value as initial geometry amplitude" in source
     assert "self.draw_prepomax_imperfection_recommendations()" in source
     assert "def _select_prepomax_imperfection_row(self, row_index):" in source

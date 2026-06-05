@@ -1,6 +1,8 @@
 import copy
 from pathlib import Path
 
+import pytest
+
 from anystruct import (
     calc_loads,
     calc_structure,
@@ -407,6 +409,82 @@ def test_cylinder_structure_property_service_derives_stresses_from_force_values(
     assert result.derived_forces == (1000, 2000, 3000, 4000)
     assert result.main_dict["sasd"][0] == result.derived_stresses[0] * 1e6
     assert result.main_dict["shsd"][0] == result.derived_stresses[4] * 1e6
+
+
+def test_cylinder_structure_property_service_builds_conical_shell_request():
+    request = _cylinder_structure_property_request(load_mode=1)
+    request = project_services.CylinderStructurePropertyRequest(
+        calculation_domain="Unstiffened conical shell (Force input)",
+        dummy_values=request.dummy_values,
+        shell_values={
+            **request.shell_values,
+            "cone_r1": 4000,
+            "cone_r2": 6500,
+            "cone_length": 5000,
+        },
+        longitudinal_values=request.longitudinal_values,
+        ring_stiffener_values=request.ring_stiffener_values,
+        ring_frame_values=request.ring_frame_values,
+        load_input={
+            **request.load_input,
+            "M1sd": 2000,
+            "M2sd": 1000,
+            "Q1sd": 4000,
+            "Q2sd": 1000,
+        },
+        main_values=request.main_values,
+        structure_types=request.structure_types,
+    )
+
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert result.geometry == 9
+    assert result.shell_dict["cone r1"] == [4.0, "m"]
+    assert result.shell_dict["cone r2"] == [6.5, "m"]
+    assert result.shell_dict["cone length, l"] == [5.0, "m"]
+    assert result.shell_dict["radius"][0] == pytest.approx(5.869678440936948)
+    assert result.main_dict["cone M2sd"] == [1000, "kNm"]
+    assert len(result.derived_forces) == 6
+
+
+def test_cylinder_structure_property_service_derives_conical_forces_from_stress_values():
+    request = _cylinder_structure_property_request(load_mode=0)
+    request = project_services.CylinderStructurePropertyRequest(
+        calculation_domain="Unstiffened conical shell (Force input)",
+        dummy_values=request.dummy_values,
+        shell_values={
+            **request.shell_values,
+            "cone_r1": 4000,
+            "cone_r2": 6500,
+            "cone_length": 5000,
+        },
+        longitudinal_values=request.longitudinal_values,
+        ring_stiffener_values=request.ring_stiffener_values,
+        ring_frame_values=request.ring_frame_values,
+        load_input={
+            **request.load_input,
+            "psd": -0.1,
+            "sasd": -60,
+            "smsd": 20,
+            "tTsd": -3,
+            "tQsd": 2,
+            "shsd": 0,
+        },
+        main_values=request.main_values,
+        structure_types=request.structure_types,
+    )
+
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert result.geometry == 9
+    assert result.derived_stresses == (-60, 20, 3, 2, 0)
+    assert len(result.derived_forces) == 6
+    assert result.derived_forces[2] == 0
+    assert result.derived_forces[5] == 0
+    assert result.main_dict["cone Nsd"][0] == pytest.approx(result.derived_forces[0])
+    assert result.main_dict["cone M1sd"][0] == pytest.approx(result.derived_forces[1])
+    assert result.main_dict["cone M2sd"] == [0, "kNm"]
+    assert result.main_dict["cone Q2sd"] == [0, "kN"]
 
 
 def _cylinder_excel_import_defaults(end_cap_pressure="not included in axial force"):
@@ -883,6 +961,75 @@ def test_project_hydration_service_rebuilds_saved_structures_loads_and_cylinders
     assert hydrated.load_assignments["load1"][0].get_name() == load.get_name()
     assert line_structure.loads(line_bundle)[0].get_name() == load.get_name()
     assert len(hydrated.section_properties) == 1
+
+
+def test_project_hydration_service_preserves_conical_cylinder_geometry_and_forces():
+    base_bundle = example_data.get_line_to_struc()["line1"]
+    request = _cylinder_structure_property_request(load_mode=1)
+    request = project_services.CylinderStructurePropertyRequest(
+        calculation_domain="Unstiffened conical shell (Force input)",
+        dummy_values=request.dummy_values,
+        shell_values={
+            **request.shell_values,
+            "cone_r1": 4000,
+            "cone_r2": 6500,
+            "cone_length": 5000,
+        },
+        longitudinal_values=request.longitudinal_values,
+        ring_stiffener_values=request.ring_stiffener_values,
+        ring_frame_values=request.ring_frame_values,
+        load_input={
+            **request.load_input,
+            "Nsd": -1000,
+            "M1sd": 2000,
+            "M2sd": 1000,
+            "Tsd": 500,
+            "Q1sd": 200,
+            "Q2sd": 100,
+            "psd": -0.1,
+        },
+        main_values=request.main_values,
+        structure_types=request.structure_types,
+    )
+    result = project_services.CylinderStructurePropertyService.build(request)
+    cylinder = calc_structure.CylinderAndCurvedPlate(
+        main_dict=result.main_dict,
+        shell=calc_structure.Shell(result.shell_dict),
+        long_stf=None,
+        ring_stf=None,
+        ring_frame=None,
+    )
+    state = project_application.ProjectSnapshotService.create_state(
+        project_information="hydrate conical",
+        theme="default",
+        points={"point1": [0.0, 0.0], "point2": [1.0, 0.0]},
+        lines={"line1": [1, 2]},
+        line_bundles={"line1": [base_bundle[0], None, None, [], {}, cylinder]},
+        load_assignments={},
+        accelerations={"static": 9.81},
+        load_combinations=[],
+        tanks={},
+        tank_grid=[],
+        tank_search_data=None,
+        buckling_method="DNV-RP-C201 - prescriptive",
+        shifting={},
+        weight_and_cog={},
+    )
+
+    hydrated = project_application.ProjectHydrationService.hydrate_objects(
+        state,
+        project_application.ProjectHydrationDefaults(structure_types=example_data.structure_types),
+    )
+    reloaded = line_structure.cylinder(hydrated.line_bundles["line1"])
+    details = reloaded.get_utilization_factors()["Unstiffened conical shell detailed"]
+
+    assert reloaded.geometry == 9
+    assert reloaded.ShellObj.cone_r1 == pytest.approx(4.0)
+    assert reloaded.ShellObj.cone_r2 == pytest.approx(6.5)
+    assert reloaded.ShellObj.cone_length == pytest.approx(5.0)
+    assert reloaded._cone_M2sd == pytest.approx(1000)
+    assert details["equivalent radius"] == pytest.approx(5.869678440936948)
+    assert details["governing radius"] == pytest.approx(4.0)
 
 
 def test_project_open_service_assembles_transfer_and_hydrated_objects():

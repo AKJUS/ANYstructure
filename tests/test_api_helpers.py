@@ -53,8 +53,22 @@ def test_cylinder_domain_with_input_mode(domain, expected):
 
 
 def test_cylinder_domains_with_input_are_canonical_labels():
-    assert api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT == tuple(api_helpers.CYLINDER_GEOMETRY_IDS)
+    assert tuple(api_helpers.CYLINDER_GEOMETRY_IDS) == api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT
+    assert api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT.count(
+        "Unstiffened conical shell (Force input)"
+    ) == 1
+    assert "Unstiffened conical shell (Stress input)" not in api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT
     assert all("  " not in domain for domain in api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT)
+
+
+def test_geometry_id_accepts_conical_stress_input_alias():
+    assert "Unstiffened conical shell (Stress input)" not in api_helpers.CYLINDER_STRUCTURE_DOMAINS_WITH_INPUT
+    assert api_helpers.geometry_id_for_domain("Unstiffened conical shell (Stress input)") == 9
+
+
+def test_cylinder_input_mode_accepts_hidden_labelled_domains():
+    assert api_helpers.cylinder_input_mode("Unstiffened conical shell (Force input)") == "Force"
+    assert api_helpers.cylinder_input_mode("Unstiffened conical shell (Stress input)") == "Stress"
 
 
 def test_geometry_id_rejects_unknown_domain():

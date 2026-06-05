@@ -339,6 +339,7 @@ Cylinder domains:
 * ``Ring Stiffened panel``
 * ``Orthogonally Stiffened shell``
 * ``Orthogonally Stiffened panel``
+* ``Unstiffened conical shell``
 
 Flat plate buckling methods:
 

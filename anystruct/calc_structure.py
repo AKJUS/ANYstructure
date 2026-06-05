@@ -2599,9 +2599,10 @@ class Shell():
             self._k_factor = main_dict['eff. buckling lenght factor'][0]
 
         # For conical
-        self._cone_r1 = None
-        self._cone_r2 = None
-        self._cone_alpha = None
+        self._cone_r1 = None if main_dict is None else main_dict.get('cone r1', [None, 'm'])[0]
+        self._cone_r2 = None if main_dict is None else main_dict.get('cone r2', [None, 'm'])[0]
+        self._cone_length = None if main_dict is None else main_dict.get('cone length, l', [None, 'm'])[0]
+        self._cone_alpha = None if main_dict is None else main_dict.get('cone alpha', [None, 'deg'])[0]
     @property
     def Lc(self):
         return self._tot_cyl_length
@@ -2644,6 +2645,49 @@ class Shell():
     @k_factor.setter
     def k_factor(self, val):
         self._k_factor = val
+    @property
+    def cone_r1(self):
+        return self._cone_r1
+    @cone_r1.setter
+    def cone_r1(self, val):
+        self._cone_r1 = val
+    @property
+    def cone_r2(self):
+        return self._cone_r2
+    @cone_r2.setter
+    def cone_r2(self, val):
+        self._cone_r2 = val
+    @property
+    def cone_length(self):
+        return self._cone_length
+    @cone_length.setter
+    def cone_length(self, val):
+        self._cone_length = val
+    @property
+    def cone_alpha(self):
+        return self._cone_alpha
+    @cone_alpha.setter
+    def cone_alpha(self, val):
+        self._cone_alpha = val
+    def set_conical_geometry(self, r1, r2, length):
+        self._cone_r1 = r1
+        self._cone_r2 = r2
+        self._cone_length = length
+        self._cone_alpha = math.degrees(math.atan(abs(r2 - r1) / length)) if length else 0
+        self._radius = self.cone_equivalent_radius()
+        self._dist_between_rings = self.cone_equivalent_length()
+        self._length_of_shell = self._dist_between_rings
+        self._tot_cyl_length = self._dist_between_rings
+    def cone_equivalent_radius(self):
+        if None in [self._cone_r1, self._cone_r2, self._cone_alpha]:
+            return self._radius
+        cos_alpha = math.cos(math.radians(self._cone_alpha))
+        return (self._cone_r1 + self._cone_r2) / (2 * cos_alpha) if cos_alpha else 0
+    def cone_equivalent_length(self):
+        if None in [self._cone_length, self._cone_alpha]:
+            return self._dist_between_rings
+        cos_alpha = math.cos(math.radians(self._cone_alpha))
+        return self._cone_length / cos_alpha if cos_alpha else 0
     def get_Zl(self):
         L = self.tot_cyl_length*1000
         Zl = math.pow(L,2)*math.sqrt(1-math.pow(0.3,2))/(self._radius*1000 * self._thk*1000) if self._thk*self._radius else 0
@@ -2659,7 +2703,11 @@ class Shell():
                                   'length of shell, L': [self._length_of_shell, 'm'],
                                   'tot cyl length, Lc': [self._tot_cyl_length, 'm'],
                                   'eff. buckling lenght factor': [self._k_factor, 'm'],
-                                  'mat_yield': [self._mat_yield, 'Pa']}
+                                  'mat_yield': [self._mat_yield, 'Pa'],
+                                  'cone r1': [self._cone_r1, 'm'],
+                                  'cone r2': [self._cone_r2, 'm'],
+                                  'cone length, l': [self._cone_length, 'm'],
+                                  'cone alpha': [self._cone_alpha, 'deg']}
         return main_data
 
     def set_main_properties(self, main_dict):
@@ -2671,6 +2719,10 @@ class Shell():
         self._length_of_shell = main_dict['length of shell, L'][0]
         self._tot_cyl_length = main_dict['tot cyl length, Lc'][0]
         self._k_factor = main_dict['eff. buckling lenght factor'][0]
+        self._cone_r1 = main_dict.get('cone r1', [None, 'm'])[0]
+        self._cone_r2 = main_dict.get('cone r2', [None, 'm'])[0]
+        self._cone_length = main_dict.get('cone length, l', [None, 'm'])[0]
+        self._cone_alpha = main_dict.get('cone alpha', [None, 'deg'])[0]
 
 class CylinderAndCurvedPlate():
     '''
@@ -2691,7 +2743,8 @@ class CylinderAndCurvedPlate():
                  1:'Unstiffened shell (Force input)', 2:'Unstiffened panel (Stress input)',
                  3:'Longitudinal Stiffened shell  (Force input)', 4:'Longitudinal Stiffened panel (Stress input)',
                  5:'Ring Stiffened shell (Force input)', 6:'Ring Stiffened panel (Stress input)',
-                 7:'Orthogonally Stiffened shell (Force input)', 8:'Orthogonally Stiffened panel (Stress input)'}
+                 7:'Orthogonally Stiffened shell (Force input)', 8:'Orthogonally Stiffened panel (Stress input)',
+                 9:'Unstiffened conical shell (Force input)'}
     geomeries_map = dict()
     for key, value in geomeries.items():
         geomeries_map[value] = key
@@ -2727,6 +2780,12 @@ class CylinderAndCurvedPlate():
                 self.__ring_frame_excluded= None
                 self._end_cap_pressure_included= None
                 self._uls_or_als= None
+                self._cone_Nsd = None
+                self._cone_M1sd = None
+                self._cone_M2sd = None
+                self._cone_Tsd = None
+                self._cone_Q1sd = None
+                self._cone_Q2sd = None
 
         else:
             self._sasd = main_dict['sasd'][0]
@@ -2749,6 +2808,12 @@ class CylinderAndCurvedPlate():
             self.__ring_frame_excluded = main_dict['ring frame excluded'][0]
             self._end_cap_pressure_included = main_dict['end cap pressure'][0]
             self._uls_or_als =  main_dict['ULS or ALS'][0]
+            self._cone_Nsd = main_dict.get('cone Nsd', [None, 'kN'])[0]
+            self._cone_M1sd = main_dict.get('cone M1sd', [None, 'kNm'])[0]
+            self._cone_M2sd = main_dict.get('cone M2sd', [None, 'kNm'])[0]
+            self._cone_Tsd = main_dict.get('cone Tsd', [None, 'kNm'])[0]
+            self._cone_Q1sd = main_dict.get('cone Q1sd', [None, 'kN'])[0]
+            self._cone_Q2sd = main_dict.get('cone Q2sd', [None, 'kN'])[0]
 
         self._Shell = shell
         self._LongStf = long_stf
@@ -2943,6 +3008,8 @@ class CylinderAndCurvedPlate():
         # Local buckling of stiffeners
 
         results = {'Unstiffened shell': None,
+                   'Unstiffened conical shell': None,
+                   'Unstiffened conical shell detailed': None,
                    'Longitudinal stiffened shell': None,
                    'Ring stiffened shell': None,
                    'Heavy ring frame': None,
@@ -2953,6 +3020,15 @@ class CylinderAndCurvedPlate():
                    'Weight': None}
 
         if empty_result_dict:
+            return results
+        if self._geometry == 9:
+            conical = self.unstiffened_conical_shell()
+            results['Unstiffened conical shell'] = conical['UF unstiffened conical shell']
+            results['Unstiffened conical shell detailed'] = conical
+            if optimizing:
+                if results['Unstiffened conical shell'] > 1:
+                    return False, 'UF unstiffened conical shell', results
+                return True, 'Check OK', results
             return results
         data_shell_buckling = self.shell_buckling()
         unstiffend_shell, column_buckling_data = None, None
@@ -3078,6 +3154,12 @@ class CylinderAndCurvedPlate():
         self.__ring_frame_excluded = main_dict['ring frame excluded'][0]
         self._end_cap_pressure_included = main_dict['end cap pressure'][0]
         self._uls_or_als =  main_dict['ULS or ALS'][0]
+        self._cone_Nsd = main_dict.get('cone Nsd', [None, 'kN'])[0]
+        self._cone_M1sd = main_dict.get('cone M1sd', [None, 'kNm'])[0]
+        self._cone_M2sd = main_dict.get('cone M2sd', [None, 'kNm'])[0]
+        self._cone_Tsd = main_dict.get('cone Tsd', [None, 'kNm'])[0]
+        self._cone_Q1sd = main_dict.get('cone Q1sd', [None, 'kN'])[0]
+        self._cone_Q2sd = main_dict.get('cone Q2sd', [None, 'kN'])[0]
 
     def shell_buckling(self):
         '''
@@ -3207,6 +3289,117 @@ class CylinderAndCurvedPlate():
 
         return {'sjsd': sjsd, 'parameters': parameters, 'cross section data': cross_sec_data,
                 'shRsd': shRsd, 'shsd': shsd, 'sxsd': sxsd}
+
+    def conical_stress_state(self, radius):
+        assert self._Shell.cone_alpha is not None, 'Input missing: self._Shell.cone_alpha'
+        assert self._Shell.thk is not None, 'Input missing: self._Shell.thk'
+        cos_alpha = math.cos(math.radians(self._Shell.cone_alpha))
+        te = self._Shell.thk * cos_alpha
+        assert radius > 0, 'Input missing: conical shell radius'
+        assert te > 0, 'Invalid conical shell equivalent thickness'
+
+        psd = self._psd / 1e6
+        nsd = getattr(self, '_cone_Nsd', 0) or 0
+        m1sd = getattr(self, '_cone_M1sd', 0) or 0
+        m2sd = getattr(self, '_cone_M2sd', 0) or 0
+        tsd_force = getattr(self, '_cone_Tsd', 0) or 0
+        q1sd = getattr(self, '_cone_Q1sd', 0) or 0
+        q2sd = getattr(self, '_cone_Q2sd', 0) or 0
+
+        pressure_pa = psd * 1e6
+        axial = pressure_pa * radius / (2 * te) + nsd * 1000 / (2 * math.pi * radius * te)
+        bending = math.sqrt(m1sd ** 2 + m2sd ** 2) * 1000 / (math.pi * radius ** 2 * te)
+        hoop = pressure_pa * radius / te
+        torsion = tsd_force * 1000 / (2 * math.pi * radius ** 2 * te)
+        shear = math.sqrt(q1sd ** 2 + q2sd ** 2) * 1000 / (math.pi * radius * te)
+
+        return {
+            'radius': radius,
+            'te': te,
+            'sasd': axial,
+            'smsd': bending,
+            'shsd': hoop,
+            'tTsd': torsion,
+            'tQsd': shear,
+        }
+
+    def unstiffened_conical_shell(self):
+        shell = self._Shell
+        assert shell.cone_r1 is not None, 'Input missing: self._Shell.cone_r1'
+        assert shell.cone_r2 is not None, 'Input missing: self._Shell.cone_r2'
+        assert shell.cone_length is not None, 'Input missing: self._Shell.cone_length'
+
+        original = {
+            'geometry': self._geometry,
+            'sasd': self._sasd,
+            'smsd': self._smsd,
+            'tTsd': self._tTsd,
+            'tQsd': self._tQsd,
+            'psd': self._psd,
+            'shsd': self._shsd,
+            'radius': shell.radius,
+            'dist_between_rings': shell.dist_between_rings,
+            'length_of_shell': shell.length_of_shell,
+            'tot_cyl_length': shell.tot_cyl_length,
+        }
+
+        equivalent_radius = shell.cone_equivalent_radius()
+        equivalent_length = shell.cone_equivalent_length()
+        r_min = min(shell.cone_r1, shell.cone_r2)
+        r_max = max(shell.cone_r1, shell.cone_r2)
+        if r_min == r_max:
+            radii = [r_min]
+        else:
+            radii = [r_min + (r_max - r_min) * idx / 100 for idx in range(101)]
+
+        envelope = None
+        try:
+            for radius in radii:
+                stress_state = self.conical_stress_state(radius)
+                self._geometry = 1
+                self._sasd = stress_state['sasd']
+                self._smsd = stress_state['smsd']
+                self._tTsd = abs(stress_state['tTsd'])
+                self._tQsd = abs(stress_state['tQsd'])
+                self._psd = 0
+                self._shsd = stress_state['shsd']
+                shell.radius = equivalent_radius
+                shell.dist_between_rings = equivalent_length
+                shell.length_of_shell = equivalent_length
+                shell.tot_cyl_length = equivalent_length
+
+                shell_data = self.shell_buckling()
+                unstiffened = self.unstiffened_shell(shell_data=shell_data)
+                uf = unstiffened['UF unstiffened circular cylinder']
+                if envelope is None or uf > envelope['UF unstiffened conical shell']:
+                    envelope = {
+                        'UF unstiffened conical shell': uf,
+                        'governing radius': radius,
+                        'equivalent radius': equivalent_radius,
+                        'equivalent length': equivalent_length,
+                        'cone alpha': shell.cone_alpha,
+                        'sasd': stress_state['sasd'],
+                        'smsd': stress_state['smsd'],
+                        'shsd': stress_state['shsd'],
+                        'tTsd': stress_state['tTsd'],
+                        'tQsd': stress_state['tQsd'],
+                        'te': stress_state['te'],
+                        'unstiffened shell data': unstiffened,
+                    }
+        finally:
+            self._geometry = original['geometry']
+            self._sasd = original['sasd']
+            self._smsd = original['smsd']
+            self._tTsd = original['tTsd']
+            self._tQsd = original['tQsd']
+            self._psd = original['psd']
+            self._shsd = original['shsd']
+            shell.radius = original['radius']
+            shell.dist_between_rings = original['dist_between_rings']
+            shell.length_of_shell = original['length_of_shell']
+            shell.tot_cyl_length = original['tot_cyl_length']
+
+        return envelope
 
     def unstiffened_shell(self, conical = False, shell_data = None):
 
@@ -4227,7 +4420,13 @@ class CylinderAndCurvedPlate():
                      'ring stf excluded': [self.__ring_stiffener_excluded, ''],
                      'ring frame excluded': [self.__ring_frame_excluded, ''],
                      'end cap pressure': [self._end_cap_pressure_included, ''],
-                     'ULS or ALS':[self._uls_or_als, '']}
+                     'ULS or ALS':[self._uls_or_als, ''],
+                     'cone Nsd': [self._cone_Nsd, 'kN'],
+                     'cone M1sd': [self._cone_M1sd, 'kNm'],
+                     'cone M2sd': [self._cone_M2sd, 'kNm'],
+                     'cone Tsd': [self._cone_Tsd, 'kNm'],
+                     'cone Q1sd': [self._cone_Q1sd, 'kN'],
+                     'cone Q2sd': [self._cone_Q2sd, 'kN']}
 
         return main_dict
         
@@ -4249,8 +4448,20 @@ class CylinderAndCurvedPlate():
         (self._spacing, self._plate_th, self._web_height, self._web_th, self._flange_width,
                 self._flange_th, self._span, self._girder_lg, self._stiffener_type)
         '''
-        shell = [self._Shell.thk, self._Shell.radius, self._Shell.dist_between_rings, self._Shell.length_of_shell, 
-                 self._Shell.tot_cyl_length, np.nan, np.nan, np.nan]
+        if self._geometry == 9:
+            shell = [
+                self._Shell.thk,
+                self._Shell.cone_equivalent_radius(),
+                self._Shell.cone_equivalent_length(),
+                self._Shell.cone_equivalent_length(),
+                self._Shell.cone_equivalent_length(),
+                self._Shell.cone_r1,
+                self._Shell.cone_r2,
+                self._Shell.cone_length,
+            ]
+        else:
+            shell = [self._Shell.thk, self._Shell.radius, self._Shell.dist_between_rings, self._Shell.length_of_shell,
+                     self._Shell.tot_cyl_length, np.nan, np.nan, np.nan]
         if self._LongStf is not None:
             long = [self._LongStf.spacing/1000, np.nan, self._LongStf.hw/1000, self._LongStf.tw/1000, self._LongStf.b/1000, 
                     self._LongStf.tf/1000, np.nan, self._LongStf.stiffener_type]
