@@ -651,6 +651,171 @@ def _product_shape_from_solid(ctx: IfcContext, solid: Any) -> Any:
     return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
 
 
+def _product_shape_from_csg_solid(ctx: IfcContext, solid: Any) -> Any:
+    """Create a product shape from an IFC CSG/boolean solid result."""
+    rep = ctx.model.createIfcShapeRepresentation(
+        ctx.body_context,
+        "Body",
+        "CSG",
+        [solid],
+    )
+    return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
+
+
+def _create_oriented_rectangular_swept_solid(
+    ctx: IfcContext,
+    center: tuple[float, float, float],
+    local_x: tuple[float, float, float],
+    local_z: tuple[float, float, float],
+    xdim: float,
+    ydim: float,
+    depth: float,
+) -> Any:
+    """Create a rectangular swept solid positioned/oriented in model coordinates.
+
+    The rectangle is centred on the local X/Y axes and extruded along local Z.
+    Unlike _add_oriented_box_element(), the placement is embedded directly in the
+    solid.  This makes the solid usable as an operand in IFC boolean operations.
+    """
+    xdim = max(float(xdim), EPS)
+    ydim = max(float(ydim), EPS)
+    depth = max(float(depth), EPS)
+    profile = ctx.model.createIfcRectangleProfileDef(
+        "AREA",
+        None,
+        _axis2_placement_2d(ctx.model),
+        xdim,
+        ydim,
+    )
+    return ctx.model.createIfcExtrudedAreaSolid(
+        profile,
+        _axis2_placement_3d(ctx.model, center, axis=local_z, ref_direction=local_x),
+        ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
+        depth,
+    )
+
+
+def _create_solid_cylinder_for_boolean(ctx: IfcContext, radius: float, z0: float, z1: float) -> Any:
+    """Create a solid analytic cylinder for cutting/intersecting member roots."""
+    radius = max(float(radius), EPS)
+    z0 = float(z0)
+    z1 = float(z1)
+    depth = max(abs(z1 - z0), EPS)
+    profile = ctx.model.createIfcCircleProfileDef(
+        "AREA",
+        None,
+        _axis2_placement_2d(ctx.model),
+        radius,
+    )
+    return ctx.model.createIfcExtrudedAreaSolid(
+        profile,
+        _axis2_placement_3d(ctx.model, (0.0, 0.0, min(z0, z1))),
+        ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
+        depth,
+    )
+
+
+def _add_cylinder_fitted_longitudinal_web_solid(
+    ctx: IfcContext,
+    name: str,
+    radius: float,
+    shell_thk: float,
+    angle: float,
+    length: float,
+    dims: SectionDimensions,
+    side_sign: float,
+    predefined_type: str | None = "STUD",
+    extra_properties: dict[str, Any] | None = None,
+) -> Any:
+    """Add a solid longitudinal web with a curved root fitted to the cylinder.
+
+    A straight rectangular web placed tangent to a circular cylinder only touches
+    the cylinder at the web centreline.  At the web toes the root line is offset
+    from the cylindrical shell, which can create apparent gaps or non-joinable
+    geometry after IfcConvert/PrePoMax import.
+
+    This function intentionally lets the rectangular web blank overlap the
+    cylinder slightly and then uses an analytic IFC boolean cylinder to trim it:
+      * outside stiffeners: web_blank - solid_cylinder(R_outer)
+      * inside stiffeners:  web_blank ∩ solid_cylinder(R_inner)
+
+    The resulting root is cylindrical and coincident with the cylinder surface.
+    """
+    radius = max(float(radius), EPS)
+    shell_thk = max(float(shell_thk), EPS)
+    web_h = max(float(dims.web_h), EPS)
+    web_t = max(float(dims.web_thk), EPS)
+    length = max(float(length), EPS)
+    sign = 1.0 if side_sign >= 0.0 else -1.0
+
+    c = math.cos(angle)
+    s = math.sin(angle)
+    radial = (sign * c, sign * s, 0.0)
+
+    # Interface radius where the web root must match the cylindrical shell.
+    interface_r = max(radius + sign * shell_thk, EPS)
+
+    # Small overlap gives the boolean cutter something to remove.  Use a value
+    # tied to the actual web/shell dimensions so it is robust for small models.
+    root_overlap = max(min(shell_thk, web_h * 0.25), 1.0e-5)
+
+    if sign >= 0.0:
+        # Blank extends from slightly inside the outside cylinder surface to the
+        # stiffener tip.  Difference removes the inner part and leaves a curved root.
+        blank_inner_r = max(interface_r - root_overlap, EPS)
+        blank_outer_r = interface_r + web_h
+        blank_center_r = 0.5 * (blank_inner_r + blank_outer_r)
+        blank_xdim = blank_outer_r - blank_inner_r
+        cutter = _create_solid_cylinder_for_boolean(ctx, interface_r, 0.0, length)
+        boolean_operator = "DIFFERENCE"
+    else:
+        # Blank extends from the inward stiffener tip to slightly outside the
+        # inside cylinder surface.  Intersection keeps only the part inside the
+        # cylinder radius and leaves a curved root.
+        blank_inner_r = max(interface_r - web_h, EPS)
+        blank_outer_r = interface_r + root_overlap
+        blank_center_r = 0.5 * (blank_inner_r + blank_outer_r)
+        blank_xdim = blank_outer_r - blank_inner_r
+        cutter = _create_solid_cylinder_for_boolean(ctx, interface_r, 0.0, length)
+        boolean_operator = "INTERSECTION"
+
+    blank = _create_oriented_rectangular_swept_solid(
+        ctx,
+        (blank_center_r * c, blank_center_r * s, 0.0),
+        radial,
+        (0.0, 0.0, 1.0),
+        blank_xdim,
+        web_t,
+        length,
+    )
+    fitted = ctx.model.createIfcBooleanResult(boolean_operator, blank, cutter)
+    shape = _product_shape_from_csg_solid(ctx, fitted)
+    placement = _local_placement(ctx.model)
+    element = _create_building_element(ctx, "IfcMember", name, placement, shape, predefined_type)
+    _assign_to_storey(ctx, element)
+    _assign_material(ctx, element)
+
+    props = {
+        "model_type": "csg_cylinder_fitted_solid",
+        "thickness_exported_as_geometry": True,
+        "role": "longitudinal stiffener",
+        "part": "web",
+        "angle_rad": float(angle),
+        "web_height_m": web_h,
+        "nominal_web_thickness_m": web_t,
+        "shell_interface_radius_m": float(radius),
+        "member_base_radius_m": float(interface_r),
+        "shell_thickness_m": float(shell_thk),
+        "root_overlap_m": float(root_overlap),
+        "root_fit_boolean": boolean_operator,
+    }
+    if extra_properties:
+        props.update(extra_properties)
+    _add_property_set(ctx, element, "ANYstructureDimensions", props)
+    ctx.summary.elements.append(name)
+    return element
+
+
 def _ifc_faces_from_points(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> list[Any]:
     ifc_faces = []
     for face_points in faces:
@@ -702,6 +867,246 @@ def _product_shape_from_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[fl
         [surface_model],
     )
     return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
+
+
+
+
+def _ifc_parameter_value(ctx: IfcContext, value: float) -> Any:
+    """Create an IFC parameter value for IfcTrimmedCurve trim arguments."""
+    try:
+        return ctx.model.create_entity("IfcParameterValue", float(value))
+    except Exception:
+        return float(value)
+
+
+def _vertex_point(ctx: IfcContext, point: tuple[float, float, float]) -> Any:
+    return ctx.model.createIfcVertexPoint(
+        ctx.model.createIfcCartesianPoint(tuple(float(v) for v in point))
+    )
+
+
+def _oriented_edge(ctx: IfcContext, edge: Any, orientation: bool = True) -> Any:
+    """Create IfcOrientedEdge with derived start/end attributes omitted."""
+    try:
+        return ctx.model.createIfcOrientedEdge(None, None, edge, bool(orientation))
+    except Exception:
+        return ctx.model.create_entity("IfcOrientedEdge", None, None, edge, bool(orientation))
+
+
+def _edge_curve(ctx: IfcContext, start_vertex: Any, end_vertex: Any, curve: Any,
+                same_sense: bool = True) -> Any:
+    return ctx.model.createIfcEdgeCurve(start_vertex, end_vertex, curve, bool(same_sense))
+
+
+def _line_curve_between(ctx: IfcContext, p0: tuple[float, float, float],
+                        p1: tuple[float, float, float]) -> Any:
+    return ctx.model.createIfcPolyline([
+        ctx.model.createIfcCartesianPoint(tuple(float(v) for v in p0)),
+        ctx.model.createIfcCartesianPoint(tuple(float(v) for v in p1)),
+    ])
+
+
+def _trimmed_circle_curve_3d(ctx: IfcContext, radius: float, z: float,
+                             theta_start: float, theta_end: float) -> Any:
+    """Create a 3D circular arc curve at constant Z.
+
+    This is used only as a boundary curve for the analytic cylindrical face.  The
+    face geometry itself is carried by IfcCylindricalSurface.
+    """
+    circle = ctx.model.createIfcCircle(
+        _axis2_placement_3d(
+            ctx.model,
+            location=(0.0, 0.0, float(z)),
+            axis=(0.0, 0.0, 1.0),
+            ref_direction=(1.0, 0.0, 0.0),
+        ),
+        max(float(radius), EPS),
+    )
+    return ctx.model.createIfcTrimmedCurve(
+        circle,
+        [_ifc_parameter_value(ctx, theta_start)],
+        [_ifc_parameter_value(ctx, theta_end)],
+        True,
+        "PARAMETER",
+    )
+
+
+def _advanced_cylindrical_face_with_curved_bounds(
+    ctx: IfcContext,
+    cylindrical_surface: Any,
+    radius: float,
+    z_min: float,
+    z_max: float,
+    theta_start: float,
+    theta_end: float,
+) -> Any:
+    """Create one bounded analytic cylindrical face.
+
+    The previous attempts used either profile sweeps or polygon loops.  Several
+    IfcConvert/OpenCascade import paths treated those as caps or planar faces.
+    Here the boundary loop itself contains circular arc edge curves, while the
+    actual face is still an IfcCylindricalSurface.  This keeps the model as a
+    zero-thickness shell but gives the converter enough information to build a
+    cylindrical surface rather than a lid.
+    """
+    p00 = _cyl_point(radius, theta_start, z_min)
+    p10 = _cyl_point(radius, theta_end, z_min)
+    p11 = _cyl_point(radius, theta_end, z_max)
+    p01 = _cyl_point(radius, theta_start, z_max)
+
+    v00 = _vertex_point(ctx, p00)
+    v10 = _vertex_point(ctx, p10)
+    v11 = _vertex_point(ctx, p11)
+    v01 = _vertex_point(ctx, p01)
+
+    bottom_arc = _edge_curve(
+        ctx, v00, v10,
+        _trimmed_circle_curve_3d(ctx, radius, z_min, theta_start, theta_end),
+        True,
+    )
+    side_at_end = _edge_curve(
+        ctx, v10, v11,
+        _line_curve_between(ctx, p10, p11),
+        True,
+    )
+    top_arc = _edge_curve(
+        ctx, v01, v11,
+        _trimmed_circle_curve_3d(ctx, radius, z_max, theta_start, theta_end),
+        True,
+    )
+    side_at_start = _edge_curve(
+        ctx, v00, v01,
+        _line_curve_between(ctx, p00, p01),
+        True,
+    )
+
+    # Loop order: bottom a0->a1, vertical up, top a1->a0 using reversed top
+    # edge, vertical down using reversed start edge.
+    loop = ctx.model.createIfcEdgeLoop([
+        _oriented_edge(ctx, bottom_arc, True),
+        _oriented_edge(ctx, side_at_end, True),
+        _oriented_edge(ctx, top_arc, False),
+        _oriented_edge(ctx, side_at_start, False),
+    ])
+    outer = ctx.model.createIfcFaceOuterBound(loop, True)
+
+    try:
+        return ctx.model.createIfcAdvancedFace([outer], cylindrical_surface, True)
+    except Exception:
+        return ctx.model.createIfcFaceSurface([outer], cylindrical_surface, True)
+
+
+def _product_shape_from_advanced_cylindrical_shell_with_arc_bounds(
+    ctx: IfcContext,
+    radius: float,
+    z0: float,
+    z1: float,
+    theta_start: float = 0.0,
+    theta_end: float = 2.0 * math.pi,
+    split_count: int = 2,
+) -> Any:
+    """Create analytic, zero-thickness cylindrical IFC shell faces.
+
+    Representation used:
+        IfcShellBasedSurfaceModel
+          IfcOpenShell
+            IfcAdvancedFace / IfcFaceSurface
+              IfcCylindricalSurface
+              IfcFaceOuterBound(IfcEdgeLoop with circular arc EdgeCurves)
+
+    This is not a solid and not a thickness workaround.  The full cylinder is
+    split into two analytic half-cylinder faces to avoid a coincident 360-degree
+    seam while still avoiding the many-flat-plate representation.
+    """
+    radius = max(float(radius), EPS)
+    z0 = float(z0)
+    z1 = float(z1)
+    z_min = min(z0, z1)
+    z_max = max(z0, z1)
+    theta_start = float(theta_start)
+    theta_end = float(theta_end)
+
+    if z_max - z_min <= EPS:
+        raise ValueError("Cylindrical IFC shell surface has zero length.")
+    if abs(theta_end - theta_start) <= EPS:
+        raise ValueError("Cylindrical IFC shell surface has zero angular extent.")
+
+    angular_extent = abs(theta_end - theta_start)
+    is_full_circle = abs(angular_extent - 2.0 * math.pi) <= 1.0e-7
+    face_count = max(1, int(split_count)) if is_full_circle else 1
+
+    cylindrical_surface = ctx.model.createIfcCylindricalSurface(
+        _axis2_placement_3d(
+            ctx.model,
+            location=(0.0, 0.0, 0.0),
+            axis=(0.0, 0.0, 1.0),
+            ref_direction=(1.0, 0.0, 0.0),
+        ),
+        radius,
+    )
+
+    ifc_faces = []
+    for idx in range(face_count):
+        a0 = theta_start + (theta_end - theta_start) * idx / face_count
+        a1 = theta_start + (theta_end - theta_start) * (idx + 1) / face_count
+        ifc_faces.append(
+            _advanced_cylindrical_face_with_curved_bounds(
+                ctx, cylindrical_surface, radius, z_min, z_max, a0, a1
+            )
+        )
+
+    open_shell = ctx.model.createIfcOpenShell(ifc_faces)
+    surface_model = ctx.model.createIfcShellBasedSurfaceModel([open_shell])
+    rep = ctx.model.createIfcShapeRepresentation(
+        ctx.body_context,
+        "Body",
+        "SurfaceModel",
+        [surface_model],
+    )
+    return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
+
+
+def _add_analytic_swept_cylindrical_shell_surface(
+    ctx: IfcContext,
+    ifc_class: str,
+    name: str,
+    radius: float,
+    z0: float,
+    z1: float,
+    predefined_type: str | None = None,
+    extra_properties: dict[str, Any] | None = None,
+) -> Any:
+    """Add a full circular cylinder as analytic zero-thickness IFC shell faces."""
+    shape = _product_shape_from_advanced_cylindrical_shell_with_arc_bounds(ctx, radius, z0, z1)
+    placement = _local_placement(ctx.model)
+    element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
+    _assign_to_storey(ctx, element)
+    _assign_material(ctx, element)
+
+    props = {
+        "model_type": "analytic_zero_thickness_ifc_cylindrical_shell",
+        "geometry_role": "full_cylindrical_shell_as_bounded_advanced_surface",
+        "ifc_geometry": "IfcShellBasedSurfaceModel/IfcAdvancedFace/IfcCylindricalSurface/curved EdgeLoop bounds",
+        "continuous_cylinder_export": True,
+        "shell_export": True,
+        "thickness_exported_as_geometry": False,
+        "radius_m": float(radius),
+        "z0_m": float(z0),
+        "z1_m": float(z1),
+        "theta_start_rad": 0.0,
+        "theta_end_rad": float(2.0 * math.pi),
+    }
+    if extra_properties:
+        props.update(extra_properties)
+        props["model_type"] = "analytic_zero_thickness_ifc_cylindrical_shell"
+        props["ifc_geometry"] = "IfcShellBasedSurfaceModel/IfcAdvancedFace/IfcCylindricalSurface/curved EdgeLoop bounds"
+        props["continuous_cylinder_export"] = True
+        props["shell_export"] = True
+        props["thickness_exported_as_geometry"] = False
+
+    _add_property_set(ctx, element, "ANYstructureDimensions", props)
+    ctx.summary.elements.append(name)
+    return element
 
 
 def _add_surface_element(ctx: IfcContext, ifc_class: str, name: str,
@@ -1310,6 +1715,22 @@ def _add_cylindrical_shell_surface(ctx: IfcContext, ifc_class: str, name: str, r
     radius = max(float(radius), EPS)
     z0 = float(z0)
     z1 = float(z1)
+
+    # Full circular cylinders/ring flanges should not be faceted into many flat
+    # plates.  Use an analytic swept curve surface.  This remains a shell model:
+    # no wall thickness is exported as geometry.
+    is_full_circle = abs(abs(float(theta_end) - float(theta_start)) - 2.0 * math.pi) <= 1.0e-7
+    if is_full_circle:
+        _add_analytic_swept_cylindrical_shell_surface(
+            ctx, ifc_class, name, radius, z0, z1,
+            predefined_type=predefined_type,
+            extra_properties=extra_properties,
+        )
+        return
+
+    # Bounded cylindrical sectors are still faceted.  A proper analytic sector
+    # would need IFC trimming curves and is intentionally kept separate from the
+    # full-cylinder case.
     segments = _segment_count_for_arc(radius, theta_start, theta_end)
     props = {
         "radius_m": radius,
@@ -1319,9 +1740,13 @@ def _add_cylindrical_shell_surface(ctx: IfcContext, ifc_class: str, name: str, r
         "theta_end_rad": float(theta_end),
         "surface_segments": int(segments),
         "shell_export": True,
+        "thickness_exported_as_geometry": False,
+        "model_type": "faceted_zero_thickness_cylindrical_sector_surface",
     }
     if extra_properties:
         props.update(extra_properties)
+        props["shell_export"] = True
+        props["thickness_exported_as_geometry"] = False
     _add_surface_element(
         ctx, ifc_class, name,
         _cylindrical_faces(radius, z0, z1, theta_start, theta_end, segments),
@@ -1514,17 +1939,17 @@ def _add_cylinder_longitudinal_members(ctx: IfcContext, active_line: str, radius
                     [web_face], predefined_type="STUD", extra_properties=web_props,
                 )
             else:
-                web_props.update({
-                    "model_type": "swept_solid",
-                    "thickness_exported_as_geometry": True,
-                })
-                web_center_r = base_r + sign * dims.web_h / 2.0
-                _add_oriented_box_element(
-                    ctx, "IfcMember", f"{active_line} Longitudinal {index:03d} Web",
-                    (web_center_r * c, web_center_r * s, 0.0),
-                    radial, (0.0, 0.0, 1.0),
-                    dims.web_h, max(dims.web_thk, EPS), length,
-                    predefined_type="STUD", extra_properties=web_props,
+                _add_cylinder_fitted_longitudinal_web_solid(
+                    ctx,
+                    f"{active_line} Longitudinal {index:03d} Web",
+                    radius=radius,
+                    shell_thk=shell_thk,
+                    angle=angle,
+                    length=length,
+                    dims=dims,
+                    side_sign=side_sign,
+                    predefined_type="STUD",
+                    extra_properties=web_props,
                 )
 
         if dims.flange_w > EPS and str(dims.type or "T").upper() not in {"FB", "FLAT", "FLATBAR"}:
