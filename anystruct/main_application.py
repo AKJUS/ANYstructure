@@ -87,6 +87,24 @@ class Application():
     It is the main part of the code and calls up all other classes etc.
     '''
 
+    @staticmethod
+    def _start_root_fullscreen(parent):
+        """Start the main Tk window maximized while keeping normal window chrome."""
+        try:
+            parent.state('zoomed')
+            return
+        except Exception:
+            pass
+        try:
+            parent.attributes('-zoomed', True)
+            return
+        except Exception:
+            pass
+        try:
+            parent.geometry(f'{parent.winfo_screenwidth()}x{parent.winfo_screenheight()}+0+0')
+        except Exception:
+            pass
+
     def __init__(self, parent):
         '''
         Initaiting the tkinter frame.
@@ -96,6 +114,7 @@ class Application():
 
         super(Application, self).__init__()
         parent.wm_title('| ANYstructure |')
+        self._start_root_fullscreen(parent)
         self._parent = parent
         self._resize_after_id = None
         self._last_resize_size = (0, 0)
@@ -166,6 +185,14 @@ class Application():
         sub_menu.add_command(label='Open project', command=self.openfile)
         sub_menu.add_command(label='Restore previous', command=self.restore_previous)
         sub_menu.add_command(label='Open excel input', command=self.open_excel_file)
+        sub_menu.add_separator()
+        file_export_menu = tk.Menu(sub_menu)
+        sub_menu.add_cascade(label='Export', menu=file_export_menu)
+        file_export_menu.add_command(label='Geometry to SESAM GeniE JS...', command=self.export_to_js)
+        file_export_menu.add_command(label='Selected structure IFC/CAD solid model...',
+                                     command=self.export_prop_3d_ifc_model)
+        file_export_menu.add_command(label='Selected structure IFC/CAD shell/surface model...',
+                                     command=self.export_prop_3d_ifc_shell_model)
         self._shortcut_text = 'CTRL-Z Undo geometry action\n' \
                               'CTRL-P Copy selected point\n' \
                               'CTRL-M Move selected point)\n' \
@@ -2000,8 +2027,8 @@ class Application():
 
         def add_mode_card(parent, title, subtitle, details, button_text, command, primary=False):
             border = '#1f6feb' if primary else '#cad2df'
-            button_bg = '#1f6feb' if primary else '#eef2f7'
-            button_fg = 'white' if primary else '#172033'
+            button_bg = '#1f6feb' if primary else 'green'
+            button_fg = 'white' #if primary else '#172033'
             card = tk.Frame(parent, background='white', highlightbackground=border,
                             highlightthickness=2 if primary else 1, bd=0)
             tk.Label(card, text=title, background='white', foreground='#111827',
@@ -2023,7 +2050,7 @@ class Application():
             details='For multiple panels/cylinders with advanced load definition.',
             button_text='Start multiple panels',
             command=lambda: choose(False),
-            primary=True,
+            primary=False,
         )
         single_card = add_mode_card(
             content,
@@ -2032,7 +2059,7 @@ class Application():
             details='For single panel/cylinder with simplified load interface.',
             button_text='Start single mode',
             command=lambda: choose(True),
-            primary=False,
+            primary=True,
         )
         standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
         single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
@@ -2694,9 +2721,9 @@ class Application():
                         shell_lenght_l=cone_length,
                     )
                     if self._new_shell_stress_or_force.get() == 1:
-                        forces = [self._new_shell_Nsd.get(), self._new_shell_M1sd.get(),
+                        forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(),
                                   self._new_shell_M2sd.get(), self._new_shell_Tsd.get(),
-                                  self._new_shell_Q1sd.get(), self._new_shell_Q2sd.get()]
+                                  self._new_shell_Qsd.get(), self._new_shell_Q2sd.get()]
                         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
                             stresses=None, forces=forces, **conical_converter_kwargs)
                         self._new_shell_sasd.set(sasd)
@@ -2711,10 +2738,10 @@ class Application():
                         Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = hlp.helper_cylinder_stress_to_force_to_stress(
                             stresses=stresses, **conical_converter_kwargs)[:6]
                         self._new_shell_Nsd.set(Nsd)
-                        self._new_shell_M1sd.set(M1sd)
+                        self._new_shell_Msd.set(M1sd)
                         self._new_shell_M2sd.set(M2sd)
                         self._new_shell_Tsd.set(Tsd)
-                        self._new_shell_Q1sd.set(Q1sd)
+                        self._new_shell_Qsd.set(Q1sd)
                         self._new_shell_Q2sd.set(Q2sd)
                 elif self._new_shell_stress_or_force.get() == 1:
                     forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(), \
@@ -6447,9 +6474,44 @@ class Application():
 
         self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
         self._prop_3d_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        if getattr(self, '_simplified_calculation_mode', False):
+            self._prop_3d_canvas_widget.bind('<MouseWheel>', self._prop_3d_mouse_scroll)
+            self._prop_3d_canvas_widget.bind('<Button-4>', self._prop_3d_mouse_scroll)
+            self._prop_3d_canvas_widget.bind('<Button-5>', self._prop_3d_mouse_scroll)
 
         self._prop_3d_frame.bind('<Configure>', self._schedule_resize_prop_3d_figure)
         self._prop_3d_frame.after(50, self._resize_prop_3d_figure)
+
+    @staticmethod
+    def _scaled_axis_limits(limits, zoom_factor):
+        center = (float(limits[0]) + float(limits[1])) / 2.0
+        half_span = (float(limits[1]) - float(limits[0])) * float(zoom_factor) / 2.0
+        return center - half_span, center + half_span
+
+    def _zoom_prop_3d_axes(self, zoom_factor):
+        """Zoom the active 3D preview without changing its current view angle."""
+        ax = getattr(self, '_prop_3d_axes', None)
+        canvas = getattr(self, '_prop_3d_fig_canvas', None)
+        if ax is None or canvas is None:
+            return
+        try:
+            factor = min(max(float(zoom_factor), 0.2), 5.0)
+            ax.set_xlim(*self._scaled_axis_limits(ax.get_xlim(), factor))
+            ax.set_ylim(*self._scaled_axis_limits(ax.get_ylim(), factor))
+            ax.set_zlim(*self._scaled_axis_limits(ax.get_zlim(), factor))
+            canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _prop_3d_mouse_scroll(self, event):
+        """Mouse-wheel zoom for the Matplotlib 3D preview in single-line mode."""
+        if not getattr(self, '_simplified_calculation_mode', False):
+            return
+        delta = getattr(event, 'delta', 0)
+        if delta == 0:
+            delta = 120 if getattr(event, 'num', None) == 4 else -120
+        self._zoom_prop_3d_axes(0.88 if delta > 0 else 1.14)
+        return 'break'
 
     def _set_prop_3d_view(self, elev, azim):
         """Set the active 3D preview to a predefined view angle."""

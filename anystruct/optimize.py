@@ -918,7 +918,8 @@ def any_constraints_cylinder(x, obj: calc.CylinderAndCurvedPlate, init_weight, l
     '''
 
     all_checks = [0, 0, 0, 0, 0, 0, 0, 0]
-    check_map = {'weight': 0, 'UF unstiffened': 1, 'Column stability': 2, 'UF longitudinal stiffeners': 3,
+    check_map = {'weight': 0, 'UF unstiffened': 1, 'UF unstiffened conical shell': 1,
+                 'Column stability': 2, 'UF longitudinal stiffeners': 3,
                  'Stiffener check': 4, 'UF ring stiffeners': 5, 'UF ring frame': 6, 'Check OK': 7}
 
     calc_obj = create_new_cylinder_obj(obj, x)

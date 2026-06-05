@@ -602,7 +602,7 @@ class CreateOptimizeCylinderWindow():
         main_application.Application.draw_cylinder(text_size='Verdana 8 bold',
                                                    canvas=self._canvas_opt,
                                                    CylObj=self._initial_cylinder_obj,
-                                                   start_x_cyl=350, start_y_cyl=345, text_x=230,
+                                                   start_x_cyl=350, start_y_cyl=300, text_x=230,
                                                    text_y=110)
 
     def selected_algorithm(self, event):
@@ -864,7 +864,7 @@ class CreateOptimizeCylinderWindow():
         main_application.Application.draw_cylinder(text_size='Verdana 8 bold',
                                                    canvas=self._canvas_opt,
                                                    CylObj=self._opt_results[0],
-                                                   start_x_cyl=350, start_y_cyl=345, text_x=230,
+                                                   start_x_cyl=350, start_y_cyl=300, text_x=230,
                                                    text_y=110)
 
         result_x = self._opt_results[0].get_x_opt()
@@ -1028,7 +1028,7 @@ class CreateOptimizeCylinderWindow():
             main_application.Application.draw_cylinder(text_size='Verdana 8 bold',
                                                        canvas=self._canvas_opt,
                                                        CylObj=self._opt_results[0],
-                                                       start_x_cyl=350, start_y_cyl=345, text_x=230,
+                                                       start_x_cyl=350, start_y_cyl=300, text_x=230,
                                                        text_y=110)
             self._new_sasd.set(self._opt_results[0].sasd)
             self._new_smsd.set(self._opt_results[0].smsd)

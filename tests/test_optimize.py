@@ -118,6 +118,20 @@ def test_calc_weight_cylinder_uses_frustum_shell_area_for_conical_tuple():
     assert weight == pytest.approx(expected)
 
 
+def test_any_constraints_cylinder_tallies_conical_unstiffened_failure():
+    cylinder = _conical_optimization_object()
+
+    passed, failure, _x, checks, _candidate = opt.any_constraints_cylinder(
+        cylinder.get_x_opt(),
+        cylinder,
+        init_weight=False,
+    )
+
+    assert passed is False
+    assert failure == "UF unstiffened conical shell"
+    assert checks[1] == 1
+
+
 def test_stiffened_plate_with_girder_optimization_preserves_and_iterates_girder():
     plate_dict = _with_panel_default(ex.obj_dict)
     girder_dict = _with_panel_default(ex.obj_dict_heavy)
