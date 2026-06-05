@@ -4,6 +4,11 @@ ANYstructure
 
 Save cost and time by efficient optimization and reporting!
 
+### What's new in 6.1.1 ###
+* Urgent fix for cylindrical shell updates where hidden cone defaults could overwrite radius, ring spacing and shell lengths.
+* 3D CAD export dialog now includes a transformation scale input and keeps intermediate IFC files unchecked by default.
+* 3D solid export can write one joined IFC product without building a heavy global boolean union.
+
 ### What's new in 6.1.0 ###
 * Simplified GUI input option.
 * Weld/weight optimization.

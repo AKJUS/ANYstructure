@@ -122,7 +122,7 @@ def test_release_package_metadata_uses_current_markdown_readme():
     setup_source = Path(__file__).resolve().parents[1] / "setup.py"
     source = setup_source.read_text(encoding="utf-8")
 
-    assert "version='6.1.0'" in source
+    assert "version='6.1.1'" in source
     assert "README.md" in source[source.index("def readme"):source.index("core_requires")]
     assert "README.rst" not in source
     assert "long_description_content_type='text/markdown'" in source
@@ -459,11 +459,22 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "def export_prop_3d_ifc_model(self):" in source
     assert "def export_prop_3d_ifc_shell_model(self):" in source
     assert "def _export_prop_3d_ifc_model_common(self, shell_export=False):" in source
+    assert "def _ask_prop_3d_ifc_export_options(self, shell_export=False):" in source
+    assert "transformation_scale = tk.StringVar(value='1.0')" in source
+    assert "keep_ifc = tk.BooleanVar(value=False)" in source
+    assert "ttk.Label(dialog, text='Transformation scale')" in source
+    assert "'transformation_scale': scale" in source
+    assert "text='Join all solid parts into one complete model'" in source
+    assert "join_chk.configure(state='disabled' if shell_export else 'normal')" in source
+    assert "'boolean_join_all_solids': bool(boolean_join.get()) and not bool(shell_export)" in source
     assert "confirmoverwrite=False" in source
     assert "if os.path.exists(filename):" in source
     assert "messagebox.askyesno(" in source
     assert "ifc_model_export.export_selected_structure_from_application" in source
     assert "shell_export=shell_export" in source
+    assert "boolean_join_all_solids=options.get('boolean_join_all_solids', False)" in source
+    assert "transformation_scale=options.get('transformation_scale', 1.0)" in source
+    assert "'\\nTransformation scale: ' + str(options.get('transformation_scale', 1.0))" in source
     assert "def export_prop_3d_unv(self):" in source
     assert "self.export_prop_3d_ifc_model()" in source
     assert "def _get_prop_3d_shell_export_mesh(self):" in source
@@ -507,6 +518,21 @@ def test_ifc_solid_and_shell_exports_use_separate_geometry_paths():
     assert "def _temporary_filename_near" in source
     assert "def _write_ifc_atomic" in source
     assert "def _convert_ifc_atomic" in source
+    assert "boolean_join_all_solids: bool = False" in source
+    assert 'length_unit: str = "m"' in source
+    assert "def _normalise_export_length_unit" in source
+    assert "return \"mm\", 1000.0, \"MILLI\"" in source
+    assert "length_unit_obj = model.createIfcSIUnit(None, \"LENGTHUNIT\", si_prefix, \"METRE\")" in source
+    assert "length_scale: float = 1.0" in source
+    assert "transformation_scale: float = 1.0" in source
+    assert "def _normalise_transformation_scale" in source
+    assert "Transformation scale must be a positive finite number." in source
+    assert "def _scale_value" in source
+    assert "solid_operands: list[Any] = field(default_factory=list)" in source
+    assert "def _track_solid_operand" in source
+    assert "def _replace_solid_parts_with_single_product" in source
+    assert '"SolidModel"' in source
+    assert '"model_type": "single_product_complete_model"' in source
     assert "os.replace(temp_filename, target_filename)" in source
     assert "timeout=timeout_seconds" in source
     assert "def _add_cylindrical_wall_solid" in source
@@ -518,10 +544,15 @@ def test_ifc_solid_and_shell_exports_use_separate_geometry_paths():
     assert 'base_radius = radius if shell_export else max(radius + sign * max(shell_thk, 0.0), EPS)' in source
     assert "_add_cylinder_structure(ctx, app, cylinder_obj, active_line, side_sign, shell_export=shell_export)" in source
     assert "_add_flat_structure(ctx, app, all_obj, active_line, side_sign, shell_export=shell_export)" in source
+    assert "_replace_solid_parts_with_single_product(ctx, active_line)" in source
     assert "_convert_ifc_with_ifcconvert(native_ifc_filename, requested_filename" not in source
     assert "_convert_ifc_atomic(native_ifc_filename, requested_filename" in source
     assert "_write_ifc_atomic(ctx.model, native_ifc_filename)" in source
     assert '"thickness_exported_as_geometry": not bool(shell_export)' in source
+    assert '"boolean_join_all_solids": bool(ctx.boolean_join_all_solids)' in source
+    assert '"export_length_unit": ctx.length_unit' in source
+    assert '"export_length_scale_from_m": ctx.length_scale' in source
+    assert '"transformation_scale": ctx.transformation_scale' in source
     assert 'predefined_type="RING"' not in source
     assert "This exporter currently uses zero-thickness shell/surface" not in source
 

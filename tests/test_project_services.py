@@ -411,6 +411,39 @@ def test_cylinder_structure_property_service_derives_stresses_from_force_values(
     assert result.main_dict["shsd"][0] == result.derived_stresses[4] * 1e6
 
 
+def test_cylinder_structure_property_service_ignores_cone_defaults_for_cylinders():
+    request = _cylinder_structure_property_request(load_mode=1)
+    request = project_services.CylinderStructurePropertyRequest(
+        calculation_domain="Longitudinal Stiffened shell (Force input)",
+        dummy_values=request.dummy_values,
+        shell_values={
+            **request.shell_values,
+            "radius": 6500,
+            "distance_between_rings": 3000,
+            "length": 12000,
+            "total_length": 15000,
+            "cone_r1": 4000,
+            "cone_r2": 6000,
+            "cone_length": 5000,
+        },
+        longitudinal_values=request.longitudinal_values,
+        ring_stiffener_values=request.ring_stiffener_values,
+        ring_frame_values=request.ring_frame_values,
+        load_input=request.load_input,
+        main_values=request.main_values,
+        structure_types=request.structure_types,
+    )
+
+    result = project_services.CylinderStructurePropertyService.build(request)
+
+    assert result.geometry == 3
+    assert result.shell_dict["radius"] == [6.5, "m"]
+    assert result.shell_dict["distance between rings, l"] == [3.0, "m"]
+    assert result.shell_dict["length of shell, L"] == [12.0, "m"]
+    assert result.shell_dict["tot cyl length, Lc"] == [15.0, "m"]
+    assert result.shell_dict["cone alpha"] == [None, "deg"]
+
+
 def test_cylinder_structure_property_service_builds_conical_shell_request():
     request = _cylinder_structure_property_request(load_mode=1)
     request = project_services.CylinderStructurePropertyRequest(

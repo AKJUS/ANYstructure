@@ -4,7 +4,7 @@
   <Metadata productVersion="1.6.1" projectFileVersion="2.0"/>
   <ProductInformation>
     <Name>ANYstructure</Name>
-    <Version>6.0.1</Version>
+    <Version>6.1.1</Version>
     <CompanyName/>
     <WebURI>https://github.com/audunarn/ANYstructure</WebURI>
   </ProductInformation>
@@ -75,7 +75,7 @@
     <Program executableFilePath="" isLaunchEnabled="false" isTerminationEnabled="false"/>
   </VisualUpdateConfiguration>
   <BuildConfiguration>
-    <SetupFilePath>C:\Github\ANYstructure\ANYstructure_6_0_0.exe</SetupFilePath>
+    <SetupFilePath>C:\Github\ANYstructure\ANYstructure_6_1_1.exe</SetupFilePath>
     <SetupIconPath>..\icons\ancient.ico</SetupIconPath>
     <UninstallerIconPath>..\icons\ancient.ico</UninstallerIconPath>
     <Compression method="0" level="2"/>

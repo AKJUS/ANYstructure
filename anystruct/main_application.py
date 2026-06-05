@@ -6569,7 +6569,7 @@ class Application():
         """
         self.export_prop_3d_ifc_model()
 
-    def _ask_prop_3d_ifc_export_options(self):
+    def _ask_prop_3d_ifc_export_options(self, shell_export=False):
         """Ask for IFC/CAD export format.
 
         IfcConvert is intentionally not exposed to the user.  For converted
@@ -6603,13 +6603,16 @@ class Application():
 
         result = {'value': None}
         selected_format = tk.StringVar(value=list(format_by_label.keys())[0])
-        keep_ifc = tk.BooleanVar(value=True)
+        transformation_scale = tk.StringVar(value='1.0')
+        keep_ifc = tk.BooleanVar(value=False)
+        boolean_join = tk.BooleanVar(value=False)
 
         pad = {'padx': 10, 'pady': 4}
         ttk.Label(
             dialog,
             text='Export the selected ANYstructure object as a proper IFC/CAD model.\n'
-                 'Legacy shell STL/UNV preview-mesh export is disabled. '                 'For OBJ/DAE/GLB/STP/IGS/XML/SVG/H5/TTL/RDB/JSON, ANYstructure first writes IFC, '
+                 'Legacy shell STL/UNV preview-mesh export is disabled. '
+                 'For OBJ/DAE/GLB/STP/IGS/XML/SVG/H5/TTL/RDB/JSON, ANYstructure first writes IFC, '
                  'then automatically runs the bundled/package IfcConvert executable.',
             justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=2, sticky='w', **pad)
@@ -6624,16 +6627,31 @@ class Application():
         )
         format_box.grid(row=1, column=1, sticky='we', **pad)
 
+        ttk.Label(dialog, text='Transformation scale').grid(row=2, column=0, sticky='w', **pad)
+        scale_entry = ttk.Entry(
+            dialog,
+            textvariable=transformation_scale,
+            width=18,
+        )
+        scale_entry.grid(row=2, column=1, sticky='w', **pad)
+
         keep_chk = ttk.Checkbutton(
             dialog,
             text='Keep intermediate .ifc file when converting to another format',
             variable=keep_ifc,
         )
-        keep_chk.grid(row=2, column=1, sticky='w', **pad)
+        keep_chk.grid(row=3, column=1, sticky='w', **pad)
+
+        join_chk = ttk.Checkbutton(
+            dialog,
+            text='Join all solid parts into one complete model',
+            variable=boolean_join,
+        )
+        join_chk.grid(row=4, column=1, sticky='w', **pad)
 
         note_var = tk.StringVar()
         ttk.Label(dialog, textvariable=note_var, justify=tk.LEFT, foreground='gray25').grid(
-            row=3, column=0, columnspan=2, sticky='w', **pad
+            row=5, column=0, columnspan=2, sticky='w', **pad
         )
 
         def update_state(*_args):
@@ -6643,28 +6661,47 @@ class Application():
                 keep_chk.configure(state='normal' if needs_ifcconvert else 'disabled')
             except Exception:
                 pass
+            try:
+                join_chk.configure(state='disabled' if shell_export else 'normal')
+            except Exception:
+                pass
             if needs_ifcconvert:
-                note_var.set(
+                note_text = (
                     'Automatic processing: no user path is required. IfcConvert.exe is resolved from the installed '
                     'anystruct package, the PyInstaller bundle, or PATH. Include IfcConvert.exe as package data.'
                 )
             else:
-                note_var.set('Native IFC export does not require IfcConvert.')
+                note_text = 'Native IFC export does not require IfcConvert.'
+            if shell_export:
+                note_text += ' Boolean join is only available for solid export.'
+            note_var.set(note_text)
 
         selected_format.trace_add('write', update_state)
         update_state()
 
         button_row = ttk.Frame(dialog)
-        button_row.grid(row=4, column=0, columnspan=2, sticky='e', padx=10, pady=(8, 10))
+        button_row.grid(row=6, column=0, columnspan=2, sticky='e', padx=10, pady=(8, 10))
 
         def accept():
             key, ext, desc, tool = format_by_label[selected_format.get()]
+            try:
+                scale = float(transformation_scale.get())
+                if not math.isfinite(scale) or scale <= 0.0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                messagebox.showerror(
+                    'IFC / CAD export options',
+                    'Transformation scale must be a positive number.'
+                )
+                return
             result['value'] = {
                 'format': key,
                 'extension': ext,
                 'description': desc,
                 'tool': tool,
                 'keep_intermediate_ifc': bool(keep_ifc.get()),
+                'boolean_join_all_solids': bool(boolean_join.get()) and not bool(shell_export),
+                'transformation_scale': scale,
             }
             dialog.destroy()
 
@@ -6722,7 +6759,7 @@ class Application():
             )
             return
 
-        options = self._ask_prop_3d_ifc_export_options()
+        options = self._ask_prop_3d_ifc_export_options(shell_export=shell_export)
         if options is None:
             return
 
@@ -6757,6 +6794,8 @@ class Application():
                 output_format=options['format'],
                 keep_intermediate_ifc=options['keep_intermediate_ifc'],
                 shell_export=shell_export,
+                boolean_join_all_solids=options.get('boolean_join_all_solids', False),
+                transformation_scale=options.get('transformation_scale', 1.0),
             )
         except ImportError as error:
             messagebox.showerror(
@@ -6779,8 +6818,11 @@ class Application():
                 'Export completed:\n' + filename +
                 '\n\nExport type: ' + export_kind +
                 '\nFormat: ' + options['extension'] + ' via ' + options['tool'] +
+                '\nTransformation scale: ' + str(options.get('transformation_scale', 1.0)) +
                 '\nElements exported: ' + str(summary.element_count)
             )
+            if options.get('boolean_join_all_solids', False):
+                message += '\nJoined model: complete solid model exported as one IFC product'
             if getattr(summary, 'native_ifc_filename', None) and summary.native_ifc_filename != filename:
                 message += '\nSource IFC: ' + str(summary.native_ifc_filename)
             if getattr(summary, 'warnings', None):
