@@ -637,6 +637,8 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
 def _discrete_range_values(lower, upper, delta, include_upper=True):
     if lower is None:
         return [np.nan]
+    if upper is None:
+        upper = lower
 
     try:
         lower = float(lower)
@@ -952,8 +954,8 @@ def scipy_de_loop_flat(min_var, max_var, deltas, initial_structure_obj, lateral_
                 seed=1,
             )
             evaluate(result.x)
-        except Exception:
-            pass
+        except Exception as error:
+            _append_limited(failed_results, _scipy_de_failure_result(error), result_history_limit)
 
     best_result = _select_best_flat_result(
         valid_results,
@@ -1131,6 +1133,10 @@ def _append_limited(items, item, limit):
         items.append(item)
 
 
+def _scipy_de_failure_result(error):
+    return False, 'SciPy Differential Evolution failed: ' + str(error), (), []
+
+
 def scipy_de_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, trials=100000,
                            use_weight_filter=True, predefiened_stiffener_iter=None,
                            weld_bias=0.0, builtup_stiffener=False,
@@ -1236,8 +1242,8 @@ def scipy_de_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, tria
                 seed=1,
             )
             evaluate(result.x)
-        except Exception:
-            pass
+        except Exception as error:
+            _append_limited(failed_results, _scipy_de_failure_result(error), result_history_limit)
 
     best_result = _select_best_cylinder_result(
         valid_results,

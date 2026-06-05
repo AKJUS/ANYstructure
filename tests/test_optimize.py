@@ -716,6 +716,46 @@ def test_scipy_de_cylinder_returns_best_valid_sampled_candidate(monkeypatch):
     assert any(item[1] == 'Rejected' for item in result[1])
 
 
+def test_scipy_de_cylinder_records_optimizer_failures(monkeypatch):
+    class FakeInitialCylinder:
+        LongStfObj = None
+
+    min_var = [
+        [0.02, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    max_var = [
+        [0.03, 2.5, 5.0, 0.6, 4.0, 0.0, 0.0, 0.0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0],
+    ]
+    deltas = [
+        [0.01, 1.0, 1.0, 0.1, 1.0, 1.0, 1.0, 1.0],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+    ]
+
+    def fake_differential_evolution(*args, **kwargs):
+        raise RuntimeError("integrality unsupported")
+
+    monkeypatch.setattr(opt, 'differential_evolution', fake_differential_evolution)
+
+    result = opt.scipy_de_loop_cylinder(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialCylinder(),
+        trials=50,
+    )
+
+    assert result[3] is False
+    assert any("SciPy Differential Evolution failed: integrality unsupported" in item[1] for item in result[4])
+
+
 def test_run_optimization_dispatches_scipy_de_flat(monkeypatch, opt_input):
     obj, upper_bounds, lower_bounds, lat_press, deltas, _, _, _ = opt_input
     captured = {}
@@ -757,6 +797,17 @@ def test_scipy_de_flat_component_candidates_are_snapped_to_grid():
 
     assert candidate[0] == pytest.approx(0.7)
     assert candidate[1:] == pytest.approx((0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0))
+
+
+def test_scipy_de_flat_component_candidates_tolerate_optional_upper_bounds():
+    min_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0], dtype=object)
+    max_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, None, 10.0], dtype=object)
+    deltas = np.array([0.05, 0.005, 0.05, 0.005, 0.05, 0.005])
+
+    candidate_space = opt._get_flat_component_candidates(min_var, max_var, deltas)
+    candidate = opt._flat_candidate_from_indices([0, 0, 0, 0, 0, 0, 0, 0], candidate_space)
+
+    assert candidate[6] == pytest.approx(3.5)
 
 
 def test_scipy_de_flat_returns_best_valid_sampled_candidate(monkeypatch):
@@ -808,6 +859,34 @@ def test_scipy_de_flat_returns_best_valid_sampled_candidate(monkeypatch):
     assert result[0].lat_press == pytest.approx(1.0)
     assert result[2] is True
     assert any(item[1] == 'Rejected' for item in result[3])
+
+
+def test_scipy_de_flat_records_optimizer_failures(monkeypatch):
+    class FakeInitialStructure:
+        Stiffener = None
+        Plate = type('FakePlate', (), {'mat_factor': 1.15})()
+
+    min_var = np.array([0.6, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    max_var = np.array([0.65, 0.01, 0.3, 0.01, 0.1, 0.01, 3.5, 10.0])
+    deltas = np.array([0.05, 0.005, 0.05, 0.005, 0.05, 0.005])
+
+    def fake_differential_evolution(*args, **kwargs):
+        raise RuntimeError("integrality unsupported")
+
+    monkeypatch.setattr(opt, 'differential_evolution', fake_differential_evolution)
+
+    result = opt.scipy_de_loop_flat(
+        min_var,
+        max_var,
+        deltas,
+        FakeInitialStructure(),
+        lateral_pressure=1.0,
+        trials=50,
+        const_chk=(False, False, False, False, False, False, False, False, False, False),
+    )
+
+    assert result[3] is False
+    assert any("SciPy Differential Evolution failed: integrality unsupported" in item[1] for item in result[4])
 
 
 def test_run_optimization_forwards_cost_factors_to_flat_algorithm(monkeypatch, opt_input):

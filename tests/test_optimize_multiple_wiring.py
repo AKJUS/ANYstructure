@@ -73,3 +73,11 @@ def test_multiple_optimizer_has_scipy_de_algorithm_option():
     assert "algorithm=self._new_algorithm.get()" in source
     assert "self.algorithm_random_label.config(text='Max evaluations')" in source
     assert "SCIPY_DE" in source
+
+
+def test_multiple_optimizer_uses_tuple_exception_handler_for_missing_slamming_pressure():
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "optimize_multiple_window.py").read_text(
+        encoding="utf-8")
+
+    assert "except (KeyError, AttributeError):" in source
+    assert "except [KeyError, AttributeError]:" not in source

@@ -811,7 +811,7 @@ class CreateOptimizeMultipleWindow():
                     slamming_pressure = 0
                 else:
                     slamming_pressure = self.app.get_highest_pressure(line)['slamming']
-            except [KeyError, AttributeError]:
+            except (KeyError, AttributeError):
                 slamming_pressure = 0
 
         fat_press = ((fat_press['p_ext']['loaded'], fat_press['p_ext']['ballast'],

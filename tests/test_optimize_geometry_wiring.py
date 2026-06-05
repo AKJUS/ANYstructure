@@ -42,6 +42,14 @@ def test_span_optimizer_uses_imported_allstructure_type_in_result_drawing():
     assert "calc_structure.AllStructure" not in source
 
 
+def test_span_optimizer_non_axis_aligned_midpoint_uses_both_y_coordinates():
+    optimize_geometry_source = Path(__file__).resolve().parents[1] / "anystruct" / "optimize_geometry.py"
+    source = optimize_geometry_source.read_text(encoding="utf-8")
+
+    assert "min(p2[1], p1[1]) + abs((p2[1] - p1[1]) * 0.5)" in source
+    assert "min(p2[1] - p1[1])" not in source
+
+
 def test_span_result_drawing_accepts_allstructure_instances(monkeypatch):
     class FakeCanvas:
         def __init__(self):

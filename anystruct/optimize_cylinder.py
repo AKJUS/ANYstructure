@@ -442,7 +442,7 @@ class CreateOptimizeCylinderWindow():
         # self._ent_algorithm.place(x=start_x+dx*11, y=start_y+dy*8)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
 
-        # tk.Button(self._frame,text='algorith information',command=self.algorithm_info,bg='white')\
+        # tk.Button(self._frame,text='algorithm information',command=self.algorithm_info,bg='white')\
         #     .place(x=start_x+dx*12.5, y=start_y+dy*7)
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
                                     font='Verdana 10 bold', fg='Yellow', relief="raised")

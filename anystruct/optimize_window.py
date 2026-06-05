@@ -648,7 +648,7 @@ class CreateOptimizeWindow():
         self._ent_algorithm.place(x=1120, y=150)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
 
-        tk.Button(self._frame, text='algorith information', command=self.algorithm_info, bg='white') \
+        tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
             .place(x=1120, y=195, width=140)
 
         # ---------------------------------------------------------------------

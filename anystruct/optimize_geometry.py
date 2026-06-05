@@ -526,7 +526,7 @@ class CreateOptGeoWindow():
         # self._runnig_time_label.config(text=str(self.get_running_time()))
         self._ent_algorithm.place(x=start_x + dx * 10, y=start_y + dy)
         self.algorithm_random_label = tk.Label(self._frame, text='Number of trials')
-        tk.Button(self._frame, text='algorith information', command=self.algorithm_info, bg='white') \
+        tk.Button(self._frame, text='algorithm information', command=self.algorithm_info, bg='white') \
             .place(x=start_x + dx * 10, y=start_y + dy * 2)
 
         self.run_button = tk.Button(self._frame, text='RUN OPTIMIZATION!', command=self.run_optimizaion, bg='red',
@@ -947,7 +947,7 @@ class CreateOptGeoWindow():
                     to_find = [min(p2[0], p1[0]) + (p2[0] - p1[0]) * 0.5, p2[1]]
                 else:  # Other orientations
                     to_find = [min(p2[0], p1[0]) + abs((p2[0] - p1[0]) * 0.5),
-                               min(p2[1] - p1[1]) + abs((p2[1] - p1[1]) * 0.5)]
+                               min(p2[1], p1[1]) + abs((p2[1] - p1[1]) * 0.5)]
 
                 # Taking properites from the closest line.
                 closet_line = self.opt_find_closest_orig_line(to_find)
