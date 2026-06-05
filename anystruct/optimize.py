@@ -11,6 +11,7 @@ from math import floor
 from matplotlib import pyplot as plt
 from tkinter.filedialog import asksaveasfilename
 import csv
+from scipy.optimize import differential_evolution
 
 try:
     import anystruct.calc_structure as calc
@@ -153,6 +154,21 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                                     weld_metric=weld_metric,
                                                     cost_factors=cost_factors)
 
+    if cylinder and algorithm == 'scipy_de cylinder':
+        return scipy_de_loop_cylinder(
+            min_var=min_var,
+            max_var=max_var,
+            deltas=deltas,
+            initial_structure_obj=initial_structure_obj,
+            trials=trials,
+            use_weight_filter=use_weight_filter,
+            predefiened_stiffener_iter=predefined_stiffener_iter,
+            weld_bias=weld_bias,
+            builtup_stiffener=builtup_stiffener,
+            weld_metric=weld_metric,
+            cost_factors=cost_factors,
+        )
+
     if cylinder:
         to_return = any_smart_loop_cylinder(
             min_var=min_var,
@@ -180,16 +196,16 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                    weld_metric=weld_metric, processes=processes,
                                    cost_factors=cost_factors)
         return to_return
-    elif algorithm == 'anysmart' and is_geometric:
+    elif algorithm in ('anysmart', 'scipy_de') and is_geometric:
         return geometric_summary_search(min_var=min_var, max_var=max_var, deltas=deltas,
                                         initial_structure_obj=initial_structure_obj, lateral_pressure=lateral_pressure,
                                         init_filter=init_filter_weight, side=side, const_chk=const_chk,
                                         fat_obj=fatigue_obj, fat_press=fat_press_ext_int, min_max_span=min_max_span,
                                         tot_len=tot_len, frame_distance=frame_distance,
-                                        algorithm='anysmart', predefiened_stiffener_iter=predefined_stiffener_iter,
+                                        algorithm=algorithm, predefiened_stiffener_iter=predefined_stiffener_iter,
                                         slamming_press=slamming_press, load_pre=load_pre,
                                         opt_girder_prop=opt_girder_prop, processes=processes, ml_algo=ml_algo,
-                                        weld_bias=weld_bias, builtup_stiffener=builtup_stiffener,
+                                        trials=trials, weld_bias=weld_bias, builtup_stiffener=builtup_stiffener,
                                         weld_metric=weld_metric, cost_factors=cost_factors)
     elif algorithm == 'anydetail' and not is_geometric:
         return any_optimize_loop(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, init_filter_weight,
@@ -197,6 +213,17 @@ def run_optmizataion(initial_structure_obj=None, min_var=None, max_var=None, lat
                                  slamming_press=slamming_press, weld_bias=weld_bias,
                                  builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
                                  cost_factors=cost_factors)
+    elif algorithm == 'scipy_de' and not is_geometric:
+        return scipy_de_loop_flat(min_var=min_var, max_var=max_var, deltas=deltas,
+                                  initial_structure_obj=initial_structure_obj,
+                                  lateral_pressure=lateral_pressure, trials=trials,
+                                  side=side, const_chk=const_chk, fat_dict=fat_dict,
+                                  fat_press=fat_press_ext_int, slamming_press=slamming_press,
+                                  predefiened_stiffener_iter=predefined_stiffener_iter,
+                                  puls_acceptance=puls_acceptance, fdwn=fdwn, fup=fup,
+                                  ml_algo=ml_algo, weld_bias=weld_bias,
+                                  builtup_stiffener=builtup_stiffener,
+                                  weld_metric=weld_metric, cost_factors=cost_factors)
     elif algorithm == 'random' and not is_geometric:
         return get_random_result(initial_structure_obj, lateral_pressure, min_var, max_var, deltas, trials=trials,
                                  side=side, const_chk=const_chk, fat_dict=fat_dict, fat_press=fat_press_ext_int,
@@ -606,10 +633,636 @@ def any_smart_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, lat
     new_cylinder_obj = create_new_cylinder_obj(initial_structure_obj, ass_var)
     return new_cylinder_obj, main_fail
 
+
+def _discrete_range_values(lower, upper, delta, include_upper=True):
+    if lower is None:
+        return [np.nan]
+
+    try:
+        lower = float(lower)
+        upper = float(upper)
+        delta = float(delta)
+    except Exception:
+        return [lower]
+
+    if delta <= 0.0:
+        return [lower] if abs(lower - upper) < 1e-12 else []
+
+    if abs(lower - upper) < 1e-12:
+        return [lower]
+
+    stop = upper + delta if include_upper else upper
+    values = np.arange(lower, stop, delta)
+    if include_upper:
+        values = values[values <= upper + abs(delta) * 1e-9]
+    return list(values)
+
+
+def _get_flat_component_candidates(min_var, max_var, deltas, predefiened_stiffener_iter=None):
+    """
+    Return either per-dimension candidate values or full predefined candidates.
+    """
+    if predefiened_stiffener_iter is not None:
+        return {
+            'mode': 'full',
+            'candidates': list(
+                any_get_all_combs(
+                    min_var,
+                    max_var,
+                    deltas,
+                    predef_stiffeners=[item.get_tuple() for item in predefiened_stiffener_iter],
+                )
+            ),
+        }
+
+    axes = [
+        _discrete_range_values(min_var[0], max_var[0], deltas[0], include_upper=True),
+        _discrete_range_values(min_var[1], max_var[1], deltas[1], include_upper=True),
+        _discrete_range_values(min_var[2], max_var[2], deltas[2], include_upper=True),
+        _discrete_range_values(min_var[3], max_var[3], deltas[3], include_upper=True),
+        _discrete_range_values(min_var[4], max_var[4], deltas[4], include_upper=True),
+        _discrete_range_values(min_var[5], max_var[5], deltas[5], include_upper=True),
+    ]
+
+    span_delta = deltas[4] if len(deltas) > 4 else 1.0
+    girder_delta = deltas[7] if len(deltas) > 7 else 1.0
+    axes.append(_discrete_range_values(min_var[6], max_var[6], span_delta, include_upper=False))
+    axes.append(_discrete_range_values(min_var[7], max_var[7], girder_delta, include_upper=False))
+
+    if len(min_var) >= 12:
+        girder_deltas = [
+            deltas[6] if len(deltas) > 6 else deltas[2],
+            deltas[7] if len(deltas) > 7 else deltas[3],
+            deltas[8] if len(deltas) > 8 else deltas[4],
+            deltas[9] if len(deltas) > 9 else deltas[5],
+        ]
+        for idx, delta in zip((8, 9, 10, 11), girder_deltas):
+            axes.append(_discrete_range_values(min_var[idx], max_var[idx], delta, include_upper=True))
+
+    return {'mode': 'axes', 'axes': axes}
+
+
+def _flat_candidate_from_indices(indices, candidate_space):
+    if candidate_space['mode'] == 'full':
+        candidates = candidate_space['candidates']
+        if len(candidates) == 0:
+            raise IndexError('No flat candidates')
+        candidate_idx = int(round(float(indices[0])))
+        candidate_idx = min(max(candidate_idx, 0), len(candidates) - 1)
+        return candidates[candidate_idx]
+
+    candidate = []
+    for idx, value in enumerate(indices):
+        axis = candidate_space['axes'][idx]
+        if len(axis) == 0:
+            raise IndexError('No flat candidates for dimension ' + str(idx))
+        candidate_idx = int(round(float(value)))
+        candidate_idx = min(max(candidate_idx, 0), len(axis) - 1)
+        candidate.append(axis[candidate_idx])
+    return tuple(candidate)
+
+
+def _flat_candidate_bounds(candidate_space):
+    if candidate_space['mode'] == 'full':
+        return [(0, len(candidate_space['candidates']) - 1)]
+    return [(0, len(axis) - 1) for axis in candidate_space['axes']]
+
+
+def _flat_ml_results_for_candidate(candidate, initial_structure_obj, lateral_pressure, chk,
+                                   puls_acceptance=0.87, fdwn=1, fup=0.5, ml_algo=None):
+    if not (chk[7] or chk[9]):
+        return None
+
+    try:
+        calc_object = create_new_calc_obj(initial_structure_obj, candidate, fdwn=fdwn, fup=fup)
+    except Exception:
+        return None
+
+    if chk[7]:
+        return _predict_semi_analytical_uf(
+            calc_object,
+            lateral_pressure,
+            default_acceptance=puls_acceptance,
+        )
+
+    if chk[9]:
+        prefix = _get_numeric_pipeline_prefix(calc_object)
+        ml_input = _get_ml_input_for_optimization(calc_object, lateral_pressure)
+        try:
+            mat_fac = float(initial_structure_obj.Plate.mat_factor)
+        except Exception:
+            mat_fac = 1.15
+        return _predict_numeric_uf_group(
+            ml_algo=ml_algo,
+            input_rows=[ml_input],
+            prefix=prefix,
+            mat_fac=mat_fac,
+        )[0]
+
+    return None
+
+
+def _select_best_flat_result(valid_results, initial_structure_obj, weld_bias=0.0,
+                             builtup_stiffener=False, weld_metric='weld_consumables',
+                             cost_factors=None):
+    if len(valid_results) == 0:
+        return None
+
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    cost_factors = normalize_cost_factors(cost_factors)
+    weld_metric = normalize_weld_metric(weld_metric)
+
+    try:
+        stiffener_type = (
+            initial_structure_obj.Stiffener.get_stiffener_type()
+            if initial_structure_obj.Stiffener is not None
+            else 'T'
+        )
+    except Exception:
+        stiffener_type = 'T'
+
+    if cost_factors is not None:
+        return min(
+            valid_results,
+            key=lambda item: calc_flat_objective_value(
+                item[2],
+                stiffener_type=stiffener_type,
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            ),
+        )
+
+    if weld_bias <= 0.0:
+        return min(valid_results, key=lambda item: calc_weight(item[2]))
+
+    if weld_bias >= 1.0:
+        return min(
+            valid_results,
+            key=lambda item: calc_weld_objective(
+                item[2],
+                stiffener_type=stiffener_type,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+            ),
+        )
+
+    weight_values = [calc_weight(item[2]) for item in valid_results]
+    weld_values = [
+        calc_weld_objective(
+            item[2],
+            stiffener_type=stiffener_type,
+            include_web_to_flange=builtup_stiffener,
+            weld_metric=weld_metric,
+        )
+        for item in valid_results
+    ]
+    positive_weight_values = [val for val in weight_values if val > 0.0]
+    positive_weld_values = [val for val in weld_values if val > 0.0]
+    weight_ref = min(positive_weight_values) if len(positive_weight_values) > 0 else 1.0
+    weld_ref = min(positive_weld_values) if len(positive_weld_values) > 0 else 1.0
+    weight_bias = 1.0 - weld_bias
+    best_idx = min(
+        range(len(valid_results)),
+        key=lambda idx: weight_bias * (weight_values[idx] / weight_ref) + weld_bias * (weld_values[idx] / weld_ref),
+    )
+    return valid_results[best_idx]
+
+
+def scipy_de_loop_flat(min_var, max_var, deltas, initial_structure_obj, lateral_pressure, trials=100000,
+                       side='p', const_chk=(True, True, True, True, True, True, True, False, False, False),
+                       fat_dict=None, fat_press=None, slamming_press=0, predefiened_stiffener_iter=None,
+                       puls_acceptance=0.87, fdwn=1, fup=0.5, ml_algo=None, weld_bias=0.0,
+                       builtup_stiffener=False, weld_metric='weld_consumables', cost_factors=None):
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
+    builtup_stiffener = bool(builtup_stiffener)
+
+    candidate_space = _get_flat_component_candidates(
+        min_var,
+        max_var,
+        deltas,
+        predefiened_stiffener_iter=predefiened_stiffener_iter,
+    )
+    bounds = _flat_candidate_bounds(candidate_space)
+    if any(upper < lower for lower, upper in bounds):
+        return None, None, None, False, []
+
+    cache = {}
+    valid_results = []
+    failed_results = []
+    valid_keys = set()
+    failed_keys = set()
+    popsize = 5
+    result_history_limit = 1000
+
+    try:
+        stiffener_type = (
+            initial_structure_obj.Stiffener.get_stiffener_type()
+            if initial_structure_obj.Stiffener is not None
+            else 'T'
+        )
+    except Exception:
+        stiffener_type = 'T'
+
+    def evaluate(index_values):
+        key = tuple(
+            min(max(int(round(float(value))), 0), int(bounds[idx][1]))
+            for idx, value in enumerate(index_values)
+        )
+        if key not in cache:
+            candidate = _flat_candidate_from_indices(key, candidate_space)
+            ml_results = _flat_ml_results_for_candidate(
+                candidate,
+                initial_structure_obj,
+                lateral_pressure,
+                const_chk,
+                puls_acceptance=puls_acceptance,
+                fdwn=fdwn,
+                fup=fup,
+                ml_algo=ml_algo,
+            )
+            result = any_constraints_all(
+                candidate,
+                initial_structure_obj,
+                lateral_pressure,
+                float('inf'),
+                side,
+                const_chk,
+                fat_dict,
+                fat_press,
+                slamming_press,
+                None,
+                False,
+                fdwn,
+                fup,
+                ml_results,
+                False,
+                weld_bias,
+                builtup_stiffener,
+                weld_metric,
+                cost_factors,
+            )
+            result = _compact_optimizer_result(result)
+            cache[key] = result
+
+            if result[0] is False:
+                if key not in failed_keys:
+                    _append_limited(failed_results, result, result_history_limit)
+                    failed_keys.add(key)
+            else:
+                if key not in valid_keys:
+                    valid_results.append(result)
+                    valid_keys.add(key)
+
+        result = cache[key]
+        if result[0] is False:
+            return float('inf')
+
+        return calc_flat_objective_value(
+            result[2],
+            stiffener_type=stiffener_type,
+            weld_bias=weld_bias,
+            include_web_to_flange=builtup_stiffener,
+            weld_metric=weld_metric,
+            cost_factors=cost_factors,
+        )
+
+    if all(lower == upper for lower, upper in bounds):
+        evaluate([lower for lower, _ in bounds])
+    else:
+        maxiter = _scipy_de_maxiter_from_evaluation_budget(trials, bounds, popsize)
+        try:
+            result = differential_evolution(
+                evaluate,
+                bounds=bounds,
+                integrality=[True for _ in bounds],
+                polish=False,
+                workers=1,
+                popsize=popsize,
+                maxiter=maxiter,
+                seed=1,
+            )
+            evaluate(result.x)
+        except Exception:
+            pass
+
+    best_result = _select_best_flat_result(
+        valid_results,
+        initial_structure_obj,
+        weld_bias=weld_bias,
+        builtup_stiffener=builtup_stiffener,
+        weld_metric=weld_metric,
+        cost_factors=cost_factors,
+    )
+
+    main_fail = list(failed_results)
+    for item in valid_results:
+        main_fail.append(item)
+
+    if best_result is None:
+        return None, None, None, False, main_fail
+
+    ass_var = best_result[2]
+    if len(ass_var) >= 12:
+        ass_var = [round(item, 10) for item in ass_var[0:12]]
+    elif len(ass_var) == 8:
+        ass_var = [round(item, 10) for item in ass_var[0:8]]
+    else:
+        ass_var = [round(item, 10) for item in ass_var[0:8]] + [ass_var[8]]
+
+    calc_object = create_new_calc_obj(initial_structure_obj, ass_var, fat_dict, fdwn=fdwn, fup=fup)[0]
+    calc_object.lat_press = lateral_pressure
+    return calc_object, fat_dict, True, main_fail
+
+
+def _get_cylinder_component_candidates(min_var, max_var, deltas, initial_structure_obj,
+                                       predefiened_stiffener_iter=None):
+    """
+    Build per-component cylinder candidate lists.
+
+    This mirrors the component generation in any_smart_loop_cylinder without
+    creating the full Cartesian product.  The SciPy discrete sampler selects
+    integer indices into these component lists.
+    """
+    component_candidates = []
+
+    for idx in range(len(min_var)):
+        if sum(min_var[idx]) == 0:
+            structure_to_check = [(0, 0, 0, 0, 0, 0, 0, 0), ]
+        else:
+            if any([predefiened_stiffener_iter is None, idx == 0]):
+                if initial_structure_obj.LongStfObj is not None:
+                    initial_structure_obj.LongStfObj.stiffener_type = 'T'
+                structure_to_check = any_get_all_combs(min_var[idx], max_var[idx], deltas[idx])
+            else:
+                structure_to_check = any_get_all_combs(
+                    min_var[idx],
+                    max_var[idx],
+                    deltas[idx],
+                    predef_stiffeners=[item.get_tuple() for item in predefiened_stiffener_iter],
+                )
+
+        component_candidates.append(list(structure_to_check))
+
+    return component_candidates
+
+
+def _cylinder_candidate_from_indices(indices, component_candidates):
+    candidate = []
+    for idx, value in enumerate(indices):
+        candidates = component_candidates[idx]
+        if len(candidates) == 0:
+            raise IndexError('No cylinder candidates for component ' + str(idx))
+        candidate_idx = int(round(float(value)))
+        candidate_idx = min(max(candidate_idx, 0), len(candidates) - 1)
+        candidate.append(candidates[candidate_idx])
+    return candidate
+
+
+def _scipy_de_maxiter_from_evaluation_budget(max_evaluations, bounds, popsize):
+    """
+    Convert an approximate function-evaluation budget to SciPy maxiter.
+
+    differential_evolution uses roughly (maxiter + 1) * popsize * N_free
+    evaluations when polish=False.
+    """
+    try:
+        max_evaluations = int(max_evaluations)
+    except Exception:
+        max_evaluations = 0
+
+    free_dimensions = sum(1 for lower, upper in bounds if upper > lower)
+    if free_dimensions == 0:
+        return 0
+
+    evaluations_per_iteration = max(int(popsize) * free_dimensions, 1)
+    return max(int(max_evaluations / evaluations_per_iteration) - 1, 0)
+
+
+def _select_best_cylinder_result(valid_results, weld_bias=0.0, builtup_stiffener=False,
+                                 weld_metric='weld_consumables', cost_factors=None):
+    """
+    Select the best valid cylinder result using the same winner policy as
+    any_smart_loop_cylinder.
+    """
+    if len(valid_results) == 0:
+        return None
+
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+    cost_factors = normalize_cost_factors(cost_factors)
+    weld_metric = normalize_weld_metric(weld_metric)
+
+    if cost_factors is not None:
+        return min(
+            valid_results,
+            key=lambda item: calc_cylinder_objective_value(
+                item[2],
+                weld_bias=weld_bias,
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            ),
+        )
+
+    if weld_bias <= 0.0:
+        return min(valid_results, key=lambda item: calc_weight_cylinder(item[2]))
+
+    if weld_bias >= 1.0:
+        return min(
+            valid_results,
+            key=lambda item: calc_weld_objective_cylinder(
+                item[2],
+                include_web_to_flange=builtup_stiffener,
+                weld_metric=weld_metric,
+            ),
+        )
+
+    weight_values = [calc_weight_cylinder(item[2]) for item in valid_results]
+    weld_values = [
+        calc_weld_objective_cylinder(
+            item[2],
+            include_web_to_flange=builtup_stiffener,
+            weld_metric=weld_metric,
+        )
+        for item in valid_results
+    ]
+
+    positive_weight_values = [val for val in weight_values if val > 0.0]
+    positive_weld_values = [val for val in weld_values if val > 0.0]
+    weight_ref = min(positive_weight_values) if len(positive_weight_values) > 0 else 1.0
+    weld_ref = min(positive_weld_values) if len(positive_weld_values) > 0 else 1.0
+    weight_bias = 1.0 - weld_bias
+
+    best_idx = min(
+        range(len(valid_results)),
+        key=lambda idx: weight_bias * (weight_values[idx] / weight_ref) + weld_bias * (weld_values[idx] / weld_ref),
+    )
+    return valid_results[best_idx]
+
+
+def _compact_optimizer_result(result):
+    """
+    Drop heavy calculation objects from optimizer bookkeeping.
+
+    any_constraints_cylinder may return a full candidate calc object as the
+    fifth tuple element.  The SciPy sampler only needs the status, reason,
+    candidate tuple, and utilization data.
+    """
+    try:
+        return tuple(result[:4])
+    except Exception:
+        return result
+
+
+def _append_limited(items, item, limit):
+    if len(items) < limit:
+        items.append(item)
+
+
+def scipy_de_loop_cylinder(min_var, max_var, deltas, initial_structure_obj, trials=100000,
+                           use_weight_filter=True, predefiened_stiffener_iter=None,
+                           weld_bias=0.0, builtup_stiffener=False,
+                           weld_metric='weld_consumables', cost_factors=None):
+    """
+    Cylinder optimization using SciPy differential evolution over discrete
+    component candidate indices.
+
+    The returned cylinder is always created from existing delta/predefined
+    candidates and is validated by any_constraints_cylinder.
+    """
+    try:
+        weld_bias = min(max(float(weld_bias), 0.0), 1.0)
+    except Exception:
+        weld_bias = 0.0
+
+    builtup_stiffener = bool(builtup_stiffener)
+    weld_metric = normalize_weld_metric(weld_metric)
+    cost_factors = normalize_cost_factors(cost_factors)
+
+    component_candidates = _get_cylinder_component_candidates(
+        min_var,
+        max_var,
+        deltas,
+        initial_structure_obj,
+        predefiened_stiffener_iter=predefiened_stiffener_iter,
+    )
+
+    if any(len(candidates) == 0 for candidates in component_candidates):
+        return None, None, None, False, []
+
+    bounds = [(0, len(candidates) - 1) for candidates in component_candidates]
+    cache = {}
+    valid_results = []
+    failed_results = []
+    valid_keys = set()
+    failed_keys = set()
+    popsize = 5
+    result_history_limit = 1000
+
+    def evaluate(index_values):
+        key = tuple(
+            min(max(int(round(float(value))), 0), len(component_candidates[idx]) - 1)
+            for idx, value in enumerate(index_values)
+        )
+        if key not in cache:
+            candidate = _cylinder_candidate_from_indices(key, component_candidates)
+            result = any_constraints_cylinder(
+                candidate,
+                initial_structure_obj,
+                False,
+                None,
+                'p',
+                (True, True, True, True, True, True, True, False, False, False),
+                None,
+                None,
+                0,
+                1,
+                0.5,
+                None,
+                weld_bias,
+                builtup_stiffener,
+                weld_metric,
+                cost_factors,
+            )
+            result = _compact_optimizer_result(result)
+            cache[key] = result
+
+            if result[0] is False:
+                if key not in failed_keys:
+                    _append_limited(failed_results, result, result_history_limit)
+                    failed_keys.add(key)
+            else:
+                if key not in valid_keys:
+                    valid_results.append(result)
+                    valid_keys.add(key)
+
+        result = cache[key]
+        if result[0] is False:
+            return float('inf')
+
+        return calc_cylinder_objective_value(
+            result[2],
+            weld_bias=weld_bias,
+            include_web_to_flange=builtup_stiffener,
+            weld_metric=weld_metric,
+            cost_factors=cost_factors,
+        )
+
+    if all(lower == upper for lower, upper in bounds):
+        evaluate([lower for lower, _ in bounds])
+    else:
+        maxiter = _scipy_de_maxiter_from_evaluation_budget(trials, bounds, popsize)
+        try:
+            result = differential_evolution(
+                evaluate,
+                bounds=bounds,
+                integrality=[True for _ in bounds],
+                polish=False,
+                workers=1,
+                popsize=popsize,
+                maxiter=maxiter,
+                seed=1,
+            )
+            evaluate(result.x)
+        except Exception:
+            pass
+
+    best_result = _select_best_cylinder_result(
+        valid_results,
+        weld_bias=weld_bias,
+        builtup_stiffener=builtup_stiffener,
+        weld_metric=weld_metric,
+        cost_factors=cost_factors,
+    )
+
+    main_fail = list(failed_results)
+    for item in valid_results:
+        main_fail.append(item)
+
+    if best_result is None:
+        return None, None, None, False, main_fail
+
+    new_cylinder_obj = create_new_cylinder_obj(initial_structure_obj, best_result[2])
+    return new_cylinder_obj, main_fail
+
+
 def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, lateral_pressure,
                              init_filter=float('inf'),
                              side='p', const_chk=(True, True, True, True, True, True), fat_obj=None, fat_press=None,
                              slamming_press=None, predefiened_stiffener_iter=None, processes=None, ml_algo=None,
+                             algorithm='anysmart', trials=10000,
                              weld_bias=0.0, builtup_stiffener=False, weld_metric='weld_consumables',
                              cost_factors=None):
     ''' Searching multiple sections using the smart loop. '''
@@ -624,16 +1277,37 @@ def any_smart_loop_geometric(min_var, max_var, deltas, initial_structure_obj, la
         else:
             this_predefiened_objects = None
 
-        opt_obj = any_smart_loop(min_var=min_var, max_var=max_var, deltas=deltas, initial_structure_obj=struc_obj,
-                                 lateral_pressure=lat_press, init_filter=init_filter, side=side,
-                                 const_chk=const_chk,
-                                 fat_dict=None if fatigue_obj is None else fatigue_obj.get_fatigue_properties(),
-                                 fat_press=None if fatigue_press is None else fatigue_press,
-                                 slamming_press=0 if slam_press is None else slam_press,
-                                 predefiened_stiffener_iter=this_predefiened_objects, processes=processes,
-                                 ml_algo=ml_algo, weld_bias=weld_bias,
-                                 builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
-                                 cost_factors=cost_factors)
+        if algorithm == 'scipy_de':
+            opt_obj = scipy_de_loop_flat(
+                min_var=min_var,
+                max_var=max_var,
+                deltas=deltas,
+                initial_structure_obj=struc_obj,
+                lateral_pressure=lat_press,
+                trials=trials,
+                side=side,
+                const_chk=const_chk,
+                fat_dict=None if fatigue_obj is None else fatigue_obj.get_fatigue_properties(),
+                fat_press=None if fatigue_press is None else fatigue_press,
+                slamming_press=0 if slam_press is None else slam_press,
+                predefiened_stiffener_iter=this_predefiened_objects,
+                ml_algo=ml_algo,
+                weld_bias=weld_bias,
+                builtup_stiffener=builtup_stiffener,
+                weld_metric=weld_metric,
+                cost_factors=cost_factors,
+            )
+        else:
+            opt_obj = any_smart_loop(min_var=min_var, max_var=max_var, deltas=deltas, initial_structure_obj=struc_obj,
+                                     lateral_pressure=lat_press, init_filter=init_filter, side=side,
+                                     const_chk=const_chk,
+                                     fat_dict=None if fatigue_obj is None else fatigue_obj.get_fatigue_properties(),
+                                     fat_press=None if fatigue_press is None else fatigue_press,
+                                     slamming_press=0 if slam_press is None else slam_press,
+                                     predefiened_stiffener_iter=this_predefiened_objects, processes=processes,
+                                     ml_algo=ml_algo, weld_bias=weld_bias,
+                                     builtup_stiffener=builtup_stiffener, weld_metric=weld_metric,
+                                     cost_factors=cost_factors)
 
         all_obj.append(opt_obj)
         idx += 1
@@ -647,7 +1321,7 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                              min_max_span=(2, 6), tot_len=None, frame_distance=None,
                              algorithm='anysmart', predefiened_stiffener_iter=None, reiterate=True,
                              processes=None, slamming_press=None, load_pre=False, opt_girder_prop=None,
-                             ml_algo=None, weld_bias=0.0, builtup_stiffener=False,
+                             ml_algo=None, trials=10000, weld_bias=0.0, builtup_stiffener=False,
                              weld_metric='weld_consumables', cost_factors=None):
     '''Geometric optimization of all relevant sections. '''
     try:
@@ -773,7 +1447,7 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                 min_var[0:6] += deltas / 2
                 max_var[0:6] -= deltas / 2
 
-            if algorithm == 'anysmart':
+            if algorithm in ('anysmart', 'scipy_de'):
                 if load_pre:
                     import pickle
                     with open('geo_opt_2.pickle', 'rb') as file:
@@ -790,6 +1464,8 @@ def geometric_summary_search(min_var=None, max_var=None, deltas=None, initial_st
                                                            predefiened_stiffener_iter=predefiened_stiffener_iter,
                                                            processes=processes,
                                                            ml_algo=ml_algo,
+                                                           algorithm=algorithm,
+                                                           trials=trials,
                                                            weld_bias=weld_bias,
                                                            builtup_stiffener=builtup_stiffener,
                                                            weld_metric=weld_metric,

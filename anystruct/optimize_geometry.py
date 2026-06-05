@@ -274,7 +274,7 @@ class CreateOptGeoWindow():
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=95)
         tk.Frame(self._frame, width=770, height=5, bg="grey", colormap="new").place(x=20, y=135)
 
-        algorithms = ('anysmart', ' ')
+        algorithms = ('anysmart', 'scipy_de')
 
         tk.Label(self._frame, text='-- Plate field span optimizer for plate fields separated by frames. --',
                  font='Verdana 15 bold').place(x=10, y=10)
@@ -381,6 +381,9 @@ class CreateOptGeoWindow():
                                           width=int(ent_w / 2))
 
         start_x, start_y, dx, dy = 20, 70, 100, 40
+        status_y = 170
+        objective_y = 205
+        canvas_y = 300
 
         tk.Label(self._frame, text='Processes\n (CPUs)', font='Verdana 9 bold', bg='silver') \
             .place(x=start_x + 8 * dx, y=start_y + 0.5 * dy)
@@ -391,12 +394,12 @@ class CreateOptGeoWindow():
         self._draw_scale = 500
         self._canvas_opt = tk.Canvas(self._frame, width=self._prop_canvas_dim[0], height=self._prop_canvas_dim[1],
                                      background='azure', relief='groove', borderwidth=2)
-        self._canvas_opt.place(x=start_x + 10.5 * dx, y=start_y + 5.0 * dy)
+        self._canvas_opt.place(x=start_x + 10.5 * dx, y=canvas_y)
         self._select_canvas_dim = (1000, 720)
         self._canvas_select = tk.Canvas(self._frame, width=self._select_canvas_dim[0],
                                         height=self._select_canvas_dim[1],
                                         background='azure', relief='groove', borderwidth=2)
-        self._canvas_select.place(x=start_x + 0 * dx, y=start_y + 5.0 * dy)
+        self._canvas_select.place(x=start_x + 0 * dx, y=canvas_y)
 
         # Labels for the pso
         self._lb_swarm_size = tk.Label(self._frame, text='swarm size')
@@ -428,14 +431,14 @@ class CreateOptGeoWindow():
             font='Verdana 9 bold',
             justify=tk.LEFT,
         )
-        self._running_time_info_label.place(x=start_x, y=start_y + 2.8 * dy)
+        self._running_time_info_label.place(x=start_x, y=status_y)
         tk.Label(self._frame, text='- Harmonize stiffener spacing for section.', font='Verdana 9 bold') \
-            .place(x=650, y=218)
+            .place(x=650, y=objective_y + 45)
         # self._runnig_time_label = tk.Label(self._frame, text='', font='Verdana 9 bold')
         # self._runnig_time_label.place(x=start_x + 2.7 * dx, y=start_y + 2.8 * dy)
         # tk.Label(self._frame, text='seconds ', font='Verdana 9 bold').place(x=start_x + 3.3 * dx, y=start_y + 2.8 * dy)
         self._result_label = tk.Label(self._frame, text='', font='Verdana 9 bold')
-        self._result_label.place(x=start_x, y=start_y + 3.4 * dy)
+        self._result_label.place(x=start_x + 4.8 * dx, y=status_y)
 
         self._ent_spacing_upper.place(x=start_x + dx * 2, y=start_y)
         self._ent_delta_spacing.place(x=start_x + dx * 2, y=start_y + dy)
@@ -574,7 +577,7 @@ class CreateOptGeoWindow():
         self._new_weld_bias.trace_add('write', self._update_weld_bias_label)
         self._new_weld_metric.trace_add('write', self._update_weld_bias_label)
 
-        start_y, start_x, dy = 620, 100, 25
+        start_y, start_x, dy = 655, 100, 25
         tk.Label(self._frame, text='Check for minimum section modulus').place(x=start_x + dx * 9.7, y=start_y + 4 * dy)
         tk.Label(self._frame, text='Check for minimum plate thk.').place(x=start_x + dx * 9.7, y=start_y + 5 * dy)
         tk.Label(self._frame, text='Check for minimum shear area').place(x=start_x + dx * 9.7, y=start_y + 6 * dy)
@@ -628,7 +631,7 @@ class CreateOptGeoWindow():
         tk.Checkbutton(self._frame, variable=self._new_check_buckling_ml_numeric).place(x=start_x + dx * 12,
                                                                                         y=start_y + 13 * dy)
 
-        tk.Checkbutton(self._frame, variable=self._new_harmonize_spacing).place(x=620, y=216)
+        tk.Checkbutton(self._frame, variable=self._new_harmonize_spacing).place(x=620, y=objective_y + 41)
 
         # Stress scaling
         self._new_fup = tk.DoubleVar()
@@ -686,7 +689,7 @@ class CreateOptGeoWindow():
         # Optimization objective bias.
         # For geometric optimization this is forwarded to optimize.py.
         # optimize.py must skip weld calculations when weld_bias == 0.0.
-        obj_x, obj_y = 20, 175
+        obj_x, obj_y = 20, objective_y
 
         tk.Label(
             self._frame,
@@ -801,6 +804,28 @@ class CreateOptGeoWindow():
             self._ent_maxiter.place_forget()
             self._ent_minstep.place_forget()
             self._ent_minfunc.place_forget()
+            self.algorithm_random_label.config(text='Number of trials')
+            self._ent_random_trials.place(x=start_x + dx * 11.3, y=start_y + 1.2 * dy)
+            self.algorithm_random_label.place(x=start_x + dx * 11.3, y=start_y + 0.5 * dy)
+
+        elif self._new_algorithm.get() == 'scipy_de':
+            self._ent_random_trials.place_forget()
+            self.algorithm_random_label.place_forget()
+            self._lb_swarm_size.place_forget()
+            self._lb_omega.place_forget()
+            self._lb_phip.place_forget()
+            self._lb_phig.place_forget()
+            self._lb_maxiter.place_forget()
+            self._lb_minstep.place_forget()
+            self._lb_minfunc.place_forget()
+            self._ent_swarm_size.place_forget()
+            self._ent_omega.place_forget()
+            self._ent_phip.place_forget()
+            self._ent_phig.place_forget()
+            self._ent_maxiter.place_forget()
+            self._ent_minstep.place_forget()
+            self._ent_minfunc.place_forget()
+            self.algorithm_random_label.config(text='Max evaluations')
             self._ent_random_trials.place(x=start_x + dx * 11.3, y=start_y + 1.2 * dy)
             self.algorithm_random_label.place(x=start_x + dx * 11.3, y=start_y + 0.5 * dy)
 
@@ -967,7 +992,8 @@ class CreateOptGeoWindow():
 
                     geo_results = op.run_optmizataion(initial_structure_obj=init_objects, min_var=this_min_var,
                                                       max_var=this_max_var, lateral_pressure=lateral_press,
-                                                      deltas=self.get_deltas(), algorithm='anysmart',
+                                                      deltas=self.get_deltas(), algorithm=self._new_algorithm.get(),
+                                                      trials=self._new_algorithm_random_trials.get(),
                                                       side=pressure_side,
                                                       const_chk=contraints, pso_options=self.pso_parameters,
                                                       is_geometric=True, fatigue_obj=fatigue_objects,
@@ -1000,7 +1026,8 @@ class CreateOptGeoWindow():
             else:
                 geo_results = op.run_optmizataion(initial_structure_obj=init_objects, min_var=self.get_lower_bounds(),
                                                   max_var=self.get_upper_bounds(), lateral_pressure=lateral_press,
-                                                  deltas=self.get_deltas(), algorithm='anysmart', side=pressure_side,
+                                                  deltas=self.get_deltas(), algorithm=self._new_algorithm.get(),
+                                                  trials=self._new_algorithm_random_trials.get(), side=pressure_side,
                                                   const_chk=contraints, pso_options=self.pso_parameters,
                                                   is_geometric=True, fatigue_obj=fatigue_objects,
                                                   fat_press_ext_int=fat_press_ext_int,
@@ -1740,6 +1767,10 @@ class CreateOptGeoWindow():
                                     'RANDOM_NO_BOUNDS:\n'
                                     '           Same as RANDOM, but does not use the defined deltas.\n'
                                     '           The deltas is set to 1 mm for all dimensions/thicknesses.\n\n'
+                                    'SCIPY_DE:\n'
+                                    '           Uses SciPy differential evolution to sample snapped candidates\n'
+                                    '           from the current bounds and deltas.\n'
+                                    '           Number of trials is used as the max evaluation budget.\n\n'
                                     'ANYDETAIL:\n'
                                     '           Same as for ANYSMART, but will take some more time and\n'
                                     '           provide a chart of weight development during execution.\n\n'
