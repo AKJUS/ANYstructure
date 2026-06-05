@@ -32,6 +32,10 @@ For documentation:
 
 https://anystructure.readthedocs.io/en/latest/
 
+For tutorials:
+
+https://www.youtube.com/@ANYopenSoft
+
 ## Development setup ##
 
 ANYstructure is currently maintained as a Python package named `anystruct`. The GUI can still be launched through the `ANYstructure` console command after an editable install.
