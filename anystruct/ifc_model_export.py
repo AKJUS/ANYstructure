@@ -96,6 +96,12 @@ class IfcContext:
     body_context: Any
     material: Any
     summary: ExportSummary
+    boolean_join_all_solids: bool = False
+    solid_operands: list[Any] = field(default_factory=list)
+    solid_source_elements: list[Any] = field(default_factory=list)
+    length_unit: str = "m"
+    length_scale: float = 1.0
+    transformation_scale: float = 1.0
 
 
 IFCCONVERT_FORMATS = {
@@ -517,31 +523,69 @@ def _flat_lp_from_gui(app: Any, span: float, spacing: float) -> float:
     return max(2.0 * span, 2.0 * spacing, 0.8)
 
 
+def _normalise_export_length_unit(length_unit: str | None) -> tuple[str, float, str | None]:
+    unit = str(length_unit or "m").strip().lower()
+    if unit in {"m", "meter", "metre", "meters", "metres"}:
+        return "m", 1.0, None
+    if unit in {"mm", "millimeter", "millimetre", "millimeters", "millimetres"}:
+        return "mm", 1000.0, "MILLI"
+    raise ValueError("Unsupported export length unit: " + str(length_unit))
+
+
+def _normalise_transformation_scale(transformation_scale: float | str | None) -> float:
+    if transformation_scale in [None, ""]:
+        return 1.0
+    try:
+        scale = float(transformation_scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Transformation scale must be a number.") from exc
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("Transformation scale must be a positive finite number.")
+    return scale
+
+
+def _scale_value(value: float, length_scale: float) -> float:
+    return float(value) * float(length_scale)
+
+
+def _scale_point(point: Iterable[float], length_scale: float) -> tuple[float, ...]:
+    return tuple(_scale_value(v, length_scale) for v in point)
+
+
+def _cartesian_point(ctx: IfcContext, point: Iterable[float]) -> Any:
+    return ctx.model.createIfcCartesianPoint(_scale_point(point, ctx.length_scale))
+
+
 def _axis2_placement_3d(model: Any, location=(0.0, 0.0, 0.0), axis=(0.0, 0.0, 1.0),
-                        ref_direction=(1.0, 0.0, 0.0)) -> Any:
+                        ref_direction=(1.0, 0.0, 0.0), length_scale: float = 1.0) -> Any:
     return model.createIfcAxis2Placement3D(
-        model.createIfcCartesianPoint(tuple(float(v) for v in location)),
+        model.createIfcCartesianPoint(_scale_point(location, length_scale)),
         model.createIfcDirection(tuple(float(v) for v in axis)),
         model.createIfcDirection(tuple(float(v) for v in ref_direction)),
     )
 
 
-def _axis2_placement_2d(model: Any, location=(0.0, 0.0), ref_direction=(1.0, 0.0)) -> Any:
+def _axis2_placement_2d(model: Any, location=(0.0, 0.0), ref_direction=(1.0, 0.0),
+                        length_scale: float = 1.0) -> Any:
     return model.createIfcAxis2Placement2D(
-        model.createIfcCartesianPoint(tuple(float(v) for v in location)),
+        model.createIfcCartesianPoint(_scale_point(location, length_scale)),
         model.createIfcDirection(tuple(float(v) for v in ref_direction)),
     )
 
 
 def _local_placement(model: Any, location=(0.0, 0.0, 0.0), axis=(0.0, 0.0, 1.0),
-                     ref_direction=(1.0, 0.0, 0.0), relative_to=None) -> Any:
+                     ref_direction=(1.0, 0.0, 0.0), relative_to=None, length_scale: float = 1.0) -> Any:
     return model.createIfcLocalPlacement(
         relative_to,
-        _axis2_placement_3d(model, location, axis, ref_direction),
+        _axis2_placement_3d(model, location, axis, ref_direction, length_scale=length_scale),
     )
 
 
-def _create_basic_context(filename: str, project_name: str, material_name: str = "Steel") -> IfcContext:
+def _create_basic_context(filename: str, project_name: str, material_name: str = "Steel",
+                          length_unit: str = "m", transformation_scale: float | str | None = 1.0) -> IfcContext:
+    normalised_unit, unit_scale, si_prefix = _normalise_export_length_unit(length_unit)
+    transformation_scale = _normalise_transformation_scale(transformation_scale)
+    length_scale = unit_scale * transformation_scale
     model = ifcopenshell.file(schema="IFC4")
 
     world = _axis2_placement_3d(model)
@@ -566,10 +610,10 @@ def _create_basic_context(filename: str, project_name: str, material_name: str =
         None,
     )
 
-    length_unit = model.createIfcSIUnit(None, "LENGTHUNIT", None, "METRE")
+    length_unit_obj = model.createIfcSIUnit(None, "LENGTHUNIT", si_prefix, "METRE")
     area_unit = model.createIfcSIUnit(None, "AREAUNIT", None, "SQUARE_METRE")
     volume_unit = model.createIfcSIUnit(None, "VOLUMEUNIT", None, "CUBIC_METRE")
-    unit_assignment = model.createIfcUnitAssignment([length_unit, area_unit, volume_unit])
+    unit_assignment = model.createIfcUnitAssignment([length_unit_obj, area_unit, volume_unit])
 
     project = model.createIfcProject(
         _guid(),
@@ -602,6 +646,9 @@ def _create_basic_context(filename: str, project_name: str, material_name: str =
         body_context=body_subcontext,
         material=material,
         summary=ExportSummary(filename=filename, project_name=project_name),
+        length_unit=normalised_unit,
+        length_scale=length_scale,
+        transformation_scale=transformation_scale,
     )
 
 
@@ -614,6 +661,65 @@ def _assign_to_storey(ctx: IfcContext, element: Any) -> None:
 def _assign_material(ctx: IfcContext, element: Any) -> None:
     ctx.model.createIfcRelAssociatesMaterial(
         _guid(), None, "Material", None, [element], ctx.material
+    )
+
+
+def _track_solid_operand(ctx: IfcContext, element: Any, operand: Any) -> None:
+    if not ctx.boolean_join_all_solids:
+        return
+    ctx.solid_operands.append(operand)
+    ctx.solid_source_elements.append(element)
+
+
+def _remove_product_from_export_tree(ctx: IfcContext, element: Any) -> None:
+    """Detach an IFC product and its direct relationships from the output tree."""
+    try:
+        inverse_entities = list(ctx.model.get_inverse(element))
+    except Exception:
+        inverse_entities = []
+    for inverse in inverse_entities:
+        try:
+            ctx.model.remove(inverse)
+        except Exception:
+            pass
+    try:
+        ctx.model.remove(element)
+    except Exception:
+        pass
+
+
+def _replace_solid_parts_with_single_product(ctx: IfcContext, active_line: str) -> None:
+    if not ctx.boolean_join_all_solids:
+        return
+    if len(ctx.solid_operands) < 2:
+        return
+
+    name = f"{active_line} Complete joined model"
+    rep = ctx.model.createIfcShapeRepresentation(
+        ctx.body_context,
+        "Body",
+        "SolidModel",
+        list(ctx.solid_operands),
+    )
+    shape = ctx.model.createIfcProductDefinitionShape(None, None, [rep])
+    placement = _local_placement(ctx.model)
+    element = _create_building_element(ctx, "IfcBuildingElementProxy", name, placement, shape, "ELEMENT")
+    _assign_to_storey(ctx, element)
+    _assign_material(ctx, element)
+    _add_property_set(ctx, element, "ANYstructureDimensions", {
+        "model_type": "single_product_complete_model",
+        "join_method": "single_ifc_product_multi_solid_body",
+        "source_solid_part_count": int(len(ctx.solid_source_elements)),
+        "thickness_exported_as_geometry": True,
+    })
+
+    for source_element in list(ctx.solid_source_elements):
+        _remove_product_from_export_tree(ctx, source_element)
+
+    ctx.summary.elements[:] = [name]
+    ctx.summary.warnings.append(
+        "Solid export parts were written as one IFC product with multiple solid bodies. "
+        "This avoids the expensive global boolean UNION that can make downstream CAD/FE tools hang."
     )
 
 
@@ -683,15 +789,16 @@ def _create_oriented_rectangular_swept_solid(
     profile = ctx.model.createIfcRectangleProfileDef(
         "AREA",
         None,
-        _axis2_placement_2d(ctx.model),
-        xdim,
-        ydim,
+        _axis2_placement_2d(ctx.model, length_scale=ctx.length_scale),
+        _scale_value(xdim, ctx.length_scale),
+        _scale_value(ydim, ctx.length_scale),
     )
     return ctx.model.createIfcExtrudedAreaSolid(
         profile,
-        _axis2_placement_3d(ctx.model, center, axis=local_z, ref_direction=local_x),
+        _axis2_placement_3d(ctx.model, center, axis=local_z, ref_direction=local_x,
+                            length_scale=ctx.length_scale),
         ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
-        depth,
+        _scale_value(depth, ctx.length_scale),
     )
 
 
@@ -704,14 +811,14 @@ def _create_solid_cylinder_for_boolean(ctx: IfcContext, radius: float, z0: float
     profile = ctx.model.createIfcCircleProfileDef(
         "AREA",
         None,
-        _axis2_placement_2d(ctx.model),
-        radius,
+        _axis2_placement_2d(ctx.model, length_scale=ctx.length_scale),
+        _scale_value(radius, ctx.length_scale),
     )
     return ctx.model.createIfcExtrudedAreaSolid(
         profile,
-        _axis2_placement_3d(ctx.model, (0.0, 0.0, min(z0, z1))),
+        _axis2_placement_3d(ctx.model, (0.0, 0.0, min(z0, z1)), length_scale=ctx.length_scale),
         ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
-        depth,
+        _scale_value(depth, ctx.length_scale),
     )
 
 
@@ -813,6 +920,7 @@ def _add_cylinder_fitted_longitudinal_web_solid(
         props.update(extra_properties)
     _add_property_set(ctx, element, "ANYstructureDimensions", props)
     ctx.summary.elements.append(name)
+    _track_solid_operand(ctx, element, fitted)
     return element
 
 
@@ -823,7 +931,7 @@ def _ifc_faces_from_points(ctx: IfcContext, faces: Iterable[Iterable[tuple[float
         for point in face_points:
             if len(point) != 3:
                 raise ValueError("IFC surface point must have three coordinates.")
-            pts.append(ctx.model.createIfcCartesianPoint(tuple(float(v) for v in point)))
+            pts.append(_cartesian_point(ctx, point))
         if len(pts) < 3:
             continue
         poly_loop = ctx.model.createIfcPolyLoop(pts)
@@ -834,11 +942,7 @@ def _ifc_faces_from_points(ctx: IfcContext, faces: Iterable[Iterable[tuple[float
 
 def _product_shape_from_closed_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> Any:
     """Create a faceted B-rep solid from closed polygon faces."""
-    ifc_faces = _ifc_faces_from_points(ctx, faces)
-    if not ifc_faces:
-        raise ValueError("No valid IFC solid faces were generated.")
-    closed_shell = ctx.model.createIfcClosedShell(ifc_faces)
-    brep = ctx.model.createIfcFacetedBrep(closed_shell)
+    brep = _faceted_brep_from_closed_faces(ctx, faces)
     rep = ctx.model.createIfcShapeRepresentation(
         ctx.body_context,
         "Body",
@@ -846,6 +950,14 @@ def _product_shape_from_closed_faces(ctx: IfcContext, faces: Iterable[Iterable[t
         [brep],
     )
     return ctx.model.createIfcProductDefinitionShape(None, None, [rep])
+
+
+def _faceted_brep_from_closed_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> Any:
+    ifc_faces = _ifc_faces_from_points(ctx, faces)
+    if not ifc_faces:
+        raise ValueError("No valid IFC solid faces were generated.")
+    closed_shell = ctx.model.createIfcClosedShell(ifc_faces)
+    return ctx.model.createIfcFacetedBrep(closed_shell)
 
 
 def _product_shape_from_faces(ctx: IfcContext, faces: Iterable[Iterable[tuple[float, float, float]]]) -> Any:
@@ -881,7 +993,7 @@ def _ifc_parameter_value(ctx: IfcContext, value: float) -> Any:
 
 def _vertex_point(ctx: IfcContext, point: tuple[float, float, float]) -> Any:
     return ctx.model.createIfcVertexPoint(
-        ctx.model.createIfcCartesianPoint(tuple(float(v) for v in point))
+        _cartesian_point(ctx, point)
     )
 
 
@@ -901,8 +1013,8 @@ def _edge_curve(ctx: IfcContext, start_vertex: Any, end_vertex: Any, curve: Any,
 def _line_curve_between(ctx: IfcContext, p0: tuple[float, float, float],
                         p1: tuple[float, float, float]) -> Any:
     return ctx.model.createIfcPolyline([
-        ctx.model.createIfcCartesianPoint(tuple(float(v) for v in p0)),
-        ctx.model.createIfcCartesianPoint(tuple(float(v) for v in p1)),
+        _cartesian_point(ctx, p0),
+        _cartesian_point(ctx, p1),
     ])
 
 
@@ -919,8 +1031,9 @@ def _trimmed_circle_curve_3d(ctx: IfcContext, radius: float, z: float,
             location=(0.0, 0.0, float(z)),
             axis=(0.0, 0.0, 1.0),
             ref_direction=(1.0, 0.0, 0.0),
+            length_scale=ctx.length_scale,
         ),
-        max(float(radius), EPS),
+        _scale_value(max(float(radius), EPS), ctx.length_scale),
     )
     return ctx.model.createIfcTrimmedCurve(
         circle,
@@ -1041,8 +1154,9 @@ def _product_shape_from_advanced_cylindrical_shell_with_arc_bounds(
             location=(0.0, 0.0, 0.0),
             axis=(0.0, 0.0, 1.0),
             ref_direction=(1.0, 0.0, 0.0),
+            length_scale=ctx.length_scale,
         ),
-        radius,
+        _scale_value(radius, ctx.length_scale),
     )
 
     ifc_faces = []
@@ -1139,7 +1253,14 @@ def _add_faceted_solid_element(ctx: IfcContext, ifc_class: str, name: str,
                                faces: Iterable[Iterable[tuple[float, float, float]]],
                                predefined_type: str | None = None,
                                extra_properties: dict[str, Any] | None = None) -> Any:
-    shape = _product_shape_from_closed_faces(ctx, faces)
+    brep = _faceted_brep_from_closed_faces(ctx, faces)
+    rep = ctx.model.createIfcShapeRepresentation(
+        ctx.body_context,
+        "Body",
+        "Brep",
+        [brep],
+    )
+    shape = ctx.model.createIfcProductDefinitionShape(None, None, [rep])
     placement = _local_placement(ctx.model)
     element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
     _assign_to_storey(ctx, element)
@@ -1152,6 +1273,7 @@ def _add_faceted_solid_element(ctx: IfcContext, ifc_class: str, name: str,
         props.update(extra_properties)
     _add_property_set(ctx, element, "ANYstructureDimensions", props)
     ctx.summary.elements.append(name)
+    _track_solid_operand(ctx, element, brep)
     return element
 
 
@@ -1295,15 +1417,15 @@ def _create_rectangular_swept_solid(ctx: IfcContext, xdim: float, ydim: float, d
     profile = ctx.model.createIfcRectangleProfileDef(
         "AREA",
         None,
-        _axis2_placement_2d(ctx.model),
-        xdim,
-        ydim,
+        _axis2_placement_2d(ctx.model, length_scale=ctx.length_scale),
+        _scale_value(xdim, ctx.length_scale),
+        _scale_value(ydim, ctx.length_scale),
     )
     return ctx.model.createIfcExtrudedAreaSolid(
         profile,
-        _axis2_placement_3d(ctx.model),
+        _axis2_placement_3d(ctx.model, length_scale=ctx.length_scale),
         ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
-        depth,
+        _scale_value(depth, ctx.length_scale),
     )
 
 
@@ -1315,15 +1437,36 @@ def _create_circle_hollow_swept_solid(ctx: IfcContext, outer_radius: float, wall
     profile = ctx.model.createIfcCircleHollowProfileDef(
         "AREA",
         None,
-        _axis2_placement_2d(ctx.model),
-        outer_radius,
-        wall_thickness,
+        _axis2_placement_2d(ctx.model, length_scale=ctx.length_scale),
+        _scale_value(outer_radius, ctx.length_scale),
+        _scale_value(wall_thickness, ctx.length_scale),
     )
     return ctx.model.createIfcExtrudedAreaSolid(
         profile,
-        _axis2_placement_3d(ctx.model),
+        _axis2_placement_3d(ctx.model, length_scale=ctx.length_scale),
         ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
-        depth,
+        _scale_value(depth, ctx.length_scale),
+    )
+
+
+def _create_positioned_circle_hollow_swept_solid(ctx: IfcContext, outer_radius: float, wall_thickness: float,
+                                                 z0: float, z1: float) -> Any:
+    outer_radius = max(float(outer_radius), EPS)
+    wall_thickness = min(max(float(wall_thickness), EPS), outer_radius * 0.95)
+    depth = max(abs(float(z1) - float(z0)), EPS)
+    profile = ctx.model.createIfcCircleHollowProfileDef(
+        "AREA",
+        None,
+        _axis2_placement_2d(ctx.model, length_scale=ctx.length_scale),
+        _scale_value(outer_radius, ctx.length_scale),
+        _scale_value(wall_thickness, ctx.length_scale),
+    )
+    return ctx.model.createIfcExtrudedAreaSolid(
+        profile,
+        _axis2_placement_3d(ctx.model, (0.0, 0.0, min(float(z0), float(z1))),
+                            length_scale=ctx.length_scale),
+        ctx.model.createIfcDirection((0.0, 0.0, 1.0)),
+        _scale_value(depth, ctx.length_scale),
     )
 
 
@@ -1339,7 +1482,8 @@ def _add_box_element(ctx: IfcContext, ifc_class: str, name: str, x0: float, x1: 
     depth = max(z1 - z0, EPS)
     solid = _create_rectangular_swept_solid(ctx, xdim, ydim, depth)
     shape = _product_shape_from_solid(ctx, solid)
-    placement = _local_placement(ctx.model, ((x0 + x1) / 2.0, (y0 + y1) / 2.0, z0))
+    placement = _local_placement(ctx.model, ((x0 + x1) / 2.0, (y0 + y1) / 2.0, z0),
+                                 length_scale=ctx.length_scale)
     element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
     _assign_to_storey(ctx, element)
     _assign_material(ctx, element)
@@ -1351,6 +1495,19 @@ def _add_box_element(ctx: IfcContext, ifc_class: str, name: str, x0: float, x1: 
         props.update(extra_properties)
     _add_property_set(ctx, element, "ANYstructureDimensions", props)
     ctx.summary.elements.append(name)
+    _track_solid_operand(
+        ctx,
+        element,
+        _create_oriented_rectangular_swept_solid(
+            ctx,
+            ((x0 + x1) / 2.0, (y0 + y1) / 2.0, z0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            xdim,
+            ydim,
+            depth,
+        ),
+    )
     return element
 
 
@@ -1386,7 +1543,8 @@ def _add_oriented_box_element(ctx: IfcContext, ifc_class: str, name: str, center
     """Add a rectangular swept solid with local X/ref direction and local Z/extrusion axis."""
     solid = _create_rectangular_swept_solid(ctx, xdim, ydim, depth)
     shape = _product_shape_from_solid(ctx, solid)
-    placement = _local_placement(ctx.model, center, axis=local_z, ref_direction=local_x)
+    placement = _local_placement(ctx.model, center, axis=local_z, ref_direction=local_x,
+                                 length_scale=ctx.length_scale)
     element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
     _assign_to_storey(ctx, element)
     _assign_material(ctx, element)
@@ -1402,6 +1560,11 @@ def _add_oriented_box_element(ctx: IfcContext, ifc_class: str, name: str, center
         props.update(extra_properties)
     _add_property_set(ctx, element, "ANYstructureDimensions", props)
     ctx.summary.elements.append(name)
+    _track_solid_operand(
+        ctx,
+        element,
+        _create_oriented_rectangular_swept_solid(ctx, center, local_x, local_z, xdim, ydim, depth),
+    )
     return element
 
 
@@ -1824,8 +1987,11 @@ def _add_cylindrical_wall_solid(ctx: IfcContext, ifc_class: str, name: str, radi
     is_full_circle = abs(abs(theta_end - theta_start) - 2.0 * math.pi) <= 1.0e-7
     if is_full_circle:
         solid = _create_circle_hollow_swept_solid(ctx, outer_radius, outer_radius - inner_radius, abs(z1 - z0))
+        joined_operand = _create_positioned_circle_hollow_swept_solid(
+            ctx, outer_radius, outer_radius - inner_radius, z0, z1
+        )
         shape = _product_shape_from_solid(ctx, solid)
-        placement = _local_placement(ctx.model, (0.0, 0.0, min(z0, z1)))
+        placement = _local_placement(ctx.model, (0.0, 0.0, min(z0, z1)), length_scale=ctx.length_scale)
         element = _create_building_element(ctx, ifc_class, name, placement, shape, predefined_type)
         _assign_to_storey(ctx, element)
         _assign_material(ctx, element)
@@ -1835,6 +2001,7 @@ def _add_cylindrical_wall_solid(ctx: IfcContext, ifc_class: str, name: str, radi
         })
         _add_property_set(ctx, element, "ANYstructureDimensions", props)
         ctx.summary.elements.append(name)
+        _track_solid_operand(ctx, element, joined_operand)
         return
 
     segments = _segment_count_for_arc(radius, theta_start, theta_end)
@@ -2202,6 +2369,9 @@ def export_selected_structure_from_application(
     ifcconvert_path: str | None = None,
     keep_intermediate_ifc: bool = True,
     shell_export: bool = True,
+    boolean_join_all_solids: bool = False,
+    length_unit: str = "m",
+    transformation_scale: float | str | None = 1.0,
 ) -> ExportSummary:
     """Export the active ANYstructure line as an IFC solid or shell model.
 
@@ -2231,8 +2401,21 @@ def export_selected_structure_from_application(
         When True, export zero-thickness shell/surface geometry with nominal
         thickness stored as metadata.  When False, export plate/web/flange
         thickness as geometry.
+    boolean_join_all_solids:
+        When True for solid export, replace the separate plate/member products
+        with one IFC product containing all solid bodies for downstream meshing
+        workflows.  The exporter intentionally avoids a global IFC boolean UNION
+        because that can make converters and FE importers hang.
+    length_unit:
+        Export geometry length unit.  ``m`` writes metre coordinates; ``mm``
+        writes millimetre coordinates and declares IFC length units as millimetres.
+    transformation_scale:
+        Positive scale factor applied to exported geometry coordinates and profile
+        dimensions.  ``1.0`` exports the model at its native size.
     """
     output_format = _normalise_export_format(output_format, filename)
+    length_unit, _length_scale, _si_prefix = _normalise_export_length_unit(length_unit)
+    transformation_scale = _normalise_transformation_scale(transformation_scale)
     requested_filename = filename
 
     if output_format == "ifc":
@@ -2261,7 +2444,14 @@ def export_selected_structure_from_application(
         material_yield = 355.0
     material_name = f"Steel S{int(round(material_yield))}"
     project_name = "ANYstructure IFC model - " + str(active_line)
-    ctx = _create_basic_context(native_ifc_filename, project_name, material_name=material_name)
+    ctx = _create_basic_context(
+        native_ifc_filename,
+        project_name,
+        material_name=material_name,
+        length_unit=length_unit,
+        transformation_scale=transformation_scale,
+    )
+    ctx.boolean_join_all_solids = bool(boolean_join_all_solids) and not bool(shell_export)
 
     try:
         side_sign = -1.0 if bool(getattr(app, "_new_prop_3d_opposite_side").get()) else 1.0
@@ -2283,6 +2473,8 @@ def export_selected_structure_from_application(
             raise ValueError("Could not read flat panel structure object from selected line.") from error
         _add_flat_structure(ctx, app, all_obj, active_line, side_sign, shell_export=shell_export)
 
+    _replace_solid_parts_with_single_product(ctx, active_line)
+
     _add_property_set(ctx, ctx.project, "ANYstructureExport", {
         "active_line": active_line,
         "source": "ANYstructure",
@@ -2292,6 +2484,10 @@ def export_selected_structure_from_application(
         "export_model_type": "zero_thickness_shell_surface" if shell_export else "model_based_cad",
         "shell_export": bool(shell_export),
         "thickness_exported_as_geometry": not bool(shell_export),
+        "boolean_join_all_solids": bool(ctx.boolean_join_all_solids),
+        "export_length_unit": ctx.length_unit,
+        "export_length_scale_from_m": ctx.length_scale,
+        "transformation_scale": ctx.transformation_scale,
     })
 
     _write_ifc_atomic(ctx.model, native_ifc_filename)

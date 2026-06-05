@@ -368,7 +368,7 @@ class CylinderStructurePropertyService:
 
         geometry = api_helpers.geometry_id_for_domain(request.calculation_domain)
         dummy_data = cls._dummy_data(request)
-        shell_dict = cls._shell_dict(request)
+        shell_dict = cls._shell_dict(request, geometry=geometry)
         long_dict = cls._longitudinal_dict(request)
         ring_stf_dict = cls._ring_stiffener_dict(request)
         ring_frame_dict = cls._ring_frame_dict(request)
@@ -456,12 +456,15 @@ class CylinderStructurePropertyService:
         }
 
     @staticmethod
-    def _shell_dict(request):
+    def _shell_dict(request, geometry=None):
         values = request.shell_values
         cone_r1 = values.get('cone_r1')
         cone_r2 = values.get('cone_r2')
         cone_length = values.get('cone_length')
-        if cone_r1 not in [None, 0] and cone_r2 not in [None, 0] and cone_length not in [None, 0]:
+        if geometry is None:
+            geometry = api_helpers.geometry_id_for_domain(request.calculation_domain)
+        cone_values_are_defined = cone_r1 not in [None, 0] and cone_r2 not in [None, 0] and cone_length not in [None, 0]
+        if geometry == 9 and cone_values_are_defined:
             alpha = math.degrees(math.atan(abs(cone_r2 - cone_r1) / cone_length))
             cos_alpha = math.cos(math.radians(alpha))
             radius = (cone_r1 + cone_r2) / (2 * cos_alpha)
