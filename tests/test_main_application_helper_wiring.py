@@ -192,6 +192,11 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "Recommended default" not in source
     assert "Single panel/cylinder" in source
     assert "FEA result buckling" in source
+    assert "text='Experimental'" in source
+    assert "tk.BooleanVar(value=False)" in source
+    assert "def toggle_experimental():" in source
+    assert "fea_card.pack_forget()" in source
+    assert "if experimental_var.get():" in source
     assert "dialog.bind('<Return>', lambda _event: choose('multiple'))" in source
     assert "dialog.bind('<Escape>', lambda _event: choose('multiple'))" in source
     assert "self._parent.wait_window(dialog)" in source
@@ -823,6 +828,28 @@ def test_cylinder_ring_frames_suppress_overlapping_ring_stiffeners():
     assert "ring_positions = _ring_positions_without_heavy_frame_overlap(" in cylinder_export_block
     assert cylinder_export_block.index("ring_positions = _ring_positions_without_heavy_frame_overlap(") < \
         cylinder_export_block.index("if frame_dims is not None:")
+
+
+def test_ifc_shell_ring_webs_are_not_faceted_into_many_panels():
+    ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
+    ifc_text = ifc_source.read_text(encoding="utf-8")
+
+    assert "def _ring_web_shell_faces(" in ifc_text
+    helper_block = ifc_text[
+        ifc_text.index("def _ring_web_shell_faces("):
+        ifc_text.index("def _conical_wall_solid_faces")
+    ]
+    assert "face_count = 2 if is_full_circle else 1" in helper_block
+    assert "outer = [" in helper_block
+    assert "inner = [" in helper_block
+    assert "faces.append(outer + inner)" in helper_block
+
+    ring_block = ifc_text[
+        ifc_text.index("def _add_ring_set"):
+        ifc_text.index("def _add_cylinder_structure")
+    ]
+    assert "_ring_web_shell_faces(r0, r1, z_pos, theta_start, theta_end)" in ring_block
+    assert "_annular_radial_faces(r0, r1, z_pos, theta_start, theta_end, segments)" not in ring_block
 
 
 def test_unv_export_writes_nodes_and_elements(tmp_path):

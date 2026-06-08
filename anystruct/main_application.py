@@ -1988,7 +1988,7 @@ class Application():
         dialog.resizable(False, False)
         dialog.transient(self._parent)
 
-        width, height = 920, 382
+        width, height = 920, 416
         try:
             self._parent.update_idletasks()
             root_x = self._parent.winfo_rootx()
@@ -2045,6 +2045,8 @@ class Application():
 
         content = tk.Frame(dialog, background='#f5f7fb')
         content.pack(fill=tk.BOTH, expand=True, padx=26, pady=24)
+        card_row = tk.Frame(content, background='#f5f7fb')
+        card_row.pack(fill=tk.BOTH, expand=True)
 
         def add_mode_card(parent, title, subtitle, details, button_text, command, primary=False):
             border = '#1f6feb' if primary else '#cad2df'
@@ -2065,7 +2067,7 @@ class Application():
             return card
 
         standard_card = add_mode_card(
-            content,
+            card_row,
             title='Multiple panels',
             subtitle='Default',
             details='For multiple panels/cylinders with advanced load definition.',
@@ -2074,7 +2076,7 @@ class Application():
             primary=False,
         )
         single_card = add_mode_card(
-            content,
+            card_row,
             title='Single panel/cylinder',
             subtitle='Simplified calculation',
             details='For single panel/cylinder with simplified load interface.',
@@ -2083,7 +2085,7 @@ class Application():
             primary=True,
         )
         fea_card = add_mode_card(
-            content,
+            card_row,
             title='FEA result buckling',
             subtitle='FE panel scan',
             details='Import PrePoMax/CalculiX INP/FRD files and select buckling panels directly.',
@@ -2092,8 +2094,29 @@ class Application():
             primary=False,
         )
         standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
-        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 8))
-        fea_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        fea_card.pack_forget()
+
+        experimental_var = tk.BooleanVar(value=False)
+
+        def toggle_experimental():
+            if experimental_var.get():
+                single_card.pack_configure(padx=(8, 8))
+                fea_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+            else:
+                fea_card.pack_forget()
+                single_card.pack_configure(padx=(8, 0))
+
+        tk.Checkbutton(
+            content,
+            text='Experimental',
+            variable=experimental_var,
+            command=toggle_experimental,
+            background='#f5f7fb',
+            activebackground='#f5f7fb',
+            foreground='#334155',
+            font=('Segoe UI', 9),
+        ).pack(anchor=tk.W, pady=(10, 0))
 
         try:
             dialog.grab_set()

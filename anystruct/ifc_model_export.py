@@ -1418,6 +1418,40 @@ def _annular_radial_faces(radius0: float, radius1: float, z: float, theta_start:
     return faces
 
 
+def _ring_web_shell_faces(radius0: float, radius1: float, z: float, theta_start: float,
+                          theta_end: float) -> list[list[tuple[float, float, float]]]:
+    """Return one curved-footprint shell face per ring-web sector.
+
+    Ring webs are physical plate fields, not FE mesh strips.  A full circular
+    ring is represented by two 180-degree shell faces, matching the cylindrical
+    shell convention.  A bounded cylinder-panel sector is represented by one
+    shell face.  Each face is a single polygon loop with sampled arc boundaries,
+    so the web remains visible as an annular plate instead of collapsing to a
+    chord rectangle.
+    """
+    radius0, radius1 = sorted((max(float(radius0), EPS), max(float(radius1), EPS)))
+    theta_start = float(theta_start)
+    theta_end = float(theta_end)
+    angular_extent = abs(theta_end - theta_start)
+    is_full_circle = abs(angular_extent - 2.0 * math.pi) <= 1.0e-7
+    face_count = 2 if is_full_circle else 1
+    samples_per_face = max(8, int(math.ceil(angular_extent / face_count / (math.pi / 18.0))))
+    faces: list[list[tuple[float, float, float]]] = []
+    for face_index in range(face_count):
+        a0 = theta_start + (theta_end - theta_start) * face_index / face_count
+        a1 = theta_start + (theta_end - theta_start) * (face_index + 1) / face_count
+        outer = [
+            _cyl_point(radius1, a0 + (a1 - a0) * sample_index / samples_per_face, z)
+            for sample_index in range(samples_per_face + 1)
+        ]
+        inner = [
+            _cyl_point(radius0, a0 + (a1 - a0) * sample_index / samples_per_face, z)
+            for sample_index in range(samples_per_face, -1, -1)
+        ]
+        faces.append(outer + inner)
+    return faces
+
+
 def _conical_wall_solid_faces(inner0: float, outer0: float, inner1: float, outer1: float,
                               z0: float, z1: float, theta_start: float, theta_end: float,
                               segments: int) -> list[list[tuple[float, float, float]]]:
@@ -2258,7 +2292,7 @@ def _add_ring_set(ctx: IfcContext, active_line: str, role: str, radius: float, p
             if shell_export:
                 _add_surface_element(
                     ctx, "IfcMember", f"{active_line} {role} {index:03d} Web",
-                    _annular_radial_faces(r0, r1, z_pos, theta_start, theta_end, segments),
+                    _ring_web_shell_faces(r0, r1, z_pos, theta_start, theta_end),
                     predefined_type="MEMBER",
                     extra_properties=web_props,
                 )
