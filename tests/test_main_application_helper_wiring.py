@@ -250,11 +250,24 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def _draw_fea_panel_existing_result_text(self, panel):" in source
     assert "def _draw_fea_panel_2d_sketch(self):" in source
     assert "def _draw_flat_structure_2d_preview(self, all_obj, selected_text=''):" in source
-    assert "matplotlib.colors.Normalize(vmin=0.0, vmax=1.5)" in source
+    assert "self._fea_uf_color_lower = tk.DoubleVar()" in source
+    assert "self._fea_uf_color_upper = tk.DoubleVar()" in source
+    assert "def _fea_uf_color_limits(self):" in source
+    assert "UF color range:" in source
+    assert "textvariable=self._fea_uf_color_lower" in source
+    assert "textvariable=self._fea_uf_color_upper" in source
+    assert "ttk.Button(self._main_fr, text='Update scale'" in source
+    assert "uf_min, uf_max = self._fea_uf_color_limits()" in source
+    assert "matplotlib.colors.Normalize(vmin=uf_min, vmax=uf_max)" in source
     assert "colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])" in source
     assert "fig.colorbar(scalar_map, cax=colorbar_ax)" in source
     assert "colorbar.set_label('UF'" in source
     assert "self._build_flat_structure_properties()" in source
+    assert "def _apply_selected_fea_cylinder_panel_to_inputs(self, data):" in source
+    assert "api_helpers.cylinder_domain_with_input_mode(domain)" in source
+    assert "self._new_shell_stress_or_force.set(2)" in source
+    assert "def _fea_panel_cylinder_structure(self, panel):" in source
+    assert "cylinder=cylinder_obj" in source
     assert "self._create_all_structure_from_properties(prop_dict)" in source
     assert "self._fea_buckling_mode = False" in source
     assert "self.draw_results(state=state)" in source

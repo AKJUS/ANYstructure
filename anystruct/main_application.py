@@ -339,6 +339,10 @@ class Application():
         self._fea_buckling_created = []
         self._fea_pick_cid = None
         self._fea_pick_after_id = None
+        self._fea_uf_color_lower = tk.DoubleVar()
+        self._fea_uf_color_upper = tk.DoubleVar()
+        self._fea_uf_color_lower.set(0.0)
+        self._fea_uf_color_upper.set(1.5)
 
         # Optional Matplotlib based 3D preview. In simplified mode this is promoted
         # to the large main pane; otherwise it remains in the lower property canvas.
@@ -2302,6 +2306,10 @@ class Application():
         except KeyError:
             return
         data = panel.anystructure_input
+        if isinstance(data.get('shell'), dict):
+            self._apply_selected_fea_cylinder_panel_to_inputs(data)
+            return
+
         geometry = data.get('geometry', {})
         section = data.get('section', {})
         material = data.get('material', {})
@@ -2329,6 +2337,126 @@ class Application():
         self._new_puls_panel_boundary.set(str(buckling.get('puls_boundary', 'Int')))
         self._new_puls_sp_or_up.set(str(buckling.get('puls_sp_or_up', 'SP')))
         self._new_puls_up_boundary.set(str(buckling.get('puls_up_boundary', 'SSSS')))
+        self.calculation_domain_selected(sync_cylinder_inputs=False)
+
+    def _apply_selected_fea_cylinder_panel_to_inputs(self, data):
+        """Copy one FE cylinder panel into the existing cylinder GUI variables."""
+
+        def number(container, key, default=0.0):
+            try:
+                value = float(container.get(key, default))
+            except (AttributeError, TypeError, ValueError):
+                value = default
+            return value if math.isfinite(value) else default
+
+        def positive(container, key, default):
+            value = number(container, key, default)
+            return value if value > 1.0e-9 else default
+
+        def set_member(member, web_h, web_t, flange_w, flange_t, member_type):
+            if not isinstance(member, dict):
+                return
+            web_h.set(round(positive(member, 'web_height_mm', 1.0), 5))
+            web_t.set(round(positive(member, 'web_thickness_mm', 1.0), 5))
+            flange_w.set(round(max(number(member, 'flange_width_mm', 0.0), 0.0), 5))
+            flange_t.set(round(max(number(member, 'flange_thickness_mm', 0.0), 0.0), 5))
+            member_type.set(str(member.get('type', 'FB') or 'FB'))
+
+        shell = data.get('shell', {})
+        material = data.get('material', {})
+        stresses = data.get('stresses', {})
+        domain = str(data.get('calculation_domain', 'Unstiffened shell'))
+        if domain in api_helpers.CYLINDER_STRUCTURE_DOMAINS:
+            domain = api_helpers.cylinder_domain_with_input_mode(domain)
+
+        thickness_mm = positive(shell, 'thickness_mm', max(float(self._new_shell_thk.get() or 0.0), 1.0))
+        radius_mm = positive(shell, 'radius_mm', max(float(self._new_shell_radius.get() or 0.0), 1.0))
+        length_mm = positive(shell, 'total_length_mm', positive(shell, 'distance_between_rings_mm', 1.0))
+        distance_between_rings_mm = positive(shell, 'distance_between_rings_mm', length_mm)
+        panel_spacing_mm = positive(shell, 'panel_spacing_mm', max(float(self._new_stf_spacing.get() or 0.0), 1.0))
+
+        self._new_calculation_domain.set(domain)
+        self._new_panel_or_shell.set('shell')
+        self._new_shell_stress_or_force.set(2)
+        self._new_shell_thk.set(round(thickness_mm, 5))
+        self._new_shell_radius.set(round(radius_mm, 5))
+        self._new_shell_dist_rings.set(round(distance_between_rings_mm, 5))
+        self._new_shell_length.set(round(distance_between_rings_mm, 5))
+        self._new_shell_tot_length.set(round(length_mm, 5))
+        self._new_shell_panel_spacing.set(round(panel_spacing_mm, 5))
+        self._new_shell_ring_frame_length_between_girders.set(round(distance_between_rings_mm, 5))
+        self._new_shell_k_factor.set(1.0)
+        self._new_plate_thk.set(round(thickness_mm, 5))
+        self._new_field_len.set(round(distance_between_rings_mm, 5))
+        self._new_stf_spacing.set(round(panel_spacing_mm, 5))
+
+        material_yield = number(material, 'yield_mpa', 355.0)
+        material_factor = number(material, 'material_factor', 1.15)
+        elastic_modulus = number(material, 'elastic_modulus_mpa', 210000.0)
+        poisson = number(material, 'poisson', 0.3)
+        self._new_material.set(round(material_yield, 5))
+        self._new_material_factor.set(material_factor)
+        self._new_shell_yield.set(round(material_yield, 5))
+        self._new_shell_mat_factor.set(material_factor)
+        self._new_shell_e_module.set(elastic_modulus * 1.0e6)
+        self._new_shell_poisson.set(poisson)
+
+        sasd = number(stresses, 'sasd_mpa', 0.0)
+        smsd = number(stresses, 'smsd_mpa', 0.0)
+        tTsd = number(stresses, 'tTsd_mpa', 0.0)
+        tQsd = number(stresses, 'tQsd_mpa', 0.0)
+        psd = number(stresses, 'psd_mpa', 0.0)
+        shsd = number(stresses, 'shsd_mpa', 0.0)
+        self._new_shell_sasd.set(round(sasd, 5))
+        self._new_shell_smsd.set(round(smsd, 5))
+        self._new_shell_tTsd.set(round(tTsd, 5))
+        self._new_shell_tQsd.set(round(tQsd, 5))
+        self._new_shell_psd.set(round(psd, 5))
+        self._new_shell_shsd.set(round(shsd, 5))
+        self._new_sigma_x1.set(round(max(-sasd, 0.0), 5))
+        self._new_sigma_x2.set(round(max(-sasd, 0.0), 5))
+        self._new_sigma_y1.set(round(max(-shsd, 0.0), 5))
+        self._new_sigma_y2.set(round(max(-shsd, 0.0), 5))
+        self._new_tauxy.set(round(abs(tTsd), 5))
+
+        longitudinal = data.get('longitudinal_stiffener')
+        ring_stiffener = data.get('ring_stiffener')
+        ring_frame = data.get('ring_frame')
+        set_member(
+            longitudinal,
+            self._new_stf_web_h,
+            self._new_stf_web_t,
+            self._new_stf_fl_w,
+            self._new_stf_fl_t,
+            self._new_stf_type,
+        )
+        set_member(
+            ring_stiffener,
+            self._new_shell_ring_stf_hw,
+            self._new_shell_ring_stf_tw,
+            self._new_shell_ring_stf_b,
+            self._new_shell_ring_stf_tf,
+            self._new_shell_ring_stf_type,
+        )
+        set_member(
+            ring_frame,
+            self._new_shell_ring_frame_hw,
+            self._new_shell_ring_frame_tw,
+            self._new_shell_ring_frame_b,
+            self._new_shell_ring_frame_tf,
+            self._new_shell_ring_frame_type,
+        )
+        set_member(
+            ring_frame or ring_stiffener,
+            self._new_girder_web_h,
+            self._new_girder_web_t,
+            self._new_girder_fl_w,
+            self._new_girder_fl_t,
+            self._new_girder_type,
+        )
+        self._new_girder_length_LG.set(round(distance_between_rings_mm, 5))
+        self._new_shell_exclude_ring_stf.set(ring_stiffener is None)
+        self._new_shell_exclude_ring_frame.set(ring_frame is None)
         self.calculation_domain_selected(sync_cylinder_inputs=False)
 
     def _ensure_fea_lower_panes_visible(self):
@@ -3320,6 +3448,8 @@ class Application():
                 selected_panel = None
         uf_text = '-' if selected_panel is None or selected_panel.usage_factor is None else f'{selected_panel.usage_factor:.3g}'
         source_text = 'No FE file loaded' if session is None else os.path.basename(session.inp_path)
+        uf_lower_entry = ttk.Entry(self._main_fr, textvariable=self._fea_uf_color_lower, width=7)
+        uf_upper_entry = ttk.Entry(self._main_fr, textvariable=self._fea_uf_color_upper, width=7)
 
         rows = [
             ttk.Label(self._main_fr, text='FEA result buckling', font=self._text_size['Text 8 bold']),
@@ -3345,6 +3475,11 @@ class Application():
                 'buckling',
                 command=self._on_fea_buckling_option_changed,
             ),
+            ttk.Label(self._main_fr, text='UF color range:', font=self._text_size['Text 8']),
+            uf_lower_entry,
+            ttk.Label(self._main_fr, text='to', font=self._text_size['Text 8']),
+            uf_upper_entry,
+            ttk.Button(self._main_fr, text='Update scale', command=lambda: self._refresh_fea_buckling_views(rebuild_3d=True)),
             ttk.Label(self._main_fr, text='Panels: ' + str(panel_count), font=self._text_size['Text 8']),
             ttk.Label(self._main_fr, text='Selected: ' + selected, font=self._text_size['Text 8']),
             ttk.Label(self._main_fr, text='UF: ' + uf_text, font=self._text_size['Text 8']),
@@ -3359,7 +3494,12 @@ class Application():
         rows[5].place(relx=x0, rely=y0 + dy * 4.8, relwidth=0.145)
         rows[6].place(relx=x0, rely=y0 + dy * 6.1)
         rows[7].place(relx=x0, rely=y0 + dy * 6.9, relwidth=0.09)
-        for index, item in enumerate(rows[8:], start=8):
+        rows[8].place(relx=x0, rely=y0 + dy * 8.0)
+        rows[9].place(relx=x0, rely=y0 + dy * 8.8)
+        rows[10].place(relx=x0 + 0.045, rely=y0 + dy * 8.82)
+        rows[11].place(relx=x0 + 0.060, rely=y0 + dy * 8.8)
+        rows[12].place(relx=x0 + 0.105, rely=y0 + dy * 8.75)
+        for index, item in enumerate(rows[13:], start=10):
             item.place(relx=x0, rely=y0 + dy * (index + 0.6))
 
     def gui_load_combinations(self, event):
@@ -5084,10 +5224,28 @@ class Application():
 
     def _fea_panel_canvas_color(self, panel, index):
         if panel is not None and panel.usage_factor is not None:
-            value = max(min(float(panel.usage_factor), 1.5), 0.0)
-            rgba = plt.get_cmap('RdYlGn_r')(value / 1.5)
+            uf_min, uf_max = self._fea_uf_color_limits()
+            value = max(min(float(panel.usage_factor), uf_max), uf_min)
+            rgba = plt.get_cmap('RdYlGn_r')((value - uf_min) / max(uf_max - uf_min, 1.0e-9))
             return matplotlib.colors.rgb2hex(rgba)
         return '#d9d9d9'
+
+    def _fea_uf_color_limits(self):
+        try:
+            lower = float(self._fea_uf_color_lower.get())
+        except Exception:
+            lower = 0.0
+        try:
+            upper = float(self._fea_uf_color_upper.get())
+        except Exception:
+            upper = 1.5
+        if not math.isfinite(lower):
+            lower = 0.0
+        if not math.isfinite(upper):
+            upper = 1.5
+        if upper <= lower:
+            upper = lower + 1.0
+        return lower, upper
 
     def _embed_fea_buckling_3d_figure(self, fig, ax, default_view=(24, -55)):
         """Embed the FEA buckling-panel-only 3D view in the main drawing pane."""
@@ -5228,11 +5386,16 @@ class Application():
         }
         try:
             all_obj = self._fea_panel_all_structure()
+            cylinder_obj = self._fea_panel_cylinder_structure(panel)
             pressure_mpa = self._fea_panel_pressure_mpa(panel)
             self._point_dict.setdefault('point999991', [0.0, 0.0])
             self._point_dict.setdefault('point999992', [max(panel.field.span_m, 1.0), 0.0])
             self._line_dict[temp_line] = [999991, 999992]
-            project_services.LineStructureService(self._line_to_struc).assign_structure(temp_line, all_obj)
+            project_services.LineStructureService(self._line_to_struc).assign_structure(
+                temp_line,
+                all_obj,
+                cylinder=cylinder_obj,
+            )
             self._new_load_comb_dict[('manual', temp_line, 'manual')] = [
                 tk.DoubleVar(value=pressure_mpa * 1.0e6),
                 tk.DoubleVar(value=1.0),
@@ -5272,8 +5435,20 @@ class Application():
                 self._line_to_struc[temp_line] = old_bundle
 
     def _fea_panel_all_structure(self):
-        prop_dict, _section_dict = self._build_flat_structure_properties()
-        return self._create_all_structure_from_properties(prop_dict)
+        old_domain = self._new_calculation_domain.get()
+        try:
+            if not self._is_flat_calculation_domain(old_domain):
+                self._new_calculation_domain.set('Flat plate, stiffened with girder')
+            prop_dict, _section_dict = self._build_flat_structure_properties()
+            return self._create_all_structure_from_properties(prop_dict)
+        finally:
+            self._new_calculation_domain.set(old_domain)
+
+    def _fea_panel_cylinder_structure(self, panel):
+        if not isinstance(getattr(panel, 'anystructure_input', {}).get('shell'), dict):
+            return None
+        cylinder_obj, *_rest = self._build_cylinder_structure_properties()
+        return cylinder_obj
 
     @staticmethod
     def _fea_panel_pressure_mpa(panel):
@@ -5480,7 +5655,8 @@ class Application():
             return
         fig = plt.Figure(figsize=(9.8, 5.8), dpi=100)
         ax = fig.add_axes([0.01, 0.06, 0.86, 0.88], projection='3d')
-        uf_norm = matplotlib.colors.Normalize(vmin=0.0, vmax=1.5)
+        uf_min, uf_max = self._fea_uf_color_limits()
+        uf_norm = matplotlib.colors.Normalize(vmin=uf_min, vmax=uf_max)
         uf_cmap = plt.get_cmap('RdYlGn_r')
 
         for record in records:

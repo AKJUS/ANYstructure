@@ -1,11 +1,10 @@
-"""Infer flat stiffened plate fields from CalculiX/PrePoMax shell models.
+"""Infer flat and cylindrical stiffened fields from CalculiX/PrePoMax shells.
 
-This module is intentionally small and geometry-first.  The first supported
-workflow reads the CalculiX ``.inp`` shell mesh, groups coplanar connected shell
-elements into surface patches, and infers flat-panel bays plus shell-plate
-stiffener webs/flanges.  ``.frd`` support is currently limited to lightweight
-result-block discovery so the geometry interpreter can be paired with result
-files without committing to stress recovery semantics yet.
+Flat structures are interpreted from connected coplanar patches. Cylindrical
+structures use a separate best-fit axis/radius pipeline, preserve periodic
+circumferential topology, and infer longitudinal stiffeners plus ring
+stiffeners/frames from local shell orientation. FRD stresses can be projected
+to either flat panel axes or local axial/circumferential cylinder axes.
 """
 
 from __future__ import annotations
@@ -662,7 +661,7 @@ def calculate_field_buckling(
     return results
 
 
-def create_fea_buckling_session(
+def _create_flat_fea_buckling_session(
     inp_path: str | os.PathLike[str],
     frd_path: str | os.PathLike[str] | None = None,
     *,
@@ -865,6 +864,15 @@ def panel_3d_records(
     different elevations, perpendicular panels, and skewed panels remain
     separated in model coordinates without exposing the FE mesh.
     """
+
+    if fields and isinstance(fields[0], CylinderField):
+        geometry = detect_cylinder_geometry(model)
+        return cylinder_3d_records(
+            model,
+            geometry,
+            fields,  # type: ignore[arg-type]
+            field_values=field_values,
+        )
 
     records: list[dict[str, Any]] = []
     for index, field_item in enumerate(fields):
@@ -1711,7 +1719,30 @@ def _selected_uf_from_buckling_result(item: dict[str, Any]) -> float | None:
     result = item.get("result")
     if not isinstance(result, dict):
         return None
+    cylinder_uf = _find_cylinder_usage_factor(result)
+    if cylinder_uf is not None:
+        return cylinder_uf
     return _find_usage_factor(result)
+
+
+def _find_cylinder_usage_factor(result: dict[str, Any]) -> float | None:
+    values: list[float] = []
+    for key in (
+        "Unstiffened shell",
+        "Unstiffened conical shell",
+        "Longitudinal stiffened shell",
+        "Ring stiffened shell",
+        "Heavy ring frame",
+    ):
+        uf = _first_finite_float(result.get(key))
+        if uf is not None:
+            values.append(uf)
+    need_column = result.get("Need to check column buckling", False) is True
+    if need_column:
+        column_uf = _first_finite_float(result.get("Column stability UF"))
+        if column_uf is not None:
+            values.append(column_uf)
+    return max(values) if values else None
 
 
 def _find_usage_factor(value: object) -> float | None:
@@ -2077,6 +2108,1387 @@ def _safe_float(value: object) -> float | None:
         return None
     return result
 
+
+
+# ---------------------------------------------------------------------------
+# Cylindrical shell extraction
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CylinderGeometry:
+    """Best-fit circular-cylinder geometry inferred from the shell mesh."""
+
+    axis_origin: Point3D
+    axis_direction: Vector3D
+    radius_m: float
+    axial_bounds: tuple[float, float]
+    radial_rms_error_m: float
+    skin_element_ids: tuple[int, ...]
+    skin_thickness_m: float | None = None
+    confidence: float = 1.0
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CylinderMember:
+    """One longitudinal stiffener or circumferential ring member."""
+
+    member_id: str
+    role: str
+    section_type: str
+    web_element_ids: tuple[int, ...]
+    flange_element_ids: tuple[int, ...]
+    station: float
+    direction: Vector3D
+    web_height_m: float
+    flange_width_m: float | None
+    web_thickness_m: float | None = None
+    flange_thickness_m: float | None = None
+    confidence: float = 1.0
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CylinderField:
+    """One curved shell bay bounded by adjacent rings and longitudinal stiffeners."""
+
+    field_id: str
+    element_ids: tuple[int, ...]
+    axial_bounds: tuple[float, float]
+    angular_bounds_rad: tuple[float, float]
+    axial_length_m: float
+    circumferential_spacing_m: float
+    radius_m: float
+    shell_thickness_m: float | None
+    attached_member_ids: tuple[str, ...]
+    members: tuple[CylinderMember, ...] = ()
+    confidence: float = 1.0
+    diagnostics: tuple[str, ...] = ()
+
+    @property
+    def angular_span_rad(self) -> float:
+        return _positive_angle(self.angular_bounds_rad[1] - self.angular_bounds_rad[0])
+
+    # Compatibility aliases used by the existing FEA-result GUI.  The GUI was
+    # originally written for PlateField and expects span/spacing/thickness names.
+    # For a cylinder bay, span is axial and spacing is circumferential arc length.
+    @property
+    def span_m(self) -> float:
+        return self.axial_length_m
+
+    @property
+    def spacing_m(self) -> float:
+        return self.circumferential_spacing_m
+
+    @property
+    def shell_section_thickness_m(self) -> float | None:
+        return self.shell_thickness_m
+
+    @property
+    def transverse_bounds(self) -> tuple[float, float]:
+        return self.angular_bounds_rad
+
+    @property
+    def base_patch_id(self) -> str:
+        return "cylinder_skin"
+
+
+@dataclass(frozen=True)
+class CylinderStress:
+    """Nominal local cylinder stresses reduced from an FRD result."""
+
+    field_id: str
+    axial_stress_mpa: float
+    hoop_stress_mpa: float
+    torsional_shear_mpa: float
+    transverse_shear_mpa: float
+    sample_count: int
+    reduction: str
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FeaCylinderPanel:
+    """One selectable cylindrical shell bay."""
+
+    field_id: str
+    field: CylinderField
+    stress: CylinderStress | None
+    anystructure_input: dict[str, Any]
+    buckling_result: dict[str, Any] | None = None
+    usage_factor: float | None = None
+
+
+@dataclass(frozen=True)
+class FeaCylinderSession:
+    """Complete cylindrical FE-result interpretation."""
+
+    inp_path: str
+    frd_path: str | None
+    model: FeShellModel
+    geometry: CylinderGeometry
+    fields: tuple[CylinderField, ...]
+    panels: tuple[FeaCylinderPanel, ...]
+    frd_summary: dict[str, Any] | None = None
+    diagnostics: tuple[str, ...] = ()
+
+    @property
+    def field_count(self) -> int:
+        return len(self.fields)
+
+    @property
+    def panel_count(self) -> int:
+        return len(self.panels)
+
+    def panel(self, field_id: str) -> FeaCylinderPanel:
+        for panel in self.panels:
+            if panel.field_id == field_id:
+                return panel
+        raise KeyError(field_id)
+
+    def usage_factors(self) -> dict[str, float]:
+        return {
+            panel.field_id: panel.usage_factor
+            for panel in self.panels
+            if panel.usage_factor is not None
+        }
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "geometry_type": "cylinder",
+            "inp_path": self.inp_path,
+            "frd_path": self.frd_path,
+            "node_count": len(self.model.nodes),
+            "element_count": len(self.model.shell_elements),
+            "field_count": len(self.fields),
+            "geometry": {
+                "axis_origin": list(self.geometry.axis_origin),
+                "axis_direction": list(self.geometry.axis_direction),
+                "radius_m": self.geometry.radius_m,
+                "axial_bounds": list(self.geometry.axial_bounds),
+                "radial_rms_error_m": self.geometry.radial_rms_error_m,
+                "skin_element_count": len(self.geometry.skin_element_ids),
+                "skin_thickness_m": self.geometry.skin_thickness_m,
+                "confidence": self.geometry.confidence,
+                "diagnostics": list(self.geometry.diagnostics),
+            },
+            "fields": summarize_cylinder_fields(self.fields),
+            "panels": [
+                {
+                    "field_id": panel.field_id,
+                    "usage_factor": panel.usage_factor,
+                    "anystructure_input": panel.anystructure_input,
+                    "stress": None if panel.stress is None else {
+                        "axial_stress_mpa": panel.stress.axial_stress_mpa,
+                        "hoop_stress_mpa": panel.stress.hoop_stress_mpa,
+                        "torsional_shear_mpa": panel.stress.torsional_shear_mpa,
+                        "transverse_shear_mpa": panel.stress.transverse_shear_mpa,
+                        "sample_count": panel.stress.sample_count,
+                        "reduction": panel.stress.reduction,
+                    },
+                    "buckling_result": panel.buckling_result,
+                }
+                for panel in self.panels
+            ],
+            "frd": self.frd_summary,
+            "diagnostics": list(self.diagnostics),
+        }
+
+
+def is_cylindrical_shell_model(
+    model: FeShellModel,
+    *,
+    minimum_skin_fraction: float = 0.35,
+    maximum_relative_rms_error: float = 0.03,
+) -> bool:
+    """Return whether the shell mesh contains a credible circular cylindrical skin."""
+
+    try:
+        geometry = detect_cylinder_geometry(model)
+    except (ValueError, ArithmeticError):
+        return False
+    relative_error = geometry.radial_rms_error_m / max(geometry.radius_m, 1.0e-12)
+    skin_fraction = len(geometry.skin_element_ids) / max(len(model.shell_elements), 1)
+    return relative_error <= maximum_relative_rms_error and skin_fraction >= minimum_skin_fraction
+
+
+def detect_cylinder_geometry(
+    model: FeShellModel,
+    *,
+    radial_tolerance_fraction: float = 0.006,
+    normal_alignment: float = 0.65,
+) -> CylinderGeometry:
+    """Fit a circular cylinder and identify the true shell skin.
+
+    The axis is estimated from the full point cloud, but the final radius and
+    skin set are derived from radially oriented shell elements close to the
+    outermost dominant cylindrical surface.  This prevents inward ring webs,
+    longitudinal webs and flanges from inflating the radial tolerance and being
+    mistaken for shell plating.
+    """
+
+    if len(model.nodes) < 6 or not model.shell_elements:
+        raise ValueError("not enough shell geometry to fit a cylinder")
+
+    import numpy as np
+
+    points = np.asarray(list(model.nodes.values()), dtype=float)
+    centre = points.mean(axis=0)
+    covariance = np.cov((points - centre).T)
+    _, eigenvectors = np.linalg.eigh(covariance)
+
+    best: tuple[float, Vector3D, Point3D, float, float] | None = None
+    for index in range(3):
+        axis = _canonical_axis(tuple(float(value) for value in eigenvectors[:, index]))
+        origin, radius, rms = _fit_circle_about_axis(points, axis)
+        axial_extent = _point_cloud_extent(points, axis)
+        score = rms / max(radius, 1.0e-12)
+        if radius <= 1.0e-10 or axial_extent <= 1.0e-10:
+            continue
+        if best is None or score < best[0]:
+            best = (score, axis, origin, radius, rms)
+
+    if best is None:
+        raise ValueError("could not determine a cylindrical axis")
+
+    _, axis, origin, _initial_radius, _initial_rms = best
+
+    radial_candidates: list[tuple[int, float, float]] = []
+    for element in model.shell_elements.values():
+        points_element = [model.nodes[node_id] for node_id in element.corner_node_ids]
+        centroid = _element_centroid(model, element)
+        radial_vector = _radial_vector(centroid, origin, axis)
+        radial_distance = _length(radial_vector)
+        if radial_distance <= 1.0e-12:
+            continue
+        normal = _element_normal(points_element)
+        alignment = abs(_dot(normal, _normalise(radial_vector)))
+        if alignment >= normal_alignment:
+            radial_candidates.append((element.element_id, radial_distance, alignment))
+
+    if not radial_candidates:
+        raise ValueError("no radially oriented shell elements found")
+
+    candidate_distances = sorted(item[1] for item in radial_candidates)
+    upper_index = min(
+        len(candidate_distances) - 1,
+        max(0, int(math.floor(0.90 * (len(candidate_distances) - 1)))),
+    )
+    outer_reference = candidate_distances[upper_index]
+
+    coarse_tolerance = max(
+        outer_reference * max(radial_tolerance_fraction * 2.0, 0.01),
+        1.0e-7,
+    )
+    coarse_ids = [
+        element_id
+        for element_id, distance, _alignment in radial_candidates
+        if abs(distance - outer_reference) <= coarse_tolerance
+    ]
+    if not coarse_ids:
+        raise ValueError("could not isolate the cylindrical shell surface")
+
+    coarse_node_ids = {
+        node_id
+        for element_id in coarse_ids
+        for node_id in model.shell_elements[element_id].corner_node_ids
+    }
+    coarse_node_distances = [
+        _length(_radial_vector(model.nodes[node_id], origin, axis))
+        for node_id in coarse_node_ids
+    ]
+    radius = _median(coarse_node_distances) or outer_reference
+
+    radial_tolerance = max(radius * radial_tolerance_fraction, 1.0e-7)
+    skin_ids: list[int] = []
+    axial_values: list[float] = []
+    skin_node_ids: set[int] = set()
+
+    for element_id, radial_distance, _alignment in radial_candidates:
+        if abs(radial_distance - radius) > radial_tolerance:
+            continue
+        element = model.shell_elements[element_id]
+        skin_ids.append(element_id)
+        skin_node_ids.update(element.corner_node_ids)
+        axial_values.extend(
+            _axial_coordinate(model.nodes[node_id], origin, axis)
+            for node_id in element.corner_node_ids
+        )
+
+    if not skin_ids:
+        raise ValueError("no cylindrical skin elements satisfied the final fit tolerance")
+
+    skin_radial_distances = [
+        _length(_radial_vector(model.nodes[node_id], origin, axis))
+        for node_id in skin_node_ids
+    ]
+    radius = _median(skin_radial_distances) or radius
+    rms = math.sqrt(_mean((distance - radius) ** 2 for distance in skin_radial_distances))
+
+    skin_thickness = _shell_section_thickness_for_elements(model, skin_ids)
+    relative_rms = rms / max(radius, 1.0e-12)
+    confidence = max(0.0, min(1.0, 1.0 - relative_rms / 0.01))
+    return CylinderGeometry(
+        axis_origin=origin,
+        axis_direction=axis,
+        radius_m=radius,
+        axial_bounds=(min(axial_values), max(axial_values)),
+        radial_rms_error_m=rms,
+        skin_element_ids=tuple(sorted(skin_ids)),
+        skin_thickness_m=skin_thickness,
+        confidence=confidence,
+        diagnostics=(
+            "axis inferred from shell-node covariance",
+            "skin isolated from the outer dominant radially oriented shell surface",
+            "inward webs and flanges excluded before the final radius fit",
+        ),
+    )
+
+
+def infer_cylinder_fields(
+    model: FeShellModel,
+    geometry: CylinderGeometry | None = None,
+) -> list[CylinderField]:
+    """Infer cylindrical bays, longitudinal stiffeners, and ring frames."""
+
+    geometry = detect_cylinder_geometry(model) if geometry is None else geometry
+    members = _infer_cylinder_members(model, geometry)
+    longitudinals = sorted(
+        (member for member in members if member.role == "longitudinal_stiffener"),
+        key=lambda member: member.station,
+    )
+    rings = sorted(
+        (member for member in members if member.role in {"ring_stiffener", "ring_frame"}),
+        key=lambda member: member.station,
+    )
+
+    if longitudinals:
+        angular_intervals = [
+            (longitudinals[index].station, longitudinals[(index + 1) % len(longitudinals)].station)
+            for index in range(len(longitudinals))
+        ]
+    else:
+        angular_intervals = [(-math.pi, math.pi)]
+
+    axial_stations = [geometry.axial_bounds[0]]
+    axial_stations.extend(
+        member.station
+        for member in rings
+        if geometry.axial_bounds[0] + 1.0e-8 < member.station < geometry.axial_bounds[1] - 1.0e-8
+    )
+    axial_stations.append(geometry.axial_bounds[1])
+    axial_stations = _unique_sorted(axial_stations, tolerance=1.0e-7)
+
+    shell_centres = {
+        element_id: _element_centroid(model, model.shell_elements[element_id])
+        for element_id in geometry.skin_element_ids
+    }
+    members_by_id = {member.member_id: member for member in members}
+    fields: list[CylinderField] = []
+    field_index = 1
+
+    for axial_index, (lower_axial, upper_axial) in enumerate(zip(axial_stations[:-1], axial_stations[1:])):
+        lower_ring = _member_at_station(rings, lower_axial)
+        upper_ring = _member_at_station(rings, upper_axial)
+        for angular_index, (start_angle, end_angle) in enumerate(angular_intervals):
+            attached: list[str] = []
+            if longitudinals:
+                attached.extend(
+                    (
+                        longitudinals[angular_index].member_id,
+                        longitudinals[(angular_index + 1) % len(longitudinals)].member_id,
+                    )
+                )
+            if lower_ring is not None:
+                attached.append(lower_ring.member_id)
+            if upper_ring is not None:
+                attached.append(upper_ring.member_id)
+
+            selected_ids: list[int] = []
+            for element_id, centroid in shell_centres.items():
+                axial = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+                if not (lower_axial - 1.0e-8 <= axial <= upper_axial + 1.0e-8):
+                    continue
+                angle = _cylinder_angle(centroid, geometry)
+                if _angle_in_interval(angle, start_angle, end_angle):
+                    selected_ids.append(element_id)
+
+            angle_span = _positive_angle(end_angle - start_angle)
+            if not longitudinals:
+                angle_span = 2.0 * math.pi
+            field_members = tuple(
+                members_by_id[member_id]
+                for member_id in dict.fromkeys(attached)
+                if member_id in members_by_id
+            )
+            fields.append(
+                CylinderField(
+                    field_id=f"cyl_field_{field_index:03d}",
+                    element_ids=tuple(sorted(selected_ids)),
+                    axial_bounds=(lower_axial, upper_axial),
+                    angular_bounds_rad=(start_angle, end_angle),
+                    axial_length_m=upper_axial - lower_axial,
+                    circumferential_spacing_m=geometry.radius_m * angle_span,
+                    radius_m=geometry.radius_m,
+                    shell_thickness_m=geometry.skin_thickness_m,
+                    attached_member_ids=tuple(dict.fromkeys(attached)),
+                    members=field_members,
+                    confidence=geometry.confidence,
+                    diagnostics=(
+                        "bounded axially by adjacent ring stations or shell ends",
+                        "bounded circumferentially by adjacent longitudinal stiffener angles",
+                    ),
+                )
+            )
+            field_index += 1
+    return fields
+
+
+def summarize_cylinder_fields(fields: Sequence[CylinderField]) -> list[dict[str, Any]]:
+    """Flatten inferred cylindrical fields for JSON inspection."""
+
+    return [
+        {
+            "field_id": field_item.field_id,
+            "element_count": len(field_item.element_ids),
+            "axial_bounds_m": list(field_item.axial_bounds),
+            "angular_bounds_rad": list(field_item.angular_bounds_rad),
+            "angular_span_deg": math.degrees(field_item.angular_span_rad),
+            "axial_length_m": field_item.axial_length_m,
+            "circumferential_spacing_m": field_item.circumferential_spacing_m,
+            "radius_m": field_item.radius_m,
+            "shell_thickness_m": field_item.shell_thickness_m,
+            "attached_member_ids": list(field_item.attached_member_ids),
+            "confidence": field_item.confidence,
+            "diagnostics": list(field_item.diagnostics),
+            "members": [
+                {
+                    "member_id": member.member_id,
+                    "role": member.role,
+                    "section_type": member.section_type,
+                    "station": member.station,
+                    "web_height_m": member.web_height_m,
+                    "flange_width_m": member.flange_width_m,
+                    "web_thickness_m": member.web_thickness_m,
+                    "flange_thickness_m": member.flange_thickness_m,
+                    "web_element_count": len(member.web_element_ids),
+                    "flange_element_count": len(member.flange_element_ids),
+                    "confidence": member.confidence,
+                    "diagnostics": list(member.diagnostics),
+                }
+                for member in field_item.members
+            ],
+        }
+        for field_item in fields
+    ]
+
+
+def reduce_cylinder_stresses(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+    fields: Sequence[CylinderField],
+    frd_stress: FrdStressResult,
+) -> list[CylinderStress]:
+    """Project FRD stresses into local axial/circumferential cylinder axes.
+
+    Cylinder stresses retain the CalculiX tension-positive sign convention,
+    which matches the ANYstructure cylinder API where compression is negative.
+    """
+
+    result: list[CylinderStress] = []
+    for field_item in fields:
+        samples: list[tuple[float, float, float]] = []
+        seen: set[int] = set()
+        for element_id in field_item.element_ids:
+            for node_id in frd_stress.element_nodes.get(element_id, ()):
+                if node_id in seen or node_id not in frd_stress.nodal_stress:
+                    continue
+                point = frd_stress.nodes.get(node_id)
+                if point is None:
+                    continue
+                seen.add(node_id)
+                radial = _normalise(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
+                circumferential = _normalise(_cross(geometry.axis_direction, radial))
+                axial, hoop, shear = _project_frd_stress(
+                    frd_stress.components,
+                    frd_stress.nodal_stress[node_id],
+                    geometry.axis_direction,
+                    circumferential,
+                )
+                samples.append((axial / 1.0e6, hoop / 1.0e6, shear / 1.0e6))
+
+        if samples:
+            result.append(
+                CylinderStress(
+                    field_id=field_item.field_id,
+                    axial_stress_mpa=_mean(sample[0] for sample in samples),
+                    hoop_stress_mpa=_mean(sample[1] for sample in samples),
+                    torsional_shear_mpa=_mean(sample[2] for sample in samples),
+                    transverse_shear_mpa=0.0,
+                    sample_count=len(samples),
+                    reduction="mean local membrane stress in axial/circumferential axes",
+                    diagnostics=(
+                        "CalculiX tension-positive sign retained; cylinder compression is negative",
+                        "S_axial, S_hoop and tau_axial-hoop projected at every result node",
+                    ),
+                )
+            )
+        else:
+            result.append(
+                CylinderStress(
+                    field_id=field_item.field_id,
+                    axial_stress_mpa=0.0,
+                    hoop_stress_mpa=0.0,
+                    torsional_shear_mpa=0.0,
+                    transverse_shear_mpa=0.0,
+                    sample_count=0,
+                    reduction="no FRD stress samples",
+                    diagnostics=("no result nodes matched the cylinder field elements",),
+                )
+            )
+    return result
+
+
+def anystructure_input_for_cylinder_field(
+    field_item: CylinderField,
+    stress: CylinderStress | None = None,
+    *,
+    pressure_mpa: float = 0.0,
+    material_yield_mpa: float = 355.0,
+    elastic_modulus_mpa: float = 210000.0,
+    material_factor: float = 1.15,
+    poisson: float = 0.3,
+) -> dict[str, Any]:
+    """Return CylStru-compatible values inferred for one cylindrical bay."""
+
+    longitudinal = _first_cylinder_member(field_item, "longitudinal_stiffener")
+    panel_stress = stress or CylinderStress(
+        field_id=field_item.field_id,
+        axial_stress_mpa=0.0,
+        hoop_stress_mpa=0.0,
+        torsional_shear_mpa=0.0,
+        transverse_shear_mpa=0.0,
+        sample_count=0,
+        reduction="default zero stress",
+    )
+    domain = _cylinder_domain_for_field(field_item)
+    calculation_longitudinal, calculation_ring, calculation_frame = _cylinder_calculation_members(
+        field_item,
+        domain,
+    )
+    return {
+        "field_id": field_item.field_id,
+        "calculation_domain": domain,
+        "shell": {
+            "radius_mm": field_item.radius_m * 1000.0,
+            "thickness_mm": (field_item.shell_thickness_m or 0.0) * 1000.0,
+            "total_length_mm": field_item.axial_length_m * 1000.0,
+            "distance_between_rings_mm": field_item.axial_length_m * 1000.0,
+            "panel_spacing_mm": field_item.circumferential_spacing_m * 1000.0,
+        },
+        "longitudinal_stiffener": _cylinder_member_input(calculation_longitudinal or longitudinal),
+        "ring_stiffener": _cylinder_member_input(calculation_ring),
+        "ring_frame": _cylinder_member_input(calculation_frame),
+        "material": {
+            "yield_mpa": material_yield_mpa,
+            "elastic_modulus_mpa": elastic_modulus_mpa,
+            "material_factor": material_factor,
+            "poisson": poisson,
+        },
+        "stresses": {
+            "sasd_mpa": panel_stress.axial_stress_mpa,
+            "smsd_mpa": 0.0,
+            "tTsd_mpa": panel_stress.torsional_shear_mpa,
+            "tQsd_mpa": panel_stress.transverse_shear_mpa,
+            "psd_mpa": pressure_mpa,
+            "shsd_mpa": panel_stress.hoop_stress_mpa,
+            "sample_count": panel_stress.sample_count,
+            "reduction": panel_stress.reduction,
+        },
+    }
+
+
+def calculate_cylinder_buckling(
+    fields: Sequence[CylinderField],
+    stresses: Sequence[CylinderStress],
+    *,
+    pressure_mpa: float = 0.0,
+    material_yield_mpa: float = 355.0,
+    elastic_modulus_mpa: float = 210000.0,
+    material_factor: float = 1.15,
+    poisson: float = 0.3,
+    imperfection_factor: float = 0.005,
+    effective_buckling_length_factor: float = 1.0,
+) -> list[dict[str, Any]]:
+    """Run the existing ANYstructure CylStru check for each inferred bay."""
+
+    from anystruct.api import CylStru
+
+    stress_by_field = {stress.field_id: stress for stress in stresses}
+    results: list[dict[str, Any]] = []
+    for field_item in fields:
+        stress = stress_by_field.get(field_item.field_id)
+        input_data = anystructure_input_for_cylinder_field(
+            field_item,
+            stress,
+            pressure_mpa=pressure_mpa,
+            material_yield_mpa=material_yield_mpa,
+            elastic_modulus_mpa=elastic_modulus_mpa,
+            material_factor=material_factor,
+            poisson=poisson,
+        )
+        try:
+            cylinder = CylStru(calculation_domain=input_data["calculation_domain"])
+            cylinder.set_material(
+                mat_yield=material_yield_mpa,
+                emodule=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+            )
+            cylinder.set_imperfection(delta_0=imperfection_factor)
+            cylinder.set_shell_geometry(
+                radius=input_data["shell"]["radius_mm"],
+                thickness=input_data["shell"]["thickness_mm"],
+                tot_length_of_shell=input_data["shell"]["total_length_mm"],
+                distance_between_rings=input_data["shell"]["distance_between_rings_mm"],
+            )
+            cylinder.set_shell_buckling_parmeters(
+                eff_buckling_length_factor=effective_buckling_length_factor
+            )
+            cylinder.set_length_between_girder(input_data["shell"]["distance_between_rings_mm"])
+            cylinder.set_panel_spacing(input_data["shell"]["panel_spacing_mm"])
+
+            calculation_longitudinal, calculation_ring, calculation_frame = _cylinder_calculation_members(
+                field_item,
+                input_data["calculation_domain"],
+            )
+            if calculation_longitudinal is not None:
+                _set_cylinder_member(
+                    cylinder.set_longitudinal_stiffener,
+                    calculation_longitudinal,
+                    field_item.circumferential_spacing_m,
+                )
+            if calculation_ring is not None:
+                _set_cylinder_member(cylinder.set_ring_stiffener, calculation_ring, field_item.axial_length_m)
+            if calculation_frame is not None:
+                _set_cylinder_member(cylinder.set_ring_girder, calculation_frame, field_item.axial_length_m)
+
+            cylinder.set_stresses(
+                sasd=0.0 if stress is None else stress.axial_stress_mpa,
+                smsd=0.0,
+                tTsd=0.0 if stress is None else stress.torsional_shear_mpa,
+                tQsd=0.0 if stress is None else stress.transverse_shear_mpa,
+                psd=pressure_mpa,
+                shsd=0.0 if stress is None else stress.hoop_stress_mpa,
+            )
+            buckling_result = cylinder.get_buckling_results()
+            results.append(
+                {
+                    "field_id": field_item.field_id,
+                    "domain": input_data["calculation_domain"],
+                    "available": True,
+                    "input": input_data,
+                    "result": buckling_result,
+                }
+            )
+        except Exception as err:
+            results.append(
+                {
+                    "field_id": field_item.field_id,
+                    "domain": input_data["calculation_domain"],
+                    "available": False,
+                    "input": input_data,
+                    "error": str(err),
+                }
+            )
+    return results
+
+
+def create_fea_cylinder_buckling_session(
+    inp_path: str | os.PathLike[str],
+    frd_path: str | os.PathLike[str] | None = None,
+    *,
+    calculation_method: str = "DNV-RP-C202",
+    buckling_acceptance: str = "ultimate",
+    pressure_mpa: float = 0.0,
+    material_yield_mpa: float = 355.0,
+    elastic_modulus_mpa: float = 210000.0,
+    material_factor: float = 1.15,
+    poisson: float = 0.3,
+    run_buckling: bool = True,
+) -> FeaCylinderSession:
+    """Create the cylinder equivalent of ``create_fea_buckling_session``.
+
+    ``calculation_method`` and ``buckling_acceptance`` are accepted because the
+    FEA-result GUI sends the same common keyword set for flat and cylindrical
+    models. Cylinder buckling is still evaluated by ``CylStru``.
+    """
+
+    inp_path = str(inp_path)
+    frd_path_text = None if frd_path is None else str(frd_path)
+    model = read_calculix_inp(inp_path)
+    geometry = detect_cylinder_geometry(model)
+    fields = tuple(infer_cylinder_fields(model, geometry))
+    frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
+    diagnostics: list[str] = []
+    diagnostics.append(
+        "cylinder calculation uses CylStru; requested common GUI method="
+        f"{calculation_method!r}, acceptance={buckling_acceptance!r}"
+    )
+
+    if frd_path_text:
+        frd_stress = read_calculix_frd_stress(frd_path_text)
+        stresses = tuple(reduce_cylinder_stresses(model, geometry, fields, frd_stress))
+    else:
+        stresses = ()
+        diagnostics.append("no FRD result file supplied; cylinder stresses set to defaults")
+
+    buckling_results: tuple[dict[str, Any], ...] = ()
+    if run_buckling and stresses:
+        buckling_results = tuple(
+            calculate_cylinder_buckling(
+                fields,
+                stresses,
+                pressure_mpa=pressure_mpa,
+                material_yield_mpa=material_yield_mpa,
+                elastic_modulus_mpa=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+            )
+        )
+
+    stress_by_field = {stress.field_id: stress for stress in stresses}
+    result_by_field = {
+        str(result["field_id"]): result
+        for result in buckling_results
+        if result.get("field_id")
+    }
+    panels = tuple(
+        FeaCylinderPanel(
+            field_id=field_item.field_id,
+            field=field_item,
+            stress=stress_by_field.get(field_item.field_id),
+            anystructure_input=anystructure_input_for_cylinder_field(
+                field_item,
+                stress_by_field.get(field_item.field_id),
+                pressure_mpa=pressure_mpa,
+                material_yield_mpa=material_yield_mpa,
+                elastic_modulus_mpa=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+            ),
+            buckling_result=result_by_field.get(field_item.field_id),
+            usage_factor=_selected_uf_from_buckling_result(result_by_field.get(field_item.field_id, {})),
+        )
+        for field_item in fields
+    )
+    return FeaCylinderSession(
+        inp_path=inp_path,
+        frd_path=frd_path_text,
+        model=model,
+        geometry=geometry,
+        fields=fields,
+        panels=panels,
+        frd_summary=frd_summary,
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def create_fea_structure_buckling_session(
+    inp_path: str | os.PathLike[str],
+    frd_path: str | os.PathLike[str] | None = None,
+    *,
+    geometry_type: str = "auto",
+    **kwargs: Any,
+) -> FeaBucklingSession | FeaCylinderSession:
+    """Dispatch to flat-plate or cylindrical-shell extraction.
+
+    ``geometry_type`` may be ``"auto"``, ``"flat"`` or ``"cylinder"``.
+    """
+
+    geometry_type = geometry_type.strip().lower()
+    if geometry_type not in {"auto", "flat", "cylinder"}:
+        raise ValueError("geometry_type must be 'auto', 'flat', or 'cylinder'")
+    if geometry_type == "cylinder":
+        return create_fea_cylinder_buckling_session(inp_path, frd_path, **kwargs)
+    if geometry_type == "flat":
+        return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
+
+    model = read_calculix_inp(inp_path)
+    if is_cylindrical_shell_model(model):
+        return create_fea_cylinder_buckling_session(inp_path, frd_path, **kwargs)
+    return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
+
+
+def create_fea_buckling_session(
+    inp_path: str | os.PathLike[str],
+    frd_path: str | os.PathLike[str] | None = None,
+    *,
+    geometry_type: str = "auto",
+    **kwargs: Any,
+) -> FeaBucklingSession | FeaCylinderSession:
+    """Public FEA-session entry point used by the ANYstructure GUI.
+
+    Existing callers continue to use this function.  Cylindrical shell models
+    are detected automatically and returned as ``FeaCylinderSession`` objects.
+    """
+    return create_fea_structure_buckling_session(
+        inp_path,
+        frd_path,
+        geometry_type=geometry_type,
+        **kwargs,
+    )
+
+
+def cylinder_3d_records(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+    fields: Sequence[CylinderField],
+    field_values: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    """Return actual curved FE polygons for cylinder GUI rendering."""
+
+    records: list[dict[str, Any]] = []
+    for index, field_item in enumerate(fields):
+        polygons = _field_element_polygons(
+            model,
+            PlateField(
+                field_id=field_item.field_id,
+                base_patch_id="cylinder_skin",
+                element_ids=field_item.element_ids,
+                bbox=_bbox_for_elements(model, field_item.element_ids) if field_item.element_ids else (
+                    (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)
+                ),
+                span_m=field_item.axial_length_m,
+                spacing_m=field_item.circumferential_spacing_m,
+                transverse_bounds=field_item.angular_bounds_rad,
+                attached_member_ids=field_item.attached_member_ids,
+            ),
+        )
+        points = [point for polygon in polygons for point in polygon]
+        records.append(
+            {
+                "field_id": field_item.field_id,
+                "index": index,
+                "polygons": polygons,
+                "bbox": _bbox(points) if points else None,
+                "centroid": _mean_point(points),
+                "value": None if field_values is None else field_values.get(field_item.field_id),
+                "axial_length_m": field_item.axial_length_m,
+                "circumferential_spacing_m": field_item.circumferential_spacing_m,
+            }
+        )
+    return records
+
+
+def _infer_cylinder_members(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+) -> tuple[CylinderMember, ...]:
+    skin_ids = set(geometry.skin_element_ids)
+    longitudinal_web_ids: list[int] = []
+    ring_web_ids: list[int] = []
+    flange_ids: list[int] = []
+
+    radial_margin = max(geometry.radius_m * 0.002, 1.0e-7)
+    for element in model.shell_elements.values():
+        if element.element_id in skin_ids:
+            continue
+        points = [model.nodes[node_id] for node_id in element.corner_node_ids]
+        centroid = _mean_point(points)
+        radial = _radial_vector(centroid, geometry.axis_origin, geometry.axis_direction)
+        radial_distance = _length(radial)
+        normal = _element_normal(points)
+        radial_direction = _normalise(radial)
+        radial_alignment = abs(_dot(normal, radial_direction))
+        axial_alignment = abs(_dot(normal, geometry.axis_direction))
+        radial_extent = _point_radial_extent(points, geometry)
+
+        if radial_extent > radial_margin and axial_alignment >= 0.60:
+            ring_web_ids.append(element.element_id)
+        elif radial_extent > radial_margin and axial_alignment <= 0.40 and radial_alignment <= 0.45:
+            longitudinal_web_ids.append(element.element_id)
+        elif abs(radial_distance - geometry.radius_m) > radial_margin and radial_alignment >= 0.55:
+            flange_ids.append(element.element_id)
+
+    longitudinal_components = _merge_cylinder_components_by_station(
+        model,
+        _connected_components_by_corner_edges(model, longitudinal_web_ids),
+        geometry,
+        role="longitudinal",
+    )
+    ring_components = _merge_cylinder_components_by_station(
+        model,
+        _connected_components_by_corner_edges(model, ring_web_ids),
+        geometry,
+        role="ring",
+    )
+    flange_components = _connected_components_by_corner_edges(model, flange_ids)
+
+    flange_data = [
+        (
+            tuple(component),
+            _component_centroid(model, component),
+            _component_radial_height(model, component, geometry),
+            _component_axial_bounds(model, component, geometry),
+            _component_angular_mean(model, component, geometry),
+        )
+        for component in flange_components
+    ]
+
+    members: list[CylinderMember] = []
+    for index, component in enumerate(longitudinal_components, start=1):
+        centroid = _component_centroid(model, component)
+        angle = _cylinder_angle(centroid, geometry)
+        flange = _match_cylinder_flange(
+            flange_data,
+            role="longitudinal_stiffener",
+            station=angle,
+            component=component,
+            model=model,
+            geometry=geometry,
+        )
+        members.append(
+            _make_cylinder_member(
+                model,
+                geometry,
+                member_id=f"longitudinal_stiffener_{index:03d}",
+                role="longitudinal_stiffener",
+                station=angle,
+                web_component=component,
+                flange_component=() if flange is None else flange,
+            )
+        )
+
+    raw_rings: list[CylinderMember] = []
+    for index, component in enumerate(ring_components, start=1):
+        centroid = _component_centroid(model, component)
+        station = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+        flange = _match_cylinder_flange(
+            flange_data,
+            role="ring",
+            station=station,
+            component=component,
+            model=model,
+            geometry=geometry,
+        )
+        raw_rings.append(
+            _make_cylinder_member(
+                model,
+                geometry,
+                member_id=f"ring_{index:03d}",
+                role="ring_stiffener",
+                station=station,
+                web_component=component,
+                flange_component=() if flange is None else flange,
+            )
+        )
+
+    if raw_rings:
+        heights = [member.web_height_m for member in raw_rings]
+        median_height = _median(heights) or 0.0
+        for index, member in enumerate(raw_rings, start=1):
+            role = "ring_frame" if member.web_height_m > max(median_height * 1.35, median_height + 1.0e-8) else "ring_stiffener"
+            members.append(
+                CylinderMember(
+                    member_id=f"{role}_{index:03d}",
+                    role=role,
+                    section_type=member.section_type,
+                    web_element_ids=member.web_element_ids,
+                    flange_element_ids=member.flange_element_ids,
+                    station=member.station,
+                    direction=member.direction,
+                    web_height_m=member.web_height_m,
+                    flange_width_m=member.flange_width_m,
+                    web_thickness_m=member.web_thickness_m,
+                    flange_thickness_m=member.flange_thickness_m,
+                    confidence=member.confidence,
+                    diagnostics=member.diagnostics,
+                )
+            )
+    return tuple(members)
+
+
+
+def _merge_cylinder_components_by_station(
+    model: FeShellModel,
+    components: Sequence[Sequence[int]],
+    geometry: CylinderGeometry,
+    *,
+    role: str,
+) -> list[list[int]]:
+    """Merge disconnected mesh strips that represent one physical member."""
+
+    groups: list[tuple[float, list[int]]] = []
+    axial_length = geometry.axial_bounds[1] - geometry.axial_bounds[0]
+    linear_tolerance = max(axial_length * 1.0e-5, geometry.radius_m * 1.0e-5, 1.0e-7)
+    angular_tolerance = max(linear_tolerance / max(geometry.radius_m, 1.0e-12), 1.0e-5)
+
+    for component in components:
+        centroid = _component_centroid(model, component)
+        station = (
+            _cylinder_angle(centroid, geometry)
+            if role == "longitudinal"
+            else _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+        )
+        for index, (existing_station, element_ids) in enumerate(groups):
+            error = (
+                abs(_wrapped_angle_difference(station, existing_station))
+                if role == "longitudinal"
+                else abs(station - existing_station)
+            )
+            tolerance = angular_tolerance if role == "longitudinal" else linear_tolerance
+            if error <= tolerance:
+                element_ids.extend(component)
+                if role == "longitudinal":
+                    merged_station = math.atan2(
+                        math.sin(existing_station) + math.sin(station),
+                        math.cos(existing_station) + math.cos(station),
+                    )
+                else:
+                    merged_station = (existing_station + station) / 2.0
+                groups[index] = (merged_station, element_ids)
+                break
+        else:
+            groups.append((station, list(component)))
+    return [sorted(set(element_ids)) for _, element_ids in groups]
+
+
+def _make_cylinder_member(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+    *,
+    member_id: str,
+    role: str,
+    station: float,
+    web_component: Sequence[int],
+    flange_component: Sequence[int],
+) -> CylinderMember:
+    web_points = _component_points(model, web_component)
+    flange_points = _component_points(model, flange_component)
+    web_height = _component_radial_height(model, web_component, geometry)
+    if role == "longitudinal_stiffener":
+        direction = geometry.axis_direction
+        flange_width = _component_circumferential_extent(flange_points, geometry) if flange_points else None
+    else:
+        centroid = _component_centroid(model, web_component)
+        radial = _normalise(_radial_vector(centroid, geometry.axis_origin, geometry.axis_direction))
+        direction = _normalise(_cross(geometry.axis_direction, radial))
+        flange_width = _point_cloud_extent_raw(flange_points, geometry.axis_direction) if flange_points else None
+
+    section_type = "FB"
+    diagnostics = ["web classified from local shell orientation and radial extent"]
+    if flange_component:
+        section_type = "T"
+        diagnostics.append("flange matched by shared geometry and station proximity")
+    else:
+        diagnostics.append("no matching flange shell component found")
+    return CylinderMember(
+        member_id=member_id,
+        role=role,
+        section_type=section_type,
+        web_element_ids=tuple(sorted(web_component)),
+        flange_element_ids=tuple(sorted(flange_component)),
+        station=station,
+        direction=direction,
+        web_height_m=web_height,
+        flange_width_m=flange_width,
+        web_thickness_m=_shell_section_thickness_for_elements(model, web_component),
+        flange_thickness_m=_shell_section_thickness_for_elements(model, flange_component),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _match_cylinder_flange(
+    flange_data: Sequence[tuple[tuple[int, ...], Point3D, float, tuple[float, float], float]],
+    *,
+    role: str,
+    station: float,
+    component: Sequence[int],
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+) -> tuple[int, ...] | None:
+    web_nodes = {
+        node_id
+        for element_id in component
+        for node_id in model.shell_elements[element_id].corner_node_ids
+    }
+    best: tuple[float, tuple[int, ...]] | None = None
+    for flange_component, centroid, _, axial_bounds, angle in flange_data:
+        flange_nodes = {
+            node_id
+            for element_id in flange_component
+            for node_id in model.shell_elements[element_id].corner_node_ids
+        }
+        shares_node = bool(web_nodes & flange_nodes)
+        if role == "longitudinal_stiffener":
+            station_error = abs(_wrapped_angle_difference(angle, station)) * geometry.radius_m
+        else:
+            flange_station = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+            station_error = abs(flange_station - station)
+        score = station_error - (1.0 if shares_node else 0.0)
+        if shares_node or station_error <= max(geometry.radius_m * 0.02, 1.0e-4):
+            if best is None or score < best[0]:
+                best = (score, flange_component)
+    return None if best is None else best[1]
+
+
+def _cylinder_domain_for_field(field_item: CylinderField) -> str:
+    roles = {member.role for member in field_item.members}
+    has_longitudinal = "longitudinal_stiffener" in roles
+    has_ring = bool(roles & {"ring_stiffener", "ring_frame"})
+    if has_longitudinal and has_ring:
+        return "Orthogonally Stiffened shell"
+    if has_longitudinal:
+        return "Longitudinal Stiffened shell"
+    if has_ring:
+        return "Ring Stiffened shell"
+    return "Unstiffened shell"
+
+
+def _cylinder_calculation_members(
+    field_item: CylinderField,
+    domain: str | None = None,
+) -> tuple[CylinderMember | None, CylinderMember | None, CylinderMember | None]:
+    """Return member objects compatible with the selected ``CylStru`` domain.
+
+    The FE geometry may contain several plausible calculation domains in one
+    bay.  The legacy cylinder API represents orthogonal stiffening as
+    longitudinal stiffeners plus a ring frame object; when the scan finds a
+    transverse ring stiffener but no heavy frame, use that transverse member as
+    the frame for the calculation instead of calling a setter for an object the
+    selected domain does not own.
+    """
+
+    domain = _cylinder_domain_for_field(field_item) if domain is None else str(domain)
+    longitudinal = _first_cylinder_member(field_item, "longitudinal_stiffener")
+    ring = _first_cylinder_member(field_item, "ring_stiffener")
+    frame = _first_cylinder_member(field_item, "ring_frame")
+    domain_lower = domain.lower()
+
+    if "orthogonally" in domain_lower:
+        return longitudinal, None, frame or ring
+    if "longitudinal" in domain_lower:
+        return longitudinal, None, None
+    if "ring stiffened" in domain_lower:
+        return None, ring or frame, None
+    return None, None, None
+
+
+def _cylinder_member_input(member: CylinderMember | None) -> dict[str, Any] | None:
+    if member is None:
+        return None
+    return {
+        "type": member.section_type,
+        "web_height_mm": member.web_height_m * 1000.0,
+        "web_thickness_mm": (member.web_thickness_m or 0.0) * 1000.0,
+        "flange_width_mm": (member.flange_width_m or 0.0) * 1000.0,
+        "flange_thickness_mm": (member.flange_thickness_m or 0.0) * 1000.0,
+        "source_member_id": member.member_id,
+    }
+
+
+def _set_cylinder_member(setter: Any, member: CylinderMember, spacing_m: float) -> None:
+    setter(
+        hw=member.web_height_m * 1000.0,
+        tw=(member.web_thickness_m or 0.0) * 1000.0,
+        bf=(member.flange_width_m or 0.0) * 1000.0,
+        tf=(member.flange_thickness_m or 0.0) * 1000.0,
+        stf_type=member.section_type,
+        spacing=spacing_m * 1000.0,
+    )
+
+
+def _first_cylinder_member(field_item: CylinderField, role: str) -> CylinderMember | None:
+    candidates = [member for member in field_item.members if member.role == role]
+    return None if not candidates else sorted(candidates, key=lambda member: member.member_id)[0]
+
+
+def _fit_circle_about_axis(points: Any, axis: Vector3D) -> tuple[Point3D, float, float]:
+    import numpy as np
+
+    axis_array = np.asarray(axis, dtype=float)
+    basis_u = np.asarray(_orthogonal_unit(axis), dtype=float)
+    basis_v = np.cross(axis_array, basis_u)
+    coordinates_u = points @ basis_u
+    coordinates_v = points @ basis_v
+    matrix = np.column_stack((2.0 * coordinates_u, 2.0 * coordinates_v, np.ones(len(points))))
+    rhs = coordinates_u ** 2 + coordinates_v ** 2
+    solution, *_ = np.linalg.lstsq(matrix, rhs, rcond=None)
+    centre_u, centre_v, constant = solution
+    radius_squared = max(float(constant + centre_u ** 2 + centre_v ** 2), 0.0)
+    radius = math.sqrt(radius_squared)
+    axial_centre = float((points @ axis_array).mean())
+    origin_array = basis_u * centre_u + basis_v * centre_v + axis_array * axial_centre
+    radial_distances = np.sqrt((coordinates_u - centre_u) ** 2 + (coordinates_v - centre_v) ** 2)
+    rms = float(np.sqrt(np.mean((radial_distances - radius) ** 2)))
+    return tuple(float(value) for value in origin_array), radius, rms
+
+
+def _orthogonal_unit(axis: Vector3D) -> Vector3D:
+    reference = (1.0, 0.0, 0.0) if abs(axis[0]) < 0.8 else (0.0, 1.0, 0.0)
+    return _normalise(_cross(axis, reference))
+
+
+def _canonical_axis(axis: Vector3D) -> Vector3D:
+    axis = _normalise(axis)
+    largest = max(range(3), key=lambda index: abs(axis[index]))
+    if axis[largest] < 0.0:
+        axis = tuple(-value for value in axis)  # type: ignore[assignment]
+    return axis
+
+
+def _point_cloud_extent(points: Any, direction: Vector3D) -> float:
+    import numpy as np
+
+    values = points @ np.asarray(direction, dtype=float)
+    return float(values.max() - values.min())
+
+
+def _point_cloud_extent_raw(points: Sequence[Point3D], direction: Vector3D) -> float:
+    if not points:
+        return 0.0
+    values = [_dot(point, direction) for point in points]
+    return max(values) - min(values)
+
+
+def _axial_coordinate(point: Point3D, origin: Point3D, axis: Vector3D) -> float:
+    return _dot(_subtract(point, origin), axis)
+
+
+def _radial_vector(point: Point3D, origin: Point3D, axis: Vector3D) -> Vector3D:
+    relative = _subtract(point, origin)
+    axial = _dot(relative, axis)
+    return tuple(relative[index] - axial * axis[index] for index in range(3))  # type: ignore[return-value]
+
+
+def _cylinder_basis(geometry: CylinderGeometry) -> tuple[Vector3D, Vector3D]:
+    first = _orthogonal_unit(geometry.axis_direction)
+    second = _normalise(_cross(geometry.axis_direction, first))
+    return first, second
+
+
+def _cylinder_angle(point: Point3D, geometry: CylinderGeometry) -> float:
+    radial = _radial_vector(point, geometry.axis_origin, geometry.axis_direction)
+    first, second = _cylinder_basis(geometry)
+    return math.atan2(_dot(radial, second), _dot(radial, first))
+
+
+def _positive_angle(angle: float) -> float:
+    value = angle % (2.0 * math.pi)
+    return value if value > 1.0e-12 else 2.0 * math.pi
+
+
+def _wrapped_angle_difference(first: float, second: float) -> float:
+    return (first - second + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _angle_in_interval(angle: float, start: float, end: float) -> bool:
+    span = _positive_angle(end - start)
+    relative = (angle - start) % (2.0 * math.pi)
+    return relative <= span + 1.0e-10
+
+
+def _component_points(model: FeShellModel, component: Sequence[int]) -> list[Point3D]:
+    return [
+        model.nodes[node_id]
+        for element_id in component
+        for node_id in model.shell_elements[element_id].corner_node_ids
+    ]
+
+
+def _component_centroid(model: FeShellModel, component: Sequence[int]) -> Point3D:
+    return _mean_point(_component_points(model, component))
+
+
+def _component_radial_height(
+    model: FeShellModel,
+    component: Sequence[int],
+    geometry: CylinderGeometry,
+) -> float:
+    points = _component_points(model, component)
+    if not points:
+        return 0.0
+    distances = [
+        _length(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
+        for point in points
+    ]
+    return max(distances) - min(distances)
+
+
+def _component_axial_bounds(
+    model: FeShellModel,
+    component: Sequence[int],
+    geometry: CylinderGeometry,
+) -> tuple[float, float]:
+    values = [
+        _axial_coordinate(point, geometry.axis_origin, geometry.axis_direction)
+        for point in _component_points(model, component)
+    ]
+    return (min(values), max(values)) if values else (0.0, 0.0)
+
+
+def _component_angular_mean(
+    model: FeShellModel,
+    component: Sequence[int],
+    geometry: CylinderGeometry,
+) -> float:
+    angles = [_cylinder_angle(point, geometry) for point in _component_points(model, component)]
+    if not angles:
+        return 0.0
+    return math.atan2(_mean(math.sin(value) for value in angles), _mean(math.cos(value) for value in angles))
+
+
+def _component_circumferential_extent(
+    points: Sequence[Point3D],
+    geometry: CylinderGeometry,
+) -> float:
+    if not points:
+        return 0.0
+    angles = [_cylinder_angle(point, geometry) for point in points]
+    reference = angles[0]
+    unwrapped = [reference + _wrapped_angle_difference(angle, reference) for angle in angles]
+    return geometry.radius_m * (max(unwrapped) - min(unwrapped))
+
+
+def _point_radial_extent(points: Sequence[Point3D], geometry: CylinderGeometry) -> float:
+    distances = [
+        _length(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
+        for point in points
+    ]
+    return max(distances) - min(distances) if distances else 0.0
+
+
+def _shell_section_thickness_for_elements(
+    model: FeShellModel,
+    element_ids: Iterable[int],
+) -> float | None:
+    element_set = set(element_ids)
+    if not element_set:
+        return None
+    for section in model.shell_sections:
+        if not section.elset:
+            continue
+        if element_set & set(model.elsets.get(section.elset, ())):
+            return section.thickness_m
+    return None
+
+
+def _unique_sorted(values: Sequence[float], tolerance: float) -> list[float]:
+    result: list[float] = []
+    for value in sorted(values):
+        if not result or abs(value - result[-1]) > tolerance:
+            result.append(value)
+    return result
+
+
+def _member_at_station(
+    members: Sequence[CylinderMember],
+    station: float,
+    tolerance: float = 1.0e-6,
+) -> CylinderMember | None:
+    candidates = [member for member in members if abs(member.station - station) <= tolerance]
+    return None if not candidates else min(candidates, key=lambda member: abs(member.station - station))
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Infer flat stiffened plate fields from CalculiX shell files.")
