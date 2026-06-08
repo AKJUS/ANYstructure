@@ -30,6 +30,7 @@ try:
     from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
     import anystruct.sesam_interface as sesam
+    import anystruct.fe_plate_fields as fe_plate_fields
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -61,6 +62,7 @@ except ModuleNotFoundError:
     from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
     import ANYstructure.anystruct.sesam_interface as sesam
+    import ANYstructure.anystruct.fe_plate_fields as fe_plate_fields
 
 
 def load_project_state(path):
@@ -83,6 +85,23 @@ def open_project(path, hydration_defaults=None):
 def save_project(path, save_input):
     """Create and save project state from a public project save input."""
     return ProjectSaveService.save_path(path, save_input)
+
+
+def create_fea_result_buckling_session(inp_path, frd_path=None, **kwargs):
+    """Scan FE geometry/results and return selectable ANYstructure buckling panels.
+
+    The returned session contains one panel record per discovered buckling field.
+    Each panel includes inferred geometry, material defaults, reduced FE stresses,
+    optional buckling results, and 2D plot bounds for GUI rendering.
+    """
+
+    return fe_plate_fields.create_fea_buckling_session(inp_path, frd_path, **kwargs)
+
+
+def analyze_fea_result_buckling(inp_path, frd_path, **kwargs):
+    """Read INP/FRD, infer panels, reduce stresses, and return a serializable summary."""
+
+    return create_fea_result_buckling_session(inp_path, frd_path, **kwargs).summary()
 
 
 class FlatStru():

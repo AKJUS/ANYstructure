@@ -191,13 +191,21 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "subtitle='Default'" in source
     assert "Recommended default" not in source
     assert "Single panel/cylinder" in source
-    assert "dialog.bind('<Return>', lambda _event: choose(False))" in source
-    assert "dialog.bind('<Escape>', lambda _event: choose(False))" in source
+    assert "FEA result buckling" in source
+    assert "text='Experimental'" in source
+    assert "tk.BooleanVar(value=False)" in source
+    assert "def toggle_experimental():" in source
+    assert "fea_card.pack_forget()" in source
+    assert "if experimental_var.get():" in source
+    assert "dialog.bind('<Return>', lambda _event: choose('multiple'))" in source
+    assert "dialog.bind('<Escape>', lambda _event: choose('multiple'))" in source
     assert "self._parent.wait_window(dialog)" in source
     assert "Mode - Single panel/cylinder" in source
     assert "Mode - Multiple panels" in source
+    assert "Mode - FEA result buckling" in source
     assert "def switch_to_single_calculation_mode(self):" in source
     assert "def switch_to_multiple_calculation_mode(self):" in source
+    assert "def switch_to_fea_result_buckling_mode(self):" in source
     assert "self._single_line_name = selected_line" in source
     assert "self._activate_simplified_calculation_pipeline()" in source
     assert "def _ensure_single_dummy_line(self):" in source
@@ -216,6 +224,78 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "self._tabControl.add(self._tab_geo, text='Geometry')" in source
     assert "self._tabControl.add(self._tab_comp, text='Compartments and loads')" in source
     assert "self.gui_load_combinations(self._combination_slider.get())" in source
+
+
+def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "import anystruct.fe_plate_fields as fe_plate_fields" in source
+    assert "self._fea_buckling_mode = False" in source
+    assert "self._fea_buckling_session = None" in source
+    assert "Open FEA result buckling files..." in source
+    assert "def open_fea_buckling_files(self):" in source
+    assert "def reimport_fea_buckling_files(self):" in source
+    assert "def import_fea_buckling_files(self, inp_path, frd_path=None):" in source
+    assert "fe_plate_fields.create_fea_buckling_session(" in source
+    assert "def _draw_fea_buckling_canvas(self):" in source
+    assert "fe_plate_fields.panel_3d_records(session.model, session.fields, session.usage_factors())" in source
+    assert "Poly3DCollection(" in source
+    assert "self._fea_3d_panel_artists = {}" in source
+    assert "self._fea_3d_panel_artists[field_id] = collection" in source
+    assert "def _update_fea_3d_selection(self):" in source
+    assert "def _ensure_fea_lower_panes_visible(self):" in source
+    assert "def _refresh_fea_buckling_views(self, rebuild_3d=False):" in source
+    assert "def _draw_fea_panel_result_text(self):" in source
+    assert "def _draw_fea_panel_existing_result_text(self, panel):" in source
+    assert "def _draw_fea_panel_2d_sketch(self):" in source
+    assert "def _draw_flat_structure_2d_preview(self, all_obj, selected_text=''):" in source
+    assert "matplotlib.colors.Normalize(vmin=0.0, vmax=1.5)" in source
+    assert "colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])" in source
+    assert "fig.colorbar(scalar_map, cax=colorbar_ax)" in source
+    assert "colorbar.set_label('UF'" in source
+    assert "self._build_flat_structure_properties()" in source
+    assert "self._create_all_structure_from_properties(prop_dict)" in source
+    assert "self._fea_buckling_mode = False" in source
+    assert "self.draw_results(state=state)" in source
+    assert "self.get_color_and_calc_state(current_line=temp_line, active_line_only=True)" in source
+    assert "pressure_mpa * 1.0e6" in source
+    assert "panel.anystructure_input.get('stresses', {}).get('pressure_mpa', 0.0)" in source
+    assert "edgecolor='red' if selected else 'none'" in source
+    assert "linewidth=1.8 if selected else 0.0" in source
+    assert "collection.set_gid(field_id)" in source
+    assert "collection.set_picker(True)" in source
+    assert "self._fea_pick_cid = self._prop_3d_fig_canvas.mpl_connect(" in source
+    assert "def _on_fea_buckling_panel_pick(self, event):" in source
+    assert "def _select_fea_panel_after_matplotlib_event(self, field_id):" in source
+    assert "self._fea_pick_after_id = self._parent.after_idle(select_panel)" in source
+    assert "self._prop_3d_fig_canvas.toolbar = None" in source
+    assert "self._prop_3d_toolbar.set_history_buttons = lambda *args, **kwargs: None" in source
+    assert "def _apply_selected_fea_panel_to_inputs(self):" in source
+    assert "self._new_plate_thk.set(round(float(geometry.get('plate_thickness_mm', 0.0)), 5))" in source
+    assert "self._new_sigma_x1.set(round(float(stresses.get('sigma_x1_mpa', 0.0)), 5))" in source
+
+    select_block = source[source.index("def _select_fea_panel(self, field_id):"):source.index("def _single_mode_active_line_candidate")]
+    assert "self._refresh_fea_buckling_views(rebuild_3d=False)" in select_block
+    assert "self._draw_fea_buckling_canvas()" not in select_block
+    assert "panel.buckling_error" not in source
+    assert "getattr(self, '_fea_buckling_mode', False)" in source[source.index("def _prop_3d_mouse_scroll"):source.index("def _set_prop_3d_view")]
+    assert "if getattr(self, '_fea_buckling_mode', False):\n            self._draw_fea_panel_result_text()" in source
+    assert "if getattr(self, '_fea_buckling_mode', False):\n            self._draw_fea_panel_2d_sketch()" in source
+
+    load_block = source[source.index("def _gui_fea_buckling_options"):source.index("def gui_load_combinations")]
+    assert "Manual pressure [Pa]" not in load_block
+    assert "self._lab_pressure" in load_block
+    assert "item.place_forget()" in load_block
+    assert "Import INP/FRD" in load_block
+    assert "Reimport" in load_block
+    assert "Analyse file" in load_block
+    assert "Buckling method:" in load_block
+    assert "DNV-RP-C201 - prescriptive" in load_block
+    assert "SemiAnalytical S3/U3" in load_block
+    assert "ML-Numeric (PULS based)" in load_block
+    assert "UF basis:" in load_block
+    assert "command=self._on_fea_buckling_option_changed" in load_block
 
 
 def test_initial_property_layout_uses_domain_selection_after_root_geometry_is_realized():
@@ -672,6 +752,104 @@ def test_3d_member_positions_keep_exact_spacing_and_end_boundary():
                   for idx in range(len(dense_end_positions) - 1)]
     assert round(max(dense_gaps) - min(dense_gaps), 12) == 0.0
     assert max(dense_gaps) <= 0.75
+
+
+def test_panel_length_expansion_keeps_stiffener_span_as_girder_bay():
+    assert Application._support_positions_from_length_and_span(12.0, 4.0) == [0.0, 4.0, 8.0, 12.0]
+    assert Application._support_positions_from_length_and_span(10.0, 4.0) == [1.0, 5.0, 9.0]
+    assert Application._support_positions_from_length_and_span(3.0, 4.0) == []
+    assert Application._bay_ranges_from_support_positions(10.0, [1.0, 5.0, 9.0]) == [
+        (0.0, 1.0),
+        (1.0, 5.0),
+        (5.0, 9.0),
+        (9.0, 10.0),
+    ]
+
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    main_text = main_source.read_text(encoding="utf-8")
+    flat_3d_block = main_text[
+        main_text.index("def draw_flat_panel_prop_3d"):
+        main_text.index("def _add_cylinder_longitudinal_stiffener_3d")
+    ]
+    assert "girder_xs = self._support_positions_from_length_and_span(width, span, max_count=80)" in flat_3d_block
+    assert "for x_pos in girder_xs:" in flat_3d_block
+    assert "for bay_x0, bay_x1 in solid_x_breaks:" in flat_3d_block
+
+    ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
+    ifc_text = ifc_source.read_text(encoding="utf-8")
+    assert "def _support_positions_from_length_and_span(length: float, span: float, max_count: int = 80)" in ifc_text
+    assert "offset = (length - full_span_count * span) / 2.0" in ifc_text
+    assert "def _bay_ranges_from_support_positions(" in ifc_text
+    flat_export_block = ifc_text[
+        ifc_text.index("def _add_flat_structure"):
+        ifc_text.index("def _is_cylinder_panel")
+    ]
+    assert "girder_xs = _support_positions_from_length_and_span(width, span, max_count=80)" in flat_export_block
+    assert "for index, x_pos in enumerate(girder_xs, start=1):" in flat_export_block
+    assert "bay_ranges = _bay_ranges_from_support_positions(width, girder_xs, girder_gap)" in flat_export_block
+    assert "for bay_index, (bay_x0, bay_x1) in enumerate(bay_ranges, start=1):" in flat_export_block
+
+
+def test_cylinder_ring_frames_suppress_overlapping_ring_stiffeners():
+    assert Application._ring_member_half_width({"web_thk": 0.02, "flange_w": 0.16}) == 0.08
+    assert Application._ring_positions_without_heavy_frame_overlap(
+        [2.5, 4.86, 5.0, 5.14, 7.5],
+        [5.0],
+        ring_half_width=0.05,
+        frame_half_width=0.10,
+    ) == [2.5, 7.5]
+    assert Application._ring_positions_without_heavy_frame_overlap(
+        [4.86, 5.14],
+        [],
+        ring_half_width=0.05,
+        frame_half_width=0.10,
+    ) == [4.86, 5.14]
+
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    main_text = main_source.read_text(encoding="utf-8")
+    cylinder_block = main_text[
+        main_text.index("def draw_cylinder_prop_3d"):
+        main_text.index("def draw_prop", main_text.index("def draw_cylinder_prop_3d"))
+    ]
+    assert "frame_dims = None" in cylinder_block
+    assert "girder_positions = []" in cylinder_block
+    assert "ring_positions = self._ring_positions_without_heavy_frame_overlap(" in cylinder_block
+    assert cylinder_block.index("ring_positions = self._ring_positions_without_heavy_frame_overlap(") < \
+        cylinder_block.index("if frame_dims is not None:")
+
+    ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
+    ifc_text = ifc_source.read_text(encoding="utf-8")
+    assert "def _ring_positions_without_heavy_frame_overlap(" in ifc_text
+    cylinder_export_block = ifc_text[
+        ifc_text.index("def _add_cylinder_structure"):
+        ifc_text.index("def export_selected_structure_from_application")
+    ]
+    assert "frame_positions: list[float] = []" in cylinder_export_block
+    assert "ring_positions = _ring_positions_without_heavy_frame_overlap(" in cylinder_export_block
+    assert cylinder_export_block.index("ring_positions = _ring_positions_without_heavy_frame_overlap(") < \
+        cylinder_export_block.index("if frame_dims is not None:")
+
+
+def test_ifc_shell_ring_webs_are_not_faceted_into_many_panels():
+    ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
+    ifc_text = ifc_source.read_text(encoding="utf-8")
+
+    assert "def _ring_web_shell_faces(" in ifc_text
+    helper_block = ifc_text[
+        ifc_text.index("def _ring_web_shell_faces("):
+        ifc_text.index("def _conical_wall_solid_faces")
+    ]
+    assert "face_count = 2 if is_full_circle else 1" in helper_block
+    assert "outer = [" in helper_block
+    assert "inner = [" in helper_block
+    assert "faces.append(outer + inner)" in helper_block
+
+    ring_block = ifc_text[
+        ifc_text.index("def _add_ring_set"):
+        ifc_text.index("def _add_cylinder_structure")
+    ]
+    assert "_ring_web_shell_faces(r0, r1, z_pos, theta_start, theta_end)" in ring_block
+    assert "_annular_radial_faces(r0, r1, z_pos, theta_start, theta_end, segments)" not in ring_block
 
 
 def test_unv_export_writes_nodes_and_elements(tmp_path):
