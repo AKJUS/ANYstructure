@@ -484,6 +484,83 @@ def _positions_from_length_and_spacing(length: float, spacing: float, include_en
     return clean_positions or [length / 2.0]
 
 
+def _ring_member_half_width(dims: SectionDimensions | None) -> float:
+    """Return the axial half-width occupied by a ring member."""
+
+    if dims is None:
+        return 0.0
+    return max(float(dims.web_thk), float(dims.flange_w), 0.0) / 2.0
+
+
+def _ring_positions_without_heavy_frame_overlap(
+        positions: Iterable[float],
+        frame_positions: Iterable[float],
+        ring_half_width: float,
+        frame_half_width: float,
+        tolerance: float = EPS,
+) -> list[float]:
+    """Suppress ordinary ring stiffeners whose axial footprint overlaps heavy frames."""
+
+    ring_half_width = max(_pos_float(ring_half_width, 0.0), 0.0)
+    frame_half_width = max(_pos_float(frame_half_width, 0.0), 0.0)
+    tolerance = max(_pos_float(tolerance, EPS), 0.0)
+    heavy_positions = [float(pos) for pos in frame_positions]
+    filtered_positions: list[float] = []
+    for pos in (float(value) for value in positions):
+        if any(abs(pos - frame_pos) <= ring_half_width + frame_half_width + tolerance
+               for frame_pos in heavy_positions):
+            continue
+        filtered_positions.append(pos)
+    return filtered_positions
+
+
+def _support_positions_from_length_and_span(length: float, span: float, max_count: int = 80) -> list[float]:
+    """Return centered girder/support stations while preserving the bay span."""
+
+    length = _pos_float(length, 0.0)
+    span = _pos_float(span, 0.0)
+    if length <= EPS:
+        return [0.0]
+    if span <= EPS:
+        return [0.0, length]
+
+    full_span_count = min(int(math.floor(length / span)), max(0, int(max_count)))
+    if full_span_count <= 0:
+        return []
+
+    offset = (length - full_span_count * span) / 2.0
+    positions = [offset + span * idx for idx in range(full_span_count + 1)]
+    if offset <= EPS:
+        positions[0] = 0.0
+    if abs(positions[-1] - length) <= EPS:
+        positions[-1] = length
+    return positions
+
+
+def _bay_ranges_from_support_positions(length: float, supports: Iterable[float], support_gap: float = 0.0) -> list[tuple[float, float]]:
+    """Return member segment ranges split by internal support/girder lines."""
+
+    length = _pos_float(length, 0.0)
+    support_gap = max(_pos_float(support_gap, 0.0), 0.0)
+    if length <= EPS:
+        return []
+
+    internal_supports = sorted(
+        pos for pos in (float(value) for value in supports)
+        if EPS < pos < length - EPS
+    )
+    breakpoints = [0.0] + internal_supports + [length]
+    ranges: list[tuple[float, float]] = []
+    for x0, x1 in zip(breakpoints[:-1], breakpoints[1:]):
+        left_gap = support_gap / 2.0 if any(abs(x0 - support) <= EPS for support in internal_supports) else 0.0
+        right_gap = support_gap / 2.0 if any(abs(x1 - support) <= EPS for support in internal_supports) else 0.0
+        bay_x0 = max(x0 + left_gap, 0.0)
+        bay_x1 = min(x1 - right_gap, length)
+        if bay_x1 > bay_x0:
+            ranges.append((bay_x0, bay_x1))
+    return ranges
+
+
 def _flat_lg_from_objects(app: Any, girder: Any, stiffener: Any, spacing: float) -> float:
     for obj in (girder, stiffener):
         if obj is None:
@@ -1793,7 +1870,7 @@ def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: st
     if girder is not None:
         width = _flat_lp_from_gui(app, span, spacing)
         length = _flat_lg_from_objects(app, girder, stiffener, spacing)
-        x_mid = width / 2.0
+        girder_xs = _support_positions_from_length_and_span(width, span, max_count=80)
         gdims = _section_dimensions_from_app(app, girder)
         sdims = _section_dimensions_from_app(app, stiffener) if stiffener is not None else None
         _add_plate_box(
@@ -1801,30 +1878,24 @@ def _add_flat_structure(ctx: IfcContext, app: Any, all_obj: Any, active_line: st
             extra_properties={"active_line": active_line, "panel_type": "flat panel with girder"},
             shell_export=shell_export,
         )
-        _add_member_web_and_flange(
-            ctx, f"{active_line} Girder", "y", x_mid, length / 2.0, length,
-            plate_thk, gdims, y_limits=(0.0, length), side_sign=side_sign, member_role="girder",
-            shell_export=shell_export,
-        )
+        for index, x_pos in enumerate(girder_xs, start=1):
+            _add_member_web_and_flange(
+                ctx, f"{active_line} Girder {index:03d}", "y", x_pos, length / 2.0, length,
+                plate_thk, gdims, y_limits=(0.0, length), side_sign=side_sign, member_role="girder",
+                shell_export=shell_export,
+            )
         if sdims is not None:
             stiffener_ys = _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80)
-            # Shell model: no web thickness is exported, so stiffeners meet the girder
-            # exactly at the girder web centreline.  This avoids both gaps and overlaps.
-            left_x0, left_x1 = 0.0, x_mid
-            right_x0, right_x1 = x_mid, width
+            girder_gap = 0.0 if shell_export else max(gdims.web_thk, 0.0)
+            bay_ranges = _bay_ranges_from_support_positions(width, girder_xs, girder_gap)
             for index, y in enumerate(stiffener_ys, start=1):
-                if left_x1 > left_x0:
+                for bay_index, (bay_x0, bay_x1) in enumerate(bay_ranges, start=1):
+                    if bay_x1 <= bay_x0:
+                        continue
                     _add_member_web_and_flange(
-                        ctx, f"{active_line} Stiffener {index:03d} Left", "x",
-                        (left_x0 + left_x1) / 2.0, y, left_x1 - left_x0, plate_thk,
-                        sdims, x_limits=(left_x0, left_x1), side_sign=side_sign,
-                        member_role="stiffener", shell_export=shell_export,
-                    )
-                if right_x1 > right_x0:
-                    _add_member_web_and_flange(
-                        ctx, f"{active_line} Stiffener {index:03d} Right", "x",
-                        (right_x0 + right_x1) / 2.0, y, right_x1 - right_x0, plate_thk,
-                        sdims, x_limits=(right_x0, right_x1), side_sign=side_sign,
+                        ctx, f"{active_line} Stiffener {index:03d} Bay {bay_index:03d}", "x",
+                        (bay_x0 + bay_x1) / 2.0, y, bay_x1 - bay_x0, plate_thk,
+                        sdims, x_limits=(bay_x0, bay_x1), side_sign=side_sign,
                         member_role="stiffener", shell_export=shell_export,
                     )
     else:
@@ -2325,23 +2396,8 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
         _add_cylinder_longitudinal_members(ctx, active_line, radius, length, angles, long_dims, thk, side_sign,
                                            shell_export=shell_export)
 
-    if getattr(cyl_obj, "RingStfObj", None) is not None:
-        ring_dims = _section_dimensions_from_app(app, cyl_obj.RingStfObj)
-        try:
-            ring_spacing = _normalise_length_to_m(shell._dist_between_rings, 0.0)
-        except Exception:
-            ring_spacing = _normalise_length_to_m(_safe_getter(shell, (), ("dist_between_rings",), 0.0), 0.0)
-        if ring_spacing <= EPS:
-            try:
-                ring_spacing = _normalise_length_to_m(app._new_shell_dist_rings.get(), 0.0)
-            except Exception:
-                ring_spacing = 0.0
-        ring_positions = _positions_from_length_and_spacing(length, ring_spacing, include_ends=False, max_count=80)
-        _add_ring_set(ctx, active_line, "Ring stiffener", radius, ring_positions, ring_dims, side_sign,
-                      theta_start=theta_start if is_panel else 0.0,
-                      theta_end=theta_end if is_panel else 2.0 * math.pi,
-                      shell_export=shell_export, shell_thk=thk)
-
+    frame_dims = None
+    frame_positions: list[float] = []
     if getattr(cyl_obj, "RingFrameObj", None) is not None:
         frame_dims = _section_dimensions_from_app(app, cyl_obj.RingFrameObj)
         try:
@@ -2356,6 +2412,31 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
         frame_positions = [length / 2.0] if frame_spacing <= EPS else _positions_from_length_and_spacing(
             length, frame_spacing, include_ends=False, max_count=40
         )
+
+    if getattr(cyl_obj, "RingStfObj", None) is not None:
+        ring_dims = _section_dimensions_from_app(app, cyl_obj.RingStfObj)
+        try:
+            ring_spacing = _normalise_length_to_m(shell._dist_between_rings, 0.0)
+        except Exception:
+            ring_spacing = _normalise_length_to_m(_safe_getter(shell, (), ("dist_between_rings",), 0.0), 0.0)
+        if ring_spacing <= EPS:
+            try:
+                ring_spacing = _normalise_length_to_m(app._new_shell_dist_rings.get(), 0.0)
+            except Exception:
+                ring_spacing = 0.0
+        ring_positions = _positions_from_length_and_spacing(length, ring_spacing, include_ends=False, max_count=80)
+        ring_positions = _ring_positions_without_heavy_frame_overlap(
+            ring_positions,
+            frame_positions,
+            _ring_member_half_width(ring_dims),
+            _ring_member_half_width(frame_dims),
+        )
+        _add_ring_set(ctx, active_line, "Ring stiffener", radius, ring_positions, ring_dims, side_sign,
+                      theta_start=theta_start if is_panel else 0.0,
+                      theta_end=theta_end if is_panel else 2.0 * math.pi,
+                      shell_export=shell_export, shell_thk=thk)
+
+    if frame_dims is not None:
         _add_ring_set(ctx, active_line, "Ring frame", radius, frame_positions, frame_dims, side_sign,
                       theta_start=theta_start if is_panel else 0.0,
                       theta_end=theta_end if is_panel else 2.0 * math.pi,

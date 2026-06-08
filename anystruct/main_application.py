@@ -42,6 +42,7 @@ try:
     import anystruct.project_application as project_application
     import anystruct.project_services as project_services
     import anystruct.solid_export as solid_export
+    import anystruct.fe_plate_fields as fe_plate_fields
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -64,6 +65,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.project_application as project_application
     import ANYstructure.anystruct.project_services as project_services
     import ANYstructure.anystruct.solid_export as solid_export
+    import ANYstructure.anystruct.fe_plate_fields as fe_plate_fields
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,7 @@ class Application():
         sub_menu.add_command(label='Open project', command=self.openfile)
         sub_menu.add_command(label='Restore previous', command=self.restore_previous)
         sub_menu.add_command(label='Open excel input', command=self.open_excel_file)
+        sub_menu.add_command(label='Open FEA result buckling files...', command=self.open_fea_buckling_files)
         sub_menu.add_separator()
         file_export_menu = tk.Menu(sub_menu)
         sub_menu.add_cascade(label='Export', menu=file_export_menu)
@@ -265,6 +268,7 @@ class Application():
         sub_colors.add_separator()
         sub_colors.add_command(label='Mode - Single panel/cylinder', command=self.switch_to_single_calculation_mode)
         sub_colors.add_command(label='Mode - Multiple panels', command=self.switch_to_multiple_calculation_mode)
+        sub_colors.add_command(label='Mode - FEA result buckling', command=self.switch_to_fea_result_buckling_mode)
 
         # base_mult = 1.2
         # base_canvas_dim = [int(1000 * base_mult),int(720*base_mult)]  #do not modify this, sets the "orignal" canvas dimensions.
@@ -325,6 +329,16 @@ class Application():
 
         self._simplified_calculation_mode = False
         self._single_line_name = 'line1'
+        self._fea_buckling_mode = False
+        self._fea_buckling_session = None
+        self._fea_selected_panel_id = None
+        self._fea_last_inp_path = None
+        self._fea_last_frd_path = None
+        self._fea_panel_canvas_items = {}
+        self._fea_3d_panel_artists = {}
+        self._fea_buckling_created = []
+        self._fea_pick_cid = None
+        self._fea_pick_after_id = None
 
         # Optional Matplotlib based 3D preview. In simplified mode this is promoted
         # to the large main pane; otherwise it remains in the lower property canvas.
@@ -1947,27 +1961,34 @@ class Application():
             pass
 
     def _prompt_startup_calculation_mode(self):
-        """Let the user choose the simplified single-line mode or the standard multi-panel GUI."""
+        """Let the user choose standard, simplified, or FEA-result buckling workflow."""
         try:
-            use_single_line = self._show_startup_calculation_mode_dialog()
+            startup_mode = self._show_startup_calculation_mode_dialog()
         except Exception:
-            use_single_line = False
+            startup_mode = 'multiple'
 
-        self._simplified_calculation_mode = bool(use_single_line)
-        self._new_show_prop_3d.set(self._simplified_calculation_mode)
-        if self._simplified_calculation_mode:
+        if startup_mode is True:
+            startup_mode = 'single'
+        elif startup_mode is False:
+            startup_mode = 'multiple'
+
+        if startup_mode == 'single':
             self.switch_to_single_calculation_mode()
+        elif startup_mode == 'fea':
+            self.switch_to_fea_result_buckling_mode()
+        else:
+            self.switch_to_multiple_calculation_mode()
 
     def _show_startup_calculation_mode_dialog(self):
-        """Show a polished startup mode picker and return True for the simplified workflow."""
-        result = {'use_single_line': False}
+        """Show a startup mode picker and return ``multiple``, ``single`` or ``fea``."""
+        result = {'mode': 'multiple'}
         app_version = self._get_application_version_from_metadata()
         dialog = tk.Toplevel(self._parent, background='#f5f7fb')
         dialog.title('Start ANYstructure')
         dialog.resizable(False, False)
         dialog.transient(self._parent)
 
-        width, height = 640, 382
+        width, height = 920, 382
         try:
             self._parent.update_idletasks()
             root_x = self._parent.winfo_rootx()
@@ -1980,17 +2001,17 @@ class Application():
         except Exception:
             dialog.geometry(f'{width}x{height}')
 
-        def choose(use_single_line):
-            result['use_single_line'] = use_single_line
+        def choose(mode):
+            result['mode'] = mode
             try:
                 dialog.grab_release()
             except Exception:
                 pass
             dialog.destroy()
 
-        dialog.protocol('WM_DELETE_WINDOW', lambda: choose(False))
-        dialog.bind('<Return>', lambda _event: choose(False))
-        dialog.bind('<Escape>', lambda _event: choose(False))
+        dialog.protocol('WM_DELETE_WINDOW', lambda: choose('multiple'))
+        dialog.bind('<Return>', lambda _event: choose('multiple'))
+        dialog.bind('<Escape>', lambda _event: choose('multiple'))
 
         header = tk.Frame(dialog, background='#172033', height=116)
         header.pack(fill=tk.X)
@@ -2036,7 +2057,7 @@ class Application():
             tk.Label(card, text=subtitle, background='white', foreground='#475569',
                      font=('Segoe UI', 9, 'bold')).pack(anchor=tk.W, padx=18)
             tk.Label(card, text=details, background='white', foreground='#475569',
-                     justify=tk.LEFT, wraplength=235, font=('Segoe UI', 9)).pack(anchor=tk.W, padx=18, pady=(12, 16))
+                     justify=tk.LEFT, wraplength=245, font=('Segoe UI', 9)).pack(anchor=tk.W, padx=18, pady=(12, 16))
             tk.Button(card, text=button_text, command=command, background=button_bg, foreground=button_fg,
                       activebackground=button_bg, activeforeground=button_fg, relief=tk.FLAT,
                       padx=14, pady=7, font=('Segoe UI', 9, 'bold'), cursor='hand2').pack(
@@ -2049,7 +2070,7 @@ class Application():
             subtitle='Default',
             details='For multiple panels/cylinders with advanced load definition.',
             button_text='Start multiple panels',
-            command=lambda: choose(False),
+            command=lambda: choose('multiple'),
             primary=False,
         )
         single_card = add_mode_card(
@@ -2058,11 +2079,21 @@ class Application():
             subtitle='Simplified calculation',
             details='For single panel/cylinder with simplified load interface.',
             button_text='Start single mode',
-            command=lambda: choose(True),
+            command=lambda: choose('single'),
             primary=True,
         )
-        standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
-        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0))
+        fea_card = add_mode_card(
+            content,
+            title='FEA result buckling',
+            subtitle='FE panel scan',
+            details='Import PrePoMax/CalculiX INP/FRD files and select buckling panels directly.',
+            button_text='Start FEA mode',
+            command=lambda: choose('fea'),
+            primary=False,
+        )
+        standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 8))
+        fea_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
         try:
             dialog.grab_set()
@@ -2070,7 +2101,7 @@ class Application():
         except Exception:
             pass
         self._parent.wait_window(dialog)
-        return result['use_single_line']
+        return result['mode']
 
     @staticmethod
     def _get_application_version_from_metadata():
@@ -2084,6 +2115,7 @@ class Application():
 
     def switch_to_single_calculation_mode(self):
         """Switch from standard modelling to the simplified one-line calculation workflow."""
+        self._fea_buckling_mode = False
         selected_line = self._active_line if self._active_line in self._line_dict else None
         if selected_line is not None:
             self._single_line_name = selected_line
@@ -2097,6 +2129,7 @@ class Application():
 
     def switch_to_multiple_calculation_mode(self):
         """Switch back to the standard multi-panel modelling workflow."""
+        self._fea_buckling_mode = False
         self._simplified_calculation_mode = False
         self._new_show_prop_3d.set(False)
         self._show_standard_calculation_layout()
@@ -2105,6 +2138,33 @@ class Application():
         self.update_frame(force_recalc=True)
         try:
             self.gui_load_combinations(self._combination_slider.get())
+        except Exception:
+            pass
+
+    def switch_to_fea_result_buckling_mode(self):
+        """Switch to FE-result buckling where clickable panels replace ship lines."""
+        self._fea_buckling_mode = True
+        self._simplified_calculation_mode = False
+        self._new_show_prop_3d.set(False)
+        self.clear_prop_3d()
+        self._apply_fea_buckling_layout()
+        self._active_line = ''
+        self._line_is_active = False
+        self._active_point = ''
+        self._point_is_active = False
+        self._refresh_fea_buckling_views(rebuild_3d=True)
+
+    def _apply_fea_buckling_layout(self):
+        """Hide ship modelling/load tabs and make FE panels the active workspace."""
+        try:
+            self._tabControl.hide(self._tab_geo)
+            self._tabControl.hide(self._tab_comp)
+            self._tabControl.select(self._tab_prop)
+        except Exception:
+            pass
+
+        try:
+            self.add_stucture.config(text='Update selected\nFEA panel input')
         except Exception:
             pass
 
@@ -2138,6 +2198,7 @@ class Application():
 
     def _show_standard_calculation_layout(self):
         """Restore modelling tabs and controls for the standard multi-panel workflow."""
+        self._clear_fea_buckling_option_widgets()
         try:
             self._tabControl.add(self._tab_geo, text='Geometry')
             self._tabControl.add(self._tab_comp, text='Compartments and loads')
@@ -2155,6 +2216,138 @@ class Application():
                                           'basic structural information.')
         except Exception:
             pass
+
+    def _clear_fea_buckling_option_widgets(self):
+        for item in getattr(self, '_fea_buckling_created', []):
+            try:
+                item.destroy()
+            except Exception:
+                pass
+        self._fea_buckling_created = []
+
+    def open_fea_buckling_files(self):
+        """Ask for INP/FRD files and import them into FEA-result buckling mode."""
+        inp_path = filedialog.askopenfilename(
+            title='Open CalculiX/PrePoMax input deck',
+            filetypes=(('CalculiX input', '*.inp'), ('All files', '*.*')),
+        )
+        if not inp_path:
+            return
+        frd_path = filedialog.askopenfilename(
+            title='Open CalculiX/PrePoMax result file',
+            filetypes=(('CalculiX result', '*.frd'), ('All files', '*.*')),
+        )
+        self.import_fea_buckling_files(inp_path, frd_path or None)
+
+    def reimport_fea_buckling_files(self):
+        """Re-read the last FEA files using current buckling options."""
+        if not self._fea_last_inp_path:
+            self.open_fea_buckling_files()
+            return
+        self.import_fea_buckling_files(self._fea_last_inp_path, self._fea_last_frd_path)
+
+    def import_fea_buckling_files(self, inp_path, frd_path=None):
+        """Load FEA files and prepare clickable buckling panels."""
+        try:
+            self._fea_buckling_session = fe_plate_fields.create_fea_buckling_session(
+                inp_path,
+                frd_path,
+                calculation_method=self._new_buckling_method.get(),
+                buckling_acceptance=self._new_puls_method.get(),
+                pressure_mpa=0.0,
+                material_yield_mpa=self._new_material.get(),
+                material_factor=self._new_material_factor.get(),
+                run_buckling=bool(frd_path),
+            )
+        except Exception as err:
+            messagebox.showerror('FEA import error', str(err))
+            return
+
+        self._fea_last_inp_path = str(inp_path)
+        self._fea_last_frd_path = None if frd_path is None else str(frd_path)
+        first_panel = self._fea_buckling_session.panels[0] if self._fea_buckling_session.panels else None
+        self._fea_selected_panel_id = None if first_panel is None else first_panel.field_id
+        self._apply_selected_fea_panel_to_inputs()
+        self._refresh_fea_buckling_views(rebuild_3d=True)
+
+    def _apply_selected_fea_panel_to_inputs(self):
+        """Copy the selected FE panel into the normal ANYstructure input variables."""
+        if self._fea_buckling_session is None or self._fea_selected_panel_id is None:
+            return
+        try:
+            panel = self._fea_buckling_session.panel(self._fea_selected_panel_id)
+        except KeyError:
+            return
+        data = panel.anystructure_input
+        geometry = data.get('geometry', {})
+        section = data.get('section', {})
+        material = data.get('material', {})
+        stresses = data.get('stresses', {})
+        buckling = data.get('buckling', {})
+
+        self._new_calculation_domain.set(data.get('calculation_domain', 'Flat plate, stiffened'))
+        self._new_field_len.set(round(float(geometry.get('span_mm', 0.0)), 5))
+        self._new_stf_spacing.set(round(float(geometry.get('spacing_mm', 0.0)), 5))
+        self._new_plate_thk.set(round(float(geometry.get('plate_thickness_mm', 0.0)), 5))
+        self._new_stf_type.set(str(section.get('type', 'FB') or 'FB'))
+        self._new_stf_web_h.set(round(float(section.get('web_height_mm', 0.0)), 5))
+        self._new_stf_web_t.set(round(float(section.get('web_thickness_mm', 0.0)), 5))
+        self._new_stf_fl_w.set(round(float(section.get('flange_width_mm', 0.0)), 5))
+        self._new_stf_fl_t.set(round(float(section.get('flange_thickness_mm', 0.0)), 5))
+        self._new_material.set(round(float(material.get('yield_mpa', 355.0)), 5))
+        self._new_material_factor.set(float(material.get('material_factor', 1.15)))
+        self._new_sigma_x1.set(round(float(stresses.get('sigma_x1_mpa', 0.0)), 5))
+        self._new_sigma_x2.set(round(float(stresses.get('sigma_x2_mpa', 0.0)), 5))
+        self._new_sigma_y1.set(round(float(stresses.get('sigma_y1_mpa', 0.0)), 5))
+        self._new_sigma_y2.set(round(float(stresses.get('sigma_y2_mpa', 0.0)), 5))
+        self._new_tauxy.set(round(float(stresses.get('tau_xy_mpa', 0.0)), 5))
+        self._new_buckling_method.set(str(buckling.get('calculation_method', self._new_buckling_method.get())))
+        self._new_puls_method.set(str(buckling.get('buckling_acceptance', self._new_puls_method.get())))
+        self._new_puls_panel_boundary.set(str(buckling.get('puls_boundary', 'Int')))
+        self._new_puls_sp_or_up.set(str(buckling.get('puls_sp_or_up', 'SP')))
+        self._new_puls_up_boundary.set(str(buckling.get('puls_up_boundary', 'SSSS')))
+        self.calculation_domain_selected(sync_cylinder_inputs=False)
+
+    def _ensure_fea_lower_panes_visible(self):
+        """Keep FEA mode's selected-panel sketch and result text panes visible."""
+        try:
+            main_place = self._main_canvas.place_info()
+            x_canvas_place = float(main_place.get('relx', 0.26))
+            right_limit = 0.915
+            total_width = max(right_limit - x_canvas_place, 0.30)
+            prop_width = total_width * 0.43
+            result_width = total_width - prop_width
+            self._prop_canvas.place(relx=x_canvas_place, rely=0.73, relwidth=prop_width, relheight=0.27)
+            self._result_canvas.place(relx=x_canvas_place + prop_width, rely=0.73,
+                                      relwidth=result_width, relheight=0.27)
+            tk.Misc.lift(self._prop_canvas)
+            tk.Misc.lift(self._result_canvas)
+        except Exception:
+            pass
+
+    def _refresh_fea_lower_panes(self):
+        self._ensure_fea_lower_panes_visible()
+        self._draw_fea_panel_result_text()
+        self._draw_fea_panel_2d_sketch()
+
+    def _refresh_fea_buckling_views(self, rebuild_3d=False):
+        if rebuild_3d:
+            self._draw_fea_buckling_canvas()
+        else:
+            self._update_fea_3d_selection()
+        self._refresh_fea_lower_panes()
+        self._gui_fea_buckling_options()
+
+    def _on_fea_buckling_option_changed(self, *_args):
+        if self._fea_last_inp_path:
+            self.reimport_fea_buckling_files()
+        else:
+            self._gui_fea_buckling_options()
+
+    def _select_fea_panel(self, field_id):
+        self._fea_selected_panel_id = field_id
+        self._apply_selected_fea_panel_to_inputs()
+        self._refresh_fea_buckling_views(rebuild_3d=False)
 
     def _single_mode_active_line_candidate(self):
         """Return the selected line when valid, otherwise the remembered dummy/single line."""
@@ -3077,12 +3270,85 @@ class Application():
         self._lab_pressure.place(relx=0.786458333, rely=self.results_gui_start)
         self._result_label_manual.place(relx=lc_x, rely=self.results_gui_start + 0.06)
 
+    def _gui_fea_buckling_options(self):
+        """Draw FEA-result buckling controls without pressure input widgets."""
+        [[item.destroy() for item in items] for items in
+         [self._lc_comb_created, self._comp_comb_created, self._manual_created, self._info_created]]
+        self._lc_comb_created, self._comp_comb_created, self._manual_created, self._info_created = [], [], [], []
+        self._clear_fea_buckling_option_widgets()
+        for item in [self._result_label_dnva, self._result_label_dnvb, self._result_label_tanktest,
+                     self._result_label_manual, self._lab_pressure]:
+            try:
+                item.place_forget()
+            except Exception:
+                pass
+
+        x0 = 0.790
+        y0 = 0.285
+        dy = 0.034
+        session = self._fea_buckling_session
+        panel_count = 0 if session is None else session.panel_count
+        selected = self._fea_selected_panel_id or '-'
+        selected_panel = None
+        if session is not None and self._fea_selected_panel_id is not None:
+            try:
+                selected_panel = session.panel(self._fea_selected_panel_id)
+            except KeyError:
+                selected_panel = None
+        uf_text = '-' if selected_panel is None or selected_panel.usage_factor is None else f'{selected_panel.usage_factor:.3g}'
+        source_text = 'No FE file loaded' if session is None else os.path.basename(session.inp_path)
+
+        rows = [
+            ttk.Label(self._main_fr, text='FEA result buckling', font=self._text_size['Text 8 bold']),
+            ttk.Button(self._main_fr, text='Import INP/FRD', command=self.open_fea_buckling_files),
+            ttk.Button(self._main_fr, text='Reimport', command=self.reimport_fea_buckling_files),
+            ttk.Button(self._main_fr, text='Analyse file', command=self.reimport_fea_buckling_files),
+            ttk.Label(self._main_fr, text='Buckling method:', font=self._text_size['Text 8']),
+            ttk.OptionMenu(
+                self._main_fr,
+                self._new_buckling_method,
+                self._new_buckling_method.get(),
+                'DNV-RP-C201 - prescriptive',
+                'SemiAnalytical S3/U3',
+                'ML-Numeric (PULS based)',
+                command=self._on_fea_buckling_option_changed,
+            ),
+            ttk.Label(self._main_fr, text='UF basis:', font=self._text_size['Text 8']),
+            ttk.OptionMenu(
+                self._main_fr,
+                self._new_puls_method,
+                self._new_puls_method.get(),
+                'ultimate',
+                'buckling',
+                command=self._on_fea_buckling_option_changed,
+            ),
+            ttk.Label(self._main_fr, text='Panels: ' + str(panel_count), font=self._text_size['Text 8']),
+            ttk.Label(self._main_fr, text='Selected: ' + selected, font=self._text_size['Text 8']),
+            ttk.Label(self._main_fr, text='UF: ' + uf_text, font=self._text_size['Text 8']),
+            ttk.Label(self._main_fr, text='Source: ' + source_text, font=self._text_size['Text 8']),
+        ]
+        self._fea_buckling_created.extend(rows)
+        rows[0].place(relx=x0, rely=y0)
+        rows[1].place(relx=x0, rely=y0 + dy * 1.3)
+        rows[2].place(relx=x0 + 0.095, rely=y0 + dy * 1.3)
+        rows[3].place(relx=x0, rely=y0 + dy * 2.6)
+        rows[4].place(relx=x0, rely=y0 + dy * 4.0)
+        rows[5].place(relx=x0, rely=y0 + dy * 4.8, relwidth=0.145)
+        rows[6].place(relx=x0, rely=y0 + dy * 6.1)
+        rows[7].place(relx=x0, rely=y0 + dy * 6.9, relwidth=0.09)
+        for index, item in enumerate(rows[8:], start=8):
+            item.place(relx=x0, rely=y0 + dy * (index + 0.6))
+
     def gui_load_combinations(self, event):
         '''
         Initsializing and updating gui for load combinations.
         The fields are located left of the Canvas.
         :return:
         '''
+
+        if getattr(self, '_fea_buckling_mode', False):
+            self._gui_fea_buckling_options()
+            return
 
         if all([self._line_is_active, self._active_line in self._line_to_struc.keys(),
                 self._gui_functional_look == 'all items']):
@@ -4793,10 +5059,451 @@ class Application():
 
         return return_dict
 
+    def _fea_panel_canvas_color(self, panel, index):
+        if panel is not None and panel.usage_factor is not None:
+            value = max(min(float(panel.usage_factor), 1.5), 0.0)
+            rgba = plt.get_cmap('RdYlGn_r')(value / 1.5)
+            return matplotlib.colors.rgb2hex(rgba)
+        return '#d9d9d9'
+
+    def _embed_fea_buckling_3d_figure(self, fig, ax, default_view=(24, -55)):
+        """Embed the FEA buckling-panel-only 3D view in the main drawing pane."""
+        self._prop_3d_axes = ax
+        self._prop_3d_default_view = default_view
+        self._disable_prop_3d_artist_clipping(ax)
+
+        place = {
+            'relx': self._place_info_float(self._main_canvas, 'relx', 0.26),
+            'rely': self._place_info_float(self._main_canvas, 'rely', 0),
+            'relwidth': self._place_info_float(self._main_canvas, 'relwidth', 0.523),
+            'relheight': self._place_info_float(self._main_canvas, 'relheight', 0.73),
+        }
+        self._prop_3d_frame = tk.Frame(
+            self._main_fr,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        self._prop_3d_frame.place(**place)
+        tk.Misc.lift(self._prop_3d_frame)
+
+        toolbar_row = tk.Frame(
+            self._prop_3d_frame,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        toolbar_row.pack(side=tk.TOP, fill=tk.X)
+        self._prop_3d_fig_canvas = FigureCanvasTkAgg(fig, master=self._prop_3d_frame)
+        self._prop_3d_fig_canvas.draw()
+        self._fea_pick_cid = self._prop_3d_fig_canvas.mpl_connect(
+            'pick_event',
+            self._on_fea_buckling_panel_pick,
+        )
+
+        self._prop_3d_toolbar = NavigationToolbar2Tk(self._prop_3d_fig_canvas, toolbar_row, pack_toolbar=False)
+        self._prop_3d_toolbar.update()
+        self._prop_3d_toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        view_row = tk.Frame(toolbar_row, background=self._style.lookup('TFrame', 'background'), bd=0,
+                            highlightthickness=0)
+        view_row.pack(side=tk.RIGHT)
+        ttk.Button(view_row, text='Iso', width=4,
+                   command=lambda: self._set_prop_3d_view(default_view[0], default_view[1])).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Top', width=4,
+                   command=lambda: self._set_prop_3d_view(90, -90)).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Side', width=5,
+                   command=lambda: self._set_prop_3d_view(0, -90)).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Import', width=7, command=self.open_fea_buckling_files).pack(side=tk.LEFT,
+                                                                                                 padx=(8, 0))
+        ttk.Button(view_row, text='Reimport', width=8, command=self.reimport_fea_buckling_files).pack(side=tk.LEFT)
+
+        self._prop_3d_canvas_widget = self._prop_3d_fig_canvas.get_tk_widget()
+        self._prop_3d_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._prop_3d_canvas_widget.bind('<MouseWheel>', self._prop_3d_mouse_scroll)
+        self._prop_3d_canvas_widget.bind('<Button-4>', self._prop_3d_mouse_scroll)
+        self._prop_3d_canvas_widget.bind('<Button-5>', self._prop_3d_mouse_scroll)
+        self._prop_3d_frame.bind('<Configure>', self._schedule_resize_prop_3d_figure)
+        self._prop_3d_frame.after(50, self._resize_prop_3d_figure)
+
+    def _select_fea_panel_after_matplotlib_event(self, field_id):
+        """Select a panel after Matplotlib has finished its current mouse callback."""
+        if getattr(self, '_fea_pick_after_id', None) is not None:
+            try:
+                self._parent.after_cancel(self._fea_pick_after_id)
+            except Exception:
+                pass
+            self._fea_pick_after_id = None
+
+        def select_panel():
+            self._fea_pick_after_id = None
+            self._select_fea_panel(field_id)
+
+        try:
+            self._fea_pick_after_id = self._parent.after_idle(select_panel)
+        except Exception:
+            self._select_fea_panel(field_id)
+
+    def _on_fea_buckling_panel_pick(self, event):
+        field_id = None
+        try:
+            field_id = event.artist.get_gid()
+        except Exception:
+            field_id = None
+        if field_id:
+            self._select_fea_panel_after_matplotlib_event(field_id)
+
+    def _update_fea_3d_selection(self):
+        """Update panel highlighting in place so the user's 3D view is preserved."""
+        session = self._fea_buckling_session
+        if session is None:
+            return
+        for field_id, collection in getattr(self, '_fea_3d_panel_artists', {}).items():
+            selected = field_id == self._fea_selected_panel_id
+            try:
+                collection.set_edgecolor('red' if selected else 'none')
+                collection.set_linewidth(1.8 if selected else 0.0)
+                collection.set_alpha(0.92 if selected else 0.82)
+            except Exception:
+                pass
+        try:
+            self._prop_3d_fig_canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _draw_fea_panel_result_text(self):
+        """Show the selected FE panel using the existing ANYstructure result printer."""
+        self._result_canvas.delete('all')
+        session = self._fea_buckling_session
+        if session is None or self._fea_selected_panel_id is None:
+            self._result_canvas.create_text(
+                8,
+                8,
+                text='No FEA buckling panel selected',
+                anchor=tk.NW,
+                font=self._text_size['Text 8 bold'],
+                fill=self._color_text,
+            )
+            return
+        try:
+            panel = session.panel(self._fea_selected_panel_id)
+        except KeyError:
+            return
+
+        self._draw_fea_panel_existing_result_text(panel)
+
+    def _draw_fea_panel_existing_result_text(self, panel):
+        temp_line = '__fea_selected_panel__'
+        old_active_line = self._active_line
+        old_line_is_active = self._line_is_active
+        old_fea_mode = self._fea_buckling_mode
+        old_line = self._line_dict.get(temp_line)
+        old_bundle = self._line_to_struc.get(temp_line)
+        old_load_keys = {
+            key: value for key, value in self._new_load_comb_dict.items()
+            if len(key) > 1 and key[1] == temp_line
+        }
+        try:
+            all_obj = self._fea_panel_all_structure()
+            pressure_mpa = self._fea_panel_pressure_mpa(panel)
+            self._point_dict.setdefault('point999991', [0.0, 0.0])
+            self._point_dict.setdefault('point999992', [max(panel.field.span_m, 1.0), 0.0])
+            self._line_dict[temp_line] = [999991, 999992]
+            project_services.LineStructureService(self._line_to_struc).assign_structure(temp_line, all_obj)
+            self._new_load_comb_dict[('manual', temp_line, 'manual')] = [
+                tk.DoubleVar(value=pressure_mpa * 1.0e6),
+                tk.DoubleVar(value=1.0),
+                tk.IntVar(value=1),
+            ]
+            self._active_line = temp_line
+            self._line_is_active = True
+            all_obj.need_recalc = True
+            state = self.get_color_and_calc_state(current_line=temp_line, active_line_only=True)
+            self._fea_buckling_mode = False
+            self.draw_results(state=state)
+        except Exception as err:
+            self._result_canvas.delete('all')
+            self._result_canvas.create_text(
+                8,
+                8,
+                text='FEA result print unavailable: ' + str(err),
+                anchor=tk.NW,
+                font=self._text_size['Text 8 bold'],
+                fill='red',
+            )
+        finally:
+            self._fea_buckling_mode = old_fea_mode
+            self._active_line = old_active_line
+            self._line_is_active = old_line_is_active
+            self._state_logger.pop(temp_line, None)
+            for key in [key for key in self._new_load_comb_dict if len(key) > 1 and key[1] == temp_line]:
+                self._new_load_comb_dict.pop(key, None)
+            self._new_load_comb_dict.update(old_load_keys)
+            if old_line is None:
+                self._line_dict.pop(temp_line, None)
+            else:
+                self._line_dict[temp_line] = old_line
+            if old_bundle is None:
+                self._line_to_struc.pop(temp_line, None)
+            else:
+                self._line_to_struc[temp_line] = old_bundle
+
+    def _fea_panel_all_structure(self):
+        prop_dict, _section_dict = self._build_flat_structure_properties()
+        return self._create_all_structure_from_properties(prop_dict)
+
+    @staticmethod
+    def _fea_panel_pressure_mpa(panel):
+        """Return pressure found for the FE panel, defaulting to zero to avoid double counting.
+
+        FRD stresses are already reduced from an analysis result.  Until an
+        explicit pressure-load extractor is added, buckling is run with the FE
+        stresses and zero lateral pressure.
+        """
+        try:
+            value = (
+                panel.anystructure_input.get('loads', {}).get(
+                    'pressure_mpa',
+                    panel.anystructure_input.get('stresses', {}).get('pressure_mpa', 0.0),
+                )
+            )
+        except Exception:
+            value = 0.0
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) else 0.0
+
+    def _draw_fea_panel_2d_sketch(self):
+        """Draw the selected FE panel using the existing flat-panel 2D style."""
+        self._prop_canvas.delete('all')
+        width = max(int(self._prop_canvas.winfo_width() or 360), 1)
+        height = max(int(self._prop_canvas.winfo_height() or 260), 1)
+        session = self._fea_buckling_session
+        if session is None or self._fea_selected_panel_id is None:
+            self._prop_canvas.create_text(
+                width / 2,
+                height / 2,
+                text='Select an FEA buckling panel',
+                font=self._text_size['Text 10 bold'],
+                fill=self._color_text,
+            )
+            return
+        try:
+            panel = session.panel(self._fea_selected_panel_id)
+        except KeyError:
+            return
+
+        try:
+            all_obj = self._fea_panel_all_structure()
+        except Exception as err:
+            self._prop_canvas.create_text(
+                width / 2,
+                height / 2,
+                text='2D panel preview unavailable: ' + str(err),
+                font=self._text_size['Text 8 bold'],
+                fill='red',
+            )
+            return
+
+        self._draw_flat_structure_2d_preview(
+            all_obj,
+            selected_text='Selected FEA buckling panel: ' + str(panel.field_id),
+        )
+
+    def _draw_flat_structure_2d_preview(self, all_obj, selected_text=''):
+        canvas_width = max(int(self._prop_canvas.winfo_width() or 360), 1)
+        canvas_height = max(int(self._prop_canvas.winfo_height() or 260), 1)
+        self._prop_canvas.create_text(
+            [canvas_width / 2 - canvas_width / 20, canvas_height / 20],
+            text=selected_text,
+            font=self._text_size["Text 10 bold"],
+            fill='red',
+        )
+        if all([all_obj.Stiffener is None, all_obj.Girder is None]):
+            structure_obj = all_obj.Plate
+            spacing = structure_obj.get_s() * self._prop_canvas_scale * 3
+            plate_thk = structure_obj.get_pl_thk() * self._prop_canvas_scale * 3
+            startx = 20
+            starty = 225
+            self._prop_canvas.create_text([startx + 100, 50],
+                                          text='Plate with thickness ' +
+                                               str(structure_obj.get_pl_thk() * 1000) + ' mm',
+                                          font=self._text_size["Text 10 bold"], fill='Black')
+            self._prop_canvas.create_rectangle(startx + spacing,
+                                               starty,
+                                               startx + spacing + spacing,
+                                               starty - plate_thk,
+                                               fill='grey', activefill='yellow')
+
+        for idx, structure_obj in enumerate([all_obj.Stiffener, all_obj.Girder]):
+            mult = 1 if all_obj.Girder is not None else 2
+            thk_mult = 2
+            startx = 100 + 300 * idx
+            starty = 225
+
+            if structure_obj is not None:
+                self._prop_canvas.create_text([startx + 60, 50],
+                                              text='Stiffener\n' + structure_obj.get_beam_string()
+                                              if idx == 0 else 'Girder\n' + structure_obj.get_beam_string(),
+                                              font=self._text_size["Text 9 bold"], fill='Black')
+                self._prop_canvas.create_text([100, 20],
+                                              text='Thickness scale x 2',
+                                              font=self._text_size["Text 10 bold"], fill='grey')
+                spacing = structure_obj.get_s() * self._prop_canvas_scale * mult
+                stf_web_height = structure_obj.get_web_h() * self._prop_canvas_scale * mult
+                stf_flange_width = structure_obj.get_fl_w() * self._prop_canvas_scale * mult
+                plate_thk = structure_obj.get_pl_thk() * self._prop_canvas_scale * thk_mult * mult
+                stf_web_thk = structure_obj.get_web_thk() * self._prop_canvas_scale * thk_mult * mult
+                stf_flange_thk = structure_obj.get_fl_thk() * self._prop_canvas_scale * thk_mult * mult
+
+                for count in [0, 1, 2] if idx == 0 else [0, ]:
+                    self._prop_canvas.create_rectangle(startx + count * spacing,
+                                                       starty,
+                                                       startx + spacing + count * spacing,
+                                                       starty - plate_thk,
+                                                       fill='grey', activefill='yellow')
+                    self._prop_canvas.create_rectangle(
+                        startx + spacing * 0.5 + count * spacing - stf_web_thk / 2,
+                        starty - plate_thk,
+                        startx + spacing * 0.5 + count * spacing + stf_web_thk / 2,
+                        starty - stf_web_height - plate_thk,
+                        fill='grey', activefill='yellow')
+
+                    if structure_obj.get_stiffener_type() not in ['L', 'L-bulb']:
+                        self._prop_canvas.create_rectangle(
+                            startx + spacing * 0.5 - stf_flange_width / 2 + count * spacing,
+                            starty - stf_web_height - plate_thk,
+                            startx + spacing * 0.5 + stf_flange_width / 2 + count * spacing,
+                            starty - stf_web_height - plate_thk - stf_flange_thk,
+                            fill='grey', activefill='yellow')
+                    else:
+                        self._prop_canvas.create_rectangle(
+                            startx + spacing * 0.5 - stf_web_thk / 2 + count * spacing,
+                            starty - stf_web_height - plate_thk,
+                            startx + spacing * 0.5 + stf_flange_width + count * spacing,
+                            starty - stf_web_height - plate_thk - stf_flange_thk,
+                            fill='grey',
+                            activefill='yellow')
+
+    @staticmethod
+    def _set_fea_3d_limits(ax, records):
+        points = [
+            point
+            for record in records
+            for polygon in record.get('polygons', [])
+            for point in polygon
+        ]
+        if not points:
+            ax.set_xlim(0.0, 1.0)
+            ax.set_ylim(0.0, 1.0)
+            ax.set_zlim(0.0, 1.0)
+            return
+        mins = [min(point[index] for point in points) for index in range(3)]
+        maxs = [max(point[index] for point in points) for index in range(3)]
+        spans = [maxs[index] - mins[index] for index in range(3)]
+        xy_reference = max(spans[0], spans[1], 1.0e-6)
+        padded_limits = []
+        for index, span in enumerate(spans):
+            minimum_span = xy_reference * 0.10 if index == 2 else xy_reference * 0.04
+            display_span = max(span, minimum_span, 1.0e-6)
+            center = (mins[index] + maxs[index]) / 2.0
+            pad = display_span * 0.06
+            padded_limits.append((center - display_span / 2.0 - pad, center + display_span / 2.0 + pad))
+        ax.set_xlim(*padded_limits[0])
+        ax.set_ylim(*padded_limits[1])
+        ax.set_zlim(*padded_limits[2])
+        try:
+            ax.set_box_aspect((
+                max(spans[0], xy_reference * 0.20),
+                max(spans[1], xy_reference * 0.20),
+                max(spans[2], xy_reference * 0.18),
+            ))
+        except Exception:
+            pass
+
+    def _draw_fea_buckling_canvas(self):
+        """Draw clickable FE buckling panels as 3D shell-panel surfaces."""
+        self._main_canvas.delete('all')
+        self._fea_panel_canvas_items = {}
+        width = max(int(self._main_canvas.winfo_width() or self._canvas_dim[0]), 1)
+        height = max(int(self._main_canvas.winfo_height() or self._canvas_dim[1]), 1)
+
+        session = self._fea_buckling_session
+        if session is None or not session.panels:
+            self.clear_prop_3d()
+            self._fea_3d_panel_artists = {}
+            self._main_canvas.create_text(
+                width / 2,
+                height / 2 - 20,
+                text='Import an INP/FRD file to scan FE buckling panels',
+                font=self._text_size['Text 12 bold'],
+                fill=self._color_text,
+            )
+            self._main_canvas.create_text(
+                width / 2,
+                height / 2 + 12,
+                text='Use the FEA result buckling controls on the right side.',
+                font=self._text_size['Text 8'],
+                fill=self._color_text,
+            )
+            return
+
+        self.clear_prop_3d()
+        self._fea_3d_panel_artists = {}
+        records = fe_plate_fields.panel_3d_records(session.model, session.fields, session.usage_factors())
+        if not records:
+            return
+        fig = plt.Figure(figsize=(9.8, 5.8), dpi=100)
+        ax = fig.add_axes([0.01, 0.06, 0.86, 0.88], projection='3d')
+        uf_norm = matplotlib.colors.Normalize(vmin=0.0, vmax=1.5)
+        uf_cmap = plt.get_cmap('RdYlGn_r')
+
+        for record in records:
+            field_id = record['field_id']
+            panel = session.panel(field_id)
+            selected = field_id == self._fea_selected_panel_id
+            collection = Poly3DCollection(
+                record['polygons'],
+                facecolor=self._fea_panel_canvas_color(panel, record['index']),
+                edgecolor='red' if selected else 'none',
+                linewidth=1.8 if selected else 0.0,
+                alpha=0.82 if panel.usage_factor is not None else 0.58,
+            )
+            collection.set_gid(field_id)
+            collection.set_picker(True)
+            ax.add_collection3d(collection)
+            self._fea_3d_panel_artists[field_id] = collection
+            label = field_id.replace('field_', '')
+            if panel.usage_factor is not None:
+                label += ' / ' + f'{panel.usage_factor:.2f}'
+            centroid = record['centroid']
+            ax.text(centroid[0], centroid[1], centroid[2], label, fontsize=7, ha='center', va='center')
+
+        self._set_fea_3d_limits(ax, records)
+        ax.set_xlabel('X [m]', fontsize=7)
+        ax.set_ylabel('Y [m]', fontsize=7)
+        ax.set_zlabel('Z [m]', fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.set_title('FEA result buckling panels - click a panel to load input', fontsize=8)
+        ax.view_init(elev=24, azim=-55)
+        scalar_map = matplotlib.cm.ScalarMappable(norm=uf_norm, cmap=uf_cmap)
+        scalar_map.set_array([])
+        colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])
+        colorbar = fig.colorbar(scalar_map, cax=colorbar_ax)
+        colorbar.set_label('UF', fontsize=7)
+        colorbar.ax.tick_params(labelsize=6)
+        self._embed_fea_buckling_3d_figure(fig, ax, default_view=(24, -55))
+
     def draw_canvas(self, state=None, event=None):
         '''
         Canvas is drawn here.
         '''
+
+        if getattr(self, '_fea_buckling_mode', False):
+            self._refresh_fea_buckling_views(rebuild_3d=True)
+            return
 
         self._main_canvas.delete('all')
         color = 'black'  # by default
@@ -5626,6 +6333,10 @@ class Application():
 
         self._result_canvas.delete('all')
 
+        if getattr(self, '_fea_buckling_mode', False):
+            self._draw_fea_panel_result_text()
+            return
+
         if state is None or self._active_line not in state['all_obj'].keys():
             return
 
@@ -6294,12 +7005,45 @@ class Application():
 
     def clear_prop_3d(self):
         """Remove any embedded Matplotlib 3D preview from the lower drawing area."""
+        if getattr(self, '_fea_pick_after_id', None) is not None:
+            try:
+                self._parent.after_cancel(self._fea_pick_after_id)
+            except Exception:
+                pass
+            self._fea_pick_after_id = None
+
         if getattr(self, '_prop_3d_resize_after_id', None) is not None:
             try:
                 self._parent.after_cancel(self._prop_3d_resize_after_id)
             except Exception:
                 pass
             self._prop_3d_resize_after_id = None
+
+        if getattr(self, '_prop_3d_fig_canvas', None) is not None:
+            try:
+                if getattr(self, '_fea_pick_cid', None) is not None:
+                    self._prop_3d_fig_canvas.mpl_disconnect(self._fea_pick_cid)
+            except Exception:
+                pass
+            self._fea_pick_cid = None
+
+            try:
+                self._prop_3d_fig_canvas.toolbar = None
+            except Exception:
+                pass
+
+        if getattr(self, '_prop_3d_toolbar', None) is not None:
+            try:
+                # A Matplotlib 3D mouse callback can outlive the Tk widgets by
+                # one event turn.  Make toolbar history updates harmless before
+                # destroying the buttons it owns.
+                self._prop_3d_toolbar.set_history_buttons = lambda *args, **kwargs: None
+            except Exception:
+                pass
+            try:
+                self._prop_3d_toolbar.destroy()
+            except Exception:
+                pass
 
         if getattr(self, '_prop_3d_frame', None) is not None:
             try:
@@ -6504,8 +7248,11 @@ class Application():
             pass
 
     def _prop_3d_mouse_scroll(self, event):
-        """Mouse-wheel zoom for the Matplotlib 3D preview in single-line mode."""
-        if not getattr(self, '_simplified_calculation_mode', False):
+        """Mouse-wheel zoom for embedded Matplotlib 3D previews."""
+        if not any([
+            getattr(self, '_simplified_calculation_mode', False),
+            getattr(self, '_fea_buckling_mode', False),
+        ]):
             return
         delta = getattr(event, 'delta', 0)
         if delta == 0:
@@ -7486,6 +8233,98 @@ class Application():
                 clean_positions.append(pos)
         return clean_positions or [length / 2.0]
 
+    @staticmethod
+    def _support_positions_from_length_and_span(length, span, max_count=80):
+        """Create centered support/girder positions without changing the span.
+
+        ``Panel length, Lp`` is the total repeated model length, while
+        ``Stiffener/plate length`` is the bay between girder supports.  If Lp is
+        not an exact multiple of the bay length, the full bays are centered so
+        the cut length is shared symmetrically at both ends.
+        """
+        try:
+            length = float(length)
+            span = float(span)
+        except Exception:
+            return [0.0]
+        if length <= 0.0:
+            return [0.0]
+        if span <= 1.0e-9:
+            return [0.0, length]
+
+        full_span_count = int(math.floor(length / span))
+        full_span_count = min(full_span_count, max(0, int(max_count)))
+        if full_span_count <= 0:
+            return []
+
+        offset = (length - full_span_count * span) / 2.0
+        positions = [offset + span * idx for idx in range(full_span_count + 1)]
+        if offset <= 1.0e-9:
+            positions[0] = 0.0
+        if abs(positions[-1] - length) <= 1.0e-9:
+            positions[-1] = length
+        return positions
+
+    @staticmethod
+    def _bay_ranges_from_support_positions(length, supports, support_gap=0.0):
+        """Return member segment ranges split by internal support/girder lines."""
+        try:
+            length = float(length)
+            support_gap = max(float(support_gap), 0.0)
+        except Exception:
+            return []
+        if length <= 0.0:
+            return []
+
+        tol = 1.0e-9
+        internal_supports = sorted(
+            pos for pos in (float(value) for value in supports)
+            if tol < pos < length - tol
+        )
+        breakpoints = [0.0] + internal_supports + [length]
+        ranges = []
+        for x0, x1 in zip(breakpoints[:-1], breakpoints[1:]):
+            left_gap = support_gap / 2.0 if any(abs(x0 - support) <= tol for support in internal_supports) else 0.0
+            right_gap = support_gap / 2.0 if any(abs(x1 - support) <= tol for support in internal_supports) else 0.0
+            bay_x0 = max(x0 + left_gap, 0.0)
+            bay_x1 = min(x1 - right_gap, length)
+            if bay_x1 > bay_x0:
+                ranges.append((bay_x0, bay_x1))
+        return ranges
+
+    @staticmethod
+    def _ring_member_half_width(dims):
+        """Return the axial half-width occupied by a ring member preview."""
+        try:
+            web_t = max(float(dims.get('web_thk', 0.0)), 0.0)
+            flange_w = max(float(dims.get('flange_w', 0.0)), 0.0)
+        except Exception:
+            return 0.0
+        return max(web_t, flange_w) / 2.0
+
+    @staticmethod
+    def _ring_positions_without_heavy_frame_overlap(positions, frame_positions, ring_half_width,
+                                                    frame_half_width, tolerance=1.0e-9):
+        """Suppress ordinary ring stiffeners whose axial footprint overlaps heavy frames."""
+        try:
+            ring_half_width = max(float(ring_half_width), 0.0)
+            frame_half_width = max(float(frame_half_width), 0.0)
+            tolerance = max(float(tolerance), 0.0)
+        except Exception:
+            ring_half_width = frame_half_width = 0.0
+            tolerance = 1.0e-9
+
+        clean_frame_positions = [float(pos) for pos in frame_positions]
+        filtered_positions = []
+        for pos in (float(value) for value in positions):
+            overlaps_frame = any(
+                abs(pos - frame_pos) <= ring_half_width + frame_half_width + tolerance
+                for frame_pos in clean_frame_positions
+            )
+            if not overlaps_frame:
+                filtered_positions.append(pos)
+        return filtered_positions
+
     def _flat_preview_lg_from_objects(self, girder, stiffener, spacing):
         """Return LG in metres, preferring the selected line object over GUI defaults."""
         for obj in (girder, stiffener):
@@ -7971,20 +8810,11 @@ class Application():
         member_side_sign = self._prop_3d_member_side_sign()
 
         if girder is not None:
-            # For panels with girder, follow the conventional sketch:
-            # x = stiffener span / panel length Lp, y = girder length LG, girder at panel centre.
-            try:
-                panel_length_lp = float(self._new_panel_length_Lp.get()) / 1000.0
-            except Exception:
-                panel_length_lp = 0.0
-            try:
-                girder_lg = float(self._new_girder_length_LG.get()) / 1000.0
-            except Exception:
-                girder_lg = 0.0
-
+            # x = total repeated panel length Lp, split into girder bays by the
+            # stiffener/plate span l.  y = girder length LG / repeated stiffeners.
             width = self._flat_preview_lp_from_gui(span, spacing)
             length = self._flat_preview_lg_from_objects(girder, stiffener, spacing)
-            x_mid = width / 2.0
+            girder_xs = self._support_positions_from_length_and_span(width, span, max_count=80)
 
             gdims = self._get_section_3d_dimensions(girder)
             sdims = self._get_section_3d_dimensions(stiffener) if stiffener is not None else None
@@ -7993,36 +8823,35 @@ class Application():
             self._add_box_3d(ax, 0.0, width, 0.0, length, 0.0, plate_thk,
                              facecolor='lightgrey', alpha=0.55)
 
-            # Central girder, one plate field on each side.
-            self._draw_section_web_and_flange_3d(
-                ax, 'y', x_mid, length / 2.0, length, plate_thk, gdims,
-                y_limits=(0.0, length), facecolor_web='silver', facecolor_flange='darkgrey',
-                side_sign=member_side_sign)
+            # Girder supports at each stiffener span station across Lp.
+            for x_pos in girder_xs:
+                self._draw_section_web_and_flange_3d(
+                    ax, 'y', x_pos, length / 2.0, length, plate_thk, gdims,
+                    y_limits=(0.0, length), facecolor_web='silver', facecolor_flange='darkgrey',
+                    side_sign=member_side_sign)
             member_z_extent = gdims['web_h'] + gdims['flange_thk']
             if member_side_sign >= 0:
                 max_z = max(max_z, plate_thk + member_z_extent)
             else:
                 min_z = min(min_z, -member_z_extent)
 
-            # Stiffeners run between panel edges/girder. Draw both fields separately.
+            # Stiffeners run bay-by-bay between adjacent girders, so increasing
+            # Lp adds girder-supported bays instead of making one very long span.
             if sdims is not None:
                 stiffener_ys = self._positions_from_length_and_spacing(
                     length, spacing, include_ends=True, max_count=80
                 )
-                left_x0, left_x1 = 0.0, max(x_mid - girder_gap / 2.0, 0.0)
-                right_x0, right_x1 = min(x_mid + girder_gap / 2.0, width), width
+                shell_x_breaks = sorted(set([0.0, width] + girder_xs))
+                solid_x_breaks = self._bay_ranges_from_support_positions(width, girder_xs, girder_gap)
                 self._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
-                    ax, [0.0, left_x1, x_mid, right_x0, width], [0.0, length] + stiffener_ys)
+                    ax, shell_x_breaks, [0.0, length] + stiffener_ys)
                 for y in stiffener_ys:
-                    if left_x1 > left_x0:
+                    for bay_x0, bay_x1 in solid_x_breaks:
+                        if bay_x1 <= bay_x0:
+                            continue
                         self._draw_section_web_and_flange_3d(
-                            ax, 'x', (left_x0 + left_x1) / 2.0, y, left_x1 - left_x0,
-                            plate_thk, sdims, x_limits=(left_x0, left_x1),
-                            facecolor_web='silver', facecolor_flange='darkgrey', side_sign=member_side_sign)
-                    if right_x1 > right_x0:
-                        self._draw_section_web_and_flange_3d(
-                            ax, 'x', (right_x0 + right_x1) / 2.0, y, right_x1 - right_x0,
-                            plate_thk, sdims, x_limits=(right_x0, right_x1),
+                            ax, 'x', (bay_x0 + bay_x1) / 2.0, y, bay_x1 - bay_x0,
+                            plate_thk, sdims, x_limits=(bay_x0, bay_x1),
                             facecolor_web='silver', facecolor_flange='darkgrey', side_sign=member_side_sign)
                 member_z_extent = sdims['web_h'] + sdims['flange_thk']
                 if member_side_sign >= 0:
@@ -8031,7 +8860,7 @@ class Application():
                     min_z = min(min_z, -member_z_extent)
             else:
                 self._append_flat_plate_shell_grid_to_prop_3d_export_mesh(
-                    ax, [0.0, x_mid, width], [0.0, length])
+                    ax, sorted(set([0.0, width] + girder_xs)), [0.0, length])
 
             title = '3D stiffened panel with girder'
             ax.set_xlabel('panel length, Lp [m]', fontsize=7, labelpad=-1)
@@ -8263,26 +9092,8 @@ class Application():
                 self._add_cylinder_longitudinal_stiffener_3d(
                     ax, radius, length, ang, long_dims, side_sign=member_side_sign)
 
-        if cyl_obj.RingStfObj is not None:
-            ring_dims = self._get_section_3d_dimensions(cyl_obj.RingStfObj)
-            radial_extension = max(radial_extension, ring_dims['web_h'] + ring_dims['flange_thk'])
-            try:
-                ring_spacing = self._normalise_preview_length_to_m(shell._dist_between_rings, 0.0)
-            except Exception:
-                ring_spacing = self._normalise_preview_length_to_m(
-                    self._safe_obj_float(shell, (), ('dist_between_rings',), 0.0), 0.0
-                )
-            if ring_spacing <= 1e-9:
-                try:
-                    ring_spacing = self._normalise_preview_length_to_m(self._new_shell_dist_rings.get(), 0.0)
-                except Exception:
-                    ring_spacing = 0.0
-            for zz in self._positions_from_length_and_spacing(
-                    length, ring_spacing, include_ends=False, max_count=30):
-                self._add_cylinder_ring_stiffener_3d(
-                    ax, radius, zz, ring_dims, is_frame=False, theta_range=theta_range,
-                    side_sign=member_side_sign)
-
+        frame_dims = None
+        girder_positions = []
         if cyl_obj.RingFrameObj is not None:
             frame_dims = self._get_section_3d_dimensions(cyl_obj.RingFrameObj)
             radial_extension = max(radial_extension, frame_dims['web_h'] + frame_dims['flange_thk'])
@@ -8305,6 +9116,35 @@ class Application():
                 girder_positions = self._positions_from_length_and_spacing(
                     length, girder_spacing, include_ends=False, max_count=16
                 )
+
+        if cyl_obj.RingStfObj is not None:
+            ring_dims = self._get_section_3d_dimensions(cyl_obj.RingStfObj)
+            radial_extension = max(radial_extension, ring_dims['web_h'] + ring_dims['flange_thk'])
+            try:
+                ring_spacing = self._normalise_preview_length_to_m(shell._dist_between_rings, 0.0)
+            except Exception:
+                ring_spacing = self._normalise_preview_length_to_m(
+                    self._safe_obj_float(shell, (), ('dist_between_rings',), 0.0), 0.0
+                )
+            if ring_spacing <= 1e-9:
+                try:
+                    ring_spacing = self._normalise_preview_length_to_m(self._new_shell_dist_rings.get(), 0.0)
+                except Exception:
+                    ring_spacing = 0.0
+            ring_positions = self._positions_from_length_and_spacing(
+                length, ring_spacing, include_ends=False, max_count=30
+            )
+            ring_positions = self._ring_positions_without_heavy_frame_overlap(
+                ring_positions, girder_positions,
+                self._ring_member_half_width(ring_dims),
+                self._ring_member_half_width(frame_dims or {}),
+            )
+            for zz in ring_positions:
+                self._add_cylinder_ring_stiffener_3d(
+                    ax, radius, zz, ring_dims, is_frame=False, theta_range=theta_range,
+                    side_sign=member_side_sign)
+
+        if frame_dims is not None:
             for zz in girder_positions:
                 self._add_cylinder_ring_stiffener_3d(
                     ax, radius, zz, frame_dims, is_frame=True, theta_range=theta_range,
@@ -8348,6 +9188,10 @@ class Application():
         name of line : [ Structure class, calc scantling class, calc fatigue class, [load classes] ]
 
         '''
+
+        if getattr(self, '_fea_buckling_mode', False):
+            self._draw_fea_panel_2d_sketch()
+            return
 
         if getattr(self, '_new_show_prop_3d', None) is not None and self._new_show_prop_3d.get():
             self.draw_prop_3d()
@@ -10270,6 +11114,10 @@ class Application():
         When clicking the right button, this method is called.
         method is referenced in
         '''
+
+        if getattr(self, '_fea_buckling_mode', False):
+            self._refresh_fea_buckling_views(rebuild_3d=True)
+            return
 
         if getattr(self, '_simplified_calculation_mode', False):
             self._select_single_calculation_line()
