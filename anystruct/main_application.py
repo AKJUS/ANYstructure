@@ -5151,12 +5151,29 @@ class Application():
                 if type(all_cyl_thk) is not list:
                     all_cyl_thk = all_cyl_thk.tolist()
 
+                def _safe_numeric_color_position(values, target):
+                    """Return a stable 0..1 position for imported values with float noise."""
+                    if not values:
+                        return 0.0
+                    try:
+                        numeric_values = [float(value) for value in values]
+                        target_value = float(target)
+                    except (TypeError, ValueError):
+                        try:
+                            return values.index(target) / max(len(values), 1)
+                        except ValueError:
+                            return 0.0
+                    nearest_index = min(
+                        range(len(numeric_values)),
+                        key=lambda index: abs(numeric_values[index] - target_value),
+                    )
+                    return nearest_index / max(len(numeric_values), 1)
+
                 line_color_coding[line] = {'plate': matplotlib.colors.rgb2hex(cmap_sections(
-                    thk_sort_unique.index(round(line_data[0].Plate.get_pl_thk(), 10)) / len(thk_sort_unique))),
+                    _safe_numeric_color_position(thk_sort_unique, line_data[0].Plate.get_pl_thk()))),
                     'spacing': 'black' if line_data[0].Stiffener is None else matplotlib.colors.rgb2hex(
-                        cmap_sections(spacing_sort_unique.index(round(line_data[0].Stiffener
-                                                                      .get_s(), 10)) / len(
-                            spacing_sort_unique))),
+                        cmap_sections(_safe_numeric_color_position(
+                            spacing_sort_unique, line_data[0].Stiffener.get_s()))),
                     'section': 'black' if line_data[0].Stiffener is None else
                     matplotlib.colors.rgb2hex(cmap_sections(sec_in_model[line_data[0]
                                                             .Stiffener.get_beam_string()] /

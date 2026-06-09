@@ -456,18 +456,22 @@ def reduce_field_stresses(
     tension-positive Pa; returned normal stresses are compression-positive MPa.
     """
 
-    _validate_frd_stress_components(frd_stress)
+    patches = detect_surface_patches(model)
+    if not patches:
+        return []
+    inference = _infer_members_from_patches(model, patches)
+    base_normal = inference.base_normal
+    base_offset = inference.base_patch.offset
+    member_direction = inference.member_direction
+    transverse_direction = inference.transverse_direction
+
     panel_stresses: list[PanelStress] = []
     for field_item in fields:
-        field_normal, field_offset, member_direction, transverse_direction = _flat_field_local_basis(
-            model,
-            field_item,
-        )
         samples = _field_stress_samples(
             field_item,
             frd_stress,
-            field_normal,
-            field_offset,
+            base_normal,
+            base_offset,
             member_direction,
             transverse_direction,
         )
@@ -487,47 +491,27 @@ def reduce_field_stresses(
             )
             continue
 
-        longitudinal_values = [sample[0] for sample in samples]
-        transverse_values = [sample[1] for sample in samples]
-        sigma_x = [-sample[2] / 1.0e6 for sample in samples]
-        sigma_y = [-sample[3] / 1.0e6 for sample in samples]
-        tau_xy = [sample[4] / 1.0e6 for sample in samples]
-
-        # Use the interior of the buckling bay, not nodes on stiffener/ring or
-        # support boundaries where local stress concentrations are expected.
-        core_indices = _central_rectangle_indices(
-            longitudinal_values,
-            transverse_values,
-            central_fraction=0.50,
-        )
-        lower_indices = _interior_transverse_band_indices(
-            longitudinal_values,
-            transverse_values,
-            target_fraction=0.25,
-            band_fraction=transverse_edge_fraction,
-        )
-        upper_indices = _interior_transverse_band_indices(
-            longitudinal_values,
-            transverse_values,
-            target_fraction=0.75,
-            band_fraction=transverse_edge_fraction,
-        )
-
-        sigma_x_nominal = _mean(sigma_x[index] for index in core_indices)
-        sample_diagnostics = [
-            f"interior core samples={len(core_indices)}",
-            f"lower quarter-band samples={len(lower_indices)}",
-            f"upper quarter-band samples={len(upper_indices)}",
+        sigma_x = [-sample[1] / 1.0e6 for sample in samples]
+        sigma_y = [-sample[2] / 1.0e6 for sample in samples]
+        tau_xy = [sample[3] / 1.0e6 for sample in samples]
+        transverse_values = [sample[0] for sample in samples]
+        lower_transverse, upper_transverse = field_item.transverse_bounds
+        edge_width = max((upper_transverse - lower_transverse) * transverse_edge_fraction, 1.0e-9)
+        lower_indices = [
+            index for index, value in enumerate(transverse_values)
+            if value <= lower_transverse + edge_width
         ]
-        minimum_reduction_count = min(len(core_indices), len(lower_indices), len(upper_indices))
-        if minimum_reduction_count < 4:
-            sample_diagnostics.append(
-                "WARNING: fewer than four interior samples contribute to at least one reduced stress component"
-            )
-        elif minimum_reduction_count < 8:
-            sample_diagnostics.append(
-                "CAUTION: fewer than eight interior samples contribute to at least one reduced stress component"
-            )
+        upper_indices = [
+            index for index, value in enumerate(transverse_values)
+            if value >= upper_transverse - edge_width
+        ]
+        if not lower_indices or not upper_indices:
+            ordered = sorted(range(len(samples)), key=lambda index: transverse_values[index])
+            take = max(1, int(math.ceil(len(ordered) * transverse_edge_fraction)))
+            lower_indices = ordered[:take]
+            upper_indices = ordered[-take:]
+
+        sigma_x_nominal = _mean(sigma_x)
         panel_stresses.append(
             PanelStress(
                 field_id=field_item.field_id,
@@ -535,17 +519,13 @@ def reduce_field_stresses(
                 sigma_x2_mpa=sigma_x_nominal,
                 sigma_y1_mpa=_mean(sigma_y[index] for index in lower_indices),
                 sigma_y2_mpa=_mean(sigma_y[index] for index in upper_indices),
-                tau_xy_mpa=_mean(tau_xy[index] for index in core_indices),
-                sample_count=len(core_indices),
-                reduction="interior nominal membrane: centre-core axial/shear and quarter-point transverse bands",
+                tau_xy_mpa=_mean(tau_xy),
+                sample_count=len(samples),
+                reduction="nominal membrane: mean axial/shear, transverse side-band means",
                 diagnostics=(
-                    "global FRD stress tensor projected independently to this panel's local x/y axes",
-                    "local x follows the panel stiffener/member direction; local y lies in-plane and normal to x",
+                    "FRD stress tensors projected to inferred panel axes",
                     "normal stresses converted from FE tension-positive Pa to compression-positive MPa",
                     "mid-surface shell result nodes preferred to avoid bending peak stress input",
-                    "panel-edge nodes excluded where possible to avoid boundary and stiffener stress concentrations",
-                    "sigma_y1/sigma_y2 sampled near the interior quarter points, not at the physical edges",
-                    *sample_diagnostics,
                 ),
             )
         )
@@ -650,22 +630,31 @@ def calculate_field_buckling(
                 buckling_acceptance=buckling_acceptance,
             )
             buckling_result = panel.get_buckling_results(calculation_method=calculation_method)
-            result_available = (
+            result_record = {
+                "field_id": field_item.field_id,
+                "domain": domain,
+                "calculation_method": calculation_method,
+                "buckling_acceptance": buckling_acceptance,
+                "stress": summarize_panel_stresses([stress])[0],
+                "result": buckling_result,
+            }
+            selected_uf = _selected_uf_from_buckling_result(result_record)
+            api_available = (
                 bool(buckling_result.get("available", True))
                 if isinstance(buckling_result, dict)
-                else True
+                else buckling_result is not None
             )
-            results.append(
-                {
-                    "field_id": field_item.field_id,
-                    "domain": domain,
-                    "available": result_available,
-                    "calculation_method": calculation_method,
-                    "buckling_acceptance": buckling_acceptance,
-                    "stress": summarize_panel_stresses([stress])[0],
-                    "result": buckling_result,
-                }
-            )
+            # A finite UF is a valid result even when an older/newer API wrapper
+            # reports ``available`` differently.
+            result_record["available"] = selected_uf is not None or api_available
+            result_record["usage_factor"] = selected_uf
+            if selected_uf is None and isinstance(buckling_result, dict):
+                result_record["error"] = str(
+                    buckling_result.get("error")
+                    or buckling_result.get("message")
+                    or "buckling calculation returned no identifiable usage factor"
+                )
+            results.append(result_record)
         except Exception as err:
             results.append(
                 {
@@ -724,6 +713,20 @@ def _create_flat_fea_buckling_session(
                 material_factor=material_factor,
                 poisson=poisson,
             )
+        )
+
+    unavailable_results = [
+        result for result in buckling_results
+        if not result.get("available", False)
+    ]
+    if unavailable_results:
+        diagnostics.append(
+            f"{len(unavailable_results)} of {len(buckling_results)} flat-panel buckling calculations "
+            "returned no identifiable usage factor"
+        )
+        diagnostics.extend(
+            f"{result.get('field_id', '?')}: {result.get('error', 'no result')}"
+            for result in unavailable_results[:20]
         )
 
     plot_records = panel_plot_records(model, fields)
@@ -1736,9 +1739,17 @@ def _buckling_uf_by_field(buckling_results: Sequence[dict[str, Any]]) -> dict[st
 
 
 def _selected_uf_from_buckling_result(item: dict[str, Any]) -> float | None:
-    result = item.get("result")
-    if not isinstance(result, dict):
+    """Return the governing UF from one stored panel calculation.
+
+    API result dictionaries have changed shape over time.  Do not require one
+    exact key layout; search recognised UF/utilisation keys recursively and use
+    the governing finite value.
+    """
+    if not isinstance(item, dict):
         return None
+    result = item.get("result", item)
+    if not isinstance(result, dict):
+        return _first_finite_float(result)
     cylinder_uf = _find_cylinder_usage_factor(result)
     if cylinder_uf is not None:
         return cylinder_uf
@@ -1765,43 +1776,90 @@ def _find_cylinder_usage_factor(result: dict[str, Any]) -> float | None:
     return max(values) if values else None
 
 
+def _usage_key_priority(key: object) -> int:
+    """Return a positive priority for keys that represent utilisation factors."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(key).lower()).strip()
+    exact = {
+        "selected uf": 100,
+        "governing uf": 100,
+        "ultimate uf": 95,
+        "buckling uf": 95,
+        "actual usage factor": 95,
+        "usage factor": 90,
+        "utilization factor": 90,
+        "utilisation factor": 90,
+        "plate buckling": 85,
+        "uf": 80,
+    }
+    if normalized in exact:
+        return exact[normalized]
+    words = set(normalized.split())
+    if "uf" in words:
+        return 70
+    if "usage" in words and "factor" in words:
+        return 65
+    if ("utilization" in words or "utilisation" in words) and "factor" in words:
+        return 65
+    if "buckling" in words and ("factor" in words or "ratio" in words):
+        return 55
+    return 0
+
+
 def _find_usage_factor(value: object) -> float | None:
-    preferred_keys = (
-        "selected UF",
-        "ultimate UF",
-        "buckling UF",
-        "Plate buckling",
-        "Actual usage Factor",
-        "actual usage factor",
-        "usage_factor",
-        "usage factor",
-        "UF",
-    )
-    if isinstance(value, dict):
-        lower_lookup = {str(key).lower(): key for key in value}
-        for key in preferred_keys:
-            actual_key = lower_lookup.get(key.lower())
-            if actual_key is not None:
-                uf = _first_finite_float(value.get(actual_key))
-                if uf is not None:
-                    return uf
-        for nested in value.values():
-            uf = _find_usage_factor(nested)
-            if uf is not None:
-                return uf
-        return None
-    return _first_finite_float(value)
+    """Find the governing finite UF in nested API output.
+
+    Earlier code returned the first numeric scalar found during recursion.
+    That could miss valid UFs in newer result layouts or accidentally select a
+    confidence/geometry value.  Only UF-like keys are considered first; the
+    governing value is the maximum finite candidate.
+    """
+    candidates: list[tuple[int, float]] = []
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                priority = _usage_key_priority(key)
+                if priority:
+                    numeric = _first_finite_float(nested)
+                    if numeric is not None:
+                        candidates.append((priority, numeric))
+                visit(nested)
+        elif isinstance(item, (list, tuple, set)):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    if candidates:
+        highest_priority = max(priority for priority, _value in candidates)
+        preferred = [number for priority, number in candidates if priority == highest_priority]
+        return max(preferred) if preferred else None
+
+    # Compatibility fallback for APIs returning a bare scalar/list as result.
+    if not isinstance(value, dict):
+        return _first_finite_float(value)
+    return None
 
 
 def _first_finite_float(value: object) -> float | None:
     direct = _safe_float(value)
     if direct is not None:
         return direct
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            nested = _first_finite_float(item)
-            if nested is not None:
-                return nested
+    if isinstance(value, dict):
+        values = [
+            nested
+            for nested_value in value.values()
+            for nested in [_first_finite_float(nested_value)]
+            if nested is not None
+        ]
+        return max(values) if values else None
+    if isinstance(value, (list, tuple, set)):
+        values = [
+            nested
+            for item in value
+            for nested in [_first_finite_float(item)]
+            if nested is not None
+        ]
+        return max(values) if values else None
     return None
 
 
@@ -1815,83 +1873,6 @@ def _finite_field_values(field_values: dict[str, float] | None) -> dict[str, flo
     }
 
 
-def _flat_field_local_basis(
-    model: FeShellModel,
-    field_item: PlateField,
-) -> tuple[Vector3D, float, Vector3D, Vector3D]:
-    """Return a right-handed local basis for one flat panel field.
-
-    CalculiX FRD stresses are global.  The buckling input must instead use the
-    individual panel orientation: local x along the longitudinal stiffener (or
-    longest in-plane panel direction), local y in the plate plane, and local z
-    normal to the plate.
-    """
-
-    polygons = _field_element_polygons(model, field_item)
-    points = [point for polygon in polygons for point in polygon]
-    if not points:
-        points = _bbox_corners(field_item.bbox)
-
-    normals: list[Vector3D] = []
-    reference_normal: Vector3D | None = None
-    for polygon in polygons:
-        normal = _element_normal(polygon)
-        if _length(normal) <= 1.0e-12:
-            continue
-        if reference_normal is None:
-            reference_normal = normal
-        elif _dot(normal, reference_normal) < 0.0:
-            normal = tuple(-value for value in normal)  # type: ignore[assignment]
-        normals.append(normal)
-
-    if normals:
-        field_normal = _normalise(tuple(sum(normal[i] for normal in normals) for i in range(3)))
-    else:
-        field_normal = _field_representative_normal(model, field_item)
-    if _length(field_normal) <= 1.0e-12:
-        field_normal = (0.0, 0.0, 1.0)
-
-    centroid = _mean_point(points)
-    field_offset = _dot(centroid, field_normal)
-
-    # Prefer a stiffener direction because ANYstructure sigma_x is the stress
-    # along the stiffener/span direction.  Girder/other member directions are
-    # valid fallbacks for unstiffened or incomplete fields.
-    ordered_members = sorted(
-        field_item.members,
-        key=lambda member: (0 if member.role == "stiffener" else 1, member.member_id),
-    )
-    member_direction = (0.0, 0.0, 0.0)
-    for member in ordered_members:
-        candidate = _project_to_plane(member.direction, field_normal)
-        if _length(candidate) > 1.0e-12:
-            member_direction = candidate
-            break
-
-    if _length(member_direction) <= 1.0e-12:
-        # Use the longest actual shell edge projected into the panel plane.
-        best_length = 0.0
-        best_direction: Vector3D = (0.0, 0.0, 0.0)
-        for polygon in polygons:
-            for first, second in zip(polygon, polygon[1:] + polygon[:1]):
-                edge = _project_to_plane(_subtract(second, first), field_normal)
-                edge_length = _length(edge)
-                if edge_length > best_length:
-                    best_length = edge_length
-                    best_direction = edge
-        member_direction = best_direction
-
-    if _length(member_direction) <= 1.0e-12:
-        member_direction = _orthogonal_unit(field_normal)
-    member_direction = _normalise(member_direction)
-    transverse_direction = _normalise(_cross(field_normal, member_direction))
-    if _length(transverse_direction) <= 1.0e-12:
-        transverse_direction = _orthogonal_unit(field_normal)
-        member_direction = _normalise(_cross(transverse_direction, field_normal))
-
-    return field_normal, field_offset, member_direction, transverse_direction
-
-
 def _field_stress_samples(
     field_item: PlateField,
     frd_stress: FrdStressResult,
@@ -1899,8 +1880,8 @@ def _field_stress_samples(
     base_offset: float,
     member_direction: Vector3D,
     transverse_direction: Vector3D,
-) -> list[tuple[float, float, float, float, float]]:
-    all_samples: list[tuple[float, float, float, float, float, float]] = []
+) -> list[tuple[float, float, float, float]]:
+    all_samples: list[tuple[float, float, float, float, float]] = []
     seen_node_ids: set[int] = set()
     for element_id in field_item.element_ids:
         for node_id in frd_stress.element_nodes.get(element_id, ()):
@@ -1917,226 +1898,16 @@ def _field_stress_samples(
                 transverse_direction,
             )
             distance_to_mid_surface = abs(_dot(point, base_normal) - base_offset)
-            all_samples.append((
-                _dot(point, member_direction),
-                _dot(point, transverse_direction),
-                sigma_x,
-                sigma_y,
-                tau_xy,
-                distance_to_mid_surface,
-            ))
+            all_samples.append((_dot(point, transverse_direction), sigma_x, sigma_y, tau_xy, distance_to_mid_surface))
 
     if not all_samples:
         return []
 
     mid_surface_tolerance = max((field_item.shell_section_thickness_m or 0.0) * 0.2, 1.0e-8)
-    mid_surface_samples = [sample for sample in all_samples if sample[5] <= mid_surface_tolerance]
+    mid_surface_samples = [sample for sample in all_samples if sample[4] <= mid_surface_tolerance]
     selected = mid_surface_samples or all_samples
-    return [sample[:5] for sample in selected]
+    return [sample[:4] for sample in selected]
 
-
-def _central_rectangle_indices(
-    first_coordinates: Sequence[float],
-    second_coordinates: Sequence[float],
-    *,
-    central_fraction: float,
-    minimum_count: int = 8,
-) -> list[int]:
-    """Return a robust interior sample set centred in the panel.
-
-    The preferred region is the requested central rectangle.  On coarse FE
-    meshes it is widened gradually until enough independent result nodes are
-    available.  Exact outer-boundary nodes remain excluded whenever the mesh
-    provides interior alternatives.
-    """
-
-    if not first_coordinates or len(first_coordinates) != len(second_coordinates):
-        return []
-    count = len(first_coordinates)
-    target_count = max(1, min(int(minimum_count), count))
-    first_min, first_max = min(first_coordinates), max(first_coordinates)
-    second_min, second_max = min(second_coordinates), max(second_coordinates)
-    first_mid = (first_min + first_max) / 2.0
-    second_mid = (second_min + second_max) / 2.0
-    first_span = max(first_max - first_min, 1.0e-12)
-    second_span = max(second_max - second_min, 1.0e-12)
-
-    fractions = [central_fraction, 0.65, 0.80, 0.90]
-    indices: list[int] = []
-    for fraction in fractions:
-        fraction = max(min(float(fraction), 0.95), 0.05)
-        half_first = first_span * fraction / 2.0
-        half_second = second_span * fraction / 2.0
-        indices = [
-            index
-            for index, (first, second) in enumerate(zip(first_coordinates, second_coordinates))
-            if abs(first - first_mid) <= half_first and abs(second - second_mid) <= half_second
-        ]
-        if len(indices) >= target_count:
-            return indices
-
-    # Prefer non-boundary nodes, ranked by normalized distance to panel centre.
-    tolerance_first = max(first_span * 1.0e-8, 1.0e-12)
-    tolerance_second = max(second_span * 1.0e-8, 1.0e-12)
-    interior = [
-        index for index, (first, second) in enumerate(zip(first_coordinates, second_coordinates))
-        if first_min + tolerance_first < first < first_max - tolerance_first
-        and second_min + tolerance_second < second < second_max - tolerance_second
-    ]
-    candidates = interior if len(interior) >= target_count else list(range(count))
-    ranked = sorted(
-        candidates,
-        key=lambda index: (
-            ((first_coordinates[index] - first_mid) / first_span) ** 2
-            + ((second_coordinates[index] - second_mid) / second_span) ** 2
-        ),
-    )
-    return ranked[:target_count]
-
-
-def _interior_transverse_band_indices(
-    longitudinal_coordinates: Sequence[float],
-    transverse_coordinates: Sequence[float],
-    *,
-    target_fraction: float,
-    band_fraction: float,
-) -> list[int]:
-    """Return an interior transverse band inside the central longitudinal half."""
-
-    if not transverse_coordinates or len(longitudinal_coordinates) != len(transverse_coordinates):
-        return []
-    long_min, long_max = min(longitudinal_coordinates), max(longitudinal_coordinates)
-    trans_min, trans_max = min(transverse_coordinates), max(transverse_coordinates)
-    long_mid = (long_min + long_max) / 2.0
-    long_half = max((long_max - long_min) * 0.25, 1.0e-12)
-    target = trans_min + (trans_max - trans_min) * target_fraction
-    half_band = max((trans_max - trans_min) * max(min(band_fraction, 0.25), 0.05) / 2.0, 1.0e-12)
-    central_longitudinal = [
-        index
-        for index, value in enumerate(longitudinal_coordinates)
-        if abs(value - long_mid) <= long_half
-    ]
-    candidates = central_longitudinal or list(range(len(transverse_coordinates)))
-    indices = [index for index in candidates if abs(transverse_coordinates[index] - target) <= half_band]
-    if indices:
-        return indices
-    return [min(candidates, key=lambda index: abs(transverse_coordinates[index] - target))]
-
-
-
-def _validate_frd_stress_components(frd_stress: FrdStressResult) -> None:
-    """Reject incomplete FRD tensors before panel-axis projection.
-
-    Silently substituting zero for a missing tensor component can produce a
-    plausible-looking but incorrect local stress state, especially for rotated
-    plates and cylindrical shells.
-    """
-
-    available = {component.upper() for component in frd_stress.components}
-    required = {"SXX", "SYY", "SZZ", "SXY", "SYZ"}
-    missing = sorted(required - available)
-    if not ({"SZX", "SXZ"} & available):
-        missing.append("SZX/SXZ")
-    if missing:
-        raise ValueError(
-            "FRD STRESS block does not contain a complete global symmetric tensor; "
-            f"missing: {', '.join(missing)}; available: {', '.join(frd_stress.components) or 'none'}"
-        )
-    if not frd_stress.nodal_stress:
-        raise ValueError("FRD STRESS block contains no nodal stress records")
-
-
-def quality_check_fea_extraction(
-    model: FeShellModel,
-    fields: Sequence[PlateField] | Sequence[CylinderField],
-    frd_stress: FrdStressResult | None = None,
-    *,
-    geometry: CylinderGeometry | None = None,
-) -> dict[str, Any]:
-    """Return general extraction quality metrics for flat or cylindrical models."""
-
-    report: dict[str, Any] = {
-        "node_count": len(model.nodes),
-        "shell_element_count": len(model.shell_elements),
-        "field_count": len(fields),
-        "warnings": [],
-        "checks": {},
-    }
-    warnings: list[str] = report["warnings"]
-    checks: dict[str, Any] = report["checks"]
-
-    if not fields:
-        warnings.append("no buckling fields were inferred")
-        return report
-
-    is_cylinder = isinstance(fields[0], CylinderField)
-    assigned = [element_id for field_item in fields for element_id in field_item.element_ids]
-    counts: dict[int, int] = defaultdict(int)
-    for element_id in assigned:
-        counts[element_id] += 1
-
-    if is_cylinder:
-        geometry = detect_cylinder_geometry(model) if geometry is None else geometry
-        expected = set(geometry.skin_element_ids)
-        checks["geometry_type"] = "cylinder"
-        checks["radius_m"] = geometry.radius_m
-        checks["radial_rms_error_m"] = geometry.radial_rms_error_m
-        checks["relative_radial_rms"] = geometry.radial_rms_error_m / max(geometry.radius_m, 1.0e-12)
-    else:
-        patches = detect_surface_patches(model)
-        inference = _infer_members_from_patches(model, patches)
-        expected = set(inference.base_patch.element_ids)
-        checks["geometry_type"] = "flat"
-        checks["stiffener_count"] = len(inference.stiffeners)
-        checks["girder_count"] = len(inference.girders)
-        checks["base_plate_area_m2"] = inference.base_patch.area
-
-    assigned_set = set(assigned)
-    missing_elements = sorted(expected - assigned_set)
-    extra_elements = sorted(assigned_set - expected)
-    duplicate_elements = sorted(element_id for element_id, count in counts.items() if count > 1)
-    checks["expected_skin_element_count"] = len(expected)
-    checks["assigned_unique_element_count"] = len(assigned_set)
-    checks["missing_skin_element_count"] = len(missing_elements)
-    checks["duplicate_skin_element_count"] = len(duplicate_elements)
-    checks["extra_non_skin_element_count"] = len(extra_elements)
-    if missing_elements:
-        warnings.append(f"{len(missing_elements)} skin/base elements are not assigned to a field")
-    if duplicate_elements:
-        warnings.append(f"{len(duplicate_elements)} skin/base elements are assigned to multiple fields")
-    if extra_elements:
-        warnings.append(f"{len(extra_elements)} non-skin elements are assigned to fields")
-
-    if frd_stress is not None:
-        _validate_frd_stress_components(frd_stress)
-        checks["frd_components"] = list(frd_stress.components)
-        checks["frd_stress_node_count"] = len(frd_stress.nodal_stress)
-        if is_cylinder:
-            reduced = reduce_cylinder_stresses(model, geometry, fields, frd_stress)  # type: ignore[arg-type]
-            sample_counts = [item.sample_count for item in reduced]
-        else:
-            reduced = reduce_field_stresses(model, fields, frd_stress)  # type: ignore[arg-type]
-            sample_counts = [item.sample_count for item in reduced]
-        ordered = sorted(sample_counts)
-        checks["stress_sample_count_min"] = min(ordered) if ordered else 0
-        checks["stress_sample_count_median"] = (
-            ordered[len(ordered) // 2] if len(ordered) % 2 else
-            (ordered[len(ordered) // 2 - 1] + ordered[len(ordered) // 2]) / 2.0
-        ) if ordered else 0
-        checks["stress_sample_count_max"] = max(ordered) if ordered else 0
-        checks["fields_with_fewer_than_4_samples"] = sum(value < 4 for value in sample_counts)
-        checks["fields_with_fewer_than_8_samples"] = sum(value < 8 for value in sample_counts)
-        if checks["fields_with_fewer_than_4_samples"]:
-            warnings.append(
-                f"{checks['fields_with_fewer_than_4_samples']} fields have fewer than four interior stress samples"
-            )
-        elif checks["fields_with_fewer_than_8_samples"]:
-            warnings.append(
-                f"{checks['fields_with_fewer_than_8_samples']} fields have fewer than eight interior stress samples"
-            )
-
-    report["passed"] = not warnings
-    return report
 
 def _project_frd_stress(
     components: Sequence[str],
@@ -2902,10 +2673,9 @@ def reduce_cylinder_stresses(
     which matches the ANYstructure cylinder API where compression is negative.
     """
 
-    _validate_frd_stress_components(frd_stress)
     result: list[CylinderStress] = []
     for field_item in fields:
-        samples: list[tuple[float, float, float, float, float, float]] = []
+        samples: list[tuple[float, float, float]] = []
         seen: set[int] = set()
         for element_id in field_item.element_ids:
             for node_id in frd_stress.element_nodes.get(element_id, ()):
@@ -2915,59 +2685,29 @@ def reduce_cylinder_stresses(
                 if point is None:
                     continue
                 seen.add(node_id)
-                axial_direction, circumferential, _radial = _cylinder_local_basis(point, geometry)
+                radial = _normalise(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
+                circumferential = _normalise(_cross(geometry.axis_direction, radial))
                 axial, hoop, shear = _project_frd_stress(
                     frd_stress.components,
                     frd_stress.nodal_stress[node_id],
-                    axial_direction,
+                    geometry.axis_direction,
                     circumferential,
                 )
-                axial_coordinate = _axial_coordinate(
-                    point,
-                    geometry.axis_origin,
-                    geometry.axis_direction,
-                )
-                angular_coordinate = (
-                    _cylinder_angle(point, geometry) - field_item.angular_bounds_rad[0]
-                ) % (2.0 * math.pi)
-                radial_offset = abs(
-                    _length(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
-                    - geometry.radius_m
-                )
-                samples.append((
-                    axial_coordinate,
-                    angular_coordinate,
-                    axial / 1.0e6,
-                    hoop / 1.0e6,
-                    shear / 1.0e6,
-                    radial_offset,
-                ))
+                samples.append((axial / 1.0e6, hoop / 1.0e6, shear / 1.0e6))
 
         if samples:
-            mid_surface_tolerance = max((field_item.shell_thickness_m or 0.0) * 0.2, 1.0e-8)
-            mid_surface_samples = [sample for sample in samples if sample[5] <= mid_surface_tolerance]
-            selected_surface = mid_surface_samples or samples
-            mid_indices = _central_rectangle_indices(
-                [sample[0] for sample in selected_surface],
-                [sample[1] for sample in selected_surface],
-                central_fraction=0.50,
-            )
-            selected = [selected_surface[index] for index in mid_indices]
             result.append(
                 CylinderStress(
                     field_id=field_item.field_id,
-                    axial_stress_mpa=_mean(sample[2] for sample in selected),
-                    hoop_stress_mpa=_mean(sample[3] for sample in selected),
-                    torsional_shear_mpa=_mean(sample[4] for sample in selected),
+                    axial_stress_mpa=_mean(sample[0] for sample in samples),
+                    hoop_stress_mpa=_mean(sample[1] for sample in samples),
+                    torsional_shear_mpa=_mean(sample[2] for sample in samples),
                     transverse_shear_mpa=0.0,
-                    sample_count=len(selected),
-                    reduction="interior mean local membrane stress in axial/circumferential axes",
+                    sample_count=len(samples),
+                    reduction="mean local membrane stress in axial/circumferential axes",
                     diagnostics=(
-                        "global CalculiX stress tensor transformed at every result node",
-                        "local cylinder basis is axial/circumferential/radial and rotates around the circumference",
                         "CalculiX tension-positive sign retained; cylinder compression is negative",
-                        "mid-surface nodes and the central half of each axial/circumferential bay are preferred",
-                        "ring and longitudinal-stiffener boundary nodes are excluded where possible",
+                        "S_axial, S_hoop and tau_axial-hoop projected at every result node",
                     ),
                 )
             )
@@ -3698,22 +3438,6 @@ def _radial_vector(point: Point3D, origin: Point3D, axis: Vector3D) -> Vector3D:
     relative = _subtract(point, origin)
     axial = _dot(relative, axis)
     return tuple(relative[index] - axial * axis[index] for index in range(3))  # type: ignore[return-value]
-
-
-def _cylinder_local_basis(
-    point: Point3D,
-    geometry: CylinderGeometry,
-) -> tuple[Vector3D, Vector3D, Vector3D]:
-    """Return the rotating local axial/hoop/radial basis at a cylinder point."""
-
-    axial = _normalise(geometry.axis_direction)
-    radial = _normalise(_radial_vector(point, geometry.axis_origin, axial))
-    if _length(radial) <= 1.0e-12:
-        radial = _orthogonal_unit(axial)
-    circumferential = _normalise(_cross(axial, radial))
-    # Re-orthogonalise radial to suppress numerical drift from the fitted axis.
-    radial = _normalise(_cross(circumferential, axial))
-    return axial, circumferential, radial
 
 
 def _cylinder_basis(geometry: CylinderGeometry) -> tuple[Vector3D, Vector3D]:
