@@ -1,0 +1,219 @@
+from matplotlib.figure import Figure
+from pathlib import Path
+
+from anystruct import fe_runtime_solver, fe_solver
+
+
+class _Plate:
+    def get_structure_type(self):
+        return "Flat plate, stiffened"
+
+    def get_span(self):
+        return 2.5
+
+    def get_s(self):
+        return 0.75
+
+    def get_pl_thk(self):
+        return 0.012
+
+
+class _AllStructure:
+    Plate = _Plate()
+    Stiffener = object()
+    Girder = object()
+
+
+class _FakeApp:
+    _active_line = "line1"
+    _line_dict = {"line1": [1, 2]}
+    _line_to_struc = {"line1": [_AllStructure(), None, None, object(), None, None]}
+
+    def get_highest_pressure(self, line):
+        assert line == "line1"
+        return {"normal": 12345.0}
+
+
+def test_active_line_snapshot_uses_current_anystructure_line():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+
+    assert snapshot.line_name == "line1"
+    assert snapshot.line_points == [1, 2]
+    assert snapshot.pressure_pa == 12345.0
+    assert snapshot.domain == "Flat plate, stiffened"
+    assert snapshot.is_cylinder is False
+
+
+def test_runtime_geometry_summary_reads_flat_panel_dimensions_and_members():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+
+    summary = fe_runtime_solver.runtime_geometry_summary(snapshot)
+
+    assert summary["geometry"] == "flat panel"
+    assert summary["length_m"] == 2.5
+    assert summary["width_m"] == 0.75
+    assert summary["thickness_m"] == 0.012
+    assert summary["has_stiffener"] is True
+    assert summary["has_girder"] is True
+
+
+def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="medium",
+        pressure_pa=100_000.0,
+        load_scale=1.2,
+        include_stiffeners=True,
+        include_girders=True,
+        num_buckling_modes=4,
+    )
+
+    result = fe_runtime_solver.run_runtime_fem(snapshot, options)
+
+    assert result.status == "ok"
+    assert result.summary["pressure_pa"] == 120_000.0
+    assert result.summary["mesh_fidelity"] == "medium"
+    assert result.summary["solver"] == "ANYstructure production FE mesh"
+    assert result.summary["mesh_info"]["shells"] > 0
+    assert result.summary["prestress_summary"]
+    assert result.summary["load_resultant"]
+    assert result.visualization["type"] == "flat"
+    assert result.visualization["stress_pa"]
+    assert result.stress_percentiles[0][0] == "p95"
+    assert result.stress_percentiles[0][1] > 0.0
+    assert result.buckling_factors == tuple(sorted(result.buckling_factors))
+
+
+def test_runtime_fem_matplotlib_figure_contains_geometry_and_result_axes():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+    result = fe_runtime_solver.run_runtime_fem(
+        snapshot,
+        fe_runtime_solver.RuntimeFEMOptions(
+            mesh_fidelity="coarse",
+            pressure_pa=100_000.0,
+            load_scale=1.0,
+            include_stiffeners=True,
+            include_girders=True,
+            num_buckling_modes=3,
+        ),
+    )
+
+    figure = fe_runtime_solver.create_runtime_fem_result_figure(snapshot, result)
+
+    assert isinstance(figure, Figure)
+    assert len(figure.axes) >= 2
+    assert figure.axes[0].get_title() == "3D stress/displacement"
+    assert figure.axes[1].get_title() == "Result summary"
+
+
+def test_lightweight_solver_returns_positive_fast_panel_results():
+    result = fe_solver.run_lightweight_fem(
+        {
+            "geometry": "flat panel",
+            "length_m": 2.5,
+            "width_m": 0.75,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": True,
+        },
+        fe_solver.LightweightFEMConfig(pressure_pa=120_000.0, mesh_fidelity="coarse", num_buckling_modes=3),
+    )
+
+    assert result.status == "ok"
+    assert result.stress_max_pa > 0.0
+    assert result.displacement_max_m > 0.0
+    assert len(result.buckling_factors) == 3
+    assert result.mesh_info["beams"] == 2
+    assert result.prestress_summary["critical_stress_pa"] > 0.0
+    assert result.load_resultant["force_n"][2] > 0.0
+    assert result.visualization["type"] == "flat"
+    assert len(result.visualization["x_m"]) == 9
+    assert len(result.visualization["stress_pa"]) == 9
+
+
+def test_production_solver_runs_full_panel_mesh_backend():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "flat panel",
+            "length_m": 1.2,
+            "width_m": 0.6,
+            "thickness_m": 0.01,
+            "has_stiffener": True,
+            "has_girder": True,
+        },
+        fe_solver.LightweightFEMConfig(pressure_pa=25_000.0, mesh_fidelity="coarse", num_buckling_modes=2),
+    )
+
+    assert result.status == "ok"
+    assert result.solver_name == "ANYstructure production FE mesh"
+    assert result.mesh_info["nodes"] > 0
+    assert result.mesh_info["shells"] > 0
+    assert result.mesh_info["beams"] > 0
+    assert result.stress_max_pa >= 0.0
+    assert result.displacement_max_m >= 0.0
+    assert result.visualization["type"] == "flat"
+    assert result.visualization["stress_pa"]
+
+
+def test_production_solver_runs_full_cylinder_mesh_with_beams_and_buckling():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 1.5,
+            "thickness_m": 0.02,
+            "has_stiffener": True,
+            "has_girder": True,
+        },
+        fe_solver.LightweightFEMConfig(pressure_pa=10_000.0, mesh_fidelity="coarse", num_buckling_modes=2),
+    )
+
+    assert result.status == "ok"
+    assert result.mesh_info["shells"] > 0
+    assert result.mesh_info["beams"] > 0
+    assert result.stress_max_pa > 0.0
+    assert result.displacement_max_m > 0.0
+    assert result.buckling_factors == tuple(sorted(result.buckling_factors))
+    assert result.buckling_factors[0] > 0.0
+    assert result.visualization["type"] == "cylinder"
+    assert result.visualization["stress_pa"]
+
+
+def test_anystructure_contains_vendored_full_fe_solver_backend():
+    assert fe_solver.full_backend_available() is True
+
+    backend = fe_solver.full_backend_api()
+
+    assert backend.AnyStructureFEMConfig.__name__ == "AnyStructureFEMConfig"
+    assert callable(backend.run_anystructure_fem_mode)
+
+
+def test_runtime_fem_module_has_ready_to_run_main_example():
+    app = fe_runtime_solver.example_runtime_app()
+    snapshot = fe_runtime_solver.active_line_snapshot(app)
+
+    assert snapshot.line_name == "line_example"
+    assert snapshot.pressure_pa == 521_418.0
+    assert snapshot.domain == "Flat plate, stiffened with girder"
+
+
+def test_runtime_fem_file_can_be_run_directly_from_pycharm():
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_runtime_solver.py").read_text(encoding="utf-8")
+
+    assert 'if __package__ in (None, ""):' in source
+    assert "sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))" in source
+    assert 'if __name__ == "__main__":' in source
+    assert "root.withdraw()" not in source
+    assert "RuntimeFEMWindow(root, example_runtime_app(), use_parent_as_window=True)" in source
+
+
+def test_active_line_snapshot_rejects_missing_structure():
+    app = _FakeApp()
+    app._active_line = "line2"
+
+    try:
+        fe_runtime_solver.active_line_snapshot(app)
+    except ValueError as error:
+        assert "active line is not available" in str(error)
+    else:
+        raise AssertionError("missing active line should fail")
