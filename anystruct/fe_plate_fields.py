@@ -563,6 +563,7 @@ def calculate_field_buckling(
     elastic_modulus_mpa: float = 210000.0,
     material_factor: float = 1.15,
     poisson: float = 0.3,
+    ml_algo: Any = None,
 ) -> list[dict[str, Any]]:
     """Run ANYstructure buckling checks for fields using reduced FE stresses."""
 
@@ -628,8 +629,9 @@ def calculate_field_buckling(
             panel.set_buckling_parameters(
                 calculation_method=calculation_method,
                 buckling_acceptance=buckling_acceptance,
+                ml_algo=ml_algo,
             )
-            buckling_result = panel.get_buckling_results(calculation_method=calculation_method)
+            buckling_result = panel.get_buckling_results(calculation_method=calculation_method, ml_algo=ml_algo)
             result_record = {
                 "field_id": field_item.field_id,
                 "domain": domain,
@@ -681,6 +683,7 @@ def _create_flat_fea_buckling_session(
     elastic_modulus_mpa: float = 210000.0,
     material_factor: float = 1.15,
     poisson: float = 0.3,
+    ml_algo: Any = None,
     run_buckling: bool = True,
 ) -> FeaBucklingSession:
     """Create a selectable FE-result buckling session for API and GUI callers."""
@@ -712,6 +715,7 @@ def _create_flat_fea_buckling_session(
                 elastic_modulus_mpa=elastic_modulus_mpa,
                 material_factor=material_factor,
                 poisson=poisson,
+                ml_algo=ml_algo,
             )
         )
 
@@ -2786,10 +2790,130 @@ def anystructure_input_for_cylinder_field(
     }
 
 
+_FLAT_PANEL_BUCKLING_METHODS = {"SemiAnalytical S3/U3", "ML-Numeric (PULS based)"}
+
+
+def _cylinder_flat_panel_method_warning(calculation_method: str) -> str:
+    return (
+        "WARNING: "
+        f"{calculation_method} is calibrated for flat plate/stiffened-panel checks. "
+        "For cylindrical FE bays ANYstructure maps axial length, circumferential spacing, "
+        "axial/hoop stresses and local stiffener data to an equivalent flat panel. "
+        "Use this as an engineering approximation; cylindrical DNV rule checks may have "
+        "separate geometry and validity limits."
+    )
+
+
+def _cylinder_member_to_flat_member(member: CylinderMember, role: str) -> InferredMember:
+    return InferredMember(
+        member_id=member.member_id,
+        role=role,
+        section_type=member.section_type,
+        web_patch_id=member.member_id,
+        flange_patch_id=member.member_id if member.flange_element_ids else None,
+        direction=member.direction,
+        station=member.station,
+        web_height_m=member.web_height_m,
+        flange_width_m=member.flange_width_m,
+        web_thickness_m=member.web_thickness_m,
+        flange_thickness_m=member.flange_thickness_m,
+        thickness_source="cylinder shell section metadata",
+        confidence=member.confidence,
+        diagnostics=member.diagnostics + ("mapped from cylindrical member for equivalent flat-panel buckling",),
+    )
+
+
+def _equivalent_flat_field_for_cylinder(field_item: CylinderField) -> PlateField:
+    flat_members: list[InferredMember] = []
+    for member in field_item.members:
+        if member.role == "longitudinal_stiffener":
+            flat_members.append(_cylinder_member_to_flat_member(member, "stiffener"))
+        elif member.role in {"ring_stiffener", "ring_frame"}:
+            flat_members.append(_cylinder_member_to_flat_member(member, "girder"))
+
+    return PlateField(
+        field_id=field_item.field_id,
+        base_patch_id="equivalent_cylinder_flat_panel",
+        element_ids=field_item.element_ids,
+        bbox=((0.0, field_item.axial_length_m), (0.0, field_item.circumferential_spacing_m), (0.0, 0.0)),
+        span_m=field_item.axial_length_m,
+        spacing_m=field_item.circumferential_spacing_m,
+        transverse_bounds=(0.0, field_item.circumferential_spacing_m),
+        attached_member_ids=field_item.attached_member_ids,
+        members=tuple(flat_members),
+        shell_section_thickness_m=field_item.shell_thickness_m,
+        confidence=field_item.confidence,
+        diagnostics=field_item.diagnostics + (
+            "equivalent flat-panel input: span=axial length, spacing=circumferential arc length",
+        ),
+    )
+
+
+def _equivalent_panel_stress_for_cylinder(stress: CylinderStress) -> PanelStress:
+    return PanelStress(
+        field_id=stress.field_id,
+        sigma_x1_mpa=-stress.axial_stress_mpa,
+        sigma_x2_mpa=-stress.axial_stress_mpa,
+        sigma_y1_mpa=-stress.hoop_stress_mpa,
+        sigma_y2_mpa=-stress.hoop_stress_mpa,
+        tau_xy_mpa=stress.torsional_shear_mpa,
+        sample_count=stress.sample_count,
+        reduction=(
+            "equivalent flat-panel stress: axial compression -> sigma_x, "
+            "hoop compression -> sigma_y, torsion -> tau_xy"
+        ),
+        source_units="MPa",
+        diagnostics=stress.diagnostics + (
+            "converted from cylinder tension-positive convention to flat compression-positive convention",
+        ),
+    )
+
+
+def calculate_equivalent_flat_buckling_for_cylinder(
+    fields: Sequence[CylinderField],
+    stresses: Sequence[CylinderStress],
+    *,
+    calculation_method: str,
+    buckling_acceptance: str = "ultimate",
+    pressure_mpa: float = 0.0,
+    material_yield_mpa: float = 355.0,
+    elastic_modulus_mpa: float = 210000.0,
+    material_factor: float = 1.15,
+    poisson: float = 0.3,
+    ml_algo: Any = None,
+) -> list[dict[str, Any]]:
+    """Run flat-panel methods on cylindrical bays using a documented equivalent mapping."""
+
+    equivalent_fields = tuple(_equivalent_flat_field_for_cylinder(field_item) for field_item in fields)
+    equivalent_stresses = tuple(_equivalent_panel_stress_for_cylinder(stress) for stress in stresses)
+    warning = _cylinder_flat_panel_method_warning(calculation_method)
+    results = calculate_field_buckling(
+        equivalent_fields,
+        equivalent_stresses,
+        calculation_method=calculation_method,
+        buckling_acceptance=buckling_acceptance,
+        pressure_mpa=pressure_mpa,
+        material_yield_mpa=material_yield_mpa,
+        elastic_modulus_mpa=elastic_modulus_mpa,
+        material_factor=material_factor,
+        poisson=poisson,
+        ml_algo=ml_algo,
+    )
+    for result in results:
+        result["domain"] = "Equivalent flat panel from cylindrical shell"
+        result["cylinder_method_warning"] = warning
+        result["warnings"] = tuple(dict.fromkeys(tuple(result.get("warnings", ())) + (warning,)))
+        result["calculation_method"] = calculation_method
+        result["buckling_acceptance"] = buckling_acceptance
+    return results
+
+
 def calculate_cylinder_buckling(
     fields: Sequence[CylinderField],
     stresses: Sequence[CylinderStress],
     *,
+    calculation_method: str = "DNV-RP-C201 - prescriptive",
+    buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,
     material_yield_mpa: float = 355.0,
     elastic_modulus_mpa: float = 210000.0,
@@ -2797,8 +2921,23 @@ def calculate_cylinder_buckling(
     poisson: float = 0.3,
     imperfection_factor: float = 0.005,
     effective_buckling_length_factor: float = 1.0,
+    ml_algo: Any = None,
 ) -> list[dict[str, Any]]:
     """Run the existing ANYstructure CylStru check for each inferred bay."""
+
+    if calculation_method in _FLAT_PANEL_BUCKLING_METHODS:
+        return calculate_equivalent_flat_buckling_for_cylinder(
+            fields,
+            stresses,
+            calculation_method=calculation_method,
+            buckling_acceptance=buckling_acceptance,
+            pressure_mpa=pressure_mpa,
+            material_yield_mpa=material_yield_mpa,
+            elastic_modulus_mpa=elastic_modulus_mpa,
+            material_factor=material_factor,
+            poisson=poisson,
+            ml_algo=ml_algo,
+        )
 
     from anystruct.api import CylStru
 
@@ -2865,6 +3004,8 @@ def calculate_cylinder_buckling(
                     "field_id": field_item.field_id,
                     "domain": input_data["calculation_domain"],
                     "available": True,
+                    "calculation_method": calculation_method,
+                    "buckling_acceptance": buckling_acceptance,
                     "input": input_data,
                     "result": buckling_result,
                 }
@@ -2875,6 +3016,8 @@ def calculate_cylinder_buckling(
                     "field_id": field_item.field_id,
                     "domain": input_data["calculation_domain"],
                     "available": False,
+                    "calculation_method": calculation_method,
+                    "buckling_acceptance": buckling_acceptance,
                     "input": input_data,
                     "error": str(err),
                 }
@@ -2893,6 +3036,7 @@ def create_fea_cylinder_buckling_session(
     elastic_modulus_mpa: float = 210000.0,
     material_factor: float = 1.15,
     poisson: float = 0.3,
+    ml_algo: Any = None,
     run_buckling: bool = True,
 ) -> FeaCylinderSession:
     """Create the cylinder equivalent of ``create_fea_buckling_session``.
@@ -2909,10 +3053,13 @@ def create_fea_cylinder_buckling_session(
     fields = tuple(infer_cylinder_fields(model, geometry))
     frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
-    diagnostics.append(
-        "cylinder calculation uses CylStru; requested common GUI method="
-        f"{calculation_method!r}, acceptance={buckling_acceptance!r}"
-    )
+    if calculation_method in _FLAT_PANEL_BUCKLING_METHODS:
+        diagnostics.append(_cylinder_flat_panel_method_warning(calculation_method))
+    else:
+        diagnostics.append(
+            "cylinder calculation uses CylStru; requested common GUI method="
+            f"{calculation_method!r}, acceptance={buckling_acceptance!r}"
+        )
 
     if frd_path_text:
         frd_stress = read_calculix_frd_stress(frd_path_text)
@@ -2927,12 +3074,29 @@ def create_fea_cylinder_buckling_session(
             calculate_cylinder_buckling(
                 fields,
                 stresses,
+                calculation_method=calculation_method,
+                buckling_acceptance=buckling_acceptance,
                 pressure_mpa=pressure_mpa,
                 material_yield_mpa=material_yield_mpa,
                 elastic_modulus_mpa=elastic_modulus_mpa,
                 material_factor=material_factor,
                 poisson=poisson,
+                ml_algo=ml_algo,
             )
+        )
+
+    unavailable_results = [
+        result for result in buckling_results
+        if not result.get("available", False)
+    ]
+    if unavailable_results:
+        diagnostics.append(
+            f"{len(unavailable_results)} of {len(buckling_results)} cylinder buckling calculations "
+            "returned no identifiable usage factor"
+        )
+        diagnostics.extend(
+            f"{result.get('field_id', '?')}: {result.get('error', 'no result')}"
+            for result in unavailable_results[:20]
         )
 
     stress_by_field = {stress.field_id: stress for stress in stresses}

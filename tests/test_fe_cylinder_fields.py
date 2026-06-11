@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from anystruct import fe_plate_fields
 from anystruct.fe_plate_fields import (
     CylinderStress,
     FeShellModel,
+    FrdStressResult,
     ShellElement,
     ShellSection,
     anystructure_input_for_cylinder_field,
@@ -17,6 +19,7 @@ from anystruct.fe_plate_fields import (
     create_fea_buckling_session,
     detect_cylinder_geometry,
     infer_cylinder_fields,
+    reduce_cylinder_stresses,
 )
 
 
@@ -135,6 +138,33 @@ def _orthogonally_stiffened_cylinder() -> FeShellModel:
     )
 
 
+def _global_stress_components_from_local(first_axis, second_axis, sigma_first, sigma_second, tau):
+    third_axis = (
+        first_axis[1] * second_axis[2] - first_axis[2] * second_axis[1],
+        first_axis[2] * second_axis[0] - first_axis[0] * second_axis[2],
+        first_axis[0] * second_axis[1] - first_axis[1] * second_axis[0],
+    )
+    tensor = [[0.0, 0.0, 0.0] for _ in range(3)]
+    for first, second, value in (
+        (first_axis, first_axis, sigma_first),
+        (second_axis, second_axis, sigma_second),
+        (first_axis, second_axis, tau),
+        (second_axis, first_axis, tau),
+        (third_axis, third_axis, 0.0),
+    ):
+        for row in range(3):
+            for col in range(3):
+                tensor[row][col] += value * first[row] * second[col]
+    return (
+        tensor[0][0],
+        tensor[1][1],
+        tensor[2][2],
+        tensor[0][1],
+        tensor[1][2],
+        tensor[2][0],
+    )
+
+
 def test_detects_cylinder_axis_and_radius() -> None:
     model = _orthogonally_stiffened_cylinder()
     geometry = detect_cylinder_geometry(model)
@@ -188,6 +218,105 @@ def test_orthogonal_cylinder_uses_ring_stiffener_as_frame_for_calculation() -> N
     assert results[0]["available"] is True
     assert results[0].get("error") is None
     assert results[0]["result"]["Heavy ring frame"] is not None
+
+
+def test_cylinder_can_run_semi_analytical_as_equivalent_flat_panel_with_warning() -> None:
+    model = _orthogonally_stiffened_cylinder()
+    geometry = detect_cylinder_geometry(model)
+    fields = infer_cylinder_fields(model, geometry)
+    stress = CylinderStress(
+        field_id=fields[0].field_id,
+        axial_stress_mpa=-12.0,
+        hoop_stress_mpa=-34.0,
+        torsional_shear_mpa=7.0,
+        transverse_shear_mpa=0.0,
+        sample_count=4,
+        reduction="test",
+    )
+
+    results = calculate_cylinder_buckling(
+        [fields[0]],
+        [stress],
+        calculation_method="SemiAnalytical S3/U3",
+        buckling_acceptance="ultimate",
+    )
+
+    assert results[0]["domain"] == "Equivalent flat panel from cylindrical shell"
+    assert results[0]["calculation_method"] == "SemiAnalytical S3/U3"
+    assert "flat plate/stiffened-panel checks" in results[0]["cylinder_method_warning"]
+    assert results[0]["stress"]["sigma_x1_mpa"] == pytest.approx(12.0)
+    assert results[0]["stress"]["sigma_y1_mpa"] == pytest.approx(34.0)
+    assert results[0]["stress"]["tau_xy_mpa"] == pytest.approx(7.0)
+    assert "result" in results[0] or "error" in results[0]
+
+
+def test_cylinder_can_route_ml_numeric_as_equivalent_flat_panel_with_warning() -> None:
+    model = _orthogonally_stiffened_cylinder()
+    geometry = detect_cylinder_geometry(model)
+    fields = infer_cylinder_fields(model, geometry)
+    stress = CylinderStress(
+        field_id=fields[0].field_id,
+        axial_stress_mpa=-12.0,
+        hoop_stress_mpa=-34.0,
+        torsional_shear_mpa=7.0,
+        transverse_shear_mpa=0.0,
+        sample_count=4,
+        reduction="test",
+    )
+
+    results = calculate_cylinder_buckling(
+        [fields[0]],
+        [stress],
+        calculation_method="ML-Numeric (PULS based)",
+        buckling_acceptance="buckling",
+        ml_algo={},
+    )
+
+    assert results[0]["domain"] == "Equivalent flat panel from cylindrical shell"
+    assert results[0]["calculation_method"] == "ML-Numeric (PULS based)"
+    assert "flat plate/stiffened-panel checks" in results[0]["cylinder_method_warning"]
+    assert results[0]["available"] is False
+    assert "Missing numeric ML model" in results[0]["error"]
+
+
+def test_cylinder_stresses_are_projected_to_axial_and_circumferential_axes() -> None:
+    model = _orthogonally_stiffened_cylinder()
+    geometry = detect_cylinder_geometry(model)
+    fields = infer_cylinder_fields(model, geometry)
+    nodal_stress = {}
+    for node_id, point in model.nodes.items():
+        radial = fe_plate_fields._normalise(
+            fe_plate_fields._radial_vector(point, geometry.axis_origin, geometry.axis_direction)
+        )
+        circumferential = fe_plate_fields._normalise(fe_plate_fields._cross(geometry.axis_direction, radial))
+        nodal_stress[node_id] = _global_stress_components_from_local(
+            geometry.axis_direction,
+            circumferential,
+            sigma_first=-12.0e6,
+            sigma_second=-34.0e6,
+            tau=7.0e6,
+        )
+    frd_stress = FrdStressResult(
+        path="synthetic",
+        nodes=model.nodes,
+        element_nodes={
+            element_id: element.corner_node_ids
+            for element_id, element in model.shell_elements.items()
+        },
+        components=("SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"),
+        nodal_stress=nodal_stress,
+    )
+
+    cylinder_stresses = reduce_cylinder_stresses(model, geometry, fields[:1], frd_stress)
+    panel_input = anystructure_input_for_cylinder_field(fields[0], cylinder_stresses[0])
+
+    assert len(cylinder_stresses) == 1
+    assert cylinder_stresses[0].axial_stress_mpa == pytest.approx(-12.0)
+    assert cylinder_stresses[0].hoop_stress_mpa == pytest.approx(-34.0)
+    assert cylinder_stresses[0].torsional_shear_mpa == pytest.approx(7.0)
+    assert panel_input["stresses"]["sasd_mpa"] == pytest.approx(-12.0)
+    assert panel_input["stresses"]["shsd_mpa"] == pytest.approx(-34.0)
+    assert panel_input["stresses"]["tTsd_mpa"] == pytest.approx(7.0)
 
 
 @pytest.mark.skipif(

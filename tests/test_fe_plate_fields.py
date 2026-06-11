@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,105 @@ def _write_synthetic_frd(path, model, stress_by_node=None):
     lines.append(" -3")
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _write_rotated_panel_inp(tmp_path, angle_degrees=35.0):
+    """Write a stiffened flat panel whose local axes are rotated in global XY."""
+
+    angle = math.radians(angle_degrees)
+    member_axis = (math.cos(angle), math.sin(angle), 0.0)
+    transverse_axis = (-math.sin(angle), math.cos(angle), 0.0)
+    normal_axis = (0.0, 0.0, 1.0)
+    nodes = {}
+    elements = {}
+    next_node = 1
+    next_element = 1
+
+    def local_point(x, y, z):
+        return (
+            member_axis[0] * x + transverse_axis[0] * y + normal_axis[0] * z,
+            member_axis[1] * x + transverse_axis[1] * y + normal_axis[1] * z,
+            member_axis[2] * x + transverse_axis[2] * y + normal_axis[2] * z,
+        )
+
+    def add_node(point):
+        nonlocal next_node
+        nodes[next_node] = point
+        next_node += 1
+        return next_node - 1
+
+    base_nodes = {}
+    for y in (0.0, 0.7, 1.4):
+        for x in (0.0, 4.0):
+            base_nodes[(x, y)] = add_node(local_point(x, y, 0.0))
+
+    top_nodes = {}
+    for y in (0.0, 0.7, 1.4):
+        for x in (0.0, 4.0):
+            top_nodes[(x, y)] = add_node(local_point(x, y, 0.4))
+
+    def add_element(node_ids):
+        nonlocal next_element
+        elements[next_element] = tuple(node_ids)
+        next_element += 1
+
+    for y0, y1 in ((0.0, 0.7), (0.7, 1.4)):
+        add_element((
+            base_nodes[(0.0, y0)],
+            base_nodes[(4.0, y0)],
+            base_nodes[(4.0, y1)],
+            base_nodes[(0.0, y1)],
+        ))
+
+    for y in (0.0, 0.7, 1.4):
+        add_element((
+            base_nodes[(0.0, y)],
+            base_nodes[(4.0, y)],
+            top_nodes[(4.0, y)],
+            top_nodes[(0.0, y)],
+        ))
+
+    lines = ["*Heading", "*Node"]
+    for node_id, (x, y, z) in nodes.items():
+        lines.append(f"{node_id}, {x:.12g}, {y:.12g}, {z:.12g}")
+    lines.append("*Element, Type=S4, Elset=Compound-1")
+    for element_id, node_ids in elements.items():
+        lines.append(f"{element_id}, " + ", ".join(str(node_id) for node_id in node_ids))
+    lines.append("*Elset, Elset=ShellSection")
+    lines.append(", ".join(str(element_id) for element_id in elements))
+    lines.append("*Shell section, Elset=ShellSection, Material=S355, Offset=0")
+    lines.append("0.015")
+    filename = tmp_path / "rotated_panel.inp"
+    filename.write_text("\n".join(lines), encoding="utf-8")
+    return filename, member_axis, transverse_axis
+
+
+def _stress_components_from_local(member_axis, transverse_axis, sigma_x, sigma_y, tau_xy, sigma_z=0.0):
+    normal_axis = (
+        member_axis[1] * transverse_axis[2] - member_axis[2] * transverse_axis[1],
+        member_axis[2] * transverse_axis[0] - member_axis[0] * transverse_axis[2],
+        member_axis[0] * transverse_axis[1] - member_axis[1] * transverse_axis[0],
+    )
+    axes = (
+        (member_axis, member_axis, sigma_x),
+        (transverse_axis, transverse_axis, sigma_y),
+        (member_axis, transverse_axis, tau_xy),
+        (transverse_axis, member_axis, tau_xy),
+        (normal_axis, normal_axis, sigma_z),
+    )
+    tensor = [[0.0, 0.0, 0.0] for _ in range(3)]
+    for first, second, value in axes:
+        for row in range(3):
+            for col in range(3):
+                tensor[row][col] += value * first[row] * second[col]
+    return (
+        tensor[0][0],
+        tensor[1][1],
+        tensor[2][2],
+        tensor[0][1],
+        tensor[1][2],
+        tensor[2][0],
+    )
 
 
 def test_read_calculix_inp_keeps_shell_section_metadata(tmp_path):
@@ -327,6 +427,68 @@ def test_reduce_field_stresses_projects_frd_to_compression_positive_mpa(tmp_path
     assert panel_stresses[0].sigma_y2_mpa == pytest.approx(50.0)
     assert panel_stresses[0].tau_xy_mpa == pytest.approx(5.0)
     assert panel_stresses[0].sample_count > 0
+
+
+def test_project_frd_stress_rotates_global_tensor_to_local_panel_axes():
+    angle = math.radians(35.0)
+    member_axis = (math.cos(angle), math.sin(angle), 0.0)
+    transverse_axis = (-math.sin(angle), math.cos(angle), 0.0)
+    components = ("SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX")
+    values = _stress_components_from_local(
+        member_axis,
+        transverse_axis,
+        sigma_x=-120.0e6,
+        sigma_y=-45.0e6,
+        tau_xy=8.0e6,
+    )
+
+    sigma_x, sigma_y, tau_xy = fe_plate_fields._project_frd_stress(
+        components,
+        values,
+        member_axis,
+        transverse_axis,
+    )
+
+    assert sigma_x == pytest.approx(-120.0e6)
+    assert sigma_y == pytest.approx(-45.0e6)
+    assert tau_xy == pytest.approx(8.0e6)
+
+
+def test_rotated_flat_panel_stresses_are_reduced_in_inferred_local_axes(tmp_path):
+    inp, member_axis, transverse_axis = _write_rotated_panel_inp(tmp_path, angle_degrees=35.0)
+    model = fe_plate_fields.read_calculix_inp(inp)
+    fields = fe_plate_fields.infer_plate_fields(model)
+    stress_values = _stress_components_from_local(
+        member_axis,
+        transverse_axis,
+        sigma_x=-120.0e6,
+        sigma_y=-45.0e6,
+        tau_xy=8.0e6,
+    )
+    frd_stress = fe_plate_fields.FrdStressResult(
+        path="synthetic",
+        nodes=model.nodes,
+        element_nodes={
+            element_id: element.corner_node_ids
+            for element_id, element in model.shell_elements.items()
+        },
+        components=("SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"),
+        nodal_stress={node_id: stress_values for node_id in model.nodes},
+    )
+
+    panel_stresses = fe_plate_fields.reduce_field_stresses(model, fields, frd_stress)
+    panel_input = fe_plate_fields.anystructure_input_for_field(fields[0], panel_stresses[0])
+
+    assert len(fields) == 2
+    assert len(panel_stresses) == 2
+    assert panel_stresses[0].sigma_x1_mpa == pytest.approx(120.0)
+    assert panel_stresses[0].sigma_x2_mpa == pytest.approx(120.0)
+    assert panel_stresses[0].sigma_y1_mpa == pytest.approx(45.0)
+    assert panel_stresses[0].sigma_y2_mpa == pytest.approx(45.0)
+    assert panel_stresses[0].tau_xy_mpa == pytest.approx(8.0, abs=5.0e-5)
+    assert panel_input["stresses"]["sigma_x1_mpa"] == pytest.approx(120.0)
+    assert panel_input["stresses"]["sigma_y1_mpa"] == pytest.approx(45.0)
+    assert panel_input["stresses"]["tau_xy_mpa"] == pytest.approx(8.0, abs=5.0e-5)
 
 
 def test_calculate_field_buckling_returns_per_field_results(tmp_path):

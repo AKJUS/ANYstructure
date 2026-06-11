@@ -2284,6 +2284,7 @@ class Application():
                 pressure_mpa=0.0,
                 material_yield_mpa=self._new_material.get(),
                 material_factor=self._new_material_factor.get(),
+                ml_algo=getattr(self, '_ML_buckling', None),
                 run_buckling=bool(frd_path),
             )
         except Exception as err:
@@ -2296,6 +2297,12 @@ class Application():
         self._fea_selected_panel_id = None if first_panel is None else first_panel.field_id
         self._apply_selected_fea_panel_to_inputs()
         self._refresh_fea_buckling_views(rebuild_3d=True)
+        warnings = [
+            str(item) for item in getattr(self._fea_buckling_session, 'diagnostics', ())
+            if str(item).startswith('WARNING:')
+        ]
+        if warnings:
+            messagebox.showwarning('FEA buckling method warning', '\n\n'.join(warnings))
 
     def _apply_selected_fea_panel_to_inputs(self):
         """Copy the selected FE panel into the normal ANYstructure input variables."""
@@ -3448,6 +3455,13 @@ class Application():
                 selected_panel = None
         uf_text = '-' if selected_panel is None or selected_panel.usage_factor is None else f'{selected_panel.usage_factor:.3g}'
         source_text = 'No FE file loaded' if session is None else os.path.basename(session.inp_path)
+        warning_text = ''
+        if session is not None:
+            warning_text = '\n'.join(
+                str(item).replace('WARNING: ', '')
+                for item in getattr(session, 'diagnostics', ())
+                if str(item).startswith('WARNING:')
+            )
         uf_lower_entry = ttk.Entry(self._main_fr, textvariable=self._fea_uf_color_lower, width=7)
         uf_upper_entry = ttk.Entry(self._main_fr, textvariable=self._fea_uf_color_upper, width=7)
 
@@ -3485,6 +3499,17 @@ class Application():
             ttk.Label(self._main_fr, text='UF: ' + uf_text, font=self._text_size['Text 8']),
             ttk.Label(self._main_fr, text='Source: ' + source_text, font=self._text_size['Text 8']),
         ]
+        if warning_text:
+            rows.append(
+                ttk.Label(
+                    self._main_fr,
+                    text=warning_text,
+                    font=self._text_size['Text 8'],
+                    foreground='red',
+                    wraplength=320,
+                    justify=tk.LEFT,
+                )
+            )
         self._fea_buckling_created.extend(rows)
         rows[0].place(relx=x0, rely=y0)
         rows[1].place(relx=x0, rely=y0 + dy * 1.3)

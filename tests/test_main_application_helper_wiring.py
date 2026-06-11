@@ -238,6 +238,8 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def reimport_fea_buckling_files(self):" in source
     assert "def import_fea_buckling_files(self, inp_path, frd_path=None):" in source
     assert "fe_plate_fields.create_fea_buckling_session(" in source
+    assert "ml_algo=getattr(self, '_ML_buckling', None)" in source
+    assert "messagebox.showwarning('FEA buckling method warning'" in source
     assert "def _draw_fea_buckling_canvas(self):" in source
     assert "fe_plate_fields.panel_3d_records(session.model, session.fields, session.usage_factors())" in source
     assert "Poly3DCollection(" in source
