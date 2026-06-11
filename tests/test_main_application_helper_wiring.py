@@ -238,6 +238,8 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def reimport_fea_buckling_files(self):" in source
     assert "def import_fea_buckling_files(self, inp_path, frd_path=None):" in source
     assert "fe_plate_fields.create_fea_buckling_session(" in source
+    assert "ml_algo=getattr(self, '_ML_buckling', None)" in source
+    assert "messagebox.showwarning('FEA buckling method warning'" in source
     assert "def _draw_fea_buckling_canvas(self):" in source
     assert "fe_plate_fields.panel_3d_records(session.model, session.fields, session.usage_factors())" in source
     assert "Poly3DCollection(" in source
@@ -250,15 +252,43 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def _draw_fea_panel_existing_result_text(self, panel):" in source
     assert "def _draw_fea_panel_2d_sketch(self):" in source
     assert "def _draw_flat_structure_2d_preview(self, all_obj, selected_text=''):" in source
-    assert "matplotlib.colors.Normalize(vmin=0.0, vmax=1.5)" in source
+    assert "self._fea_uf_color_lower = tk.DoubleVar()" in source
+    assert "self._fea_uf_color_upper = tk.DoubleVar()" in source
+    assert "self._fea_panel_line_by_field = {}" in source
+    assert "self._fea_imported_line_names = []" in source
+    assert "def _rebuild_fea_panel_line_model(self):" in source
+    assert "line_name = 'fea_panel_' + str(line_number).zfill(3)" in source
+    assert "horizontal_gap_m = 0.5" in source
+    assert "row_gap_m = 0.5" in source
+    assert "panel_frame.place(relx=0.785, rely=0.0, relwidth=0.215, relheight=1.0)" in source
+    assert "Selected Panel" in source
+    assert "Import Summary" in source
+    assert "def _fea_uf_color_limits(self):" in source
+    assert "UF colour range" in source
+    assert "textvariable=self._fea_uf_color_lower" in source
+    assert "textvariable=self._fea_uf_color_upper" in source
+    assert "text='Update colour scale'" in source
+    assert "uf_min, uf_max = self._fea_uf_color_limits()" in source
+    assert "matplotlib.colors.Normalize(vmin=uf_min, vmax=uf_max)" in source
+    assert "rgba = plt.get_cmap('jet')" in source
+    assert "uf_cmap = plt.get_cmap('jet')" in source
     assert "colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])" in source
     assert "fig.colorbar(scalar_map, cax=colorbar_ax)" in source
     assert "colorbar.set_label('UF'" in source
     assert "self._build_flat_structure_properties()" in source
+    assert "def _apply_selected_fea_cylinder_panel_to_inputs(self, data):" in source
+    assert "api_helpers.cylinder_domain_with_input_mode(domain)" in source
+    assert "self._new_shell_stress_or_force.set(2)" in source
+    assert "def _fea_panel_cylinder_structure(self, panel):" in source
+    assert "cylinder=cylinder_obj" in source
     assert "self._create_all_structure_from_properties(prop_dict)" in source
     assert "self._fea_buckling_mode = False" in source
     assert "self.draw_results(state=state)" in source
-    assert "self.get_color_and_calc_state(current_line=temp_line, active_line_only=True)" in source
+    assert "mapped_line = getattr(self, '_fea_panel_line_by_field', {}).get(panel.field_id)" in source
+    assert "flat_method_print = self._new_buckling_method.get() in [" in source
+    assert "self._line_to_struc[result_line][5] = None" in source
+    assert "if old_result_bundle is not None:" in source
+    assert "self.get_color_and_calc_state(current_line=result_line, active_line_only=True)" in source
     assert "pressure_mpa * 1.0e6" in source
     assert "panel.anystructure_input.get('stresses', {}).get('pressure_mpa', 0.0)" in source
     assert "edgecolor='red' if selected else 'none'" in source
@@ -289,12 +319,16 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "item.place_forget()" in load_block
     assert "Import INP/FRD" in load_block
     assert "Reimport" in load_block
-    assert "Analyse file" in load_block
-    assert "Buckling method:" in load_block
+    assert "Analyse file" not in load_block
+    assert "Static and dynamic accelerations" not in load_block
+    assert "Load info" not in load_block
+    assert "Load factors" not in load_block
+    assert "Weights" not in load_block
+    assert "Buckling method" in load_block
     assert "DNV-RP-C201 - prescriptive" in load_block
     assert "SemiAnalytical S3/U3" in load_block
     assert "ML-Numeric (PULS based)" in load_block
-    assert "UF basis:" in load_block
+    assert "UF basis" in load_block
     assert "command=self._on_fea_buckling_option_changed" in load_block
 
 
