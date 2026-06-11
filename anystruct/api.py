@@ -98,6 +98,12 @@ def create_fea_result_buckling_session(inp_path, frd_path=None, **kwargs):
     return fe_plate_fields.create_fea_buckling_session(inp_path, frd_path, **kwargs)
 
 
+def available_fea_stress_reduction_methods():
+    """Return supported FE stress-to-panel interpretation methods."""
+
+    return fe_plate_fields.available_stress_reduction_methods()
+
+
 def analyze_fea_result_buckling(inp_path, frd_path, **kwargs):
     """Read INP/FRD, infer panels, reduce stresses, and return a serializable summary."""
 

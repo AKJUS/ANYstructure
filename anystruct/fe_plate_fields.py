@@ -23,6 +23,33 @@ from typing import Any, Iterable, Sequence
 Point3D = tuple[float, float, float]
 Vector3D = tuple[float, float, float]
 
+STRESS_REDUCTION_METHODS: tuple[str, ...] = (
+    "CSR area weighted mean",
+    "Whole panel nodal mean",
+    "Centre strip mean",
+)
+
+_STRESS_REDUCTION_METHOD_ALIASES = {
+    "csr": "CSR area weighted mean",
+    "csr area mean": "CSR area weighted mean",
+    "csr area average": "CSR area weighted mean",
+    "csr area weighted": "CSR area weighted mean",
+    "csr area weighted mean": "CSR area weighted mean",
+    "area": "CSR area weighted mean",
+    "area weighted": "CSR area weighted mean",
+    "area weighted mean": "CSR area weighted mean",
+    "nodal": "Whole panel nodal mean",
+    "nodal mean": "Whole panel nodal mean",
+    "whole panel nodal mean": "Whole panel nodal mean",
+    "whole panel mean": "Whole panel nodal mean",
+    "centre strip": "Centre strip mean",
+    "centre strip mean": "Centre strip mean",
+    "center strip": "Centre strip mean",
+    "center strip mean": "Centre strip mean",
+    "line": "Centre strip mean",
+    "line mean": "Centre strip mean",
+}
+
 
 @dataclass(frozen=True)
 class ShellElement:
@@ -219,6 +246,29 @@ class _PatchInference:
     base_normal: Vector3D
     member_direction: Vector3D
     transverse_direction: Vector3D
+
+
+def available_stress_reduction_methods() -> tuple[str, ...]:
+    """Return the supported FE-to-buckling-panel stress reduction methods."""
+
+    return STRESS_REDUCTION_METHODS
+
+
+def normalize_stress_reduction_method(method: str | None) -> str:
+    """Normalize a public stress-reduction method label or shorthand."""
+
+    if method is None:
+        return STRESS_REDUCTION_METHODS[0]
+    text = str(method).strip()
+    if text in STRESS_REDUCTION_METHODS:
+        return text
+    normalized = _STRESS_REDUCTION_METHOD_ALIASES.get(text.lower())
+    if normalized is None:
+        raise ValueError(
+            "stress_reduction_method must be one of: "
+            + ", ".join(STRESS_REDUCTION_METHODS)
+        )
+    return normalized
 
 
 def read_calculix_inp(path: str | os.PathLike[str]) -> FeShellModel:
@@ -447,15 +497,19 @@ def reduce_field_stresses(
     frd_stress: FrdStressResult,
     *,
     transverse_edge_fraction: float = 0.2,
+    stress_reduction_method: str | None = None,
+    centre_strip_fraction: float = 0.25,
 ) -> list[PanelStress]:
     """Reduce FRD shell stresses to one ANYstructure/PULS stress set per field.
 
-    The reduction follows the PULS S3/U3 nominal-load shape: axial stress and
-    shear are uniform nominal values, while transverse stress may vary linearly
-    between the two transverse sides.  CalculiX stresses are interpreted as
-    tension-positive Pa; returned normal stresses are compression-positive MPa.
+    The default method follows the CSR/PULS-style recommendation to use area
+    weighted average membrane stresses over the finite elements of the panel.
+    Alternative methods are offered for sensitivity checks.  CalculiX stresses
+    are interpreted as tension-positive Pa; returned normal stresses are
+    compression-positive MPa.
     """
 
+    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     patches = detect_surface_patches(model)
     if not patches:
         return []
@@ -467,14 +521,23 @@ def reduce_field_stresses(
 
     panel_stresses: list[PanelStress] = []
     for field_item in fields:
-        samples = _field_stress_samples(
-            field_item,
-            frd_stress,
-            base_normal,
-            base_offset,
-            member_direction,
-            transverse_direction,
-        )
+        if reduction_method == "CSR area weighted mean":
+            samples = _field_element_stress_samples(
+                model,
+                field_item,
+                frd_stress,
+                member_direction,
+                transverse_direction,
+            )
+        else:
+            samples = _field_stress_samples(
+                field_item,
+                frd_stress,
+                base_normal,
+                base_offset,
+                member_direction,
+                transverse_direction,
+            )
         if not samples:
             panel_stresses.append(
                 PanelStress(
@@ -491,42 +554,13 @@ def reduce_field_stresses(
             )
             continue
 
-        sigma_x = [-sample[1] / 1.0e6 for sample in samples]
-        sigma_y = [-sample[2] / 1.0e6 for sample in samples]
-        tau_xy = [sample[3] / 1.0e6 for sample in samples]
-        transverse_values = [sample[0] for sample in samples]
-        lower_transverse, upper_transverse = field_item.transverse_bounds
-        edge_width = max((upper_transverse - lower_transverse) * transverse_edge_fraction, 1.0e-9)
-        lower_indices = [
-            index for index, value in enumerate(transverse_values)
-            if value <= lower_transverse + edge_width
-        ]
-        upper_indices = [
-            index for index, value in enumerate(transverse_values)
-            if value >= upper_transverse - edge_width
-        ]
-        if not lower_indices or not upper_indices:
-            ordered = sorted(range(len(samples)), key=lambda index: transverse_values[index])
-            take = max(1, int(math.ceil(len(ordered) * transverse_edge_fraction)))
-            lower_indices = ordered[:take]
-            upper_indices = ordered[-take:]
-
-        sigma_x_nominal = _mean(sigma_x)
         panel_stresses.append(
-            PanelStress(
-                field_id=field_item.field_id,
-                sigma_x1_mpa=sigma_x_nominal,
-                sigma_x2_mpa=sigma_x_nominal,
-                sigma_y1_mpa=_mean(sigma_y[index] for index in lower_indices),
-                sigma_y2_mpa=_mean(sigma_y[index] for index in upper_indices),
-                tau_xy_mpa=_mean(tau_xy),
-                sample_count=len(samples),
-                reduction="nominal membrane: mean axial/shear, transverse side-band means",
-                diagnostics=(
-                    "FRD stress tensors projected to inferred panel axes",
-                    "normal stresses converted from FE tension-positive Pa to compression-positive MPa",
-                    "mid-surface shell result nodes preferred to avoid bending peak stress input",
-                ),
+            _reduced_panel_stress_from_samples(
+                field_item,
+                samples,
+                reduction_method,
+                transverse_edge_fraction=transverse_edge_fraction,
+                centre_strip_fraction=centre_strip_fraction,
             )
         )
     return panel_stresses
@@ -685,6 +719,7 @@ def _create_flat_fea_buckling_session(
     poisson: float = 0.3,
     ml_algo: Any = None,
     run_buckling: bool = True,
+    stress_reduction_method: str | None = None,
 ) -> FeaBucklingSession:
     """Create a selectable FE-result buckling session for API and GUI callers."""
 
@@ -694,10 +729,19 @@ def _create_flat_fea_buckling_session(
     fields = tuple(infer_plate_fields(model))
     frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
+    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
+    diagnostics.append(f"stress reduction method: {reduction_method}")
 
     if frd_path_text:
         frd_stress = read_calculix_frd_stress(frd_path_text)
-        panel_stresses = tuple(reduce_field_stresses(model, fields, frd_stress))
+        panel_stresses = tuple(
+            reduce_field_stresses(
+                model,
+                fields,
+                frd_stress,
+                stress_reduction_method=reduction_method,
+            )
+        )
     else:
         panel_stresses = ()
         diagnostics.append("no FRD result file supplied; panel stresses set to defaults")
@@ -1884,7 +1928,7 @@ def _field_stress_samples(
     base_offset: float,
     member_direction: Vector3D,
     transverse_direction: Vector3D,
-) -> list[tuple[float, float, float, float]]:
+) -> list[tuple[float, float, float, float, float]]:
     all_samples: list[tuple[float, float, float, float, float]] = []
     seen_node_ids: set[int] = set()
     for element_id in field_item.element_ids:
@@ -1910,7 +1954,122 @@ def _field_stress_samples(
     mid_surface_tolerance = max((field_item.shell_section_thickness_m or 0.0) * 0.2, 1.0e-8)
     mid_surface_samples = [sample for sample in all_samples if sample[4] <= mid_surface_tolerance]
     selected = mid_surface_samples or all_samples
-    return [sample[:4] for sample in selected]
+    return [sample[:4] + (1.0,) for sample in selected]
+
+
+def _field_element_stress_samples(
+    model: FeShellModel,
+    field_item: PlateField,
+    frd_stress: FrdStressResult,
+    member_direction: Vector3D,
+    transverse_direction: Vector3D,
+) -> list[tuple[float, float, float, float, float]]:
+    samples: list[tuple[float, float, float, float, float]] = []
+    for element_id in field_item.element_ids:
+        element = model.shell_elements.get(element_id)
+        if element is None:
+            continue
+        corner_points = [model.nodes[node_id] for node_id in element.corner_node_ids if node_id in model.nodes]
+        if len(corner_points) < 3:
+            continue
+        projected_values = []
+        for node_id in frd_stress.element_nodes.get(element_id, element.corner_node_ids):
+            if node_id not in frd_stress.nodal_stress:
+                continue
+            projected_values.append(
+                _project_frd_stress(
+                    frd_stress.components,
+                    frd_stress.nodal_stress[node_id],
+                    member_direction,
+                    transverse_direction,
+                )
+            )
+        if not projected_values:
+            continue
+        centroid = _mean_point(corner_points)
+        area = _element_area(corner_points)
+        samples.append(
+            (
+                _dot(centroid, transverse_direction),
+                _mean(value[0] for value in projected_values),
+                _mean(value[1] for value in projected_values),
+                _mean(value[2] for value in projected_values),
+                max(area, 1.0e-12),
+            )
+        )
+    return samples
+
+
+def _weighted_mean(values: Iterable[tuple[float, float]]) -> float:
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    for value, weight in values:
+        weighted_sum += float(value) * float(weight)
+        weight_sum += float(weight)
+    return 0.0 if weight_sum == 0.0 else weighted_sum / weight_sum
+
+
+def _reduced_panel_stress_from_samples(
+    field_item: PlateField,
+    samples: Sequence[tuple[float, float, float, float, float]],
+    reduction_method: str,
+    *,
+    transverse_edge_fraction: float,
+    centre_strip_fraction: float,
+) -> PanelStress:
+    selected_samples = list(samples)
+    lower_transverse, upper_transverse = field_item.transverse_bounds
+    width = max(upper_transverse - lower_transverse, 1.0e-9)
+
+    if reduction_method == "Centre strip mean":
+        centre = 0.5 * (lower_transverse + upper_transverse)
+        half_strip = max(width * centre_strip_fraction * 0.5, 1.0e-9)
+        selected_samples = [
+            sample for sample in samples
+            if abs(sample[0] - centre) <= half_strip
+        ]
+        if not selected_samples:
+            ordered = sorted(samples, key=lambda sample: abs(sample[0] - centre))
+            selected_samples = ordered[: max(1, int(math.ceil(len(ordered) * centre_strip_fraction)))]
+
+    sigma_x = [-sample[1] / 1.0e6 for sample in selected_samples]
+    sigma_y = [-sample[2] / 1.0e6 for sample in selected_samples]
+    tau_xy = [sample[3] / 1.0e6 for sample in selected_samples]
+    weights = [sample[4] for sample in selected_samples]
+
+    if reduction_method == "Whole panel nodal mean":
+        weights = [1.0 for _sample in selected_samples]
+
+    sigma_x_nominal = _weighted_mean(zip(sigma_x, weights))
+    sigma_y_nominal = _weighted_mean(zip(sigma_y, weights))
+    tau_xy_nominal = _weighted_mean(zip(tau_xy, weights))
+
+    if reduction_method == "Whole panel nodal mean":
+        reduction = "whole-panel nodal membrane mean"
+        sample_note = "all matching mid-surface result nodes weighted equally"
+    elif reduction_method == "Centre strip mean":
+        reduction = f"centre-strip membrane mean over {centre_strip_fraction:.0%} panel width"
+        sample_note = "only stresses in the centre strip are averaged"
+    else:
+        reduction = "CSR area weighted membrane mean"
+        sample_note = "finite-element membrane stresses weighted by shell element area"
+
+    return PanelStress(
+        field_id=field_item.field_id,
+        sigma_x1_mpa=sigma_x_nominal,
+        sigma_x2_mpa=sigma_x_nominal,
+        sigma_y1_mpa=sigma_y_nominal,
+        sigma_y2_mpa=sigma_y_nominal,
+        tau_xy_mpa=tau_xy_nominal,
+        sample_count=len(selected_samples),
+        reduction=reduction,
+        diagnostics=(
+            "FRD stress tensors projected to inferred panel axes",
+            "normal stresses converted from FE tension-positive Pa to compression-positive MPa",
+            sample_note,
+            "CSR reference: area-weighted average membrane stress over panel finite elements",
+        ),
+    )
 
 
 def _project_frd_stress(
@@ -2670,6 +2829,9 @@ def reduce_cylinder_stresses(
     geometry: CylinderGeometry,
     fields: Sequence[CylinderField],
     frd_stress: FrdStressResult,
+    *,
+    stress_reduction_method: str | None = None,
+    centre_strip_fraction: float = 0.25,
 ) -> list[CylinderStress]:
     """Project FRD stresses into local axial/circumferential cylinder axes.
 
@@ -2677,41 +2839,54 @@ def reduce_cylinder_stresses(
     which matches the ANYstructure cylinder API where compression is negative.
     """
 
+    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     result: list[CylinderStress] = []
     for field_item in fields:
-        samples: list[tuple[float, float, float]] = []
-        seen: set[int] = set()
-        for element_id in field_item.element_ids:
-            for node_id in frd_stress.element_nodes.get(element_id, ()):
-                if node_id in seen or node_id not in frd_stress.nodal_stress:
-                    continue
-                point = frd_stress.nodes.get(node_id)
-                if point is None:
-                    continue
-                seen.add(node_id)
-                radial = _normalise(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
-                circumferential = _normalise(_cross(geometry.axis_direction, radial))
-                axial, hoop, shear = _project_frd_stress(
-                    frd_stress.components,
-                    frd_stress.nodal_stress[node_id],
-                    geometry.axis_direction,
-                    circumferential,
-                )
-                samples.append((axial / 1.0e6, hoop / 1.0e6, shear / 1.0e6))
+        if reduction_method == "CSR area weighted mean":
+            samples = _cylinder_element_stress_samples(model, geometry, field_item, frd_stress)
+        else:
+            samples = _cylinder_nodal_stress_samples(model, geometry, field_item, frd_stress)
 
-        if samples:
+        selected_samples = list(samples)
+        if reduction_method == "Centre strip mean" and selected_samples:
+            lower_axial, upper_axial = field_item.axial_bounds
+            width = max(upper_axial - lower_axial, 1.0e-9)
+            centre = 0.5 * (lower_axial + upper_axial)
+            half_strip = max(width * centre_strip_fraction * 0.5, 1.0e-9)
+            selected_samples = [
+                sample for sample in samples
+                if abs(sample[0] - centre) <= half_strip
+            ]
+            if not selected_samples:
+                ordered = sorted(samples, key=lambda sample: abs(sample[0] - centre))
+                selected_samples = ordered[: max(1, int(math.ceil(len(ordered) * centre_strip_fraction)))]
+
+        if reduction_method == "Whole panel nodal mean":
+            selected_samples = [
+                (sample[0], sample[1], sample[2], sample[3], 1.0)
+                for sample in selected_samples
+            ]
+
+        if selected_samples:
+            if reduction_method == "Whole panel nodal mean":
+                reduction = "whole-panel nodal membrane mean in axial/circumferential axes"
+            elif reduction_method == "Centre strip mean":
+                reduction = f"centre-strip membrane mean over {centre_strip_fraction:.0%} axial panel length"
+            else:
+                reduction = "CSR area weighted membrane mean in axial/circumferential axes"
             result.append(
                 CylinderStress(
                     field_id=field_item.field_id,
-                    axial_stress_mpa=_mean(sample[0] for sample in samples),
-                    hoop_stress_mpa=_mean(sample[1] for sample in samples),
-                    torsional_shear_mpa=_mean(sample[2] for sample in samples),
+                    axial_stress_mpa=_weighted_mean((sample[1], sample[4]) for sample in selected_samples),
+                    hoop_stress_mpa=_weighted_mean((sample[2], sample[4]) for sample in selected_samples),
+                    torsional_shear_mpa=_weighted_mean((sample[3], sample[4]) for sample in selected_samples),
                     transverse_shear_mpa=0.0,
-                    sample_count=len(samples),
-                    reduction="mean local membrane stress in axial/circumferential axes",
+                    sample_count=len(selected_samples),
+                    reduction=reduction,
                     diagnostics=(
                         "CalculiX tension-positive sign retained; cylinder compression is negative",
                         "S_axial, S_hoop and tau_axial-hoop projected at every result node",
+                        "CSR reference: area-weighted average membrane stress over panel finite elements",
                     ),
                 )
             )
@@ -2729,6 +2904,82 @@ def reduce_cylinder_stresses(
                 )
             )
     return result
+
+
+def _cylinder_nodal_stress_samples(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+    field_item: CylinderField,
+    frd_stress: FrdStressResult,
+) -> list[tuple[float, float, float, float, float]]:
+    samples: list[tuple[float, float, float, float, float]] = []
+    seen: set[int] = set()
+    for element_id in field_item.element_ids:
+        for node_id in frd_stress.element_nodes.get(element_id, ()):
+            if node_id in seen or node_id not in frd_stress.nodal_stress:
+                continue
+            point = frd_stress.nodes.get(node_id)
+            if point is None:
+                continue
+            seen.add(node_id)
+            axial, hoop, shear = _project_cylinder_point_stress(point, geometry, frd_stress, node_id)
+            samples.append((_dot(_subtract(point, geometry.axis_origin), geometry.axis_direction), axial, hoop, shear, 1.0))
+    return samples
+
+
+def _cylinder_element_stress_samples(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+    field_item: CylinderField,
+    frd_stress: FrdStressResult,
+) -> list[tuple[float, float, float, float, float]]:
+    samples: list[tuple[float, float, float, float, float]] = []
+    for element_id in field_item.element_ids:
+        element = model.shell_elements.get(element_id)
+        if element is None:
+            continue
+        corner_points = [model.nodes[node_id] for node_id in element.corner_node_ids if node_id in model.nodes]
+        if len(corner_points) < 3:
+            continue
+        projected_values = []
+        for node_id in frd_stress.element_nodes.get(element_id, element.corner_node_ids):
+            if node_id not in frd_stress.nodal_stress:
+                continue
+            point = frd_stress.nodes.get(node_id)
+            if point is None:
+                continue
+            projected_values.append(_project_cylinder_point_stress(point, geometry, frd_stress, node_id))
+        if not projected_values:
+            continue
+        centroid = _mean_point(corner_points)
+        area = _element_area(corner_points)
+        samples.append(
+            (
+                _dot(_subtract(centroid, geometry.axis_origin), geometry.axis_direction),
+                _mean(value[0] for value in projected_values),
+                _mean(value[1] for value in projected_values),
+                _mean(value[2] for value in projected_values),
+                max(area, 1.0e-12),
+            )
+        )
+    return samples
+
+
+def _project_cylinder_point_stress(
+    point: Point3D,
+    geometry: CylinderGeometry,
+    frd_stress: FrdStressResult,
+    node_id: int,
+) -> tuple[float, float, float]:
+    radial = _normalise(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
+    circumferential = _normalise(_cross(geometry.axis_direction, radial))
+    axial, hoop, shear = _project_frd_stress(
+        frd_stress.components,
+        frd_stress.nodal_stress[node_id],
+        geometry.axis_direction,
+        circumferential,
+    )
+    return axial / 1.0e6, hoop / 1.0e6, shear / 1.0e6
 
 
 def anystructure_input_for_cylinder_field(
@@ -3038,6 +3289,7 @@ def create_fea_cylinder_buckling_session(
     poisson: float = 0.3,
     ml_algo: Any = None,
     run_buckling: bool = True,
+    stress_reduction_method: str | None = None,
 ) -> FeaCylinderSession:
     """Create the cylinder equivalent of ``create_fea_buckling_session``.
 
@@ -3053,6 +3305,8 @@ def create_fea_cylinder_buckling_session(
     fields = tuple(infer_cylinder_fields(model, geometry))
     frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
+    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
+    diagnostics.append(f"stress reduction method: {reduction_method}")
     if calculation_method in _FLAT_PANEL_BUCKLING_METHODS:
         diagnostics.append(_cylinder_flat_panel_method_warning(calculation_method))
     else:
@@ -3063,7 +3317,15 @@ def create_fea_cylinder_buckling_session(
 
     if frd_path_text:
         frd_stress = read_calculix_frd_stress(frd_path_text)
-        stresses = tuple(reduce_cylinder_stresses(model, geometry, fields, frd_stress))
+        stresses = tuple(
+            reduce_cylinder_stresses(
+                model,
+                geometry,
+                fields,
+                frd_stress,
+                stress_reduction_method=reduction_method,
+            )
+        )
     else:
         stresses = ()
         diagnostics.append("no FRD result file supplied; cylinder stresses set to defaults")
@@ -3745,6 +4007,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Color plot by panel id or buckling utilization factor; default is uf with --buckling, otherwise panel",
     )
     parser.add_argument("--stresses", action="store_true", help="Reduce FRD stresses to one stress set per field")
+    parser.add_argument(
+        "--stress-method",
+        default=STRESS_REDUCTION_METHODS[0],
+        choices=STRESS_REDUCTION_METHODS,
+        help="Representative FE stress interpretation used with --stresses/--buckling",
+    )
     parser.add_argument("--buckling", action="store_true", help="Run ANYstructure buckling checks from reduced FRD stresses")
     parser.add_argument(
         "--buckling-method",
@@ -3770,7 +4038,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.frd:
             parser.error("--stresses/--buckling requires --frd")
         frd_stress = read_calculix_frd_stress(args.frd)
-        panel_stresses = reduce_field_stresses(model, fields, frd_stress)
+        panel_stresses = reduce_field_stresses(
+            model,
+            fields,
+            frd_stress,
+            stress_reduction_method=args.stress_method,
+        )
         payload["panel_stresses"] = summarize_panel_stresses(panel_stresses)
     if args.buckling:
         payload["buckling_results"] = calculate_field_buckling(

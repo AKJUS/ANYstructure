@@ -9,6 +9,7 @@ from anystruct.api import (
     ProjectFileCodec,
     ProjectHydrationDefaults,
     ProjectState,
+    available_fea_stress_reduction_methods,
     load_project_state,
     open_project,
     save_project_state,
@@ -66,6 +67,14 @@ def _configured_flat_domain(domain):
         flat.set_girder(hw=600, tw=15, bf=220, tf=25, stf_type="T", spacing=2800)
     flat.set_puls_parameters(sp_or_up=None, puls_boundary="Int", stiffener_end="Continuous", up_boundary="SSSS")
     return flat
+
+
+def test_available_fea_stress_reduction_methods_are_exposed():
+    assert available_fea_stress_reduction_methods() == (
+        "CSR area weighted mean",
+        "Whole panel nodal mean",
+        "Centre strip mean",
+    )
 
 
 def test_flat_structure_api_returns_special_provisions():

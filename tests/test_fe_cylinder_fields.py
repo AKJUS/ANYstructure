@@ -314,9 +314,19 @@ def test_cylinder_stresses_are_projected_to_axial_and_circumferential_axes() -> 
     assert cylinder_stresses[0].axial_stress_mpa == pytest.approx(-12.0)
     assert cylinder_stresses[0].hoop_stress_mpa == pytest.approx(-34.0)
     assert cylinder_stresses[0].torsional_shear_mpa == pytest.approx(7.0)
+    assert cylinder_stresses[0].reduction == "CSR area weighted membrane mean in axial/circumferential axes"
     assert panel_input["stresses"]["sasd_mpa"] == pytest.approx(-12.0)
     assert panel_input["stresses"]["shsd_mpa"] == pytest.approx(-34.0)
     assert panel_input["stresses"]["tTsd_mpa"] == pytest.approx(7.0)
+
+    nodal_stresses = reduce_cylinder_stresses(
+        model,
+        geometry,
+        fields[:1],
+        frd_stress,
+        stress_reduction_method="Whole panel nodal mean",
+    )
+    assert nodal_stresses[0].reduction == "whole-panel nodal membrane mean in axial/circumferential axes"
 
 
 @pytest.mark.skipif(

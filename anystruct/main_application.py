@@ -347,6 +347,8 @@ class Application():
         self._fea_uf_color_upper = tk.DoubleVar()
         self._fea_uf_color_lower.set(0.0)
         self._fea_uf_color_upper.set(1.5)
+        self._fea_stress_reduction_method = tk.StringVar()
+        self._fea_stress_reduction_method.set(fe_plate_fields.available_stress_reduction_methods()[0])
 
         # Optional Matplotlib based 3D preview. In simplified mode this is promoted
         # to the large main pane; otherwise it remains in the lower property canvas.
@@ -2439,6 +2441,7 @@ class Application():
                 material_factor=self._new_material_factor.get(),
                 ml_algo=getattr(self, '_ML_buckling', None),
                 run_buckling=bool(frd_path),
+                stress_reduction_method=self._fea_stress_reduction_method.get(),
             )
         except Exception as err:
             messagebox.showerror('FEA import error', str(err))
@@ -2658,6 +2661,79 @@ class Application():
             self.reimport_fea_buckling_files()
         else:
             self._gui_fea_buckling_options()
+
+    @staticmethod
+    def _fea_stress_method_description(method):
+        if method == 'Centre strip mean':
+            return (
+                'Averages projected membrane stresses in a narrow centre strip. '
+                'Useful as a sensitivity check when panel-edge stress peaks are local.'
+            )
+        if method == 'Whole panel nodal mean':
+            return (
+                'Averages all matching FRD result nodes equally. This preserves the '
+                'earlier ANYstructure import behaviour for comparison.'
+            )
+        return (
+            'Default CSR-style interpretation: project stresses to local panel axes, '
+            'then area-weight membrane stresses over the buckling panel elements.'
+        )
+
+    def _draw_fea_stress_interpretation_canvas(self, canvas, panel):
+        canvas.delete('all')
+        method = self._fea_stress_reduction_method.get()
+        width, height = 285, 120
+        canvas.configure(width=width, height=height)
+        bg = self._style.lookup('TFrame', 'background') or 'white'
+        canvas.configure(background=bg)
+
+        x0, y0, x1, y1 = 20, 24, 264, 76
+        canvas.create_rectangle(x0, y0, x1, y1, outline='#555555', fill='#f7f7f7', width=1)
+        if method == 'Centre strip mean':
+            strip_half = 14
+            centre = 0.5 * (x0 + x1)
+            canvas.create_rectangle(centre - strip_half, y0, centre + strip_half, y1, outline='', fill='#7fc8ff')
+            caption = 'centre strip'
+        elif method == 'Whole panel nodal mean':
+            caption = 'equal nodal mean'
+            for ix in range(5):
+                for iy in range(3):
+                    px = x0 + 24 + ix * 34
+                    py = y0 + 11 + iy * 15
+                    canvas.create_oval(px - 3, py - 3, px + 3, py + 3, outline='', fill='#2b78c6')
+        else:
+            caption = 'area weighted'
+            for ix in range(4):
+                shade = '#f9d58a' if ix % 2 == 0 else '#f3b86a'
+                xa = x0 + ix * (x1 - x0) / 4
+                xb = x0 + (ix + 1) * (x1 - x0) / 4
+                canvas.create_rectangle(xa, y0, xb, y1, outline='#dddddd', fill=shade)
+
+        canvas.create_line(x0, y1 + 9, x1, y1 + 9, arrow=tk.LAST, fill='#444444')
+        canvas.create_text(x1 + 5, y1 + 9, text='x', anchor=tk.W, font=self._text_size['Text 8'])
+        canvas.create_line(x0 - 10, y1, x0 - 10, y0, arrow=tk.LAST, fill='#444444')
+        canvas.create_text(x0 - 10, y0 - 5, text='y', anchor=tk.S, font=self._text_size['Text 8'])
+        canvas.create_text(0.5 * (x0 + x1), 12, text=caption, anchor=tk.CENTER, font=self._text_size['Text 8 bold'])
+
+        stress_text = 'no FRD stress'
+        reduction_text = method
+        if panel is not None and getattr(panel, 'stress', None) is not None:
+            stress = panel.stress
+            reduction_text = stress.reduction
+            if hasattr(stress, 'sigma_x1_mpa'):
+                stress_text = (
+                    f"sx {stress.sigma_x1_mpa:.1f}, sy {stress.sigma_y1_mpa:.1f}, "
+                    f"tau {stress.tau_xy_mpa:.1f} MPa"
+                )
+            else:
+                stress_text = (
+                    f"ax {stress.axial_stress_mpa:.1f}, hoop {stress.hoop_stress_mpa:.1f}, "
+                    f"tau {stress.torsional_shear_mpa:.1f} MPa"
+                )
+            stress_text += f" | n={stress.sample_count}"
+
+        canvas.create_text(20, 100, text=stress_text, anchor=tk.W, font=self._text_size['Text 8'], width=250)
+        canvas.create_text(20, 116, text=reduction_text, anchor=tk.W, font=self._text_size['Text 8'], width=250)
 
     def _select_fea_panel(self, field_id):
         self._fea_selected_panel_id = field_id
@@ -3761,6 +3837,38 @@ class Application():
             add_separator()
             add_label('Warning', bold=True, foreground='red')
             add_label(warning_text, foreground='red', wrap=285)
+        add_separator()
+        add_label('Stress Interpretation', bold=True)
+        add_label('Representative membrane stresses for the selected buckling panel.', wrap=285)
+        stress_method = ttk.OptionMenu(
+            panel_frame,
+            self._fea_stress_reduction_method,
+            self._fea_stress_reduction_method.get(),
+            *fe_plate_fields.available_stress_reduction_methods(),
+        )
+        stress_method.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 4))
+        row += 1
+        stress_apply = ttk.Button(
+            panel_frame,
+            text='Apply stress method',
+            command=self._on_fea_buckling_option_changed,
+        )
+        stress_apply.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 5))
+        row += 1
+        rows.extend([stress_method, stress_apply])
+        add_label(self._fea_stress_method_description(self._fea_stress_reduction_method.get()), wrap=285)
+        stress_canvas = tk.Canvas(
+            panel_frame,
+            width=285,
+            height=120,
+            bd=0,
+            highlightthickness=0,
+            background=self._style.lookup('TFrame', 'background'),
+        )
+        stress_canvas.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(2, 8))
+        row += 1
+        self._draw_fea_stress_interpretation_canvas(stress_canvas, selected_panel)
+        rows.append(stress_canvas)
         self._fea_buckling_created.extend(rows)
 
     def gui_load_combinations(self, event):

@@ -254,6 +254,8 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def _draw_flat_structure_2d_preview(self, all_obj, selected_text=''):" in source
     assert "self._fea_uf_color_lower = tk.DoubleVar()" in source
     assert "self._fea_uf_color_upper = tk.DoubleVar()" in source
+    assert "self._fea_stress_reduction_method = tk.StringVar()" in source
+    assert "fe_plate_fields.available_stress_reduction_methods()[0]" in source
     assert "self._fea_panel_line_by_field = {}" in source
     assert "self._fea_imported_line_names = []" in source
     assert "def _rebuild_fea_panel_line_model(self):" in source
@@ -289,6 +291,11 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "self._line_to_struc[result_line][5] = None" in source
     assert "if old_result_bundle is not None:" in source
     assert "self.get_color_and_calc_state(current_line=result_line, active_line_only=True)" in source
+    assert "def _fea_stress_method_description(method):" in source
+    assert "def _draw_fea_stress_interpretation_canvas(self, canvas, panel):" in source
+    assert "Stress Interpretation" in source
+    assert "Apply stress method" in source
+    assert "stress_reduction_method=self._fea_stress_reduction_method.get()" in source
     assert "pressure_mpa * 1.0e6" in source
     assert "panel.anystructure_input.get('stresses', {}).get('pressure_mpa', 0.0)" in source
     assert "edgecolor='red' if selected else 'none'" in source

@@ -427,6 +427,57 @@ def test_reduce_field_stresses_projects_frd_to_compression_positive_mpa(tmp_path
     assert panel_stresses[0].sigma_y2_mpa == pytest.approx(50.0)
     assert panel_stresses[0].tau_xy_mpa == pytest.approx(5.0)
     assert panel_stresses[0].sample_count > 0
+    assert panel_stresses[0].reduction == "CSR area weighted membrane mean"
+
+
+def test_panel_stress_reduction_methods_are_distinct():
+    field = fe_plate_fields.PlateField(
+        field_id="field_001",
+        base_patch_id="patch",
+        element_ids=(1, 2, 3),
+        bbox=((0.0, 4.0), (0.0, 1.0), (0.0, 0.0)),
+        span_m=4.0,
+        spacing_m=1.0,
+        transverse_bounds=(0.0, 1.0),
+        attached_member_ids=(),
+    )
+    samples = (
+        (0.10, -10.0e6, -20.0e6, 1.0e6, 1.0),
+        (0.50, -40.0e6, -80.0e6, 2.0e6, 1.0),
+        (0.90, -100.0e6, -200.0e6, 3.0e6, 3.0),
+    )
+
+    csr = fe_plate_fields._reduced_panel_stress_from_samples(
+        field,
+        samples,
+        "CSR area weighted mean",
+        transverse_edge_fraction=0.2,
+        centre_strip_fraction=0.25,
+    )
+    nodal = fe_plate_fields._reduced_panel_stress_from_samples(
+        field,
+        samples,
+        "Whole panel nodal mean",
+        transverse_edge_fraction=0.2,
+        centre_strip_fraction=0.25,
+    )
+    strip = fe_plate_fields._reduced_panel_stress_from_samples(
+        field,
+        samples,
+        "Centre strip mean",
+        transverse_edge_fraction=0.2,
+        centre_strip_fraction=0.25,
+    )
+
+    assert csr.sigma_x1_mpa == pytest.approx(70.0)
+    assert csr.sigma_y1_mpa == pytest.approx(140.0)
+    assert csr.tau_xy_mpa == pytest.approx(2.4)
+    assert nodal.sigma_x1_mpa == pytest.approx(50.0)
+    assert nodal.sigma_y1_mpa == pytest.approx(100.0)
+    assert nodal.tau_xy_mpa == pytest.approx(2.0)
+    assert strip.sigma_x1_mpa == pytest.approx(40.0)
+    assert strip.sigma_y1_mpa == pytest.approx(80.0)
+    assert strip.sample_count == 1
 
 
 def test_project_frd_stress_rotates_global_tensor_to_local_panel_axes():
