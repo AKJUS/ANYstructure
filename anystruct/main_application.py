@@ -189,8 +189,8 @@ class Application():
         sub_menu.add_command(label='Open project', command=self.openfile)
         sub_menu.add_command(label='Restore previous', command=self.restore_previous)
         sub_menu.add_command(label='Open excel input', command=self.open_excel_file)
-        sub_menu.add_command(label='Open FEA result buckling files...', command=self.open_fea_buckling_files)
         sub_menu.add_separator()
+        self._file_menu = sub_menu
         file_export_menu = tk.Menu(sub_menu)
         sub_menu.add_cascade(label='Export', menu=file_export_menu)
         file_export_menu.add_command(label='Geometry to SESAM GeniE JS...', command=self.export_to_js)
@@ -270,7 +270,7 @@ class Application():
         sub_colors.add_separator()
         sub_colors.add_command(label='Mode - Single panel/cylinder', command=self.switch_to_single_calculation_mode)
         sub_colors.add_command(label='Mode - Multiple panels', command=self.switch_to_multiple_calculation_mode)
-        sub_colors.add_command(label='Mode - FEA result buckling', command=self.switch_to_fea_result_buckling_mode)
+        self._gui_menu = sub_colors
 
         # base_mult = 1.2
         # base_canvas_dim = [int(1000 * base_mult),int(720*base_mult)]  #do not modify this, sets the "orignal" canvas dimensions.
@@ -332,6 +332,7 @@ class Application():
         self._simplified_calculation_mode = False
         self._single_line_name = 'line1'
         self._experimental_mode_enabled = False
+        self._sync_experimental_menu_entries()
         self._fea_buckling_mode = False
         self._fea_buckling_session = None
         self._fea_selected_panel_id = None
@@ -2001,6 +2002,48 @@ class Application():
         except Exception:
             pass
 
+    @staticmethod
+    def _menu_index_by_label(menu, label):
+        try:
+            end_index = menu.index('end')
+        except Exception:
+            return None
+        if end_index is None:
+            return None
+        for index in range(end_index + 1):
+            try:
+                if menu.entrycget(index, 'label') == label:
+                    return index
+            except Exception:
+                continue
+        return None
+
+    def _sync_experimental_menu_command(self, menu_name, label, command, visible):
+        menu = getattr(self, menu_name, None)
+        if menu is None:
+            return
+        index = self._menu_index_by_label(menu, label)
+        if visible and index is None:
+            menu.add_command(label=label, command=command)
+        elif not visible and index is not None:
+            menu.delete(index)
+
+    def _sync_experimental_menu_entries(self):
+        """Hide FEA/FRD import menu entries unless experimental mode is enabled."""
+        visible = bool(getattr(self, '_experimental_mode_enabled', False))
+        self._sync_experimental_menu_command(
+            '_file_menu',
+            'Open FEA result buckling files...',
+            self.open_fea_buckling_files,
+            visible,
+        )
+        self._sync_experimental_menu_command(
+            '_gui_menu',
+            'Mode - FEA result buckling',
+            self.switch_to_fea_result_buckling_mode,
+            visible,
+        )
+
     def _prompt_startup_calculation_mode(self):
         """Let the user choose standard, simplified, or FEA-result buckling workflow."""
         try:
@@ -2049,6 +2092,7 @@ class Application():
                 self._experimental_mode_enabled = bool(experimental_var.get())
             except Exception:
                 self._experimental_mode_enabled = mode == 'fea'
+            self._sync_experimental_menu_entries()
             try:
                 dialog.grab_release()
             except Exception:
@@ -2216,6 +2260,15 @@ class Application():
 
     def switch_to_fea_result_buckling_mode(self):
         """Switch to FE-result buckling where clickable panels replace ship lines."""
+        if not getattr(self, '_experimental_mode_enabled', False):
+            try:
+                messagebox.showinfo(
+                    title='Experimental FEA result buckling',
+                    message='Enable experimental mode at startup to use FEA result buckling.',
+                )
+            except Exception:
+                pass
+            return
         self._fea_buckling_mode = True
         self._simplified_calculation_mode = False
         self._new_show_prop_3d.set(False)
@@ -2312,6 +2365,15 @@ class Application():
 
     def open_fea_buckling_files(self):
         """Ask for INP/FRD files and import them into FEA-result buckling mode."""
+        if not getattr(self, '_experimental_mode_enabled', False):
+            try:
+                messagebox.showinfo(
+                    title='Experimental FEA result buckling',
+                    message='Enable experimental mode at startup to import INP/FRD files.',
+                )
+            except Exception:
+                pass
+            return
         inp_path = filedialog.askopenfilename(
             title='Open CalculiX/PrePoMax input deck',
             filetypes=(('CalculiX input', '*.inp'), ('All files', '*.*')),
@@ -2326,6 +2388,8 @@ class Application():
 
     def reimport_fea_buckling_files(self):
         """Re-read the last FEA files using current buckling options."""
+        if not getattr(self, '_experimental_mode_enabled', False):
+            return
         if not self._fea_last_inp_path:
             self.open_fea_buckling_files()
             return
@@ -2470,6 +2534,8 @@ class Application():
 
     def import_fea_buckling_files(self, inp_path, frd_path=None):
         """Load FEA files and prepare clickable buckling panels."""
+        if not getattr(self, '_experimental_mode_enabled', False):
+            return
         try:
             self._fea_buckling_session = fe_plate_fields.create_fea_buckling_session(
                 inp_path,
