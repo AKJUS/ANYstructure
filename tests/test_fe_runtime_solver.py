@@ -124,6 +124,8 @@ def test_runtime_fem_popup_has_compact_3d_section_preview():
 def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_runtime_solver.py").read_text(encoding="utf-8")
 
+    assert "import queue" in source
+    assert "import threading" in source
     assert "body = ttk.Panedwindow(outer, orient=tk.HORIZONTAL)" in source
     assert "body.add(left_panel, weight=2)" in source
     assert "body.add(mid_panel, weight=2)" in source
@@ -139,6 +141,13 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)" in source
     assert "axis.set_position([0.01, 0.03, 0.98, 0.93])" in source
     assert "axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)" in source
+    assert "self.run_button = ttk.Button(buttons, text=\"Run FEM\", command=self.run)" in source
+    assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
+    assert "self.progress_bar.start(12)" in source
+    assert "threading.Thread(target=worker, daemon=True)" in source
+    assert "self.window.after(100, self._poll_solver_result)" in source
+    assert "def _poll_solver_result(self) -> None:" in source
+    assert "except queue.Empty:" in source
     assert "horizontal_span" not in source
 
 
@@ -282,6 +291,29 @@ def test_flat_generated_mesh_forces_edges_at_member_lines_when_mesh_is_coarse():
     assert all(round(coords[node_id][0], 6) == 2.0 for beam in girder_beams for node_id in beam["node_ids"])
 
 
+def test_flat_generated_mesh_caps_element_size_to_stiffener_spacing():
+    spacing = 0.7
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "flat panel",
+            "length_m": 4.0,
+            "width_m": spacing,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": False,
+            "stiffener_spacing_m": spacing,
+        },
+        fe_solver.LightweightFEMConfig(mesh_size_m=5.0),
+    )
+
+    coords = {node["id"]: tuple(node["coords"]) for node in generated["nodes"]}
+    x_values = sorted({coords[node_id][0] for node_id in coords})
+    y_values = sorted({coords[node_id][1] for node_id in coords})
+
+    assert max(b - a for a, b in zip(x_values, x_values[1:])) <= spacing + 1.0e-9
+    assert max(b - a for a, b in zip(y_values, y_values[1:])) <= spacing + 1.0e-9
+
+
 def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_coarse():
     generated = fe_solver.build_generated_geometry(
         {
@@ -303,6 +335,30 @@ def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_
     assert len(row_node_ids) == round(2.0 * math.pi / 0.5)
     assert len(stiffener_columns) == len(row_node_ids)
     assert set(row_node_ids) == stiffener_columns
+
+
+def test_cylinder_generated_mesh_caps_axial_and_circumferential_size_to_stiffener_spacing():
+    spacing = 0.5
+    radius = 1.0
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "cylinder",
+            "radius_m": radius,
+            "length_m": 2.0,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": False,
+            "stiffener_spacing_m": spacing,
+        },
+        fe_solver.LightweightFEMConfig(mesh_size_m=5.0),
+    )
+
+    row_node_ids = generated["plot_grid"][0][:-1]
+    axial_values = sorted({node["coords"][2] for node in generated["nodes"]})
+    circumferential_segment = 2.0 * math.pi * radius / len(row_node_ids)
+
+    assert circumferential_segment <= spacing + 1.0e-9
+    assert max(b - a for a, b in zip(axial_values, axial_values[1:])) <= spacing + 1.0e-9
 
 
 def test_generated_cylinder_mesh_honors_mesh_size_and_middle_t_ring_girder():

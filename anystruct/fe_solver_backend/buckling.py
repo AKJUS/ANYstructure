@@ -105,8 +105,9 @@ def solve_eigenvalue_buckling(
 
     ``element_states`` is passed to
     :func:`fe_solver.matrix_assembly.assemble_geometric_stiffness_matrix`.
-    The current element implementation supports beam axial reference
-    compression; shell membrane prestress is reserved for the next expansion.
+    Beam elements accept axial reference compression and shell elements accept
+    membrane resultant prestress (compression positive, or tension-positive
+    ``membrane_forces``).
     """
     if num_modes <= 0:
         raise ValueError("num_modes must be positive")

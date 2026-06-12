@@ -187,7 +187,7 @@ def _cross_section(item: Any) -> Dict[str, float]:
         source = section
     else:
         source = item
-    return {
+    section = {
         "area": _as_float(_value(source, "area", "A"), 0.01),
         "Iy": _as_float(_value(source, "Iy", "iy"), 1.0e-8),
         "Iz": _as_float(_value(source, "Iz", "iz"), 1.0e-8),
@@ -195,6 +195,20 @@ def _cross_section(item: Any) -> Dict[str, float]:
         "shear_factor_y": _as_float(_value(source, "shear_factor_y", "ky"), 5.0 / 6.0),
         "shear_factor_z": _as_float(_value(source, "shear_factor_z", "kz"), 5.0 / 6.0),
     }
+    orientation = _value(source, "orientation", "section_orientation", "web_direction", default=None)
+    if orientation is not None:
+        vector = [float(component) for component in orientation]
+        if len(vector) >= 3 and any(abs(component) > 0.0 for component in vector[:3]):
+            section["orientation"] = tuple(vector[:3])
+    for key, aliases in (
+        ("c_y", ("c_y", "cy", "fiber_distance_y")),
+        ("c_z", ("c_z", "cz", "fiber_distance_z")),
+        ("torsion_modulus", ("torsion_modulus", "Wt", "torsional_section_modulus")),
+    ):
+        value = _value(source, *aliases, default=None)
+        if value is not None and float(value) > 0.0:
+            section[key] = float(value)
+    return section
 
 
 def _has_cross_section(item: Any) -> bool:
@@ -306,6 +320,8 @@ def _section_from_member_plates(
     area = 0.0
     iy = 0.0
     iz = 0.0
+    max_section_width = 0.0
+    max_thickness = 0.0
     for plate in plates:
         node_ids = _node_ids(plate)
         coords = np.asarray([node_coords[node_id] for node_id in node_ids if node_id in node_coords], dtype=float)
@@ -321,6 +337,8 @@ def _section_from_member_plates(
         area += thickness * section_width
         iy += thickness * section_width**3 / 12.0
         iz += section_width * thickness**3 / 12.0
+        max_section_width = max(max_section_width, section_width)
+        max_thickness = max(max_thickness, thickness)
 
     if area <= 0.0:
         raise ValueError("member-plate-section-could-not-be-inferred")
@@ -328,7 +346,7 @@ def _section_from_member_plates(
     scaled_area = area * scale**2
     scaled_iy = max(iy * scale**4, 1.0e-12)
     scaled_iz = max(iz * scale**4, 1.0e-12)
-    return {
+    section = {
         "area": scaled_area,
         "Iy": scaled_iy,
         "Iz": scaled_iz,
@@ -336,6 +354,29 @@ def _section_from_member_plates(
         "shear_factor_y": 5.0 / 6.0,
         "shear_factor_z": 5.0 / 6.0,
     }
+    if max_section_width > 0.0 and max_thickness > 0.0:
+        # Strip section: width (web) along local z, thickness along local y.
+        section["c_z"] = 0.5 * max_section_width * scale
+        section["c_y"] = 0.5 * max_thickness * scale
+        section["torsion_modulus"] = section["J"] / (max_thickness * scale)
+
+    # The inferred strip section has its width (web) along the in-plane
+    # direction transverse to the centerline.  Recover that direction so the
+    # beam local z axis matches the Iy/Iz meaning used above.
+    points = []
+    for plate in plates:
+        for node_id in _node_ids(plate):
+            if node_id in node_coords:
+                points.append(node_coords[node_id])
+    if len(points) >= 3:
+        points_arr = np.asarray(points, dtype=float)
+        axis = (p1 - p0) / length
+        offsets = points_arr - np.mean(points_arr, axis=0)
+        offsets -= np.outer(offsets @ axis, axis)
+        _, singular_values, vh = np.linalg.svd(offsets, full_matrices=False)
+        if singular_values.size and singular_values[0] > 1.0e-9 * length:
+            section["orientation"] = tuple(float(component) for component in vh[0])
+    return section
 
 
 def _member_group_key(item: Any, role: str) -> Tuple[str, str]:

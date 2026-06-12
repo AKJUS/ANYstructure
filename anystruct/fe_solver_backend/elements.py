@@ -21,10 +21,25 @@ before the membrane, bending and transverse shear B-matrices are evaluated.
 
 Shell shear treatment
 ---------------------
-The shell stiffness uses selective shear integration:
+Membrane and bending always use full integration for the element topology.
+Transverse shear depends on the topology:
 
-    * membrane and bending: full integration for the element topology
-    * transverse shear: reduced integration
+    * 4-node: MITC4 assumed natural shear (covariant shear sampled at the four
+      edge midpoints and interpolated), integrated at the full 2x2 rule.  This
+      avoids both shear locking and the spurious zero-energy w-hourglass mode
+      of one-point reduced shear integration.
+    * 8-node: reduced 2x2 shear integration (S8R style).
+
+Beam section convention
+-----------------------
+Beam local axes are (x = member axis, y, z).  ``Iy`` is the second moment of
+area about the local y axis and governs bending that deflects the beam in
+local z; ``Iz`` governs deflection in local y.  ``shear_factor_y`` scales the
+shear area for transverse shear force in local y, ``shear_factor_z`` for local
+z.  The optional ``cross_section["orientation"]`` vector prescribes the local
+z direction (e.g. the stiffener web direction).  Without it, a heuristic picks
+local y close to global Y (or global Z for members nearly parallel to Y),
+which leaves the section orientation unconstrained for asymmetric sections.
 
 Beam-shell coupling
 -------------------
@@ -50,6 +65,42 @@ if TYPE_CHECKING:
 
 
 _SMALL = 1.0e-12
+
+
+def _section_orientation(cross_section: Dict[str, Any]) -> Optional[np.ndarray]:
+    """Return the prescribed local-z (web) direction from a cross-section dict."""
+    value = cross_section.get("orientation", cross_section.get("web_direction"))
+    if value is None:
+        return None
+    vector = np.asarray(value, dtype=float).reshape(-1)
+    if vector.size < 3 or float(np.linalg.norm(vector[:3])) < _SMALL:
+        return None
+    return np.array(vector[:3], dtype=float)
+
+
+def _beam_rotation_matrix(e1: np.ndarray, orientation: Optional[np.ndarray]) -> np.ndarray:
+    """Build the beam local frame [e1 e2 e3] with optional prescribed local z.
+
+    ``orientation`` is the requested local z direction (section web direction).
+    It is projected perpendicular to the member axis; if it is (nearly)
+    parallel to the axis the heuristic fallback is used instead.
+    """
+    if orientation is not None:
+        candidate = orientation - np.dot(orientation, e1) * e1
+        norm = float(np.linalg.norm(candidate))
+        if norm > 1.0e-6 * float(np.linalg.norm(orientation)):
+            e3 = candidate / norm
+            e2 = np.cross(e3, e1)
+            e2 /= np.linalg.norm(e2)
+            return np.column_stack((e1, e2, e3))
+    trial = np.array([0.0, 1.0, 0.0])
+    if abs(float(np.dot(e1, trial))) > 0.95:
+        trial = np.array([0.0, 0.0, 1.0])
+    e2 = trial - np.dot(trial, e1) * e1
+    e2 /= np.linalg.norm(e2)
+    e3 = np.cross(e1, e2)
+    e3 /= np.linalg.norm(e3)
+    return np.column_stack((e1, e2, e3))
 
 
 class Element(ABC):
@@ -411,6 +462,75 @@ class ShellElement(Element):
             B_d[0, b + 5] = N[i]
         return B_d
 
+    # MITC4 assumed natural transverse shear (4-node elements only).
+    #
+    # Covariant shear strains are sampled where they are exact for pure
+    # bending, at the edge midpoints A(0,-1), B(1,0), C(0,1), D(-1,0):
+    #
+    #     gamma_xi(xi, eta)  = (1-eta)/2 * gamma_xi|A  + (1+eta)/2 * gamma_xi|C
+    #     gamma_eta(xi, eta) = (1-xi)/2  * gamma_eta|D + (1+xi)/2  * gamma_eta|B
+    #
+    # with gamma_xi = dw/dxi + x_,xi * theta_y - y_,xi * theta_x in a fixed
+    # element-plane frame, then mapped to Cartesian shear through the inverse
+    # in-plane Jacobian at the integration point.  The element geometry is
+    # treated as a flat facet in the frame evaluated at the element centre.
+    _MITC4_SAMPLE_POINTS = {"A": (0.0, -1.0), "B": (1.0, 0.0), "C": (0.0, 1.0), "D": (-1.0, 0.0)}
+
+    def _center_frame(self, coords: np.ndarray) -> np.ndarray:
+        _, dN_dxi, dN_deta = self.compute_shape_functions(0.0, 0.0)
+        R, _, _, _ = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
+        return R
+
+    def _mitc4_shear_samples(self, coords: np.ndarray, R: np.ndarray) -> Tuple[np.ndarray, Dict[str, Tuple[np.ndarray, np.ndarray]]]:
+        """Return in-plane node coordinates and covariant shear rows at A-D."""
+        planar = coords @ R[:, :2]
+        samples: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        for name, (xi, eta) in self._MITC4_SAMPLE_POINTS.items():
+            N, dN_dxi, dN_deta = self.compute_shape_functions(xi, eta)
+            x_xi = float(dN_dxi @ planar[:, 0])
+            y_xi = float(dN_dxi @ planar[:, 1])
+            x_eta = float(dN_deta @ planar[:, 0])
+            y_eta = float(dN_deta @ planar[:, 1])
+            row_xi = np.zeros(self.total_dofs, dtype=float)
+            row_eta = np.zeros(self.total_dofs, dtype=float)
+            for i in range(self.num_nodes):
+                b = i * 6
+                row_xi[b + 2] = dN_dxi[i]
+                row_xi[b + 3] = -N[i] * y_xi
+                row_xi[b + 4] = N[i] * x_xi
+                row_eta[b + 2] = dN_deta[i]
+                row_eta[b + 3] = -N[i] * y_eta
+                row_eta[b + 4] = N[i] * x_eta
+            samples[name] = (row_xi, row_eta)
+        return planar, samples
+
+    def _mitc4_shear_b_matrix(
+        self,
+        planar: np.ndarray,
+        samples: Dict[str, Tuple[np.ndarray, np.ndarray]],
+        xi: float,
+        eta: float,
+    ) -> Tuple[np.ndarray, float]:
+        """Assumed-shear B matrix (local Cartesian) and in-plane Jacobian det."""
+        _, dN_dxi, dN_deta = self.compute_shape_functions(xi, eta)
+        J2 = np.array(
+            [
+                [float(dN_dxi @ planar[:, 0]), float(dN_dxi @ planar[:, 1])],
+                [float(dN_deta @ planar[:, 0]), float(dN_deta @ planar[:, 1])],
+            ],
+            dtype=float,
+        )
+        det_j = float(np.linalg.det(J2))
+        if abs(det_j) < _SMALL:
+            raise ValueError(f"Shell element {self.element_id} has a singular in-plane Jacobian")
+        B_covariant = np.vstack(
+            [
+                0.5 * (1.0 - eta) * samples["A"][0] + 0.5 * (1.0 + eta) * samples["C"][0],
+                0.5 * (1.0 - xi) * samples["D"][1] + 0.5 * (1.0 + xi) * samples["B"][1],
+            ]
+        )
+        return np.linalg.inv(J2) @ B_covariant, det_j
+
     def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
         coords = self.get_node_coordinates(mesh)
         E = material.elastic_modulus
@@ -441,13 +561,22 @@ class ShellElement(Element):
             K_local += (B_d.T @ (drilling_stiffness * np.eye(1)) @ B_d) * det_j * weight
             K += T.T @ K_local @ T
 
-        for (xi, eta), weight in zip(self.shear_gauss_points, self.shear_gauss_weights):
-            N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
-            R, dN_dx, dN_dy, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
+        if self._is_4node:
+            R = self._center_frame(coords)
             T = self._local_dof_transform(R)
-            _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
-            K_local = (B_s.T @ D_shear @ B_s) * det_j * weight
-            K += T.T @ K_local @ T
+            planar, samples = self._mitc4_shear_samples(coords, R)
+            for (xi, eta), weight in zip(self.GAUSS_POINTS_2x2, self.GAUSS_WEIGHTS_2x2):
+                B_s, det_j = self._mitc4_shear_b_matrix(planar, samples, float(xi), float(eta))
+                K_local = (B_s.T @ D_shear @ B_s) * det_j * weight
+                K += T.T @ K_local @ T
+        else:
+            for (xi, eta), weight in zip(self.shear_gauss_points, self.shear_gauss_weights):
+                N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
+                R, dN_dx, dN_dy, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
+                T = self._local_dof_transform(R)
+                _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
+                K_local = (B_s.T @ D_shear @ B_s) * det_j * weight
+                K += T.T @ K_local @ T
 
         self._stiffness_matrix = K
         return K
@@ -573,6 +702,14 @@ class ShellElement(Element):
             "shear_yz": np.zeros(num_ip),
             "von_mises": np.zeros(num_ip),
         }
+        mitc_planar = None
+        mitc_samples = None
+        mitc_u_local = None
+        if self._is_4node:
+            R_center = self._center_frame(coords)
+            mitc_planar, mitc_samples = self._mitc4_shear_samples(coords, R_center)
+            mitc_u_local = self._local_dof_transform(R_center) @ u_elem_global
+
         for idx, (xi, eta) in enumerate(self.gauss_points):
             N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
             R, dN_dx, dN_dy, _ = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
@@ -581,7 +718,11 @@ class ShellElement(Element):
             B_m, B_b, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
             membrane_strain = B_m @ u_local
             curvature = B_b @ u_local
-            shear_strain = B_s @ u_local
+            if self._is_4node:
+                B_s_mitc, _ = self._mitc4_shear_b_matrix(mitc_planar, mitc_samples, float(xi), float(eta))
+                shear_strain = B_s_mitc @ mitc_u_local
+            else:
+                shear_strain = B_s @ u_local
 
             sigma_m = D_stress @ membrane_strain
             moments = D_bending_moment @ curvature
@@ -626,6 +767,28 @@ class BeamElement(Element):
         self._J = self.cross_section.get("J", 1.0e-8)
         self._ky = self.cross_section.get("shear_factor_y", 5.0 / 6.0)
         self._kz = self.cross_section.get("shear_factor_z", 5.0 / 6.0)
+        self._orientation = _section_orientation(self.cross_section)
+        # Optional exact stress-recovery data; estimated from A and I if absent.
+        self._c_y = self.cross_section.get("c_y")
+        self._c_z = self.cross_section.get("c_z")
+        self._torsion_modulus = self.cross_section.get("torsion_modulus")
+
+    def _fiber_distances(self) -> Tuple[float, float]:
+        """Extreme fiber distances (local y, local z), estimated when not given."""
+        c_y = self._c_y
+        c_z = self._c_z
+        if c_y is None or c_y <= 0.0:
+            c_y = np.sqrt(abs(self._Iz) / max(self._A, _SMALL)) * 2.0
+        if c_z is None or c_z <= 0.0:
+            c_z = np.sqrt(abs(self._Iy) / max(self._A, _SMALL)) * 2.0
+        return max(float(c_y), _SMALL), max(float(c_z), _SMALL)
+
+    def _torsion_section_modulus(self) -> float:
+        """Torsional section modulus Wt with tau = T / Wt, estimated when not given."""
+        wt = self._torsion_modulus
+        if wt is None or wt <= 0.0:
+            wt = 2.0 * self._A
+        return max(float(wt), _SMALL)
 
     @property
     def num_nodes(self) -> int:
@@ -649,14 +812,7 @@ class BeamElement(Element):
         if length < _SMALL:
             raise ValueError(f"Beam element {self.element_id} has near-zero length")
         e1 = (coords[1] - coords[0]) / length
-        trial = np.array([0.0, 1.0, 0.0])
-        if abs(float(np.dot(e1, trial))) > 0.95:
-            trial = np.array([0.0, 0.0, 1.0])
-        e2 = trial - np.dot(trial, e1) * e1
-        e2 /= np.linalg.norm(e2)
-        e3 = np.cross(e1, e2)
-        e3 /= np.linalg.norm(e3)
-        R = np.column_stack((e1, e2, e3))
+        R = _beam_rotation_matrix(e1, self._orientation)
         T = np.zeros((12, 12), dtype=float)
         Rt = R.T
         for i in range(2):
@@ -681,25 +837,29 @@ class BeamElement(Element):
         K[0, 0] = K[6, 6] = EA / L
         K[0, 6] = K[6, 0] = -EA / L
 
-        phi_y = 12.0 * EIz / max(G * self._A * self._kz * L**2, _SMALL)
-        K[2, 2] = K[8, 8] = 12.0 * EIz / (L**3 * (1.0 + phi_y))
+        # Bending about local y: deflection w (local z), rotation ry, EIy,
+        # Timoshenko shear parameter from the local-z shear area.
+        phi_w = 12.0 * EIy / max(G * self._A * self._kz * L**2, _SMALL)
+        K[2, 2] = K[8, 8] = 12.0 * EIy / (L**3 * (1.0 + phi_w))
         K[2, 8] = K[8, 2] = -K[2, 2]
-        K[2, 4] = K[4, 2] = -6.0 * EIz / (L**2 * (1.0 + phi_y))
+        K[2, 4] = K[4, 2] = -6.0 * EIy / (L**2 * (1.0 + phi_w))
         K[2, 10] = K[10, 2] = K[2, 4]
         K[8, 4] = K[4, 8] = -K[2, 4]
         K[8, 10] = K[10, 8] = -K[2, 4]
-        K[4, 4] = K[10, 10] = (4.0 + phi_y) * EIz / (L * (1.0 + phi_y))
-        K[4, 10] = K[10, 4] = (2.0 - phi_y) * EIz / (L * (1.0 + phi_y))
+        K[4, 4] = K[10, 10] = (4.0 + phi_w) * EIy / (L * (1.0 + phi_w))
+        K[4, 10] = K[10, 4] = (2.0 - phi_w) * EIy / (L * (1.0 + phi_w))
 
-        phi_z = 12.0 * EIy / max(G * self._A * self._ky * L**2, _SMALL)
-        K[1, 1] = K[7, 7] = 12.0 * EIy / (L**3 * (1.0 + phi_z))
+        # Bending about local z: deflection v (local y), rotation rz, EIz,
+        # Timoshenko shear parameter from the local-y shear area.
+        phi_v = 12.0 * EIz / max(G * self._A * self._ky * L**2, _SMALL)
+        K[1, 1] = K[7, 7] = 12.0 * EIz / (L**3 * (1.0 + phi_v))
         K[1, 7] = K[7, 1] = -K[1, 1]
-        K[1, 5] = K[5, 1] = 6.0 * EIy / (L**2 * (1.0 + phi_z))
-        K[1, 11] = K[11, 1] = 6.0 * EIy / (L**2 * (1.0 + phi_z))
-        K[7, 5] = K[5, 7] = -6.0 * EIy / (L**2 * (1.0 + phi_z))
-        K[7, 11] = K[11, 7] = -6.0 * EIy / (L**2 * (1.0 + phi_z))
-        K[5, 5] = K[11, 11] = (4.0 + phi_z) * EIy / (L * (1.0 + phi_z))
-        K[5, 11] = K[11, 5] = (2.0 - phi_z) * EIy / (L * (1.0 + phi_z))
+        K[1, 5] = K[5, 1] = 6.0 * EIz / (L**2 * (1.0 + phi_v))
+        K[1, 11] = K[11, 1] = 6.0 * EIz / (L**2 * (1.0 + phi_v))
+        K[7, 5] = K[5, 7] = -6.0 * EIz / (L**2 * (1.0 + phi_v))
+        K[7, 11] = K[11, 7] = -6.0 * EIz / (L**2 * (1.0 + phi_v))
+        K[5, 5] = K[11, 11] = (4.0 + phi_v) * EIz / (L * (1.0 + phi_v))
+        K[5, 11] = K[11, 5] = (2.0 - phi_v) * EIz / (L * (1.0 + phi_v))
 
         K[3, 3] = K[9, 9] = GJ / L
         K[3, 9] = K[9, 3] = -GJ / L
@@ -709,18 +869,32 @@ class BeamElement(Element):
 
     def compute_mass_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
         coords = self.get_node_coordinates(mesh)
-        L = float(np.linalg.norm(coords[1] - coords[0]))
-        if L < _SMALL:
+        try:
+            L, T = self._beam_frame_and_transform(coords)
+        except ValueError:
             return np.zeros((self.total_dofs, self.total_dofs))
+        rho = material.density
         M = np.zeros((12, 12), dtype=float)
-        mass_per_node = material.density * self._A * L / 2.0
+        mass_per_node = rho * self._A * L / 2.0
+        # Lumped rotary inertia: bending rotations carry the rigid-bar term
+        # rho*A*L^3/24 plus the section rotatory term rho*I*L/2; the torsion
+        # DOF carries the polar section inertia rho*(Iy+Iz)*L/2, not a
+        # bar-length term, because spinning about the member axis does not
+        # translate the distributed mass.
+        rotary_bar = mass_per_node * L**2 / 12.0
+        rotary = (
+            rho * (self._Iy + self._Iz) * L / 2.0,  # rx (torsion)
+            rotary_bar + rho * self._Iy * L / 2.0,  # ry
+            rotary_bar + rho * self._Iz * L / 2.0,  # rz
+        )
         for i in range(2):
             b = i * 6
             for d in range(3):
                 M[b + d, b + d] = mass_per_node
-                M[b + 3 + d, b + 3 + d] = mass_per_node * L**2 / 12.0
-        self._mass_matrix = M
-        return M
+                M[b + 3 + d, b + 3 + d] = rotary[d]
+        M_global = T.T @ M @ T
+        self._mass_matrix = M_global
+        return M_global
 
     @staticmethod
     def _axial_compression_from_state(state: Optional[Any]) -> float:
@@ -793,6 +967,10 @@ class BeamElement(Element):
 
         return T.T @ K_geo @ T
 
+    def _end_displacements(self, u_local: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Local DOF vectors of the two geometric end nodes."""
+        return u_local[0:6], u_local[6:12]
+
     def compute_stresses(self, mesh: "FEMesh", displacements: np.ndarray, material: "Material") -> Dict[str, Any]:
         coords = self.get_node_coordinates(mesh)
         try:
@@ -802,22 +980,22 @@ class BeamElement(Element):
         u_local = T @ self._get_element_displacements(mesh, displacements)
         E = material.elastic_modulus
         G = material.shear_modulus
-        u1, v1, w1, rx1, ry1, rz1 = u_local[0:6]
-        u2, v2, w2, rx2, ry2, rz2 = u_local[6:12]
+        end_a, end_b = self._end_displacements(u_local)
+        u1, v1, w1, rx1, ry1, rz1 = end_a
+        u2, v2, w2, rx2, ry2, rz2 = end_b
         sigma_axial = E * (u2 - u1) / L
         kappa_z = (rz2 - rz1) / L
         kappa_y = (ry2 - ry1) / L
         M_z = E * self._Iz * kappa_z
         M_y = E * self._Iy * kappa_y
-        c_z = max(np.sqrt(abs(self._Iy) / max(self._A, _SMALL)) * 2.0, _SMALL)
-        c_y = max(np.sqrt(abs(self._Iz) / max(self._A, _SMALL)) * 2.0, _SMALL)
+        c_y, c_z = self._fiber_distances()
         sigma_bending_y = M_y * c_z / max(self._Iy, _SMALL)
         sigma_bending_z = M_z * c_y / max(self._Iz, _SMALL)
-        gamma_y = (w2 - w1) / L + 0.5 * (ry1 + ry2)
-        gamma_z = (v2 - v1) / L - 0.5 * (rz1 + rz2)
-        tau_y = G * self._ky * gamma_y
-        tau_z = G * self._kz * gamma_z
-        tau_torsion = G * self._J * (rx2 - rx1) / L / max(2.0 * self._A, _SMALL)
+        gamma_xy = (v2 - v1) / L - 0.5 * (rz1 + rz2)
+        gamma_xz = (w2 - w1) / L + 0.5 * (ry1 + ry2)
+        tau_y = G * self._ky * gamma_xy
+        tau_z = G * self._kz * gamma_xz
+        tau_torsion = G * self._J * (rx2 - rx1) / L / self._torsion_section_modulus()
         sigma_x = sigma_axial + sigma_bending_y + sigma_bending_z
         von_mises = np.sqrt(sigma_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_torsion**2))
         return {
@@ -855,7 +1033,17 @@ class QuadraticBeamElement(BeamElement):
         self._J = self.cross_section.get("J", 1.0e-8)
         self._ky = self.cross_section.get("shear_factor_y", 5.0 / 6.0)
         self._kz = self.cross_section.get("shear_factor_z", 5.0 / 6.0)
+        self._orientation = _section_orientation(self.cross_section)
+        self._c_y = self.cross_section.get("c_y")
+        self._c_z = self.cross_section.get("c_z")
+        self._torsion_modulus = self.cross_section.get("torsion_modulus")
         self.eccentricity = np.zeros(3, dtype=float) if eccentricity is None else np.asarray(eccentricity, dtype=float)
+
+    def _end_displacements(self, u_local: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        # Geometric end nodes are 0 and 2; node 1 is the midside node.  The
+        # end-difference over the full length equals the quadratic shape
+        # function derivative evaluated at the element centre.
+        return u_local[0:6], u_local[12:18]
 
     @property
     def num_nodes(self) -> int:
@@ -888,14 +1076,7 @@ class QuadraticBeamElement(BeamElement):
         if length < _SMALL:
             raise ValueError(f"Quadratic beam element {self.element_id} has near-zero length")
         e1 = (coords[2] - coords[0]) / length
-        trial = np.array([0.0, 1.0, 0.0])
-        if abs(float(np.dot(e1, trial))) > 0.95:
-            trial = np.array([0.0, 0.0, 1.0])
-        e2 = trial - np.dot(trial, e1) * e1
-        e2 /= np.linalg.norm(e2)
-        e3 = np.cross(e1, e2)
-        e3 /= np.linalg.norm(e3)
-        R = np.column_stack((e1, e2, e3))
+        R = _beam_rotation_matrix(e1, self._orientation)
         T = np.zeros((18, 18), dtype=float)
         Rt = R.T
         for i in range(3):
@@ -916,33 +1097,33 @@ class QuadraticBeamElement(BeamElement):
         EIy = E * self._Iy
         EIz = E * self._Iz
         GJ = G * self._J
-        GAy = G * self._A * self._ky
-        GAz = G * self._A * self._kz
+        GA_y = G * self._A * self._ky
+        GA_z = G * self._A * self._kz
         K = np.zeros((18, 18), dtype=float)
         for xi, weight in zip(self.GAUSS_POINTS, self.GAUSS_WEIGHTS):
             N, dN_dxi = self.compute_shape_functions(float(xi))
             dN_dx = dN_dxi * 2.0 / L
             B_axial = np.zeros((1, 18), dtype=float)
             B_torsion = np.zeros((1, 18), dtype=float)
-            B_shear_y = np.zeros((1, 18), dtype=float)
-            B_shear_z = np.zeros((1, 18), dtype=float)
+            B_shear_xz = np.zeros((1, 18), dtype=float)
+            B_shear_xy = np.zeros((1, 18), dtype=float)
             B_bend_y = np.zeros((1, 18), dtype=float)
             B_bend_z = np.zeros((1, 18), dtype=float)
             for i in range(3):
                 b = i * 6
                 B_axial[0, b + 0] = dN_dx[i]
                 B_torsion[0, b + 3] = dN_dx[i]
-                B_shear_y[0, b + 2] = dN_dx[i]
-                B_shear_y[0, b + 4] = N[i]
-                B_shear_z[0, b + 1] = dN_dx[i]
-                B_shear_z[0, b + 5] = -N[i]
+                B_shear_xz[0, b + 2] = dN_dx[i]
+                B_shear_xz[0, b + 4] = N[i]
+                B_shear_xy[0, b + 1] = dN_dx[i]
+                B_shear_xy[0, b + 5] = -N[i]
                 B_bend_y[0, b + 4] = dN_dx[i]
                 B_bend_z[0, b + 5] = dN_dx[i]
             jac = L / 2.0 * weight
             K += B_axial.T @ (EA * np.eye(1)) @ B_axial * jac
             K += B_torsion.T @ (GJ * np.eye(1)) @ B_torsion * jac
-            K += B_shear_y.T @ (GAy * np.eye(1)) @ B_shear_y * jac
-            K += B_shear_z.T @ (GAz * np.eye(1)) @ B_shear_z * jac
+            K += B_shear_xz.T @ (GA_z * np.eye(1)) @ B_shear_xz * jac
+            K += B_shear_xy.T @ (GA_y * np.eye(1)) @ B_shear_xy * jac
             K += B_bend_y.T @ (EIy * np.eye(1)) @ B_bend_y * jac
             K += B_bend_z.T @ (EIz * np.eye(1)) @ B_bend_z * jac
         K_global = T.T @ K @ T
@@ -956,15 +1137,18 @@ class QuadraticBeamElement(BeamElement):
         except ValueError:
             return np.zeros((18, 18), dtype=float)
         M = np.zeros((18, 18), dtype=float)
+        rho = material.density
+        # Consistent rotary inertia per rotation axis: polar (Iy+Iz) for
+        # torsion, the matching section inertia for each bending rotation.
+        rotary_inertia = (rho * (self._Iy + self._Iz), rho * self._Iy, rho * self._Iz)
         for xi, weight in zip(self.GAUSS_POINTS, self.GAUSS_WEIGHTS):
             N, _ = self.compute_shape_functions(float(xi))
             for i in range(3):
                 for j in range(3):
-                    translational = N[i] * N[j] * material.density * self._A * weight * L / 2.0
-                    rotational = N[i] * N[j] * material.density * (self._Iy + self._Iz) * weight * L / 2.0
+                    translational = N[i] * N[j] * rho * self._A * weight * L / 2.0
                     for d in range(3):
                         M[i * 6 + d, j * 6 + d] += translational
-                        M[i * 6 + 3 + d, j * 6 + 3 + d] += rotational
+                        M[i * 6 + 3 + d, j * 6 + 3 + d] += N[i] * N[j] * rotary_inertia[d] * weight * L / 2.0
         M_global = T.T @ M @ T
         self._mass_matrix = M_global
         return M_global
@@ -975,7 +1159,38 @@ class QuadraticBeamElement(BeamElement):
         material: "Material",
         state: Optional[Any] = None,
     ) -> np.ndarray:
-        return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
+        """
+        Beam-column stress stiffness from the lateral displacement gradient:
+
+            KG = N_compression * integral (dN/dx)^T (dN/dx) dx
+
+        applied to both transverse deflections.  This is the same
+        destabilizing-gradient theory as the shell membrane KG and follows the
+        package convention ``K phi = lambda KG phi`` with compression positive.
+        The higher-order rotation-gradient term is omitted, which makes the
+        predicted critical loads slightly conservative on coarse meshes.
+        """
+        axial_compression = self._axial_compression_from_state(state)
+        if axial_compression == 0.0:
+            return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
+
+        coords = self.get_node_coordinates(mesh)
+        try:
+            L, T = self._beam_frame_and_transform(coords)
+        except ValueError:
+            return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
+
+        KG = np.zeros((18, 18), dtype=float)
+        for xi, weight in zip(self.GAUSS_POINTS, self.GAUSS_WEIGHTS):
+            _, dN_dxi = self.compute_shape_functions(float(xi))
+            dN_dx = dN_dxi * 2.0 / L
+            G_matrix = np.zeros((2, 18), dtype=float)
+            for i in range(3):
+                b = i * 6
+                G_matrix[0, b + 1] = dN_dx[i]
+                G_matrix[1, b + 2] = dN_dx[i]
+            KG += axial_compression * (G_matrix.T @ G_matrix) * (L / 2.0 * weight)
+        return T.T @ KG @ T
 
 
 class CoupledBeamShellElement(Element):

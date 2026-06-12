@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Iterable, Iterator, Mapping, MutableMapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -34,12 +34,6 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
 SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
-DEFAULT_SHIP_SECTION_INPUTS = (
-    r"C:\Github\ANYstructure\anystruct\ship_section_example.txt",
-    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA side section.txt",
-    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA mid section.txt",
-    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA transversal section.txt",
-)
 PULS_MANUAL_S3_LIMITS = {
     "source": r"C:\Program Files\DNV\NauticusHull 20.36.2508\Manuals\UserManual PULS.pdf",
     "manual_file_date": "2025-08-05",
@@ -58,7 +52,10 @@ PULS_MANUAL_U3_LIMITS = {
     "long_to_short_aspect_ratio_max": 20.0,
 }
 CSR_RULE_REFERENCE = {
-    "source": "Common Structural Rules",
+    "source": (
+        r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Desktop\Rules and standards"
+        r"\Common Structural Rules.pdf"
+    ),
     "edition": "Rules for the Classification of Steel Ships 2014, Pt 12 Common Structural Rules",
     "proportions_clause": "Sec 10/2.2.1 and Table 10.2.1",
     "advanced_buckling_clause": "Sec 10/4 and Appendix D",
@@ -163,11 +160,13 @@ class S3SolverConfig:
     transverse_modes: tuple[int, ...] = (1, 2)
     web_longitudinal_modes: tuple[int, ...] = (1, 2, 3)
     web_depth_modes: tuple[int, ...] = (1, 2)
-    initial_imperfection_ratio: float = 0.001
-    initial_imperfection_floor_mm: float = 0.02
+    # Production-tolerance model imperfections per DNV-CG-0128 Sec.6 (based on
+    # IACS Rec.47): plate imperfection b/200 of the plate breadth and stiffener
+    # imperfection L/1000 of the stiffener length, applied to the critical mode
+    # shape of each Ritz family.
+    plate_imperfection_breadth_fraction: float = 1.0 / 200.0
+    stiffener_imperfection_length_fraction: float = 1.0 / 1000.0
     nonlinear_membrane_factor: float = 0.75
-    local_global_coupling_floor: float = 0.25
-    local_global_coupling_gain: float = 1.0
     global_stiffened_strip_capacity_factor: float | None = None
     web_shear_interaction_exponent: float = 1.0
     local_plate_web_interaction_exponent: float = 1.20
@@ -183,10 +182,13 @@ class S3SolverConfig:
     use_separate_s3_pressure_modes: bool = True
     s3_pressure_mode_stiffness_factor: float = 5.0
     include_pressure_dominated_yield_in_buckling_strength: bool = False
-    include_lateral_deformation_in_ultimate_yield: bool = False
+    # The Perry-type stiffener lateral-deformation amplification (assumed bow
+    # L/1000 per DNV-CG-0128 Sec.6) is part of the PULS stiffener limit
+    # states, so it participates in the ultimate yield path by default.
+    include_lateral_deformation_in_ultimate_yield: bool = True
     include_global_curvature_in_plate_yield: bool = False
     pressure_dominated_yield_preload_ratio: float = 0.05
-    s3_major_yield_reserve_factor: float = 1.10
+    s3_major_yield_reserve_factor: float = 1.0
     yield_utilization_limit: float = 1.0
     pressure_yield_limit: float = 1.0
     max_load_factor: float = 100.0
@@ -205,6 +207,17 @@ class S3SolverConfig:
     max_flange_slenderness: float = 45.0
     max_web_to_flange_ratio: float = 5.0
     hot_spot_grid: tuple[float, ...] = (0.125, 0.25, 0.5, 0.75, 0.875)
+    membrane_hot_spot_fractions: tuple[float, ...] = (
+        0.0,
+        0.125,
+        0.25,
+        0.375,
+        0.5,
+        0.625,
+        0.75,
+        0.875,
+        1.0,
+    )
     check_mode_convergence: bool = False
     medium_longitudinal_modes: tuple[int, ...] = (1, 2, 3, 4)
     medium_transverse_modes: tuple[int, ...] = (1, 2, 3)
@@ -266,6 +279,42 @@ class RitzMode:
 
 
 @dataclass(frozen=True)
+class MembraneField:
+    """Second-order von Karman/Marguerre membrane stress field for a sine basis.
+
+    For an added deflection ``w = sum_i q_i sin(kx_i x) sin(ky_i y)`` and an
+    initial deflection ``w0`` in the same basis, the Marguerre compatibility
+    equation gives the Airy stress function as a finite cosine-harmonic series
+
+        nabla^4 F = E [ L(w + w0, w + w0) - L(w0, w0) ]
+
+    with ``L(u, v) = u_xy v_xy - (u_xx v_yy + u_yy v_xx) / 2``.  Each harmonic
+    ``h`` with wave numbers ``P = p pi / a`` and ``Q = q pi / b`` carries the
+    quadratic amplitude
+
+        A_h = (q + q0)^T G_h (q + q0) - q0^T G_h q0
+
+    and the exact particular solution
+    ``F_h = E A_h cos(P x) cos(Q y) / (P^2 + Q^2)^2``.  Both the redistributed
+    membrane stresses and the membrane strain energy follow analytically from
+    this solution with no empirical coefficients.  Stresses are stored in the
+    compression-positive convention used by the panel inputs.
+    """
+
+    elastic_modulus: float
+    thickness: float
+    coupling: np.ndarray
+    imperfection_offset: np.ndarray
+    energy_coefficient: np.ndarray
+    sigma_x_grid: np.ndarray
+    sigma_y_grid: np.ndarray
+    tau_grid: np.ndarray
+    grid_x_fractions: np.ndarray
+    grid_y_fractions: np.ndarray
+    edge_mean_axial_factors: np.ndarray
+
+
+@dataclass(frozen=True)
 class CurvaturePoint:
     x_fraction: float
     y_fraction: float
@@ -292,6 +341,7 @@ class RitzRuntime:
     plate_d2y: np.ndarray
     plate_dxy: np.ndarray
     global_centerline_d2x: np.ndarray
+    membrane: MembraneField | None = None
 
 
 @dataclass
@@ -754,7 +804,12 @@ def _anystructure_corrosion_addition_mm(
     *candidates: Any,
     default_mm: float = DEFAULT_ANYSTRUCTURE_CSR_CORROSION_ADDITION_MM,
 ) -> float:
-    """Return a full local CSR corrosion addition in mm."""
+    """Return a full local CSR corrosion addition in mm.
+
+    ANYstructure currently stores plate/stiffener geometry as gross scantlings.
+    If a project object exposes an explicit corrosion addition, use it.  Values
+    less than 0.05 are treated as metres; larger values are treated as mm.
+    """
 
     names = (
         "corrosion_addition_mm",
@@ -793,12 +848,7 @@ def _anystructure_csr_dimension_mm(value: float) -> float:
 
 
 def _anystructure_csr_panel_input(panel: S3PanelInput | U3PanelInput) -> S3PanelInput | U3PanelInput:
-    """Return panel dimensions in mm for CSR proportion checks.
-
-    The existing ANYstructure SemiAnalytical adapter uses the solver's historic
-    input convention.  CSR proportion checks, however, are explicit local
-    scantling checks and need millimetres for breadth/depth/thickness values.
-    """
+    """Return panel dimensions in mm for CSR proportion checks in ANYstructure."""
 
     if isinstance(panel, S3PanelInput):
         return replace(
@@ -1251,7 +1301,10 @@ def _s3_buckling_early_reject_vector(
         config,
         runtime=runtime,
     )
-    if pressure_yield["max"] >= config.pressure_yield_limit:
+    if (
+        panel.pressure > s3_pressure_capacity_limits(panel, section)["minimum"]
+        or pressure_yield["max"] >= config.pressure_yield_limit
+    ):
         return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
 
     buckling = elastic_buckling_factors(panel, section, modes, config, stiffener_section)
@@ -1523,6 +1576,8 @@ def _limit_check(value: float | None, *, maximum: float | None = None, minimum: 
 
 
 def _csr_strength_scale(yield_stress: float) -> float:
+    """Return the CSR slenderness scaling sqrt(235 / sigma_yd)."""
+
     if yield_stress <= EPS or not math.isfinite(yield_stress):
         return float("nan")
     return math.sqrt(235.0 / yield_stress)
@@ -1550,6 +1605,13 @@ def _net_thickness(gross_thickness: float, corrosion_addition: float) -> float |
 
 
 def _csr_flange_outstand(panel: S3PanelInput) -> float | None:
+    """Return the flange outstand breadth used by CSR Table 10.2.1.
+
+    The S3 input surface stores one flange breadth.  T-bars are treated as
+    symmetric, while angles are treated conservatively as one-sided outstands.
+    Bulb and flat-bar profiles do not use the angle/T flange outstand check.
+    """
+
     if panel.stiffener_type == "T-bar":
         return max(0.5 * (panel.flange_width - panel.web_thickness), 0.0)
     if panel.stiffener_type == "Angle":
@@ -1562,7 +1624,13 @@ def calculate_csr_requirement(
     *,
     plate_location: str = "hull_envelope_or_tank_boundary",
 ) -> dict[str, Any]:
-    """Return equation-based CSR proportion diagnostics."""
+    """Return equation-based CSR proportion diagnostics for SemiAnalytical use.
+
+    This deliberately evaluates the prescriptive CSR proportion checks outside
+    the PULS/SemiAnalytical usage-factor solver.  Lengths, spacing, stiffener
+    depth, and flange breadth are gross/scantling dimensions.  Thickness checks
+    use net thickness after the panel corrosion-addition fields are deducted.
+    """
 
     plate_coefficient = CSR_PLATE_SLENDERNESS_COEFFICIENTS.get(plate_location)
     width = min(panel.length, panel.width) if isinstance(panel, U3PanelInput) else panel.width
@@ -2017,7 +2085,7 @@ def _mode_linear_terms(
     config: S3SolverConfig,
     m: int,
     n: int,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     kx = m * math.pi / panel.length
     ky = n * math.pi / panel.width
     area_factor = panel.length * panel.width / 4.0
@@ -2028,8 +2096,16 @@ def _mode_linear_terms(
     )
 
     loads = normalized_load_components(panel)
+    # The axial stress acts on the full effective section of the family field:
+    # plate thickness for local/isotropic plate modes and the smeared section
+    # area per unit width for the global stiffened-strip modes, so the
+    # stiffener axial force is destabilizing for the global mode.  Transverse
+    # and shear loads are carried by the plating alone.
+    axial_resultant = (
+        max(loads["signed_axial_stress"], 0.0) * stiffness.membrane_thickness
+    )
     geometric = (
-        loads["compression_nx"] * kx * kx
+        axial_resultant * kx * kx
         + loads["compression_ny"] * ky * ky
     )
     linear_stiffness = area_factor * bending
@@ -2104,6 +2180,196 @@ def _mode_shear_geometric_integral(
     )
 
 
+def build_membrane_field(
+    modes: Sequence[RitzMode],
+    length: float,
+    width: float,
+    thickness: float,
+    elastic_modulus: float,
+    imperfection: Sequence[float],
+    grid_fractions: Sequence[float],
+) -> MembraneField | None:
+    """Build the exact second-order membrane field for the given sine modes.
+
+    The bilinear operator ``L(phi_i, phi_j)`` expands into the four cosine
+    harmonics ``(|m_i - m_j|, |n_i - n_j|)``, ``(|m_i - m_j|, n_i + n_j)``,
+    ``(m_i + m_j, |n_i - n_j|)`` and ``(m_i + m_j, n_i + n_j)`` with closed-form
+    coefficients.  The constant ``(0, 0)`` harmonic always cancels, which is the
+    analytic statement that the classical particular solution keeps straight
+    panel edges with no induced mean stress.
+    """
+
+    count = len(modes)
+    if count == 0:
+        return None
+    harmonics: dict[tuple[int, int], np.ndarray] = {}
+    for i, first in enumerate(modes):
+        for j in range(i, count):
+            second = modes[j]
+            cross = first.kx * first.ky * second.kx * second.ky
+            normal = 0.5 * (
+                first.kx**2 * second.ky**2 + second.kx**2 * first.ky**2
+            )
+            m_diff, m_sum = abs(first.m - second.m), first.m + second.m
+            n_diff, n_sum = abs(first.n - second.n), first.n + second.n
+            for p, q, coefficient in (
+                (m_diff, n_diff, 0.25 * (cross - normal)),
+                (m_diff, n_sum, 0.25 * (cross + normal)),
+                (m_sum, n_diff, 0.25 * (cross + normal)),
+                (m_sum, n_sum, 0.25 * (cross - normal)),
+            ):
+                if (p == 0 and q == 0) or abs(coefficient) <= EPS:
+                    continue
+                matrix = harmonics.setdefault((p, q), np.zeros((count, count)))
+                matrix[i, j] += coefficient
+                if i != j:
+                    matrix[j, i] += coefficient
+    if not harmonics:
+        return None
+
+    keys = sorted(harmonics)
+    coupling = np.stack([harmonics[key] for key in keys])
+    p_waves = np.asarray([key[0] * math.pi / length for key in keys])
+    q_waves = np.asarray([key[1] * math.pi / width for key in keys])
+    wave_sq = p_waves**2 + q_waves**2
+    inverse_biharmonic = 1.0 / np.maximum(wave_sq**2, EPS)
+    area_weight = np.asarray(
+        [
+            length * width * (0.25 if key[0] > 0 and key[1] > 0 else 0.5)
+            for key in keys
+        ]
+    )
+    energy_coefficient = elastic_modulus * thickness * area_weight * inverse_biharmonic
+
+    imperfection_array = np.asarray(imperfection, dtype=float)
+    if imperfection_array.shape != (count,):
+        imperfection_array = np.zeros(count, dtype=float)
+    imperfection_offset = np.einsum(
+        "hij,i,j->h", coupling, imperfection_array, imperfection_array
+    )
+
+    fractions = np.asarray(grid_fractions, dtype=float)
+    grid_x = np.repeat(fractions, len(fractions))
+    grid_y = np.tile(fractions, len(fractions))
+    p_counts = np.asarray([key[0] for key in keys], dtype=float)
+    q_counts = np.asarray([key[1] for key in keys], dtype=float)
+    cos_grid = np.cos(math.pi * np.outer(grid_x, p_counts)) * np.cos(
+        math.pi * np.outer(grid_y, q_counts)
+    )
+    sin_grid = np.sin(math.pi * np.outer(grid_x, p_counts)) * np.sin(
+        math.pi * np.outer(grid_y, q_counts)
+    )
+    # Compression-positive stress factors: the tension-convention solution
+    # sigma_x = F_yy = -E A Q^2 / (P^2+Q^2)^2 cos cos concentrates compression
+    # at the supported edges; flipping all three components preserves the von
+    # Mises stress while matching the panel input sign convention.
+    sigma_x_grid = cos_grid * (elastic_modulus * q_waves**2 * inverse_biharmonic)
+    sigma_y_grid = cos_grid * (elastic_modulus * p_waves**2 * inverse_biharmonic)
+    tau_grid = sin_grid * (elastic_modulus * p_waves * q_waves * inverse_biharmonic)
+    # Averaging sigma_x2 along a junction line y = const keeps only the p = 0
+    # harmonics; rows are the two long edges y = 0 and y = b, where the
+    # redistribution sheds plate load into the stiffeners.
+    p_zero = p_counts == 0.0
+    edge_factor = elastic_modulus * q_waves**2 * inverse_biharmonic
+    edge_mean_axial_factors = np.vstack(
+        [
+            np.where(p_zero, edge_factor, 0.0),
+            np.where(p_zero, edge_factor * np.cos(math.pi * q_counts), 0.0),
+        ]
+    )
+    return MembraneField(
+        elastic_modulus=elastic_modulus,
+        thickness=thickness,
+        coupling=coupling,
+        imperfection_offset=imperfection_offset,
+        energy_coefficient=energy_coefficient,
+        sigma_x_grid=sigma_x_grid,
+        sigma_y_grid=sigma_y_grid,
+        tau_grid=tau_grid,
+        grid_x_fractions=grid_x,
+        grid_y_fractions=grid_y,
+        edge_mean_axial_factors=edge_mean_axial_factors,
+    )
+
+
+def _membrane_amplitudes(field: MembraneField, total_deflection: np.ndarray) -> np.ndarray:
+    return (
+        np.einsum("hij,i,j->h", field.coupling, total_deflection, total_deflection)
+        - field.imperfection_offset
+    )
+
+
+def _membrane_force(
+    field: MembraneField,
+    total_deflection: np.ndarray,
+    amplitudes: np.ndarray,
+) -> np.ndarray:
+    weighted = field.energy_coefficient * amplitudes
+    return 2.0 * np.einsum("h,hij,j->i", weighted, field.coupling, total_deflection)
+
+
+def _membrane_tangent(
+    field: MembraneField,
+    total_deflection: np.ndarray,
+    amplitudes: np.ndarray,
+) -> np.ndarray:
+    gradients = np.einsum("hij,j->hi", field.coupling, total_deflection)
+    return 4.0 * np.einsum(
+        "h,hi,hj->ij", field.energy_coefficient, gradients, gradients
+    ) + 2.0 * np.einsum(
+        "h,hij->ij", field.energy_coefficient * amplitudes, field.coupling
+    )
+
+
+def _membrane_stress_components(
+    field: MembraneField,
+    amplitudes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return compression-positive second-order stresses at the field grid."""
+
+    return (
+        field.sigma_x_grid @ amplitudes,
+        field.sigma_y_grid @ amplitudes,
+        field.tau_grid @ amplitudes,
+    )
+
+
+def _assign_family_imperfections(
+    modes: list[RitzMode],
+    family_amplitudes: Mapping[str, float],
+) -> list[RitzMode]:
+    """Assign production-tolerance imperfections to each family's critical mode.
+
+    DNV-CG-0128 Sec.6 prescribes model imperfections harmonizing with the
+    critical eigenmode shape: the minimum elastic-factor mode of each Ritz
+    family carries the full tolerance amplitude.  Families without an elastic
+    buckling driver fall back to their softest (lowest bending stiffness)
+    mode, which is the fundamental deflection shape.
+    """
+
+    selected: dict[str, int] = {}
+    selected_factor: dict[str, float] = {}
+    fallback: dict[str, int] = {}
+    for index, mode in enumerate(modes):
+        if mode.family not in family_amplitudes:
+            continue
+        if mode.geometric_stiffness > EPS:
+            factor = mode.linear_stiffness / mode.geometric_stiffness
+            if mode.family not in selected or factor < selected_factor[mode.family]:
+                selected[mode.family] = index
+                selected_factor[mode.family] = factor
+        current = fallback.get(mode.family)
+        if current is None or mode.linear_stiffness < modes[current].linear_stiffness:
+            fallback[mode.family] = index
+    updated = list(modes)
+    for family, amplitude in family_amplitudes.items():
+        index = selected.get(family, fallback.get(family))
+        if index is None or amplitude <= EPS:
+            continue
+        updated[index] = replace(updated[index], imperfection=amplitude)
+    return updated
+
+
 def build_ritz_modes(
     panel: S3PanelInput,
     section: S3SectionProperties,
@@ -2111,10 +2377,6 @@ def build_ritz_modes(
     global_stiffness_scale: float = 1.0,
 ) -> list[RitzMode]:
     modes: list[RitzMode] = []
-    imperfection = max(
-        config.initial_imperfection_floor_mm,
-        config.initial_imperfection_ratio * min(panel.length, panel.width),
-    )
     global_pressure_share = (
         0.0
         if config.use_separate_s3_pressure_modes
@@ -2146,7 +2408,7 @@ def build_ritz_modes(
                         linear_stiffness=linear,
                         geometric_stiffness=geometric,
                         pressure_force=_pressure_generalized_force(panel, m, n, pressure_share),
-                        imperfection=imperfection,
+                        imperfection=0.0,
                         nonlinear_stiffness=max(nonlinear, EPS),
                     )
                 )
@@ -2182,7 +2444,13 @@ def build_ritz_modes(
                 nonlinear_stiffness=max(nonlinear, EPS),
             )
         )
-    return modes
+    return _assign_family_imperfections(
+        modes,
+        {
+            "local": config.plate_imperfection_breadth_fraction * panel.width,
+            "global": config.stiffener_imperfection_length_fraction * panel.length,
+        },
+    )
 
 
 def _isotropic_plate_stiffness(panel: U3PanelInput | S3PanelInput) -> OrthotropicStiffness:
@@ -2200,10 +2468,6 @@ def build_u3_ritz_modes(panel: U3PanelInput, config: S3SolverConfig) -> list[Rit
     """Return the plate-only Rayleigh-Ritz modes used by the U3 solver."""
 
     modes: list[RitzMode] = []
-    imperfection = max(
-        config.initial_imperfection_floor_mm,
-        config.initial_imperfection_ratio * min(panel.length, panel.width),
-    )
     stiffness = _isotropic_plate_stiffness(panel)
     for m in config.longitudinal_modes:
         for n in config.transverse_modes:
@@ -2224,11 +2488,17 @@ def build_u3_ritz_modes(panel: U3PanelInput, config: S3SolverConfig) -> list[Rit
                     linear_stiffness=linear,
                     geometric_stiffness=geometric,
                     pressure_force=_pressure_generalized_force(panel, m, n, 1.0),
-                    imperfection=imperfection,
+                    imperfection=0.0,
                     nonlinear_stiffness=max(nonlinear, EPS),
                 )
             )
-    return modes
+    return _assign_family_imperfections(
+        modes,
+        {
+            "plate": config.plate_imperfection_breadth_fraction
+            * min(panel.length, panel.width),
+        },
+    )
 
 
 def ritz_combined_buckling_factor(
@@ -2419,6 +2689,15 @@ def _build_ritz_runtime(
     )
     plate_x_fractions = np.asarray([point.x_fraction for point in plate_points], dtype=float)
     plate_y_fractions = np.asarray([point.y_fraction for point in plate_points], dtype=float)
+    membrane = build_membrane_field(
+        modes,
+        panel.length,
+        panel.width,
+        panel.plate_thickness,
+        panel.elastic_modulus,
+        [mode.imperfection for mode in modes],
+        config.membrane_hot_spot_fractions,
+    )
     return RitzRuntime(
         modes=modes,
         linear=np.diag([mode.linear_stiffness for mode in modes]),
@@ -2440,6 +2719,7 @@ def _build_ritz_runtime(
             if global_centerline_points
             else np.zeros((0, len(modes)))
         ),
+        membrane=membrane,
     )
 
 
@@ -2477,10 +2757,21 @@ def local_global_stiffness_scale(
         else 0.0
     )
     amplitude_ratio = _local_amplitude_ratio(panel, modes, amplitudes)
-    amplitude_utilization = amplitude_ratio / max(config.initial_imperfection_ratio, EPS)
+    amplitude_utilization = amplitude_ratio / max(
+        config.plate_imperfection_breadth_fraction, EPS
+    )
     interaction_driver = local_elastic_utilization
-    scale = 1.0 / (1.0 + config.local_global_coupling_gain * max(interaction_driver - 1.0, 0.0))
-    scale = min(1.0, max(config.local_global_coupling_floor, scale))
+    # Secant in-plane stiffness of the locally buckled plating.  The exact
+    # single-mode von Karman solution with straight edges gives the membrane
+    # strain epsilon = (2 sigma - sigma_cr) / E beyond the local critical
+    # stress, i.e. a secant stiffness ratio sigma / (2 sigma - sigma_cr).
+    # PULS computes its orthotropic macro coefficients "for an averaged state
+    # (secant)" (User Manual Sec.3.8.3); this is that law for the reduced
+    # scalar longitudinal degradation.
+    if interaction_driver > 1.0:
+        scale = interaction_driver / (2.0 * interaction_driver - 1.0)
+    else:
+        scale = 1.0
     return {
         "scale": scale,
         "local_elastic_utilization": local_elastic_utilization,
@@ -2490,16 +2781,69 @@ def local_global_stiffness_scale(
     }
 
 
-def _stiffener_column_factor(panel: S3PanelInput, section: S3SectionProperties) -> float | None:
-    compression = max(panel.axial_stress, 0.0)
-    if compression <= EPS:
+def _stiffener_column_factor(
+    panel: S3PanelInput,
+    section: S3SectionProperties,
+    config: S3SolverConfig | None = None,
+) -> float | None:
+    """Return the wide-panel orthotropic global buckling candidate.
+
+    The S3 panel breadth (number of stiffeners) is not part of the reduced
+    input surface, so the global mode is taken in the wide-panel limit where
+    the transverse wave number ky is a free continuous parameter.  For each
+    axial half-wave count m the orthotropic eigenvalue
+
+        lambda(m, ky) = (d11 kx^4 + 2 H kx^2 ky^2 + d22 ky^4)
+                        / (Nx kx^2 + Ny ky^2)
+
+    is minimized in closed form over ky^2 >= 0, with the axial resultant on
+    the full smeared section (Nx = sigma_x A / s) and the transverse
+    resultant on the plating (Ny = sigma_y t).  The pure-axial case reduces
+    exactly to the Euler column of the stiffener/plate unit over the simply
+    supported span (PULS User Manual Fig.11 asymmetric SS global modes), and
+    the pure-transverse case reduces to the classical wide orthotropic plate
+    formula 2 (sqrt(d11 d22) + H) kx^2 / Ny.
+    """
+
+    config = config or S3SolverConfig()
+    stiffness = build_orthotropic_stiffness(panel, section, "global", config)
+    axial_resultant = max(panel.axial_stress, 0.0) * stiffness.membrane_thickness
+    transverse_resultant = max(panel.mean_transverse_stress, 0.0) * panel.plate_thickness
+    if axial_resultant <= EPS and transverse_resultant <= EPS:
         return None
-    effective_length = panel.length * (0.70 if panel.stiffener_boundary == "Cont" else 1.0)
-    euler_force = math.pi**2 * panel.elastic_modulus * section.inertia_x / max(effective_length**2, EPS)
-    reference_force = compression * section.area
-    if reference_force <= EPS:
-        return None
-    return euler_force / reference_force
+
+    cross_rigidity = stiffness.d12 + 2.0 * stiffness.d66
+    best: float | None = None
+    half_wave_counts = config.longitudinal_modes or (1,)
+    for m in half_wave_counts:
+        kx_sq = (m * math.pi / panel.length) ** 2
+        bending_0 = stiffness.d11 * kx_sq * kx_sq
+        bending_1 = 2.0 * cross_rigidity * kx_sq
+        bending_2 = stiffness.d22
+        load_0 = axial_resultant * kx_sq
+        load_1 = transverse_resultant
+
+        candidates = []
+        if load_0 > EPS:
+            candidates.append(bending_0 / load_0)
+        if load_1 > EPS:
+            # Interior stationary point of the Rayleigh quotient in u = ky^2:
+            # c2 e u^2 + 2 c2 d u + (c1 d - e c0) = 0.
+            a_term = bending_2 * load_1
+            b_term = 2.0 * bending_2 * load_0
+            c_term = bending_1 * load_0 - load_1 * bending_0
+            discriminant = b_term * b_term - 4.0 * a_term * c_term
+            if a_term > EPS and discriminant >= 0.0:
+                root = (-b_term + math.sqrt(discriminant)) / (2.0 * a_term)
+                if root > EPS:
+                    candidates.append(
+                        (bending_0 + bending_1 * root + bending_2 * root * root)
+                        / (load_0 + load_1 * root)
+                    )
+        for value in candidates:
+            if math.isfinite(value) and value > EPS and (best is None or value < best):
+                best = value
+    return best
 
 
 def _plate_strip_shear_buckling(
@@ -3016,88 +3360,28 @@ def _global_stiffened_strip_capacity_adjustment(
             "notes": ["fixed global-stiffened-strip capacity override"],
         }
 
-    notes = ["computed reduced global-stiffened-strip capacity adjustment"]
-    base = 0.55
-    support_modifier = {
-        "Integrated": 0.88,
-        "Girder - long": 0.95,
-        "Girder - trans": 0.85,
-    }.get(panel.in_plane_support, 1.0)
-    pressure_modifier = 0.92 if panel.pressure > EPS else 1.0
-
-    load_modifier = 1.0
-    if "shear" in load_family:
-        load_modifier *= 0.95
-    if "axial-tension" in load_family and "transverse-compression" in load_family:
-        load_modifier *= 0.95
-    if "pressure" in load_family and "shear" not in load_family:
-        load_modifier *= 0.95
-
-    if aspect_ratio >= 6.0:
-        aspect_modifier = 0.90
-    elif aspect_ratio >= 3.0:
-        aspect_modifier = 0.96
-    else:
-        aspect_modifier = 1.05
-
-    if plate_slenderness >= 80.0:
-        slenderness_modifier = 1.15
-        notes.append("very slender plate: global-strip reduction relaxed")
-    elif plate_slenderness >= 50.0:
-        slenderness_modifier = 1.00
-    else:
-        slenderness_modifier = 0.95
-
-    if section_inertia_ratio >= 1.0e5:
-        section_modifier = 0.95
-    elif section_inertia_ratio >= 1.0e4:
-        section_modifier = 0.98
-    else:
-        section_modifier = 0.92
-
-    if local_interaction_ratio is None:
-        local_modifier = 1.0
-    elif local_interaction_ratio >= 4.0:
-        local_modifier = 0.90
-    elif local_interaction_ratio >= 2.0:
-        local_modifier = 0.95
-    else:
-        local_modifier = 1.0
-
-    capacity_factor = (
-        base
-        * support_modifier
-        * pressure_modifier
-        * load_modifier
-        * aspect_modifier
-        * slenderness_modifier
-        * section_modifier
-        * local_modifier
-    )
-    capacity_factor = min(0.95, max(0.30, capacity_factor))
+    # PULS reports the GEB as the orthotropic eigenvalue itself; the local
+    # buckling interaction enters through reduced (secant) stiffness
+    # coefficients, which the caller applies via the closed-form coupling.
+    # No empirical capacity knockdown is applied.
     return {
         "raw_factor": raw_factor,
         "local_reference_factor": local_reference_factor,
         "local_interaction_ratio": local_interaction_ratio,
-        "capacity_factor": capacity_factor,
-        "mode": "computed",
+        "capacity_factor": 1.0,
+        "mode": "raw-orthotropic-eigenvalue",
+        "load_family": load_family,
         "section": {
             "inertia_ratio": section_inertia_ratio,
             "area_ratio": section_area_ratio,
             "plate_slenderness": plate_slenderness,
             "aspect_ratio": aspect_ratio,
         },
-        "modifiers": {
-            "base": base,
-            "support": support_modifier,
-            "pressure": pressure_modifier,
-            "load": load_modifier,
-            "aspect": aspect_modifier,
-            "slenderness": slenderness_modifier,
-            "section": section_modifier,
-            "local_interaction": local_modifier,
-        },
-        "notes": notes,
+        "notes": [
+            "raw orthotropic GEB eigenvalue per the PULS definition; "
+            "local-buckling interaction applied through the secant von Karman "
+            "stiffness reduction"
+        ],
     }
 
 
@@ -3133,7 +3417,7 @@ def elastic_buckling_factors(
                 "failure_family": failure_family,
             }
         )
-    column_factor = _stiffener_column_factor(panel, stiffener_section)
+    column_factor = _stiffener_column_factor(panel, section, config)
     if column_factor is not None:
         factor_rows.append(
             {
@@ -3160,14 +3444,14 @@ def elastic_buckling_factors(
     for family, factor in coupled_shear_factors.items():
         if factor is None:
             continue
-            factor_rows.append(
-                {
-                    "factor": factor["factor"],
-                    "raw_factor": factor["factor"],
-                    "capacity_factor": 1.0,
-                    "label": f"{family}-ritz-combined-shear",
-                    "family": family,
-                    "failure_family": "plate-shear" if family == "local" else "global-stiffened-strip",
+        factor_rows.append(
+            {
+                "factor": factor["factor"],
+                "raw_factor": factor["factor"],
+                "capacity_factor": 1.0,
+                "label": f"{family}-ritz-combined-shear",
+                "family": family,
+                "failure_family": "plate-shear" if family == "local" else "global-stiffened-strip",
             }
         )
     web_factor = _stiffener_web_local_buckling(panel, section, stiffener_section, config)
@@ -3218,7 +3502,10 @@ def elastic_buckling_factors(
     elastic_global_coupling_rows: list[dict[str, float | str]] = []
     if local_reference_factor is not None:
         for row in factor_rows:
-            if row["failure_family"] != "global-stiffened-strip":
+            if row["failure_family"] not in (
+                "global-stiffened-strip",
+                "global-stiffener-cutoff",
+            ):
                 continue
             raw_factor = float(row.get("raw_factor", row["factor"]))
             adjustment = _global_stiffened_strip_capacity_adjustment(
@@ -3231,17 +3518,23 @@ def elastic_buckling_factors(
             capacity_factor = float(adjustment["capacity_factor"])
             uncoupled_factor = raw_factor * capacity_factor
             interaction_driver = uncoupled_factor / max(local_reference_factor, EPS)
-            scale = 1.0 / (
-                1.0
-                + config.local_global_coupling_gain * max(interaction_driver - 1.0, 0.0)
-            )
-            scale = min(1.0, max(config.local_global_coupling_floor, scale))
+            # Self-consistent reduced GEB with the secant von Karman membrane
+            # law: with the longitudinal stiffness reduced by u / (2u - 1) at
+            # utilization u = lambda / lambda_local, the eigenvalue condition
+            # lambda = raw * scale(lambda) has the closed-form solution
+            # lambda = (raw + lambda_local) / 2 once the local mode buckles
+            # first.
+            if interaction_driver > 1.0:
+                coupled_factor = 0.5 * (uncoupled_factor + local_reference_factor)
+            else:
+                coupled_factor = uncoupled_factor
+            scale = coupled_factor / max(uncoupled_factor, EPS)
             row["raw_factor"] = raw_factor
             row["capacity_factor"] = capacity_factor
             row["global_capacity_adjustment"] = adjustment
             row["uncoupled_factor"] = uncoupled_factor
             row["elastic_coupling_scale"] = scale
-            row["factor"] = uncoupled_factor * scale
+            row["factor"] = coupled_factor
             elastic_global_coupling_rows.append(
                 {
                     "mode": str(row["label"]),
@@ -3474,6 +3767,7 @@ def solve_equilibrium_amplitudes(
 
     linear = runtime.linear
     geometric = runtime.geometric
+    membrane = runtime.membrane
     nonlinear = runtime.nonlinear
     pressure = runtime.pressure
     imperfection = runtime.imperfection
@@ -3485,7 +3779,14 @@ def solve_equilibrium_amplitudes(
         return [0.0 for _ in modes], True, 0
 
     for iteration in range(1, config.newton_max_iterations + 1):
-        nonlinear_response = nonlinear * q**3
+        if membrane is not None:
+            total_deflection = q + imperfection
+            membrane_amplitudes = _membrane_amplitudes(membrane, total_deflection)
+            nonlinear_response = _membrane_force(
+                membrane, total_deflection, membrane_amplitudes
+            )
+        else:
+            nonlinear_response = nonlinear * q**3
         residual = tangent_linear @ q + nonlinear_response - force
         scale = max(
             float(np.max(np.abs(force))),
@@ -3496,8 +3797,15 @@ def solve_equilibrium_amplitudes(
         if float(np.max(np.abs(residual))) <= config.newton_tolerance * scale:
             return q.tolist(), True, iteration
 
-        tangent = tangent_linear.copy()
-        tangent.flat[::diagonal_stride] = tangent_linear_diagonal + 3.0 * nonlinear * q * q
+        if membrane is not None:
+            tangent = tangent_linear + _membrane_tangent(
+                membrane, total_deflection, membrane_amplitudes
+            )
+        else:
+            tangent = tangent_linear.copy()
+            tangent.flat[::diagonal_stride] = (
+                tangent_linear_diagonal + 3.0 * nonlinear * q * q
+            )
         try:
             delta = np.linalg.solve(tangent, -residual)
         except np.linalg.LinAlgError:
@@ -3572,6 +3880,96 @@ def _pressure_stiffener_bending_moment(panel: S3PanelInput) -> float:
         return 0.0
     span_factor = 12.0 if panel.stiffener_boundary == "Cont" else 8.0
     return panel.pressure * panel.width * panel.length**2 / span_factor
+
+
+def s3_pressure_capacity_limits(
+    panel: S3PanelInput,
+    section: S3SectionProperties,
+) -> dict[str, float]:
+    """Return the PULS S3 lateral pressure limits from linear beam/strip theory.
+
+    PULS User Manual Sec.3.13 defines three maximum pressure criteria:
+
+    * ``stiffener_bending``: first bending stress yield at the support of the
+      stiffener/plate unit, ``p_Fs = 12 sigma_F W_min / (s L^2)`` with the
+      section modulus taken at the stiffener flange mid-plane.  The clamped
+      span factor 12 applies to continuous stiffeners; simply supported beam
+      theory gives 8 for sniped stiffeners.
+    * ``web_shear``: first pure shear yield in the stiffener web for the
+      clamped stiffener, ``p_s = 2 V_s / (s L)`` with
+      ``V_s = sigma_F t_w I / (sqrt(3) S_p)`` and the first moment of area
+      ``S_p = s t_p z_g + t_w (z_g - t_p / 2)^2 / 2`` at the neutral axis.
+    * ``plate_bending``: first surface yield from pure local bending of the
+      clamped plate strip between stiffeners, ``p_F = 2 (t / s)^2 sigma_F``.
+
+    The manual enforces the two stiffener limits ("Two different pressure
+    limits are specified ...") while the plate strip value is reported as
+    being "of practical interest" only, so ``minimum`` covers the enforced
+    pair and ``plate_bending`` stays informational.
+    """
+
+    span_factor = 12.0 if panel.stiffener_boundary == "Cont" else 8.0
+    spacing = max(panel.width, EPS)
+    span = max(panel.length, EPS)
+    centroid = section.centroid_from_plate_midplane
+    flange_mid_distance = (
+        0.5 * panel.plate_thickness
+        + panel.stiffener_height
+        + 0.5 * (0.0 if panel.stiffener_type == "Flatbar" else panel.flange_thickness)
+        - centroid
+    )
+    minimum_section_modulus = section.inertia_x / max(abs(flange_mid_distance), EPS)
+    stiffener_bending = (
+        span_factor
+        * panel.yield_stress_stiffener
+        * minimum_section_modulus
+        / (spacing * span**2)
+    )
+
+    first_moment = spacing * panel.plate_thickness * abs(centroid) + 0.5 * max(
+        panel.web_thickness, EPS
+    ) * max(abs(centroid) - 0.5 * panel.plate_thickness, 0.0) ** 2
+    shear_yield_force = (
+        panel.yield_stress_stiffener
+        * panel.web_thickness
+        * section.inertia_x
+        / (math.sqrt(3.0) * max(first_moment, EPS))
+    )
+    web_shear = 2.0 * shear_yield_force / (spacing * span)
+
+    plate_bending = (
+        2.0
+        * (panel.plate_thickness / spacing) ** 2
+        * panel.yield_stress_plate
+    )
+    return {
+        "stiffener_bending": stiffener_bending,
+        "web_shear": web_shear,
+        "plate_bending": plate_bending,
+        "minimum": min(stiffener_bending, web_shear),
+        "span_factor": span_factor,
+        "minimum_section_modulus": minimum_section_modulus,
+        "first_moment_of_area": first_moment,
+    }
+
+
+def u3_pressure_capacity_limit(panel: U3PanelInput) -> dict[str, float]:
+    """Return the PULS U3 lateral pressure limit from linear strip theory.
+
+    PULS User Manual Sec.2.10: ``p_f = 2 (t / s)^2 sigma_F`` corresponds to
+    first material yielding in the extreme fibre along the long edges of a
+    clamped plate unit strip, with ``s`` the shortest plate dimension.
+    """
+
+    short_side = max(min(panel.length, panel.width), EPS)
+    plate_bending = (
+        2.0 * (panel.plate_thickness / short_side) ** 2 * panel.yield_stress_plate
+    )
+    return {
+        "plate_bending": plate_bending,
+        "minimum": plate_bending,
+        "short_side": short_side,
+    }
 
 
 def _sniped_stiffener_eccentricity_moments(
@@ -3677,6 +4075,25 @@ def _stiffener_torsional_deformation_stress(
     }
 
 
+def _plate_membrane_field(
+    panel: S3PanelInput | U3PanelInput,
+    modes: Sequence[RitzMode],
+    config: S3SolverConfig,
+    runtime: RitzRuntime | None,
+) -> MembraneField | None:
+    if runtime is not None and runtime.membrane is not None:
+        return runtime.membrane
+    return build_membrane_field(
+        modes,
+        panel.length,
+        panel.width,
+        panel.plate_thickness,
+        panel.elastic_modulus,
+        [mode.imperfection for mode in modes],
+        config.membrane_hot_spot_fractions,
+    )
+
+
 def _plate_yield_ratio(
     panel: S3PanelInput,
     modes: Sequence[RitzMode],
@@ -3685,63 +4102,47 @@ def _plate_yield_ratio(
     config: S3SolverConfig,
     runtime: RitzRuntime | None = None,
 ) -> float:
-    modulus = panel.elastic_modulus / (1.0 - panel.poisson_ratio**2)
-    shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
-    z_values = (-0.5 * panel.plate_thickness, 0.5 * panel.plate_thickness)
-    max_ratio = 0.0
-    curvature_family = None if config.include_global_curvature_in_plate_yield else "local"
-    amplitude_array = np.asarray(amplitudes, dtype=float)
+    """Return the redistributed membrane stress control ratio for the plating.
 
-    if runtime is not None:
-        d2x_values = runtime.plate_d2x @ amplitude_array
-        d2y_values = runtime.plate_d2y @ amplitude_array
-        dxy_values = runtime.plate_dxy @ amplitude_array
-        for index, y_fraction in enumerate(runtime.plate_y_fractions):
-            d2x = float(d2x_values[index])
-            d2y = float(d2y_values[index])
-            dxy = float(dxy_values[index])
-            transverse_stress = (
-                panel.transverse_stress_1
-                + (panel.transverse_stress_2 - panel.transverse_stress_1) * float(y_fraction)
-            )
-            for z in z_values:
-                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
-                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
-                bending_tau = -2.0 * shear_modulus * z * dxy
-                vm = _stress_von_mises(
-                    load_factor * panel.axial_stress + bending_x,
-                    load_factor * transverse_stress + bending_y,
-                    load_factor * panel.shear_stress + bending_tau,
-                )
-                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
-        return max_ratio
+    PULS evaluates its plate limit states on the redistributed membrane
+    stresses (mid-plane stresses of each component plate); bending stresses
+    across the plate thickness are explicitly excluded from the yield criteria
+    (PULS User Manual Sec.3.1 and Sec.3.10.1).  The second-order membrane
+    stresses follow from the exact Airy solution of the Marguerre
+    compatibility equation for the Ritz deflection field, evaluated on a grid
+    that includes the supported edges where the redistribution concentrates
+    compression.
+    """
 
-    for x_fraction in config.hot_spot_grid:
-        x = panel.length * x_fraction
-        for y_fraction in config.hot_spot_grid:
-            y = panel.width * y_fraction
-            d2x, d2y, dxy = _mode_curvatures(
-                modes,
-                amplitudes,
-                x,
-                y,
-                family=curvature_family,
-            )
-            transverse_stress = (
-                panel.transverse_stress_1
-                + (panel.transverse_stress_2 - panel.transverse_stress_1) * y_fraction
-            )
-            for z in z_values:
-                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
-                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
-                bending_tau = -2.0 * shear_modulus * z * dxy
-                vm = _stress_von_mises(
-                    load_factor * panel.axial_stress + bending_x,
-                    load_factor * transverse_stress + bending_y,
-                    load_factor * panel.shear_stress + bending_tau,
-                )
-                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
-    return max_ratio
+    field = _plate_membrane_field(panel, modes, config, runtime)
+    if field is None:
+        vm = _stress_von_mises(
+            load_factor * panel.axial_stress,
+            load_factor * panel.mean_transverse_stress,
+            load_factor * panel.shear_stress,
+        )
+        return vm / max(panel.yield_stress_plate, EPS)
+
+    total_deflection = np.asarray(amplitudes, dtype=float) + np.asarray(
+        [mode.imperfection for mode in modes], dtype=float
+    )
+    membrane_amplitudes = _membrane_amplitudes(field, total_deflection)
+    sigma_x2, sigma_y2, tau2 = _membrane_stress_components(field, membrane_amplitudes)
+    sigma_x = load_factor * panel.axial_stress + sigma_x2
+    sigma_y = (
+        load_factor
+        * (
+            panel.transverse_stress_1
+            + (panel.transverse_stress_2 - panel.transverse_stress_1)
+            * field.grid_y_fractions
+        )
+        + sigma_y2
+    )
+    tau = load_factor * panel.shear_stress + tau2
+    von_mises = np.sqrt(
+        np.maximum(sigma_x**2 - sigma_x * sigma_y + sigma_y**2 + 3.0 * tau**2, 0.0)
+    )
+    return float(np.max(von_mises)) / max(panel.yield_stress_plate, EPS)
 
 
 def _u3_plate_yield_ratio(
@@ -3752,66 +4153,48 @@ def _u3_plate_yield_ratio(
     config: S3SolverConfig,
     runtime: RitzRuntime | None = None,
 ) -> float:
-    modulus = panel.elastic_modulus / (1.0 - panel.poisson_ratio**2)
-    shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
-    z_values = (-0.5 * panel.plate_thickness, 0.5 * panel.plate_thickness)
-    max_ratio = 0.0
-    amplitude_array = np.asarray(amplitudes, dtype=float)
+    """Return the redistributed membrane stress control ratio for the plate.
 
-    if runtime is not None:
-        d2x_values = runtime.plate_d2x @ amplitude_array
-        d2y_values = runtime.plate_d2y @ amplitude_array
-        dxy_values = runtime.plate_dxy @ amplitude_array
-        for index, (x_fraction, y_fraction) in enumerate(
-            zip(runtime.plate_x_fractions, runtime.plate_y_fractions)
-        ):
-            axial_stress = (
-                panel.axial_stress_1
-                + (panel.axial_stress_2 - panel.axial_stress_1) * float(x_fraction)
-            )
-            d2x = float(d2x_values[index])
-            d2y = float(d2y_values[index])
-            dxy = float(dxy_values[index])
-            transverse_stress = (
-                panel.transverse_stress_1
-                + (panel.transverse_stress_2 - panel.transverse_stress_1) * float(y_fraction)
-            )
-            for z in z_values:
-                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
-                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
-                bending_tau = -2.0 * shear_modulus * z * dxy
-                vm = _stress_von_mises(
-                    load_factor * axial_stress + bending_x,
-                    load_factor * transverse_stress + bending_y,
-                    load_factor * panel.shear_stress + bending_tau,
-                )
-                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
-        return max_ratio
+    Same membrane-stress limit-state form as the S3 plate criterion, with the
+    linearly varying axial stress interpolated along the plate length.
+    """
 
-    for x_fraction in config.hot_spot_grid:
-        x = panel.length * x_fraction
-        axial_stress = (
-            panel.axial_stress_1
-            + (panel.axial_stress_2 - panel.axial_stress_1) * x_fraction
+    field = _plate_membrane_field(panel, modes, config, runtime)
+    if field is None:
+        vm = _stress_von_mises(
+            load_factor * panel.axial_stress,
+            load_factor * panel.mean_transverse_stress,
+            load_factor * panel.shear_stress,
         )
-        for y_fraction in config.hot_spot_grid:
-            y = panel.width * y_fraction
-            d2x, d2y, dxy = _mode_curvatures(modes, amplitudes, x, y)
-            transverse_stress = (
-                panel.transverse_stress_1
-                + (panel.transverse_stress_2 - panel.transverse_stress_1) * y_fraction
-            )
-            for z in z_values:
-                bending_x = -modulus * z * (d2x + panel.poisson_ratio * d2y)
-                bending_y = -modulus * z * (d2y + panel.poisson_ratio * d2x)
-                bending_tau = -2.0 * shear_modulus * z * dxy
-                vm = _stress_von_mises(
-                    load_factor * axial_stress + bending_x,
-                    load_factor * transverse_stress + bending_y,
-                    load_factor * panel.shear_stress + bending_tau,
-                )
-                max_ratio = max(max_ratio, vm / panel.yield_stress_plate)
-    return max_ratio
+        return vm / max(panel.yield_stress_plate, EPS)
+
+    total_deflection = np.asarray(amplitudes, dtype=float) + np.asarray(
+        [mode.imperfection for mode in modes], dtype=float
+    )
+    membrane_amplitudes = _membrane_amplitudes(field, total_deflection)
+    sigma_x2, sigma_y2, tau2 = _membrane_stress_components(field, membrane_amplitudes)
+    sigma_x = (
+        load_factor
+        * (
+            panel.axial_stress_1
+            + (panel.axial_stress_2 - panel.axial_stress_1) * field.grid_x_fractions
+        )
+        + sigma_x2
+    )
+    sigma_y = (
+        load_factor
+        * (
+            panel.transverse_stress_1
+            + (panel.transverse_stress_2 - panel.transverse_stress_1)
+            * field.grid_y_fractions
+        )
+        + sigma_y2
+    )
+    tau = load_factor * panel.shear_stress + tau2
+    von_mises = np.sqrt(
+        np.maximum(sigma_x**2 - sigma_x * sigma_y + sigma_y**2 + 3.0 * tau**2, 0.0)
+    )
+    return float(np.max(von_mises)) / max(panel.yield_stress_plate, EPS)
 
 
 def u3_yield_utilization(
@@ -3850,15 +4233,37 @@ def _stiffener_effective_axial_stress(
     gross_section: S3SectionProperties,
     stiffener_section: S3SectionProperties,
     load_factor: float,
+    runtime: RitzRuntime | None = None,
+    amplitudes: Sequence[float] | None = None,
 ) -> dict[str, float]:
-    """Return attached-plating effective axial stress for stiffener checks."""
+    """Return attached-plating effective axial stress for stiffener checks.
+
+    When the nonlinear response is available the redistributed membrane edge
+    stress along the plate/stiffener junction lines is added.  Averaging the
+    second-order Airy field along a junction keeps only its ``p = 0``
+    harmonics, which is the analytic form of the load shed from the buckled
+    plating into the stiffeners (compatibility of junction strain).
+    """
 
     nominal_stress = load_factor * panel.axial_stress
     area_factor = gross_section.area / max(stiffener_section.area, EPS)
+    shed_stress = 0.0
+    if (
+        runtime is not None
+        and runtime.membrane is not None
+        and amplitudes is not None
+        and len(amplitudes) == len(runtime.imperfection)
+    ):
+        field = runtime.membrane
+        total_deflection = np.asarray(amplitudes, dtype=float) + runtime.imperfection
+        membrane_amplitudes = _membrane_amplitudes(field, total_deflection)
+        edge_means = field.edge_mean_axial_factors @ membrane_amplitudes
+        shed_stress = float(np.max(edge_means))
     return {
-        "stress": nominal_stress * area_factor,
+        "stress": nominal_stress * area_factor + shed_stress,
         "nominal_stress": nominal_stress,
         "area_factor": area_factor,
+        "membrane_shed_stress": shed_stress,
     }
 
 
@@ -3974,6 +4379,8 @@ def _stiffener_yield_ratios(
         gross_section,
         stiffener_section,
         load_factor,
+        runtime,
+        amplitudes,
     )
     torsional_deformation = _stiffener_torsional_deformation_stress(
         panel,
@@ -4133,6 +4540,8 @@ def _notes() -> list[str]:
         "regular S3 unit strip only; T1, K3, corrugation and FRP are outside this milestone",
         "positive PULS CSV normal stress is compression; signed stresses scale while lateral pressure remains fixed",
         "Rayleigh-Ritz sine modes use a reduced local/global strip basis, not the full production PULS basis",
+        "plate limit state uses redistributed membrane stresses from the exact Marguerre/Airy solution of the reduced deflection field; through-thickness plate bending is excluded per the PULS limit-state definition",
+        "nonlinear membrane stiffness on the continuation path is the energy-consistent von Karman term from the same Airy solution; lateral pressure validity follows the PULS manual linear beam/strip limits",
         "buckling usage is the reduced buckling-strength envelope over ultimate capacity and elastic local/global buckling limits; fixed-pressure material preload contribution is reported in ultimate diagnostics but excluded from buckling-strength control by default",
         "shear-normal Ritz coupling is truncated in elastic and continuation checks; classical local plate shear remains a fallback candidate",
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
@@ -4148,6 +4557,7 @@ def _u3_notes() -> list[str]:
         "positive PULS export normal stress is compression; signed stresses scale while lateral pressure remains fixed",
         "Rayleigh-Ritz sine modes use an isotropic plate basis with simply-supported trigonometric shapes",
         "buckling usage is the reduced buckling-strength envelope over first-yield capacity and elastic plate/shear buckling limits",
+        "plate limit state uses redistributed membrane stresses from the exact Marguerre/Airy solution; through-thickness plate bending is excluded per the PULS limit-state definition, while the manual clamped-strip pressure limit gates lateral pressure",
         "U3 end stresses are interpolated in yield checks and averaged in elastic buckling checks",
         "PULS user manual U3 limits are reported as diagnostics; covered-domain gates remain controlled by solver config",
     ]
@@ -4488,13 +4898,19 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             ),
         },
     }
-    if pressure_yield["max"] >= config.pressure_yield_limit:
+    pressure_limits = s3_pressure_capacity_limits(panel, section)
+    pressure_preload_response["pressure_capacity_limits"] = pressure_limits
+    if (
+        panel.pressure > pressure_limits["minimum"]
+        or pressure_yield["max"] >= config.pressure_yield_limit
+    ):
         return _attach_reliability(
             _invalid_result(
                 "pressure",
                 {
                     "stage": "pressure-preload",
                     "yield_utilization": pressure_yield,
+                    "pressure_capacity_limits": pressure_limits,
                     "pressure_preload_response": pressure_preload_response,
                     "pressure_iterations": pressure_iterations,
                 },
@@ -4509,7 +4925,10 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
     buckling = elastic_buckling_factors(panel, section, modes, config, stiffener_section)
     buckling_factor = buckling["critical_factor"]
     elastic_buckling_usage = None if buckling_factor is None else 1.0 / max(buckling_factor, EPS)
-    column_factor = buckling["stiffener_column_factor"]
+    column_family = buckling["modeled_failure_families"].get("global-stiffener-cutoff", {})
+    column_factor = _optional_float(column_family.get("critical_factor"))
+    if column_factor is None:
+        column_factor = buckling["stiffener_column_factor"]
     global_family = buckling["modeled_failure_families"].get("global-stiffened-strip", {})
     global_elastic_cutoff_factor = _optional_float(global_family.get("critical_factor"))
     s3_major_yield_limit = _s3_major_yield_utilization_limit(config)
@@ -4850,13 +5269,19 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         "yield_utilization": pressure_yield,
         "controlling_yield_branch": "plate",
     }
-    if pressure_yield["max"] >= config.pressure_yield_limit:
+    pressure_limits = u3_pressure_capacity_limit(panel)
+    pressure_preload_response["pressure_capacity_limits"] = pressure_limits
+    if (
+        panel.pressure > pressure_limits["minimum"]
+        or pressure_yield["max"] >= config.pressure_yield_limit
+    ):
         return _attach_reliability(
             _invalid_u3_result(
                 "pressure",
                 {
                     "stage": "pressure-preload",
                     "yield_utilization": pressure_yield,
+                    "pressure_capacity_limits": pressure_limits,
                     "pressure_preload_response": pressure_preload_response,
                     "pressure_iterations": pressure_iterations,
                 },
@@ -5079,5 +5504,3 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         solve_u3_panel,
         validation_reasons,
     )
-
-

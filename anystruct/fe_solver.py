@@ -92,16 +92,32 @@ def _requested_mesh_size(config: LightweightFEMConfig) -> float:
     return size if size > 0.0 else 0.0
 
 
-def _line_divisions(length: float, config: LightweightFEMConfig, fallback: int) -> int:
+def _line_divisions(
+    length: float,
+    config: LightweightFEMConfig,
+    fallback: int,
+    max_element_size: float = 0.0,
+) -> int:
     mesh_size = _requested_mesh_size(config)
+    max_element_size = _positive(max_element_size, 0.0)
+    if max_element_size > 0.0 and (mesh_size <= 0.0 or mesh_size > max_element_size):
+        mesh_size = max_element_size
     if mesh_size > 0.0:
         return max(int(math.ceil(max(length, 1.0e-9) / mesh_size)), 1)
     return max(int(fallback), 1)
 
 
-def _axis_breaks(length: float, divisions: int, mandatory: tuple[float, ...] = ()) -> list[float]:
+def _axis_breaks(
+    length: float,
+    divisions: int,
+    mandatory: tuple[float, ...] = (),
+    max_element_size: float = 0.0,
+) -> list[float]:
     length = max(float(length), 1.0e-9)
     divisions = max(int(divisions), 1)
+    max_element_size = _positive(max_element_size, 0.0)
+    if max_element_size > 0.0:
+        divisions = max(divisions, int(math.ceil(length / max_element_size)))
     values = [length * idx / divisions for idx in range(divisions + 1)]
     tol = max(length * 1.0e-9, 1.0e-9)
     for value in mandatory:
@@ -119,6 +135,29 @@ def _axis_breaks(length: float, divisions: int, mandatory: tuple[float, ...] = (
     clean[0] = 0.0
     clean[-1] = length
     return clean
+
+
+def _positive_spacing(value: object) -> float:
+    try:
+        spacing = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return spacing if spacing > 1.0e-9 else 0.0
+
+
+def _member_positions(total_length: float, spacing: float, fallback_midpoint: bool = True) -> tuple[float, ...]:
+    total_length = max(float(total_length), 1.0e-9)
+    spacing = _positive_spacing(spacing)
+    tol = max(total_length * 1.0e-9, 1.0e-9)
+    positions: list[float] = []
+    if spacing > 0.0:
+        value = spacing
+        while value < total_length - tol and len(positions) < 1000:
+            positions.append(value)
+            value += spacing
+    if not positions and fallback_midpoint:
+        positions = [0.5 * total_length]
+    return tuple(positions)
 
 
 def _index_of_break(breaks: list[float], value: float) -> int:
@@ -261,12 +300,26 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     width = _positive(geometry.get("width_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
     base_div = _production_divisions(config.mesh_fidelity)
-    div_x = _line_divisions(length, config, base_div)
-    div_y = _line_divisions(width, config, base_div)
-    stiffener_y = width / 2.0 if config.include_stiffeners and geometry.get("has_stiffener") else None
-    girder_x = length / 2.0 if config.include_girders and geometry.get("has_girder") else None
-    x_breaks = _axis_breaks(length, div_x, (() if girder_x is None else (girder_x,)))
-    y_breaks = _axis_breaks(width, div_y, (() if stiffener_y is None else (stiffener_y,)))
+    stiffener_spacing = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0))
+    girder_spacing = _positive_spacing(geometry.get("girder_spacing_m", 0.0))
+    member_spacing_cap = min(
+        [value for value in (stiffener_spacing, girder_spacing) if value > 0.0],
+        default=0.0,
+    )
+    stiffener_positions = (
+        _member_positions(width, stiffener_spacing, fallback_midpoint=True)
+        if config.include_stiffeners and geometry.get("has_stiffener")
+        else ()
+    )
+    girder_positions = (
+        _member_positions(length, girder_spacing, fallback_midpoint=True)
+        if config.include_girders and geometry.get("has_girder")
+        else ()
+    )
+    div_x = _line_divisions(length, config, base_div, member_spacing_cap)
+    div_y = _line_divisions(width, config, base_div, member_spacing_cap)
+    x_breaks = _axis_breaks(length, div_x, girder_positions, member_spacing_cap)
+    y_breaks = _axis_breaks(width, div_y, stiffener_positions, member_spacing_cap)
     rows = len(x_breaks)
     cols = len(y_breaks)
 
@@ -302,7 +355,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
 
     beams = []
     beam_id = 20_001
-    if stiffener_y is not None:
+    for stiffener_y in stiffener_positions:
         mid_col = _index_of_break(y_breaks, stiffener_y)
         section = _section_or_default(geometry.get("stiffener_section"), thickness, width, 0.08)
         for row in range(rows - 1):
@@ -316,7 +369,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 }
             )
             beam_id += 1
-    if girder_x is not None:
+    for girder_x in girder_positions:
         mid_row = _index_of_break(x_breaks, girder_x)
         section = _section_or_default(geometry.get("girder_section"), thickness, length, 0.10)
         for col in range(cols - 1):
@@ -370,12 +423,24 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
     circumference = 2.0 * math.pi * radius
+    stiffener_spacing = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0))
     stiffener_count = (
-        _member_count_from_spacing(circumference, _positive(geometry.get("stiffener_spacing_m", 0.0), 0.0))
+        _member_count_from_spacing(circumference, stiffener_spacing)
         if config.include_stiffeners and geometry.get("has_stiffener")
         else 0
     )
+    girder_spacing = (
+        _positive_spacing(geometry.get("girder_spacing_m", 0.0))
+        if config.include_girders and geometry.get("has_girder")
+        else 0.0
+    )
     mesh_size = _requested_mesh_size(config)
+    mesh_size_cap = min(
+        [value for value in (stiffener_spacing, girder_spacing) if value > 0.0],
+        default=0.0,
+    )
+    if mesh_size_cap > 0.0 and (mesh_size <= 0.0 or mesh_size > mesh_size_cap):
+        mesh_size = mesh_size_cap
     if mesh_size > 0.0:
         circumferential_div = max(int(math.ceil(circumference / mesh_size)), 8)
         axial_div = max(int(math.ceil(length / mesh_size)), 2)
@@ -387,7 +452,6 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         circumferential_div = _multiple_at_least(circumferential_div, stiffener_count)
     girder_positions = []
     if config.include_girders and geometry.get("has_girder"):
-        girder_spacing = _positive(geometry.get("girder_spacing_m", 0.0), 0.0)
         if girder_spacing > 1.0e-9:
             pos = girder_spacing
             while pos < length - 1.0e-9 and len(girder_positions) < 100:
@@ -822,6 +886,9 @@ def _run_flat_panel(geometry: dict, config: LightweightFEMConfig) -> Lightweight
     sigma_cr = _plate_critical_stress(config.elastic_modulus_pa, config.poisson_ratio, thickness, short_span)
     buckling_factor = sigma_cr / max(stress, 1.0)
     div = _mesh_divisions(config.mesh_fidelity)
+    spacing_cap = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0)) if geometry.get("has_stiffener") else 0.0
+    if spacing_cap > 0.0:
+        div = max(div, int(math.ceil(max(length, width) / spacing_cap)))
     area = length * width
     return LightweightFEMResult(
         status="ok",
@@ -859,7 +926,12 @@ def _run_cylinder(geometry: dict, config: LightweightFEMConfig) -> LightweightFE
     pcr = _cylinder_critical_pressure(config.elastic_modulus_pa, config.poisson_ratio, thickness, radius)
     buckling_factor = pcr / max(pressure, 1.0)
     div = _mesh_divisions(config.mesh_fidelity)
+    spacing_cap = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0)) if geometry.get("has_stiffener") else 0.0
+    if spacing_cap > 0.0:
+        div = max(div, int(math.ceil((2.0 * math.pi * radius) / spacing_cap)))
     axial_div = max(int(length / max(radius, 1.0e-9) * div / 4), 1)
+    if spacing_cap > 0.0:
+        axial_div = max(axial_div, int(math.ceil(length / spacing_cap)))
     area = 2.0 * math.pi * radius * length
     return LightweightFEMResult(
         status="ok",

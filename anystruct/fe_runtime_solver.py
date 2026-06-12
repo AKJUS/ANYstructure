@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+import queue
 import math
 import os
 import sys
+import threading
 import types
 
 import tkinter as tk
@@ -224,6 +226,7 @@ def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
         "has_stiffener": stiffener is not None,
         "has_girder": girder is not None,
         "stiffener_spacing_m": _safe_float(_read_attr_or_call(plate, "get_s", default=None), 0.0),
+        "girder_spacing_m": _safe_float(_read_attr_or_call(girder, "get_s", "spacing", "s", default=None), 0.0),
     }
 
 
@@ -690,6 +693,10 @@ class RuntimeFEMWindow:
         self.preview_canvas = None
         self.figure_parent = None
         self.display_selector = None
+        self.run_button = None
+        self.progress_bar = None
+        self.solver_thread = None
+        self.solver_queue = queue.Queue()
 
         self._build()
 
@@ -770,7 +777,10 @@ class RuntimeFEMWindow:
 
         buttons = ttk.Frame(left_panel)
         buttons.pack(fill=tk.X, pady=(0, 10))
-        ttk.Button(buttons, text="Run FEM", command=self.run).pack(side=tk.LEFT)
+        self.run_button = ttk.Button(buttons, text="Run FEM", command=self.run)
+        self.run_button.pack(side=tk.LEFT)
+        self.progress_bar = ttk.Progressbar(buttons, mode="indeterminate", length=140)
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
         ttk.Button(buttons, text="Close", command=self.window.destroy).pack(side=tk.RIGHT)
 
         status_frame = ttk.LabelFrame(left_panel, text="Run status")
@@ -948,6 +958,15 @@ class RuntimeFEMWindow:
         self.result_text.delete("1.0", tk.END)
         self.result_text.insert(tk.END, text)
 
+    def _set_solver_running(self, is_running: bool) -> None:
+        if self.run_button is not None:
+            self.run_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
+        if self.progress_bar is not None:
+            if is_running:
+                self.progress_bar.start(12)
+            else:
+                self.progress_bar.stop()
+
     def _options(self) -> RuntimeFEMOptions:
         return RuntimeFEMOptions(
             mesh_fidelity=str(self.mesh_fidelity.get()),
@@ -963,10 +982,41 @@ class RuntimeFEMWindow:
     def run(self) -> None:
         """Prepare/run the runtime FEM request and render Matplotlib results."""
 
+        if self.solver_thread is not None and self.solver_thread.is_alive():
+            return
         if not self.include_stiffeners.get() and not self.include_girders.get():
             messagebox.showwarning("FEM solver", "At least one member beam family should normally be included.")
 
-        result = run_runtime_fem(self.snapshot, self._options())
+        options = self._options()
+        self._set_solver_running(True)
+        self._write_status("Running FEM solver...\n\n" + "The result plot will update when the solver finishes.")
+
+        def worker() -> None:
+            try:
+                self.solver_queue.put((run_runtime_fem(self.snapshot, options), None))
+            except Exception as error:
+                self.solver_queue.put((None, error))
+
+        self.solver_thread = threading.Thread(target=worker, daemon=True)
+        self.solver_thread.start()
+        self.window.after(100, self._poll_solver_result)
+
+    def _poll_solver_result(self) -> None:
+        try:
+            result, error = self.solver_queue.get_nowait()
+        except queue.Empty:
+            if self.solver_thread is not None and self.solver_thread.is_alive():
+                self.window.after(100, self._poll_solver_result)
+                return
+            self._set_solver_running(False)
+            return
+
+        self._set_solver_running(False)
+        if error is not None:
+            self._write_status("Runtime FEM failed:\n" + str(error))
+            messagebox.showerror("FEM solver", str(error))
+            return
+
         self.current_result = result
         self._set_display_modes(result)
         self._write_status(format_runtime_fem_result(result))

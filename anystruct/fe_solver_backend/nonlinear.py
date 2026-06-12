@@ -124,9 +124,13 @@ def solve_nonlinear_load_stepping(
 ) -> NonlinearLimitPointResult:
     """Run proportional load stepping and stop near the first limit point.
 
-    The tangent matrix is linearized as ``KT(lambda) = K - lambda KG``.  This
-    is a controlled stability check for the current linear elastic/geometric
-    stiffness theory, not a post-buckling continuation method.
+    The tangent matrix is linearized as ``KT(lambda) = K - lambda KG``.  Each
+    step solves the tangent system ``KT(lambda) q = lambda F``, so the reported
+    displacements follow the classical linearized pre-buckling amplification
+    and grow super-linearly as the limit point is approached.  This is a
+    controlled stability check for the current linear elastic/geometric
+    stiffness theory, not a post-buckling continuation method; past the limit
+    point the tangent is indefinite and displacements are not meaningful.
     """
     if num_steps <= 0:
         raise ValueError("num_steps must be positive")
@@ -192,9 +196,10 @@ def solve_nonlinear_load_stepping(
 
     for step_index, load_factor in enumerate(load_factors, start=1):
         rhs = float(load_factor) * F_red
+        KT_red = (K_red - float(load_factor) * KG_red).tocsr()
         try:
             with np.errstate(all="ignore"):
-                q = np.asarray(spsolve(K_red, rhs), dtype=float).reshape(-1)
+                q = np.asarray(spsolve(KT_red, rhs), dtype=float).reshape(-1)
         except Exception:
             status = "solver_failed"
             break
@@ -203,7 +208,7 @@ def solve_nonlinear_load_stepping(
             break
 
         u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
-        residual = np.asarray(K_red @ q - rhs, dtype=float).reshape(-1)
+        residual = np.asarray(KT_red @ q - rhs, dtype=float).reshape(-1)
         tangent_min = _minimum_tangent_eigenvalue(K_dense, KG_dense, float(load_factor))
         stability_index = tangent_min / initial_min
 

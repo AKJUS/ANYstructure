@@ -132,13 +132,18 @@ class StiffenerCrossSection:
     J: float
     shear_factor_y: float = 5.0 / 6.0
     shear_factor_z: float = 5.0 / 6.0
+    c_y: float = 0.0
+    c_z: float = 0.0
+    torsion_modulus: float = 0.0
 
     @staticmethod
     def _composite_rectangles(
         rectangles: List[Tuple[float, float, float, float]],
-    ) -> Tuple[float, float, float]:
+    ) -> Tuple[float, float, float, float, float]:
         """
-        Return A, Iy, Iz for rectangles described by y, z, width_y, height_z.
+        Return A, Iy, Iz, c_y, c_z for rectangles described by
+        y, z, width_y, height_z, with c_y/c_z the extreme fiber distances
+        from the centroid.
         """
         areas = np.asarray([width * height for _y, _z, width, height in rectangles], dtype=float)
         total_area = max(float(np.sum(areas)), 1.0e-30)
@@ -151,38 +156,47 @@ class StiffenerCrossSection:
 
         Iy = 0.0
         Iz = 0.0
+        c_y = 0.0
+        c_z = 0.0
         for area, (y, z, width, height) in zip(areas, rectangles):
             Iy += width * height**3 / 12.0 + area * (z - z_centroid) ** 2
             Iz += height * width**3 / 12.0 + area * (y - y_centroid) ** 2
-        return total_area, Iy, Iz
+            c_y = max(c_y, abs(y - y_centroid) + width / 2.0)
+            c_z = max(c_z, abs(z - z_centroid) + height / 2.0)
+        return total_area, Iy, Iz, c_y, c_z
 
     @classmethod
     def from_geometry(cls, stiffener_type: str, hw: float, tw: float, b: float, tf: float) -> "StiffenerCrossSection":
+        # Open thin-walled torsion: J = sum(l*t^3)/3 and tau_max = T*t_max/J,
+        # so the torsional section modulus is Wt = J / t_max.
         if stiffener_type == "T-bar":
-            A, Iy, Iz = cls._composite_rectangles(
+            A, Iy, Iz, c_y, c_z = cls._composite_rectangles(
                 [
                     (0.0, hw / 2.0, tw, hw),
                     (0.0, hw + tf / 2.0, b, tf),
                 ]
             )
             J = (hw * tw**3 + b * tf**3) / 3.0
-            return cls(area=A, Iy=Iy, Iz=Iz, J=J)
-        if stiffener_type in ("L-bulb", "Angle"):
-            A, Iy, Iz = cls._composite_rectangles(
+            t_max = max(tw, tf)
+        elif stiffener_type in ("L-bulb", "Angle"):
+            A, Iy, Iz, c_y, c_z = cls._composite_rectangles(
                 [
                     (tw / 2.0, hw / 2.0, tw, hw),
                     (b / 2.0, hw + tf / 2.0, b, tf),
                 ]
             )
             J = (hw * tw**3 + b * tf**3) / 3.0
-            return cls(area=A, Iy=Iy, Iz=Iz, J=J)
-        if stiffener_type == "Flatbar":
-            A, Iy, Iz = cls._composite_rectangles([(0.0, 0.0, b, tf)])
+            t_max = max(tw, tf)
+        elif stiffener_type == "Flatbar":
+            A, Iy, Iz, c_y, c_z = cls._composite_rectangles([(0.0, 0.0, b, tf)])
             J = b * tf**3 / 3.0
-            return cls(area=A, Iy=Iy, Iz=Iz, J=J)
-        A, Iy, Iz = cls._composite_rectangles([(0.0, hw / 2.0, tw, hw)])
-        J = hw * tw**3 / 3.0
-        return cls(area=A, Iy=Iy, Iz=Iz, J=J)
+            t_max = min(b, tf)
+        else:
+            A, Iy, Iz, c_y, c_z = cls._composite_rectangles([(0.0, hw / 2.0, tw, hw)])
+            J = hw * tw**3 / 3.0
+            t_max = tw
+        torsion_modulus = J / max(t_max, 1.0e-30)
+        return cls(area=A, Iy=Iy, Iz=Iz, J=J, c_y=c_y, c_z=c_z, torsion_modulus=torsion_modulus)
 
 
 class InterpolatedBeamShellMPCElement:
@@ -253,6 +267,9 @@ class InterpolatedBeamShellMPCElement:
 
     def compute_geometric_stiffness_matrix(self, mesh: "FEMesh", material: "Material", state: Any = None) -> np.ndarray:
         return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
+
+    def compute_stresses(self, mesh: "FEMesh", displacements: np.ndarray, material: "Material") -> Dict[str, np.ndarray]:
+        return {}
 
     def get_mpc_constraints(self, mesh: "FEMesh") -> List[Dict[str, Any]]:
         beam_node = mesh.get_node(self.beam_node_id)
@@ -452,6 +469,13 @@ def _stiffener_cross_section_dict(panel: PanelGeometry) -> Dict[str, float]:
         "J": cross_section.J,
         "shear_factor_y": cross_section.shear_factor_y,
         "shear_factor_z": cross_section.shear_factor_z,
+        "c_y": cross_section.c_y,
+        "c_z": cross_section.c_z,
+        "torsion_modulus": cross_section.torsion_modulus,
+        # Section local z (web direction): the panel lies in the global z=0
+        # plane with stiffener webs pointing in +Z.  This pins the beam local
+        # frame so Iy/Iz keep the meaning used by StiffenerCrossSection.
+        "orientation": (0.0, 0.0, 1.0),
     }
 
 
