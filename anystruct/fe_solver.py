@@ -43,6 +43,7 @@ class LightweightFEMConfig:
     load_scale: float = 1.0
     include_stiffeners: bool = True
     include_girders: bool = True
+    include_end_lids: bool = False
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
@@ -302,8 +303,18 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     base_div = _production_divisions(config.mesh_fidelity)
     stiffener_spacing = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0))
     girder_spacing = _positive_spacing(geometry.get("girder_spacing_m", 0.0))
+    active_stiffener_spacing = (
+        stiffener_spacing
+        if config.include_stiffeners and geometry.get("has_stiffener")
+        else 0.0
+    )
+    active_girder_spacing = (
+        girder_spacing
+        if config.include_girders and geometry.get("has_girder")
+        else 0.0
+    )
     member_spacing_cap = min(
-        [value for value in (stiffener_spacing, girder_spacing) if value > 0.0],
+        [value for value in (active_stiffener_spacing, active_girder_spacing) if value > 0.0],
         default=0.0,
     )
     stiffener_positions = (
@@ -424,6 +435,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
     circumference = 2.0 * math.pi * radius
     stiffener_spacing = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0))
+    active_stiffener_spacing = (
+        stiffener_spacing
+        if config.include_stiffeners and geometry.get("has_stiffener")
+        else 0.0
+    )
     stiffener_count = (
         _member_count_from_spacing(circumference, stiffener_spacing)
         if config.include_stiffeners and geometry.get("has_stiffener")
@@ -436,7 +452,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     )
     mesh_size = _requested_mesh_size(config)
     mesh_size_cap = min(
-        [value for value in (stiffener_spacing, girder_spacing) if value > 0.0],
+        [value for value in (active_stiffener_spacing, girder_spacing) if value > 0.0],
         default=0.0,
     )
     if mesh_size_cap > 0.0 and (mesh_size <= 0.0 or mesh_size > mesh_size_cap):
@@ -530,16 +546,33 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
 
     start_ring = [node_id(0, col) for col in range(cols)]
     end_ring = [node_id(rows - 1, col) for col in range(cols)]
+    rigid_lids = []
+    supports = [
+        {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0}},
+        {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
+        {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
+    ]
+    if config.include_end_lids:
+        bottom_center = rows * cols + 1
+        top_center = bottom_center + 1
+        nodes.extend(
+            [
+                {"id": bottom_center, "coords": [0.0, 0.0, 0.0]},
+                {"id": top_center, "coords": [0.0, 0.0, length]},
+            ]
+        )
+        rigid_lids = [
+            {"id": 40_001, "name": "bottom_rigid_lid", "center_node_id": bottom_center, "ring_node_ids": start_ring},
+            {"id": 40_002, "name": "top_rigid_lid", "center_node_id": top_center, "ring_node_ids": end_ring},
+        ]
+        supports = []
     return {
         "name": "ANYstructureCylinderFullMesh",
         "nodes": nodes,
         "shells": shells,
         "beams": beams,
-        "supports": [
-            {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0}},
-            {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
-            {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
-        ],
+        "rigid_lids": rigid_lids,
+        "supports": supports,
         "materials": [
             {
                 "name": "steel",
@@ -791,6 +824,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         "ANYstructure production FE mesh backend.",
         "Generated shells and stiffener/girder beams from active-line geometry.",
     ]
+    if config.include_end_lids and geometry.get("geometry") == "cylinder":
+        diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if config.top_bottom_moment_nm:
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
 
@@ -858,6 +893,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             "nodes": int(model.mesh.num_nodes),
             "shells": int(len(generated_geometry.get("shells", []))),
             "beams": int(len(generated_geometry.get("beams", []))),
+            "rigid_lids": int(len(generated_geometry.get("rigid_lids", []))),
         },
         prestress_summary=dict(prestress_summary or {}),
         load_resultant=_resultant_dict(load_resultant),

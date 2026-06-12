@@ -314,6 +314,106 @@ class InterpolatedBeamShellMPCElement:
         ]
 
 
+class RigidLidMPCElement:
+    """
+    Constraint-only rigid end diaphragm.
+
+    The element ties an end ring to a free center reference node using rigid-body
+    kinematics. It adds local end-ring stiffness without adding lid shell
+    elements, so lid stresses and lid pressure loads are not recovered.
+    """
+
+    def __init__(
+        self,
+        element_id: int,
+        center_node_id: int,
+        ring_node_ids: List[int],
+        material_name: str = "steel",
+    ):
+        self.element_id = int(element_id)
+        self.center_node_id = int(center_node_id)
+        self.ring_node_ids = [int(node_id) for node_id in ring_node_ids if int(node_id) != int(center_node_id)]
+        self.material_name = material_name
+        self.node_ids = [self.center_node_id] + self.ring_node_ids
+
+    @property
+    def num_nodes(self) -> int:
+        return len(self.node_ids)
+
+    @property
+    def dofs_per_node(self) -> int:
+        return 6
+
+    @property
+    def total_dofs(self) -> int:
+        return self.num_nodes * self.dofs_per_node
+
+    def get_node_coordinates(self, mesh: "FEMesh") -> np.ndarray:
+        coords = []
+        for node_id in self.node_ids:
+            node = mesh.get_node(node_id)
+            if node is None:
+                raise ValueError(f"Rigid lid element {self.element_id} references missing node {node_id}")
+            coords.append(node.coords())
+        return np.asarray(coords, dtype=float)
+
+    def get_dof_mapping(self, mesh: "FEMesh") -> List[int]:
+        return []
+
+    def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
+        return np.zeros((0, 0), dtype=float)
+
+    def compute_mass_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
+        return np.zeros((0, 0), dtype=float)
+
+    def compute_geometric_stiffness_matrix(self, mesh: "FEMesh", material: "Material", state: Any = None) -> np.ndarray:
+        return np.zeros((0, 0), dtype=float)
+
+    def compute_stresses(self, mesh: "FEMesh", displacements: np.ndarray, material: "Material") -> Dict[str, np.ndarray]:
+        return {}
+
+    @staticmethod
+    def _nonzero_masters(items: Dict[int, float]) -> Dict[int, float]:
+        return {int(dof): float(value) for dof, value in items.items() if abs(float(value)) > 0.0}
+
+    def get_mpc_constraints(self, mesh: "FEMesh") -> List[Dict[str, Any]]:
+        center = mesh.get_node(self.center_node_id)
+        if center is None:
+            return []
+        center_dofs = center.dofs
+        constraints: List[Dict[str, Any]] = []
+        for ring_node_id in self.ring_node_ids:
+            node = mesh.get_node(ring_node_id)
+            if node is None:
+                continue
+            rx, ry, rz = (node.coords() - center.coords()).tolist()
+            node_dofs = node.dofs
+            translation_masters = (
+                {center_dofs[0]: 1.0, center_dofs[4]: rz, center_dofs[5]: -ry},
+                {center_dofs[1]: 1.0, center_dofs[3]: -rz, center_dofs[5]: rx},
+                {center_dofs[2]: 1.0, center_dofs[3]: ry, center_dofs[4]: -rx},
+            )
+            for local_index, masters in enumerate(translation_masters):
+                constraints.append(
+                    {
+                        "slave": node_dofs[local_index],
+                        "masters": self._nonzero_masters(masters),
+                        "value": 0.0,
+                        "label": f"rigid_lid_{self.element_id}_u{local_index + 1}",
+                    }
+                )
+            for local_index in range(3, 6):
+                constraints.append(
+                    {
+                        "slave": node_dofs[local_index],
+                        "masters": {center_dofs[local_index]: 1.0},
+                        "value": 0.0,
+                        "label": f"rigid_lid_{self.element_id}_r{local_index - 2}",
+                    }
+                )
+        return constraints
+
+
 def _safe_divisions(value: int) -> int:
     return max(int(value), 1)
 

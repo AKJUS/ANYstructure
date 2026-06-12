@@ -57,6 +57,7 @@ class RuntimeFEMOptions:
     load_scale: float = 1.0
     include_stiffeners: bool = True
     include_girders: bool = True
+    include_end_lids: bool = True
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
@@ -270,6 +271,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         load_scale=options.load_scale,
         include_stiffeners=options.include_stiffeners,
         include_girders=options.include_girders,
+        include_end_lids=options.include_end_lids,
         num_buckling_modes=options.num_buckling_modes,
         mesh_size_m=options.mesh_size_m,
         top_bottom_moment_nm=options.top_bottom_moment_nm,
@@ -292,6 +294,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "pressure_pa": float(options.pressure_pa) * float(options.load_scale),
         "include_stiffeners": bool(options.include_stiffeners),
         "include_girders": bool(options.include_girders),
+        "include_end_lids": bool(options.include_end_lids),
         "num_buckling_modes": int(options.num_buckling_modes),
         "mesh_size_m": float(options.mesh_size_m),
         "top_bottom_moment_nm": float(options.top_bottom_moment_nm),
@@ -625,6 +628,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Top/bottom moment [Nm]: " + str(round(_safe_float(summary.get("top_bottom_moment_nm")), 3)),
         "Include stiffener beams: " + str(bool(summary.get("include_stiffeners"))),
         "Include girder/frame beams: " + str(bool(summary.get("include_girders"))),
+        "Include top/bottom lid: " + str(bool(summary.get("include_end_lids"))),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
         "Max displacement [mm]: " + str(round(1000.0 * _safe_float(summary.get("max_displacement_m")), 4)),
     ]
@@ -638,6 +642,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             " - nodes: " + str(mesh_info.get("nodes", 0)),
             " - shells: " + str(mesh_info.get("shells", 0)),
             " - beams: " + str(mesh_info.get("beams", 0)),
+            " - rigid lids: " + str(mesh_info.get("rigid_lids", 0)),
         ])
     prestress = summary.get("prestress_summary") or {}
     if prestress:
@@ -683,6 +688,7 @@ class RuntimeFEMWindow:
         self.top_bottom_moment_nm = tk.DoubleVar(value=_safe_float(getattr(app, "_fem_default_top_bottom_moment_nm", 0.0)))
         self.include_stiffeners = tk.BooleanVar(value=True)
         self.include_girders = tk.BooleanVar(value=True)
+        self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
         self.num_buckling_modes = tk.IntVar(value=5)
         self.display_choice = tk.StringVar(value="Static displacement/stress")
         self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
@@ -772,8 +778,11 @@ class RuntimeFEMWindow:
         ttk.Checkbutton(options, text="Include girder/frame beams", variable=self.include_girders).grid(
             row=3, column=2, columnspan=2, sticky=tk.W, padx=8, pady=6
         )
-        ttk.Label(options, text="Buckling modes").grid(row=4, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.num_buckling_modes, width=8).grid(row=4, column=1, sticky=tk.W, padx=8, pady=6)
+        ttk.Checkbutton(options, text="Top/bottom lid", variable=self.include_end_lids).grid(
+            row=4, column=0, columnspan=2, sticky=tk.W, padx=8, pady=6
+        )
+        ttk.Label(options, text="Buckling modes").grid(row=5, column=0, sticky=tk.W, padx=8, pady=6)
+        ttk.Entry(options, textvariable=self.num_buckling_modes, width=8).grid(row=5, column=1, sticky=tk.W, padx=8, pady=6)
 
         buttons = ttk.Frame(left_panel)
         buttons.pack(fill=tk.X, pady=(0, 10))
@@ -974,6 +983,7 @@ class RuntimeFEMWindow:
             load_scale=_safe_float(self.load_scale.get(), 1.0),
             include_stiffeners=bool(self.include_stiffeners.get()),
             include_girders=bool(self.include_girders.get()),
+            include_end_lids=bool(self.include_end_lids.get()),
             num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
             mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
             top_bottom_moment_nm=_safe_float(self.top_bottom_moment_nm.get(), 0.0),

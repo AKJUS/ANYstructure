@@ -143,6 +143,9 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)" in source
     assert "self.run_button = ttk.Button(buttons, text=\"Run FEM\", command=self.run)" in source
     assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
+    assert "self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))" in source
+    assert "ttk.Checkbutton(options, text=\"Top/bottom lid\", variable=self.include_end_lids)" in source
+    assert "include_end_lids=bool(self.include_end_lids.get())" in source
     assert "self.progress_bar.start(12)" in source
     assert "threading.Thread(target=worker, daemon=True)" in source
     assert "self.window.after(100, self._poll_solver_result)" in source
@@ -314,6 +317,36 @@ def test_flat_generated_mesh_caps_element_size_to_stiffener_spacing():
     assert max(b - a for a, b in zip(y_values, y_values[1:])) <= spacing + 1.0e-9
 
 
+def test_flat_mesh_size_is_not_capped_by_disabled_members():
+    requested = 3.0
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "flat panel",
+            "length_m": 10.0,
+            "width_m": 2.0,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": True,
+            "stiffener_spacing_m": 0.5,
+            "girder_spacing_m": 0.5,
+        },
+        fe_solver.LightweightFEMConfig(
+            mesh_size_m=requested,
+            include_stiffeners=False,
+            include_girders=False,
+        ),
+    )
+
+    coords = {node["id"]: tuple(node["coords"]) for node in generated["nodes"]}
+    x_values = sorted({coords[node_id][0] for node_id in coords})
+    y_values = sorted({coords[node_id][1] for node_id in coords})
+
+    assert not generated["beams"]
+    assert max(b - a for a, b in zip(x_values, x_values[1:])) <= requested + 1.0e-9
+    assert max(b - a for a, b in zip(y_values, y_values[1:])) <= requested + 1.0e-9
+    assert max(b - a for a, b in zip(x_values, x_values[1:])) > 0.5
+
+
 def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_coarse():
     generated = fe_solver.build_generated_geometry(
         {
@@ -359,6 +392,84 @@ def test_cylinder_generated_mesh_caps_axial_and_circumferential_size_to_stiffene
 
     assert circumferential_segment <= spacing + 1.0e-9
     assert max(b - a for a, b in zip(axial_values, axial_values[1:])) <= spacing + 1.0e-9
+
+
+def test_cylinder_mesh_size_is_not_capped_by_disabled_members():
+    requested = 3.0
+    radius = 2.0
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "cylinder",
+            "radius_m": radius,
+            "length_m": 8.0,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": True,
+            "stiffener_spacing_m": 0.5,
+            "girder_spacing_m": 0.5,
+        },
+        fe_solver.LightweightFEMConfig(
+            mesh_size_m=requested,
+            include_stiffeners=False,
+            include_girders=False,
+        ),
+    )
+
+    row_node_ids = generated["plot_grid"][0][:-1]
+    axial_values = sorted({node["coords"][2] for node in generated["nodes"]})
+    circumferential_segment = 2.0 * math.pi * radius / len(row_node_ids)
+
+    assert not generated["beams"]
+    assert circumferential_segment <= requested + 1.0e-9
+    assert max(b - a for a, b in zip(axial_values, axial_values[1:])) <= requested + 1.0e-9
+    assert circumferential_segment > 0.5
+    assert max(b - a for a, b in zip(axial_values, axial_values[1:])) > 0.5
+
+
+def test_cylinder_end_lids_are_stress_free_rigid_diaphragms():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 2.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    open_generated = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", include_end_lids=False),
+    )
+    lidded_generated = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", include_end_lids=True),
+    )
+
+    assert len(lidded_generated["shells"]) == len(open_generated["shells"])
+    assert len(lidded_generated["nodes"]) == len(open_generated["nodes"]) + 2
+    assert len(lidded_generated["rigid_lids"]) == 2
+    bottom_lid, top_lid = lidded_generated["rigid_lids"]
+    assert lidded_generated["supports"] == []
+
+    backend = fe_solver.full_backend_api()
+    backend_config = backend.AnyStructureFEMConfig(pressure_pa=1000.0, require_idealized_member_beams=False)
+    model = backend.build_fe_model_from_generated_geometry(lidded_generated, backend_config)
+    load_case = backend.build_symmetric_load_case(None, model, backend_config)
+    displacements, solver_info = backend.solve_linear(model, load_case, solver_type="direct", constraint_mode="auto")
+    lid_elements = [
+        element
+        for element in model.mesh.elements.values()
+        if element.__class__.__name__ == "RigidLidMPCElement"
+    ]
+
+    assert len(lid_elements) == 2
+    assert len(load_case.pressure_loads) == len(lidded_generated["shells"])
+    assert not ({element.element_id for element in lid_elements} & set(load_case.pressure_loads))
+    assert sum(len(element.get_mpc_constraints(model.mesh)) for element in lid_elements) > 0
+    assert solver_info["convergence_info"]["status"] == "converged"
+    assert solver_info["constraint_method"] == "transformation_fixed_plus_mpc_nullspace"
+    assert solver_info["constraint_info"]["num_fixed_dofs"] == 0
+    assert displacements[model.mesh.get_node(top_lid["center_node_id"]).dofs[2]] != 0.0
+    assert displacements[model.mesh.get_node(bottom_lid["center_node_id"]).dofs[2]] != 0.0
 
 
 def test_generated_cylinder_mesh_honors_mesh_size_and_middle_t_ring_girder():
