@@ -2241,6 +2241,7 @@ class Application():
 
         self._simplified_calculation_mode = True
         self._activate_simplified_calculation_pipeline()
+        self._place_3d_section_view_checkbox()
         self._place_runtime_fem_button()
 
     def switch_to_multiple_calculation_mode(self):
@@ -2252,6 +2253,7 @@ class Application():
         self.clear_prop_3d()
         self._select_single_calculation_line()
         self.update_frame(force_recalc=True)
+        self._place_3d_section_view_checkbox()
         try:
             self.gui_load_combinations(self._combination_slider.get())
         except Exception:
@@ -9287,6 +9289,26 @@ class Application():
         if getattr(self, '_simplified_calculation_mode', False):
             self.draw_prepomax_imperfection_recommendations()
 
+    def create_prop_3d_figure_for_line(self, line_name=None):
+        """Return the same 3D property-preview figure used by the main canvas."""
+        selected_line = line_name or self._active_line
+        if selected_line not in self._line_to_struc:
+            return None
+
+        previous_line = self._active_line
+        previous_line_is_active = self._line_is_active
+        self._active_line = selected_line
+        self._line_is_active = True
+        try:
+            if not getattr(self, '_simplified_calculation_mode', False):
+                self.set_selected_variables(selected_line)
+            if self._line_to_struc[selected_line][5] is not None:
+                return self.draw_cylinder_prop_3d(self._line_to_struc[selected_line][5], embed=False)
+            return self.draw_flat_panel_prop_3d(self._line_to_struc[selected_line][0], embed=False)
+        finally:
+            self._active_line = previous_line
+            self._line_is_active = previous_line_is_active
+
     def draw_prepomax_imperfection_recommendations(self):
         """Draw DNVGL-OS-C401 imperfection guidance for PrePoMax in the lower pane."""
         canvas = self._prop_canvas
@@ -9601,14 +9623,14 @@ class Application():
         self._draw_dimension_line(canvas, left + 18, template_y - 14, right - 18, template_y - 14, 'g')
         self._draw_delta_arrow(canvas, mid, base_y + 8, mid, base_y - 24)
 
-    def draw_flat_panel_prop_3d(self, all_obj):
+    def draw_flat_panel_prop_3d(self, all_obj, embed=True):
         """Draw flat plate, stiffener and optional girder as extruded 3D preview solids."""
         plate = all_obj.Plate
         stiffener = all_obj.Stiffener
         girder = all_obj.Girder
 
         if plate is None:
-            return
+            return None
 
         spacing = max(float(plate.get_s()), 1e-6)
         plate_thk = max(float(plate.get_pl_thk()), 1e-6)
@@ -9743,7 +9765,10 @@ class Application():
         self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top - z_bottom, zoom=1.52)
         ax.view_init(elev=22, azim=-55)
 
+        if not embed:
+            return fig, ax, (22, -55)
         self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
+        return fig, ax, (22, -55)
 
     def _add_cylinder_longitudinal_stiffener_3d(self, ax, radius, length, angle, dims, side_sign=1.0):
         """Draw a simplified longitudinal stiffener on a shell as radial web + outer flange."""
@@ -9839,7 +9864,7 @@ class Application():
                 ax, shell_radius * np.cos(theta_grid), shell_radius * np.sin(theta_grid), z_grid,
                 shell_model=True)
 
-    def draw_cylinder_prop_3d(self, cyl_obj):
+    def draw_cylinder_prop_3d(self, cyl_obj, embed=True):
         """Draw shell/curved plate with optional longitudinal stiffeners, ring stiffeners and ring frames."""
         shell = cyl_obj.ShellObj
         is_conical_preview = cyl_obj.geometry == 9
@@ -9990,7 +10015,10 @@ class Application():
         self._apply_prop_3d_layout(fig, ax, layout_width, layout_depth, max(length, 1e-6), zoom=1.32)
         ax.view_init(elev=20, azim=-45)
 
+        if not embed:
+            return fig, ax, (22, -55)
         self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
+        return fig, ax, (22, -55)
 
     def draw_prop(self, event=None):
         '''

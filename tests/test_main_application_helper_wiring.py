@@ -134,9 +134,16 @@ def test_functional_modes_keep_3d_section_checkbox_visible():
     source = main_source.read_text(encoding="utf-8")
 
     assert "def _place_3d_section_view_checkbox(self):" in source
+    assert "def create_prop_3d_figure_for_line(self, line_name=None):" in source
+    assert "self.draw_cylinder_prop_3d(self._line_to_struc[selected_line][5], embed=False)" in source
+    assert "self.draw_flat_panel_prop_3d(self._line_to_struc[selected_line][0], embed=False)" in source
     assert "self._chk_show_prop_3d.place(relx=0.637, rely=0.705)" in source
     assert "self._chk_show_prop_3d.lift()" in source
     assert source.count("self._place_3d_section_view_checkbox()") >= 3
+    single_mode_source = source[source.index("def switch_to_single_calculation_mode"):source.index("def switch_to_multiple_calculation_mode")]
+    multiple_mode_source = source[source.index("def switch_to_multiple_calculation_mode"):source.index("def switch_to_fea_result_buckling_mode")]
+    assert "self._place_3d_section_view_checkbox()" in single_mode_source
+    assert "self._place_3d_section_view_checkbox()" in multiple_mode_source
 
 
 def test_help_tab_includes_cylinder_panel_buckling_image():

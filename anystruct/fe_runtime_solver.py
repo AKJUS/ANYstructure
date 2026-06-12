@@ -13,6 +13,7 @@ from typing import Any
 import math
 import os
 import sys
+import types
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -222,6 +223,7 @@ def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
         "thickness_m": _safe_float(_read_attr_or_call(plate, "get_pl_thk", default=None), 0.0),
         "has_stiffener": stiffener is not None,
         "has_girder": girder is not None,
+        "stiffener_spacing_m": _safe_float(_read_attr_or_call(plate, "get_s", default=None), 0.0),
     }
 
 
@@ -238,6 +240,9 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
         "thickness_m": _safe_float(_read_attr_or_call(shell, "thk", default=None), 0.0),
         "has_stiffener": stiffener is not None,
         "has_girder": girder is not None,
+        "stiffener_spacing_m": _safe_float(_read_attr_or_call(stiffener, "get_s", "spacing", "s", default=None), 0.0),
+        "ring_spacing_m": _safe_float(_read_attr_or_call(shell, "_dist_between_rings", "dist_between_rings", default=None), 0.0),
+        "girder_spacing_m": _safe_float(_read_attr_or_call(cyl_obj, "length_between_girders", default=None), 0.0),
         "stiffener_section": _member_section(stiffener),
         "girder_section": _member_section(girder),
     }
@@ -321,7 +326,7 @@ def _all_grid_values(grid: list[list[float]]) -> list[float]:
 def _surface_facecolors(values_grid: list[list[float]]):
     values = _all_grid_values(values_grid) or [0.0]
     norm = mcolors.Normalize(vmin=min(values), vmax=max(values) if max(values) > min(values) else min(values) + 1.0)
-    cmap = colormaps["viridis"]
+    cmap = colormaps["jet"]
     return [[cmap(norm(value)) for value in row] for row in values_grid], norm, cmap
 
 
@@ -517,6 +522,91 @@ def create_runtime_fem_result_figure(
     return figure
 
 
+def create_runtime_fem_geometry_preview_figure(snapshot: RuntimeFEMLineSnapshot, app: Any | None = None) -> Figure:
+    """Create the 3D geometry preview shown in the runtime FEM popup."""
+
+    if app is not None and hasattr(app, "create_prop_3d_figure_for_line"):
+        try:
+            preview = app.create_prop_3d_figure_for_line(snapshot.line_name)
+            if isinstance(preview, tuple) and preview:
+                figure = preview[0]
+                if isinstance(figure, Figure):
+                    return figure
+        except Exception:
+            pass
+
+    geometry = runtime_geometry_summary(snapshot)
+    figure = Figure(figsize=(3.0, 2.05), dpi=100)
+    axis = figure.add_subplot(111, projection="3d")
+
+    if snapshot.is_cylinder:
+        radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        theta = np.linspace(0.0, 2.0 * math.pi, 38)
+        z = np.linspace(0.0, length, 8)
+        theta_grid, z_grid = np.meshgrid(theta, z)
+        x_grid = radius * np.cos(theta_grid)
+        y_grid = radius * np.sin(theta_grid)
+        axis.plot_surface(
+            x_grid,
+            y_grid,
+            z_grid,
+            color="#c7d2fe",
+            edgecolor="#64748b",
+            linewidth=0.12,
+            alpha=0.78,
+            shade=False,
+        )
+        axis.set_xlabel("x", fontsize=6)
+        axis.set_ylabel("y", fontsize=6)
+        axis.set_zlabel("L", fontsize=6)
+        try:
+            axis.set_box_aspect((1.0, 1.0, max(length / max(2.0 * radius, 1.0e-6), 0.35)))
+        except Exception:
+            pass
+    else:
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
+        thickness = max(_safe_float(geometry.get("thickness_m"), 0.0), 0.0)
+        x_grid, y_grid = np.meshgrid([0.0, length], [0.0, width])
+        z_grid = np.zeros_like(x_grid)
+        axis.plot_surface(
+            x_grid,
+            y_grid,
+            z_grid,
+            color="#d1d5db",
+            edgecolor="#64748b",
+            linewidth=0.25,
+            alpha=0.92,
+            shade=False,
+        )
+        web_height = max(width * 0.18, thickness * 10.0, 0.08)
+        if geometry.get("has_stiffener"):
+            y_mid = 0.5 * width
+            axis.plot([0.0, length], [y_mid, y_mid], [web_height, web_height], color="#334155", linewidth=2.0)
+            axis.plot([0.0, length], [y_mid, y_mid], [0.0, web_height], color="#475569", linewidth=1.2)
+        if geometry.get("has_girder"):
+            x_mid = 0.5 * length
+            axis.plot([x_mid, x_mid], [0.0, width], [web_height * 1.35, web_height * 1.35], color="#7f1d1d", linewidth=2.0)
+            axis.plot([x_mid, x_mid], [0.0, width], [0.0, web_height * 1.35], color="#991b1b", linewidth=1.2)
+        axis.set_xlabel("L", fontsize=6)
+        axis.set_ylabel("s", fontsize=6)
+        axis.set_zlabel("h", fontsize=6)
+        try:
+            axis.set_box_aspect((length, width, max(web_height * 1.6, width * 0.18)))
+        except Exception:
+            pass
+
+    axis.set_title("3D section view", fontsize=8)
+    axis.tick_params(labelsize=5, pad=0)
+    try:
+        axis.view_init(elev=22, azim=-55)
+    except Exception:
+        pass
+    figure.tight_layout(pad=0.3)
+    return figure
+
+
 def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
     """Format runtime FEM result text for the popup."""
 
@@ -597,6 +687,7 @@ class RuntimeFEMWindow:
         self.result_text = None
         self.figure_canvas = None
         self.figure_toolbar = None
+        self.preview_canvas = None
         self.figure_parent = None
         self.display_selector = None
 
@@ -634,7 +725,17 @@ class RuntimeFEMWindow:
             font=("Segoe UI", 9),
         ).pack(anchor=tk.W, padx=16, pady=(0, 12))
 
-        summary = ttk.LabelFrame(outer, text="Active line")
+        body = ttk.Panedwindow(outer, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        left_panel = ttk.Frame(body)
+        mid_panel = ttk.Frame(body)
+        right_panel = ttk.Frame(body)
+        body.add(left_panel, weight=2)
+        body.add(mid_panel, weight=2)
+        body.add(right_panel, weight=3)
+
+        summary = ttk.LabelFrame(left_panel, text="Active line")
         summary.pack(fill=tk.X, pady=(0, 10))
         summary_text = (
             "Line: " + self.snapshot.line_name
@@ -644,7 +745,7 @@ class RuntimeFEMWindow:
         )
         ttk.Label(summary, text=summary_text, justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=8)
 
-        options = ttk.LabelFrame(outer, text="Run options")
+        options = ttk.LabelFrame(left_panel, text="Run options")
         options.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(options, text="Mesh fidelity").grid(row=0, column=0, sticky=tk.W, padx=8, pady=6)
         ttk.OptionMenu(options, self.mesh_fidelity, self.mesh_fidelity.get(), "coarse", "medium", "fine", "very fine").grid(
@@ -667,22 +768,29 @@ class RuntimeFEMWindow:
         ttk.Label(options, text="Buckling modes").grid(row=4, column=0, sticky=tk.W, padx=8, pady=6)
         ttk.Entry(options, textvariable=self.num_buckling_modes, width=8).grid(row=4, column=1, sticky=tk.W, padx=8, pady=6)
 
-        buttons = ttk.Frame(outer)
+        buttons = ttk.Frame(left_panel)
         buttons.pack(fill=tk.X, pady=(0, 10))
         ttk.Button(buttons, text="Run FEM", command=self.run).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Close", command=self.window.destroy).pack(side=tk.RIGHT)
 
-        result_frame = ttk.LabelFrame(outer, text="Run status and visualization")
-        result_frame.pack(fill=tk.BOTH, expand=True)
-        result_frame.columnconfigure(0, weight=1)
-        result_frame.columnconfigure(1, weight=2)
-        result_frame.rowconfigure(0, weight=1)
+        status_frame = ttk.LabelFrame(left_panel, text="Run status")
+        status_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.result_text = tk.Text(result_frame, height=12, wrap=tk.WORD)
-        self.result_text.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)
+        self.result_text = tk.Text(status_frame, height=12, wrap=tk.WORD)
+        self.result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        future_inputs = ttk.LabelFrame(mid_panel, text="Additional inputs")
+        future_inputs.pack(fill=tk.BOTH, expand=True)
+
+        preview = ttk.LabelFrame(right_panel, text="3D section view")
+        preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self._show_preview_figure(create_runtime_fem_geometry_preview_figure(self.snapshot, self.app), preview)
+
+        result_frame = ttk.LabelFrame(right_panel, text="Run visualization")
+        result_frame.pack(fill=tk.BOTH, expand=True)
 
         plot_holder = ttk.Frame(result_frame)
-        plot_holder.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
+        plot_holder.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.figure_parent = plot_holder
         selector_bar = ttk.Frame(plot_holder)
         selector_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
@@ -719,6 +827,97 @@ class RuntimeFEMWindow:
         self.figure_toolbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.figure_canvas.draw()
         self.figure_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    @staticmethod
+    def _fit_preview_figure_to_canvas(figure: Figure, width: int, height: int) -> None:
+        if width < 80 or height < 80:
+            return
+        figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)
+        try:
+            figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        except Exception:
+            pass
+        zoom = 1.18
+        if min(width, height) > 340:
+            zoom = 1.28
+        if min(width, height) > 520:
+            zoom = 1.38
+        for axis in figure.axes:
+            if not hasattr(axis, "get_zlim"):
+                continue
+            axis.set_position([0.01, 0.03, 0.98, 0.93])
+            axis.margins(0.0)
+            try:
+                axis.set_proj_type("ortho")
+            except Exception:
+                pass
+            try:
+                x_limits = axis.get_xlim3d()
+                y_limits = axis.get_ylim3d()
+                z_limits = axis.get_zlim3d()
+                x_span = max(abs(x_limits[1] - x_limits[0]), 1.0e-6)
+                y_span = max(abs(y_limits[1] - y_limits[0]), 1.0e-6)
+                z_span = max(abs(z_limits[1] - z_limits[0]), 1.0e-6)
+                axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)
+            except TypeError:
+                try:
+                    axis.set_box_aspect((x_span, y_span, z_span))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    def _show_preview_figure(self, figure: Figure, parent: Any) -> None:
+        if self.preview_canvas is not None:
+            self.preview_canvas.get_tk_widget().destroy()
+            self.preview_canvas = None
+
+        self.preview_canvas = FigureCanvasTkAgg(figure, master=parent)
+        self.preview_canvas.draw()
+        widget = self.preview_canvas.get_tk_widget()
+        redraw_after_id = {"value": None}
+
+        def resize_preview(event: Any) -> None:
+            if event.width < 80 or event.height < 80:
+                return
+            if redraw_after_id["value"] is not None:
+                try:
+                    widget.after_cancel(redraw_after_id["value"])
+                except Exception:
+                    pass
+
+            def redraw() -> None:
+                redraw_after_id["value"] = None
+                if self.preview_canvas is None:
+                    return
+                canvas_widget = self.preview_canvas.get_tk_widget()
+                if canvas_widget.winfo_width() < 80 or canvas_widget.winfo_height() < 80:
+                    return
+                try:
+                    self._fit_preview_figure_to_canvas(
+                        figure,
+                        canvas_widget.winfo_width(),
+                        canvas_widget.winfo_height(),
+                    )
+                    self.preview_canvas.draw_idle()
+                except Exception:
+                    pass
+
+            try:
+                redraw_after_id["value"] = widget.after(80, redraw)
+            except Exception:
+                pass
+
+        widget.bind("<Configure>", resize_preview)
+        widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        try:
+            widget.after(120, lambda: (
+                self.preview_canvas is not None
+                and self._fit_preview_figure_to_canvas(figure, widget.winfo_width(), widget.winfo_height()) is None
+                and self.preview_canvas.draw_idle()
+            ))
+        except Exception:
+            pass
 
     def _selected_display_mode(self) -> str:
         return self.display_mode_labels.get(str(self.display_choice.get()), "static")
@@ -809,28 +1008,47 @@ class _ExampleShell:
     length_of_shell = 8.0
     tot_cyl_length = 8.0
     thk = 0.012
+    cone_r1 = None
+    cone_r2 = None
+    cone_length = None
+    _dist_between_rings = 2.0
 
 
 class _ExampleLongitudinalStiffener:
     stiffener_type = "FB"
-    hw = 150.0
-    tw = 10.0
+    spacing = 0.5
+    hw = 0.150
+    tw = 0.010
     b = 0.0
     tf = 0.0
 
 
 class _ExampleRingGirder:
     stiffener_type = "T"
-    hw = 400.0
-    tw = 10.0
-    b = 150.0
-    tf = 20.0
+    hw = 0.400
+    tw = 0.010
+    b = 0.150
+    tf = 0.020
 
 
 class _ExampleCylinder:
+    geometry = 7
     ShellObj = _ExampleShell()
     LongStfObj = _ExampleLongitudinalStiffener()
+    RingStfObj = None
     RingFrameObj = _ExampleRingGirder()
+    length_between_girders = 4.0
+
+
+class _ExampleTkVariable:
+    def __init__(self, value: Any):
+        self.value = value
+
+    def get(self) -> Any:
+        return self.value
+
+    def set(self, value: Any) -> None:
+        self.value = value
 
 
 class _ExampleRuntimeApp:
@@ -840,6 +1058,29 @@ class _ExampleRuntimeApp:
     _line_is_active = True
     _line_dict = {"line_example": [1, 2]}
     _line_to_struc = {"line_example": [_ExampleAllStructure(), None, None, object(), None, _ExampleCylinder()]}
+    _simplified_calculation_mode = True
+
+    def __init__(self):
+        self._new_prop_3d_opposite_side = _ExampleTkVariable(False)
+        self._new_shell_ring_frame_length_between_girders = _ExampleTkVariable(4.0)
+        self._new_shell_dist_rings = _ExampleTkVariable(2.0)
+        self._new_panel_length_Lp = _ExampleTkVariable(0.0)
+        self._new_girder_length_LG = _ExampleTkVariable(8.0)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            from anystruct.main_application import Application
+        except ModuleNotFoundError:
+            from ANYstructure.anystruct.main_application import Application
+        descriptor = Application.__dict__.get(name)
+        if isinstance(descriptor, staticmethod):
+            return descriptor.__func__
+        if isinstance(descriptor, classmethod):
+            return types.MethodType(descriptor.__func__, Application)
+        attr = getattr(Application, name)
+        if callable(attr):
+            return types.MethodType(attr, self)
+        return attr
 
     def get_highest_pressure(self, line):
         return {"normal": 100_000.0 if line == self._active_line else 0.0}

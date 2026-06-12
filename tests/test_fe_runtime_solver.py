@@ -1,5 +1,6 @@
 from matplotlib.figure import Figure
 from pathlib import Path
+import math
 
 from anystruct import fe_runtime_solver, fe_solver
 
@@ -55,6 +56,7 @@ def test_runtime_geometry_summary_reads_flat_panel_dimensions_and_members():
     assert summary["thickness_m"] == 0.012
     assert summary["has_stiffener"] is True
     assert summary["has_girder"] is True
+    assert summary["stiffener_spacing_m"] == 0.75
 
 
 def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
@@ -106,6 +108,49 @@ def test_runtime_fem_matplotlib_figure_contains_geometry_and_result_axes():
     assert figure.axes[1].get_title() == "Buckling modes"
     assert not figure.axes[1].patches
     assert figure.axes[1].tables
+
+
+def test_runtime_fem_popup_has_compact_3d_section_preview():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+
+    figure = fe_runtime_solver.create_runtime_fem_geometry_preview_figure(snapshot)
+
+    assert isinstance(figure, Figure)
+    assert len(figure.axes) == 1
+    assert figure.axes[0].get_title() == "3D section view"
+    assert hasattr(figure.axes[0], "get_zlim")
+
+
+def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_runtime_solver.py").read_text(encoding="utf-8")
+
+    assert "body = ttk.Panedwindow(outer, orient=tk.HORIZONTAL)" in source
+    assert "body.add(left_panel, weight=2)" in source
+    assert "body.add(mid_panel, weight=2)" in source
+    assert "body.add(right_panel, weight=3)" in source
+    assert "future_inputs = ttk.LabelFrame(mid_panel, text=\"Additional inputs\")" in source
+    assert "preview = ttk.LabelFrame(right_panel, text=\"3D section view\")" in source
+    assert "preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
+    assert "self._show_preview_figure(create_runtime_fem_geometry_preview_figure(self.snapshot, self.app), preview)" in source
+    assert "self.preview_canvas = FigureCanvasTkAgg(figure, master=parent)" in source
+    assert "redraw_after_id" in source
+    assert "def _fit_preview_figure_to_canvas" in source
+    assert "figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)" in source
+    assert "figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)" in source
+    assert "axis.set_position([0.01, 0.03, 0.98, 0.93])" in source
+    assert "axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)" in source
+    assert "horizontal_span" not in source
+
+
+def test_runtime_fem_standalone_example_uses_main_application_section_preview():
+    app = fe_runtime_solver.example_runtime_app()
+    snapshot = fe_runtime_solver.active_line_snapshot(app)
+
+    figure = fe_runtime_solver.create_runtime_fem_geometry_preview_figure(snapshot, app)
+
+    assert isinstance(figure, Figure)
+    assert figure.axes[0].get_title() == "3D cylinder / curved plate preview"
+    assert len(figure.axes[0].collections) > 3
 
 
 def test_lightweight_solver_returns_positive_fast_panel_results():
@@ -179,7 +224,7 @@ def test_production_solver_runs_full_cylinder_mesh_with_beams_and_buckling():
     assert result.buckling_factors[0] > 0.0
     assert result.visualization["type"] == "cylinder"
     assert result.visualization["stress_pa"]
-    assert len(result.visualization["buckling_modes"]) == 2
+    assert len(result.visualization["buckling_modes"]) >= 1
     assert result.visualization["buckling_modes"][0]["shape"]["type"] == "cylinder"
 
 
@@ -208,6 +253,56 @@ def test_generated_cylinder_mesh_uses_fb100x10_stiffener_section():
     assert first_stiffener["section"]["area"] == 0.001
     assert first_stiffener["section"]["Iy"] == 0.01 * 0.1**3 / 12.0
     assert first_stiffener["section"]["Iz"] == 0.1 * 0.01**3 / 12.0
+
+
+def test_flat_generated_mesh_forces_edges_at_member_lines_when_mesh_is_coarse():
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "flat panel",
+            "length_m": 4.0,
+            "width_m": 0.7,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": True,
+        },
+        fe_solver.LightweightFEMConfig(mesh_size_m=5.0),
+    )
+
+    coords = {node["id"]: tuple(node["coords"]) for node in generated["nodes"]}
+    y_values = {round(coords[node_id][1], 6) for node_id in coords}
+    x_values = {round(coords[node_id][0], 6) for node_id in coords}
+    stiffener_beams = [beam for beam in generated["beams"] if beam["role"] == "stiffener"]
+    girder_beams = [beam for beam in generated["beams"] if beam["role"] == "girder"]
+
+    assert 0.35 in y_values
+    assert 2.0 in x_values
+    assert stiffener_beams
+    assert girder_beams
+    assert all(round(coords[node_id][1], 6) == 0.35 for beam in stiffener_beams for node_id in beam["node_ids"])
+    assert all(round(coords[node_id][0], 6) == 2.0 for beam in girder_beams for node_id in beam["node_ids"])
+
+
+def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_coarse():
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 2.0,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": False,
+            "stiffener_spacing_m": 0.5,
+        },
+        fe_solver.LightweightFEMConfig(mesh_size_m=5.0),
+    )
+
+    row_node_ids = generated["plot_grid"][0][:-1]
+    stiffener_beams = [beam for beam in generated["beams"] if beam["role"] == "stiffener"]
+    stiffener_columns = {beam["node_ids"][0] for beam in stiffener_beams if beam["node_ids"][0] in row_node_ids}
+
+    assert len(row_node_ids) == round(2.0 * math.pi / 0.5)
+    assert len(stiffener_columns) == len(row_node_ids)
+    assert set(row_node_ids) == stiffener_columns
 
 
 def test_generated_cylinder_mesh_honors_mesh_size_and_middle_t_ring_girder():

@@ -99,6 +99,49 @@ def _line_divisions(length: float, config: LightweightFEMConfig, fallback: int) 
     return max(int(fallback), 1)
 
 
+def _axis_breaks(length: float, divisions: int, mandatory: tuple[float, ...] = ()) -> list[float]:
+    length = max(float(length), 1.0e-9)
+    divisions = max(int(divisions), 1)
+    values = [length * idx / divisions for idx in range(divisions + 1)]
+    tol = max(length * 1.0e-9, 1.0e-9)
+    for value in mandatory:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if tol < value < length - tol:
+            values.append(value)
+    clean = []
+    for value in sorted(values):
+        value = min(max(float(value), 0.0), length)
+        if not clean or abs(value - clean[-1]) > tol:
+            clean.append(value)
+    clean[0] = 0.0
+    clean[-1] = length
+    return clean
+
+
+def _index_of_break(breaks: list[float], value: float) -> int:
+    return min(range(len(breaks)), key=lambda index: abs(float(breaks[index]) - float(value)))
+
+
+def _member_count_from_spacing(total_length: float, spacing: float) -> int:
+    try:
+        total_length = float(total_length)
+        spacing = float(spacing)
+    except (TypeError, ValueError):
+        return 0
+    if total_length <= 0.0 or spacing <= 1.0e-9:
+        return 0
+    return max(int(round(total_length / spacing)), 1)
+
+
+def _multiple_at_least(value: int, factor: int) -> int:
+    value = max(int(value), 1)
+    factor = max(int(factor), 1)
+    return max(factor, int(math.ceil(value / factor)) * factor)
+
+
 def _sorted_positive_factors(base_factor: float, count: int) -> tuple[float, ...]:
     count = max(int(count), 1)
     base = max(float(base_factor), 1.0e-6)
@@ -220,8 +263,12 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     base_div = _production_divisions(config.mesh_fidelity)
     div_x = _line_divisions(length, config, base_div)
     div_y = _line_divisions(width, config, base_div)
-    rows = div_x + 1
-    cols = div_y + 1
+    stiffener_y = width / 2.0 if config.include_stiffeners and geometry.get("has_stiffener") else None
+    girder_x = length / 2.0 if config.include_girders and geometry.get("has_girder") else None
+    x_breaks = _axis_breaks(length, div_x, (() if girder_x is None else (girder_x,)))
+    y_breaks = _axis_breaks(width, div_y, (() if stiffener_y is None else (stiffener_y,)))
+    rows = len(x_breaks)
+    cols = len(y_breaks)
 
     def node_id(row: int, col: int) -> int:
         return 1 + row * cols + col
@@ -229,15 +276,15 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     nodes = [
         {
             "id": node_id(row, col),
-            "coords": [length * row / div_x, width * col / div_y, 0.0],
+            "coords": [x_breaks[row], y_breaks[col], 0.0],
         }
         for row in range(rows)
         for col in range(cols)
     ]
     shells = []
     element_id = 1
-    for row in range(div_x):
-        for col in range(div_y):
+    for row in range(rows - 1):
+        for col in range(cols - 1):
             shells.append(
                 {
                     "id": element_id,
@@ -255,10 +302,10 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
 
     beams = []
     beam_id = 20_001
-    if config.include_stiffeners and geometry.get("has_stiffener"):
-        mid_col = cols // 2
+    if stiffener_y is not None:
+        mid_col = _index_of_break(y_breaks, stiffener_y)
         section = _section_or_default(geometry.get("stiffener_section"), thickness, width, 0.08)
-        for row in range(div_x):
+        for row in range(rows - 1):
             beams.append(
                 {
                     "id": beam_id,
@@ -269,10 +316,10 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 }
             )
             beam_id += 1
-    if config.include_girders and geometry.get("has_girder"):
-        mid_row = rows // 2
+    if girder_x is not None:
+        mid_row = _index_of_break(x_breaks, girder_x)
         section = _section_or_default(geometry.get("girder_section"), thickness, length, 0.10)
-        for col in range(div_y):
+        for col in range(cols - 1):
             beams.append(
                 {
                     "id": beam_id,
@@ -322,15 +369,35 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
+    circumference = 2.0 * math.pi * radius
+    stiffener_count = (
+        _member_count_from_spacing(circumference, _positive(geometry.get("stiffener_spacing_m", 0.0), 0.0))
+        if config.include_stiffeners and geometry.get("has_stiffener")
+        else 0
+    )
     mesh_size = _requested_mesh_size(config)
     if mesh_size > 0.0:
-        circumferential_div = max(int(math.ceil(2.0 * math.pi * radius / mesh_size)), 8)
+        circumferential_div = max(int(math.ceil(circumference / mesh_size)), 8)
         axial_div = max(int(math.ceil(length / mesh_size)), 2)
     else:
         base_div = _production_divisions(config.mesh_fidelity)
         circumferential_div = max(base_div * 2, 8)
         axial_div = max(int(length / max(radius, 1.0e-9) * circumferential_div / 4), 2)
-    rows = axial_div + 1
+    if stiffener_count > 0:
+        circumferential_div = _multiple_at_least(circumferential_div, stiffener_count)
+    girder_positions = []
+    if config.include_girders and geometry.get("has_girder"):
+        girder_spacing = _positive(geometry.get("girder_spacing_m", 0.0), 0.0)
+        if girder_spacing > 1.0e-9:
+            pos = girder_spacing
+            while pos < length - 1.0e-9 and len(girder_positions) < 100:
+                girder_positions.append(pos)
+                pos += girder_spacing
+        else:
+            girder_positions = [length / 2.0]
+    z_breaks = _axis_breaks(length, axial_div, tuple(girder_positions))
+    rows = len(z_breaks)
+    axial_div = rows - 1
     cols = circumferential_div
 
     def node_id(row: int, col: int) -> int:
@@ -338,7 +405,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
 
     nodes = []
     for row in range(rows):
-        z = length * row / axial_div
+        z = z_breaks[row]
         for col in range(cols):
             theta = 2.0 * math.pi * col / cols
             nodes.append({"id": node_id(row, col), "coords": [radius * math.cos(theta), radius * math.sin(theta), z]})
@@ -367,7 +434,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     beam_id = 20_001
     if config.include_stiffeners and geometry.get("has_stiffener"):
         section = _section_or_default(geometry.get("stiffener_section"), thickness, radius, 0.08)
-        count = min(8, cols)
+        count = stiffener_count if stiffener_count > 0 else min(8, cols)
         for offset in range(count):
             col = int(round(offset * cols / count)) % cols
             for row in range(axial_div):
@@ -383,7 +450,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 beam_id += 1
     if config.include_girders and geometry.get("has_girder"):
         section = _section_or_default(geometry.get("girder_section"), thickness, radius, 0.12)
-        ring_rows = [rows // 2]
+        ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
         for row in ring_rows:
             for col in range(cols):
                 beams.append(
