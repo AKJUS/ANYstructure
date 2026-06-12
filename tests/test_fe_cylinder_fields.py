@@ -329,6 +329,18 @@ def test_cylinder_stresses_are_projected_to_axial_and_circumferential_axes() -> 
     assert nodal_stresses[0].reduction == "whole-panel nodal membrane mean in axial/circumferential axes"
 
 
+def test_cylinder_panel_3d_records_include_local_axes() -> None:
+    model = _orthogonally_stiffened_cylinder()
+    geometry = detect_cylinder_geometry(model)
+    fields = infer_cylinder_fields(model, geometry)
+
+    records = fe_plate_fields.panel_3d_records(model, fields[:1])
+
+    assert records
+    assert records[0]["local_x"] == pytest.approx(geometry.axis_direction)
+    assert fe_plate_fields._length(records[0]["local_y"]) == pytest.approx(1.0)
+
+
 @pytest.mark.skipif(
     not (CYLINDER_SAMPLE_INP.exists() and CYLINDER_SAMPLE_FRD.exists()),
     reason="Provided PrePoMax cylinder sample is not available",

@@ -945,6 +945,13 @@ def panel_3d_records(
             field_values=field_values,
         )
 
+    patches = detect_surface_patches(model)
+    try:
+        inference = _infer_members_from_patches(model, patches) if patches else None
+    except Exception:
+        inference = None
+    local_x = inference.member_direction if inference is not None else (1.0, 0.0, 0.0)
+    local_y = inference.transverse_direction if inference is not None else (0.0, 1.0, 0.0)
     records: list[dict[str, Any]] = []
     for index, field_item in enumerate(fields):
         polygons = [_field_representative_panel_polygon(model, field_item)]
@@ -965,6 +972,8 @@ def panel_3d_records(
                     (bbox[2][0] + bbox[2][1]) / 2.0,
                 ),
                 "normal": _field_representative_normal(model, field_item),
+                "local_x": local_x,
+                "local_y": local_y,
                 "value": value,
                 "span_m": field_item.span_m,
                 "spacing_m": field_item.spacing_m,
@@ -3470,13 +3479,19 @@ def cylinder_3d_records(
             ),
         )
         points = [point for polygon in polygons for point in polygon]
+        centroid = _mean_point(points)
+        radial = _normalise(_radial_vector(centroid, geometry.axis_origin, geometry.axis_direction))
+        local_y = _normalise(_cross(geometry.axis_direction, radial))
         records.append(
             {
                 "field_id": field_item.field_id,
                 "index": index,
                 "polygons": polygons,
                 "bbox": _bbox(points) if points else None,
-                "centroid": _mean_point(points),
+                "centroid": centroid,
+                "normal": radial,
+                "local_x": geometry.axis_direction,
+                "local_y": local_y,
                 "value": None if field_values is None else field_values.get(field_item.field_id),
                 "axial_length_m": field_item.axial_length_m,
                 "circumferential_spacing_m": field_item.circumferential_spacing_m,

@@ -356,6 +356,10 @@ def test_panel_3d_records_preserve_elevation_and_orientation(tmp_path):
     assert records[1]["bbox"][2] == (0.5, 1.5)
     assert records[0]["normal"] == pytest.approx((0.0, 0.0, 1.0))
     assert abs(records[1]["normal"][0]) == pytest.approx(1.0)
+    assert "local_x" in records[0]
+    assert "local_y" in records[0]
+    assert fe_plate_fields._length(records[0]["local_x"]) == pytest.approx(1.0)
+    assert fe_plate_fields._length(records[0]["local_y"]) == pytest.approx(1.0)
     assert len(records[0]["polygons"]) == 1
     assert len(records[1]["polygons"]) == 1
     assert len(records[0]["polygons"][0]) == 4

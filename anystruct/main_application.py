@@ -43,6 +43,7 @@ try:
     import anystruct.project_services as project_services
     import anystruct.solid_export as solid_export
     import anystruct.fe_plate_fields as fe_plate_fields
+    import anystruct.fe_runtime_solver as fe_runtime_solver
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -66,6 +67,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.project_services as project_services
     import ANYstructure.anystruct.solid_export as solid_export
     import ANYstructure.anystruct.fe_plate_fields as fe_plate_fields
+    import ANYstructure.anystruct.fe_runtime_solver as fe_runtime_solver
 
 
 @dataclass(frozen=True)
@@ -329,6 +331,7 @@ class Application():
 
         self._simplified_calculation_mode = False
         self._single_line_name = 'line1'
+        self._experimental_mode_enabled = False
         self._fea_buckling_mode = False
         self._fea_buckling_session = None
         self._fea_selected_panel_id = None
@@ -349,6 +352,12 @@ class Application():
         self._fea_uf_color_upper.set(1.5)
         self._fea_stress_reduction_method = tk.StringVar()
         self._fea_stress_reduction_method.set(fe_plate_fields.available_stress_reduction_methods()[0])
+        self._fea_show_uf_text = tk.BooleanVar(value=False)
+        self._fea_show_panel_text = tk.BooleanVar(value=False)
+        self._fea_show_local_x_arrow = tk.BooleanVar(value=False)
+        self._fea_show_local_y_arrow = tk.BooleanVar(value=False)
+        self._fea_show_mesh = tk.BooleanVar(value=False)
+        self._fea_color_code = tk.BooleanVar(value=True)
 
         # Optional Matplotlib based 3D preview. In simplified mode this is promoted
         # to the large main pane; otherwise it remains in the lower property canvas.
@@ -1862,6 +1871,14 @@ class Application():
                                          command=self.on_plot_cog_dev, style="Bold.TButton")
         self._weight_button.place(relx=0.875, rely=0.7, relwidth=0.038)
 
+        self._runtime_fem_button = ttk.Button(
+            self._main_fr,
+            text='FEM run',
+            command=self.on_open_runtime_fem_solver,
+            style="Bold.TButton",
+        )
+        self._place_runtime_fem_button()
+
         self._chk_show_prop_3d = ttk.Checkbutton(
             self._main_fr,
             text='3D section view',
@@ -1970,6 +1987,20 @@ class Application():
         except Exception:
             pass
 
+    def _place_runtime_fem_button(self):
+        """Show the runtime FEM entry point only for experimental single/multi modes."""
+        try:
+            if (
+                    getattr(self, '_experimental_mode_enabled', False)
+                    and not getattr(self, '_fea_buckling_mode', False)
+            ):
+                self._runtime_fem_button.place(relx=0.915, rely=0.7, relwidth=0.055)
+                self._runtime_fem_button.lift()
+            else:
+                self._runtime_fem_button.place_forget()
+        except Exception:
+            pass
+
     def _prompt_startup_calculation_mode(self):
         """Let the user choose standard, simplified, or FEA-result buckling workflow."""
         try:
@@ -1988,6 +2019,7 @@ class Application():
             self.switch_to_fea_result_buckling_mode()
         else:
             self.switch_to_multiple_calculation_mode()
+        self._place_runtime_fem_button()
 
     def _show_startup_calculation_mode_dialog(self):
         """Show a startup mode picker and return ``multiple``, ``single`` or ``fea``."""
@@ -2013,6 +2045,10 @@ class Application():
 
         def choose(mode):
             result['mode'] = mode
+            try:
+                self._experimental_mode_enabled = bool(experimental_var.get())
+            except Exception:
+                self._experimental_mode_enabled = mode == 'fea'
             try:
                 dialog.grab_release()
             except Exception:
@@ -2110,6 +2146,7 @@ class Application():
         experimental_var = tk.BooleanVar(value=False)
 
         def toggle_experimental():
+            self._experimental_mode_enabled = bool(experimental_var.get())
             if experimental_var.get():
                 single_card.pack_configure(padx=(8, 8))
                 fea_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
@@ -2160,6 +2197,7 @@ class Application():
 
         self._simplified_calculation_mode = True
         self._activate_simplified_calculation_pipeline()
+        self._place_runtime_fem_button()
 
     def switch_to_multiple_calculation_mode(self):
         """Switch back to the standard multi-panel modelling workflow."""
@@ -2174,6 +2212,7 @@ class Application():
             self.gui_load_combinations(self._combination_slider.get())
         except Exception:
             pass
+        self._place_runtime_fem_button()
 
     def switch_to_fea_result_buckling_mode(self):
         """Switch to FE-result buckling where clickable panels replace ship lines."""
@@ -2187,6 +2226,7 @@ class Application():
         self._active_point = ''
         self._point_is_active = False
         self._refresh_fea_buckling_views(rebuild_3d=True)
+        self._place_runtime_fem_button()
 
     def _apply_fea_buckling_layout(self):
         """Hide ship modelling/load tabs and make FE panels the active workspace."""
@@ -3819,6 +3859,33 @@ class Application():
         update_button.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 4))
         row += 1
         rows.extend([uf_lower_entry, uf_upper_entry, update_button])
+
+        add_label('3D view')
+        view_options = [
+            ('UF text', self._fea_show_uf_text),
+            ('Panel number text', self._fea_show_panel_text),
+            ('Panel local x arrow', self._fea_show_local_x_arrow),
+            ('Panel local y arrow', self._fea_show_local_y_arrow),
+            ('Show mesh', self._fea_show_mesh),
+            ('Color code', self._fea_color_code),
+        ]
+        for option_index, (option_text, option_var) in enumerate(view_options):
+            check = ttk.Checkbutton(
+                panel_frame,
+                text=option_text,
+                variable=option_var,
+                command=lambda: self._refresh_fea_buckling_views(rebuild_3d=True),
+            )
+            check.grid(
+                row=row + option_index,
+                column=0,
+                columnspan=3,
+                sticky='w',
+                padx=12,
+                pady=(0, 2),
+            )
+            rows.append(check)
+        row += len(view_options)
 
         add_separator()
         add_label('Selected Panel', bold=True)
@@ -5633,6 +5700,8 @@ class Application():
         return return_dict
 
     def _fea_panel_canvas_color(self, panel, index):
+        if not bool(self._fea_color_code.get()):
+            return '#cfd6df'
         if panel is not None and panel.usage_factor is not None:
             uf_min, uf_max = self._fea_uf_color_limits()
             value = max(min(float(panel.usage_factor), uf_max), uf_min)
@@ -5752,8 +5821,8 @@ class Application():
         for field_id, collection in getattr(self, '_fea_3d_panel_artists', {}).items():
             selected = field_id == self._fea_selected_panel_id
             try:
-                collection.set_edgecolor('red' if selected else 'none')
-                collection.set_linewidth(1.8 if selected else 0.0)
+                collection.set_edgecolor('red' if selected else ('#333333' if self._fea_show_mesh.get() else 'none'))
+                collection.set_linewidth(1.8 if selected else (0.25 if self._fea_show_mesh.get() else 0.0))
                 collection.set_alpha(0.92 if selected else 0.82)
             except Exception:
                 pass
@@ -6084,7 +6153,8 @@ class Application():
         if not records:
             return
         fig = plt.Figure(figsize=(9.8, 5.8), dpi=100)
-        ax = fig.add_axes([0.01, 0.06, 0.86, 0.88], projection='3d')
+        ax_width = 0.86 if self._fea_color_code.get() else 0.96
+        ax = fig.add_axes([0.01, 0.06, ax_width, 0.88], projection='3d')
         uf_min, uf_max = self._fea_uf_color_limits()
         uf_norm = matplotlib.colors.Normalize(vmin=uf_min, vmax=uf_max)
         uf_cmap = plt.get_cmap('jet')
@@ -6096,19 +6166,66 @@ class Application():
             collection = Poly3DCollection(
                 record['polygons'],
                 facecolor=self._fea_panel_canvas_color(panel, record['index']),
-                edgecolor='red' if selected else 'none',
-                linewidth=1.8 if selected else 0.0,
+                edgecolor='red' if selected else ('#333333' if self._fea_show_mesh.get() else 'none'),
+                linewidth=1.8 if selected else (0.25 if self._fea_show_mesh.get() else 0.0),
                 alpha=0.82 if panel.usage_factor is not None else 0.58,
             )
             collection.set_gid(field_id)
             collection.set_picker(True)
             ax.add_collection3d(collection)
             self._fea_3d_panel_artists[field_id] = collection
-            label = field_id.replace('field_', '')
-            if panel.usage_factor is not None:
-                label += ' / ' + f'{panel.usage_factor:.2f}'
             centroid = record['centroid']
-            ax.text(centroid[0], centroid[1], centroid[2], label, fontsize=7, ha='center', va='center')
+            normal = record.get('normal', (0.0, 0.0, 1.0))
+            label_point = (
+                centroid[0] + normal[0] * 0.01,
+                centroid[1] + normal[1] * 0.01,
+                centroid[2] + normal[2] * 0.01,
+            )
+            label_parts = []
+            if self._fea_show_panel_text.get():
+                label_parts.append(field_id.replace('field_', '').replace('cyl_', ''))
+            if self._fea_show_uf_text.get() and panel.usage_factor is not None:
+                label_parts.append(f'UF {panel.usage_factor:.2f}')
+            if label_parts:
+                ax.text(
+                    label_point[0],
+                    label_point[1],
+                    label_point[2],
+                    '\n'.join(label_parts),
+                    fontsize=7,
+                    ha='center',
+                    va='center',
+                )
+            arrow_length = max(min(float(record.get('span_m', record.get('axial_length_m', 1.0))),
+                                   float(record.get('spacing_m', record.get('circumferential_spacing_m', 1.0)))) * 0.28,
+                               0.05)
+            arrow_origin = (
+                centroid[0] + normal[0] * 0.02,
+                centroid[1] + normal[1] * 0.02,
+                centroid[2] + normal[2] * 0.02,
+            )
+            if self._fea_show_local_x_arrow.get():
+                local_x = record.get('local_x', (1.0, 0.0, 0.0))
+                ax.quiver(
+                    arrow_origin[0], arrow_origin[1], arrow_origin[2],
+                    local_x[0], local_x[1], local_x[2],
+                    length=arrow_length,
+                    normalize=True,
+                    color='#1f77b4',
+                    linewidth=0.8,
+                    arrow_length_ratio=0.28,
+                )
+            if self._fea_show_local_y_arrow.get():
+                local_y = record.get('local_y', (0.0, 1.0, 0.0))
+                ax.quiver(
+                    arrow_origin[0], arrow_origin[1], arrow_origin[2],
+                    local_y[0], local_y[1], local_y[2],
+                    length=arrow_length,
+                    normalize=True,
+                    color='#ff7f0e',
+                    linewidth=0.8,
+                    arrow_length_ratio=0.28,
+                )
 
         self._set_fea_3d_limits(ax, records)
         ax.set_xlabel('X [m]', fontsize=7)
@@ -6117,12 +6234,13 @@ class Application():
         ax.tick_params(labelsize=6)
         ax.set_title('FEA result buckling panels - click a panel to load input', fontsize=8)
         ax.view_init(elev=24, azim=-55)
-        scalar_map = matplotlib.cm.ScalarMappable(norm=uf_norm, cmap=uf_cmap)
-        scalar_map.set_array([])
-        colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])
-        colorbar = fig.colorbar(scalar_map, cax=colorbar_ax)
-        colorbar.set_label('UF', fontsize=7)
-        colorbar.ax.tick_params(labelsize=6)
+        if self._fea_color_code.get():
+            scalar_map = matplotlib.cm.ScalarMappable(norm=uf_norm, cmap=uf_cmap)
+            scalar_map.set_array([])
+            colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])
+            colorbar = fig.colorbar(scalar_map, cax=colorbar_ax)
+            colorbar.set_label('UF', fontsize=7)
+            colorbar.ax.tick_params(labelsize=6)
         self._embed_fea_buckling_3d_figure(fig, ax, default_view=(24, -55))
 
     def draw_canvas(self, state=None, event=None):
@@ -12439,6 +12557,22 @@ class Application():
         self.__previous_load_data = copy.deepcopy(self._load_dict)
         top = tk.Toplevel(self._parent, background=self._general_color)
         load_window.CreateLoadWindow(top, self)
+
+    def on_open_runtime_fem_solver(self):
+        """Open the experimental runtime FEM solver for the current active line."""
+        if not getattr(self, '_experimental_mode_enabled', False):
+            messagebox.showinfo(title='Experimental FEM solver', message='Enable experimental mode to use FEM run.')
+            return
+        if getattr(self, '_fea_buckling_mode', False):
+            messagebox.showinfo(
+                title='Experimental FEM solver',
+                message='Runtime FEM uses active ANYstructure lines, not imported FEA result panels.',
+            )
+            return
+        if not self._line_is_active or self._active_line not in self._line_to_struc:
+            messagebox.showinfo(title='Select line', message='Select a line with structure properties before FEM run.')
+            return
+        fe_runtime_solver.open_runtime_fem_window(self._parent, self)
 
     def on_optimize(self):
         '''

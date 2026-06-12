@@ -16,13 +16,22 @@ import numpy as np
 try:
     from anystruct import fe_solver_backend as _full_backend
     from anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
+    from anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
+    from anystruct.fe_solver_backend.buckling import solve_eigenvalue_buckling as _backend_solve_buckling
+    from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
     try:
         from ANYstructure.anystruct import fe_solver_backend as _full_backend
         from ANYstructure.anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
+        from ANYstructure.anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
+        from ANYstructure.anystruct.fe_solver_backend.buckling import solve_eigenvalue_buckling as _backend_solve_buckling
+        from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
         _full_backend = None
         _backend_compute_stresses = None
+        _backend_solve_linear = None
+        _backend_solve_buckling = None
+        _backend_load_case_resultant = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +44,8 @@ class LightweightFEMConfig:
     include_stiffeners: bool = True
     include_girders: bool = True
     num_buckling_modes: int = 5
+    mesh_size_m: float = 0.0
+    top_bottom_moment_nm: float = 0.0
     elastic_modulus_pa: float = 210.0e9
     poisson_ratio: float = 0.3
     yield_stress_pa: float = 355.0e6
@@ -66,11 +77,26 @@ def _positive(value: float, fallback: float) -> float:
 
 
 def _mesh_divisions(mesh_fidelity: str) -> int:
-    return {"coarse": 8, "medium": 16, "fine": 32}.get(str(mesh_fidelity).lower(), 8)
+    return {"coarse": 8, "medium": 16, "fine": 32, "very fine": 48, "very_fine": 48}.get(str(mesh_fidelity).lower(), 8)
 
 
 def _production_divisions(mesh_fidelity: str) -> int:
-    return {"coarse": 4, "medium": 8, "fine": 12}.get(str(mesh_fidelity).lower(), 4)
+    return {"coarse": 4, "medium": 8, "fine": 12, "very fine": 20, "very_fine": 20}.get(str(mesh_fidelity).lower(), 4)
+
+
+def _requested_mesh_size(config: LightweightFEMConfig) -> float:
+    try:
+        size = float(config.mesh_size_m)
+    except (TypeError, ValueError):
+        return 0.0
+    return size if size > 0.0 else 0.0
+
+
+def _line_divisions(length: float, config: LightweightFEMConfig, fallback: int) -> int:
+    mesh_size = _requested_mesh_size(config)
+    if mesh_size > 0.0:
+        return max(int(math.ceil(max(length, 1.0e-9) / mesh_size)), 1)
+    return max(int(fallback), 1)
 
 
 def _sorted_positive_factors(base_factor: float, count: int) -> tuple[float, ...]:
@@ -163,13 +189,39 @@ def _beam_section(thickness: float, reference: float, depth_factor: float) -> di
     }
 
 
+def _section_or_default(section: object, thickness: float, reference: float, depth_factor: float) -> dict[str, float]:
+    if isinstance(section, dict):
+        try:
+            area = float(section.get("area", section.get("A", 0.0)))
+            iy = float(section.get("Iy", section.get("iy", 0.0)))
+            iz = float(section.get("Iz", section.get("iz", 0.0)))
+            j = float(section.get("J", section.get("torsion_constant", iy + iz)))
+        except (TypeError, ValueError):
+            area = 0.0
+            iy = 0.0
+            iz = 0.0
+            j = 0.0
+        if area > 0.0 and iy > 0.0 and iz > 0.0:
+            return {
+                "area": area,
+                "Iy": max(iy, 1.0e-12),
+                "Iz": max(iz, 1.0e-12),
+                "J": max(j, 1.0e-12),
+                "shear_factor_y": float(section.get("shear_factor_y", 5.0 / 6.0)),
+                "shear_factor_z": float(section.get("shear_factor_z", 5.0 / 6.0)),
+            }
+    return _beam_section(thickness, reference, depth_factor)
+
+
 def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     width = _positive(geometry.get("width_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
-    div = _production_divisions(config.mesh_fidelity)
-    rows = div + 1
-    cols = div + 1
+    base_div = _production_divisions(config.mesh_fidelity)
+    div_x = _line_divisions(length, config, base_div)
+    div_y = _line_divisions(width, config, base_div)
+    rows = div_x + 1
+    cols = div_y + 1
 
     def node_id(row: int, col: int) -> int:
         return 1 + row * cols + col
@@ -177,15 +229,15 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     nodes = [
         {
             "id": node_id(row, col),
-            "coords": [length * row / div, width * col / div, 0.0],
+            "coords": [length * row / div_x, width * col / div_y, 0.0],
         }
         for row in range(rows)
         for col in range(cols)
     ]
     shells = []
     element_id = 1
-    for row in range(div):
-        for col in range(div):
+    for row in range(div_x):
+        for col in range(div_y):
             shells.append(
                 {
                     "id": element_id,
@@ -205,8 +257,8 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     beam_id = 20_001
     if config.include_stiffeners and geometry.get("has_stiffener"):
         mid_col = cols // 2
-        section = _beam_section(thickness, width, 0.08)
-        for row in range(div):
+        section = _section_or_default(geometry.get("stiffener_section"), thickness, width, 0.08)
+        for row in range(div_x):
             beams.append(
                 {
                     "id": beam_id,
@@ -219,8 +271,8 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             beam_id += 1
     if config.include_girders and geometry.get("has_girder"):
         mid_row = rows // 2
-        section = _beam_section(thickness, length, 0.10)
-        for col in range(div):
+        section = _section_or_default(geometry.get("girder_section"), thickness, length, 0.10)
+        for col in range(div_y):
             beams.append(
                 {
                     "id": beam_id,
@@ -270,8 +322,14 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
-    circumferential_div = max(_production_divisions(config.mesh_fidelity) * 2, 8)
-    axial_div = max(int(length / max(radius, 1.0e-9) * circumferential_div / 4), 2)
+    mesh_size = _requested_mesh_size(config)
+    if mesh_size > 0.0:
+        circumferential_div = max(int(math.ceil(2.0 * math.pi * radius / mesh_size)), 8)
+        axial_div = max(int(math.ceil(length / mesh_size)), 2)
+    else:
+        base_div = _production_divisions(config.mesh_fidelity)
+        circumferential_div = max(base_div * 2, 8)
+        axial_div = max(int(length / max(radius, 1.0e-9) * circumferential_div / 4), 2)
     rows = axial_div + 1
     cols = circumferential_div
 
@@ -280,10 +338,10 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
 
     nodes = []
     for row in range(rows):
-        x = length * row / axial_div
+        z = length * row / axial_div
         for col in range(cols):
             theta = 2.0 * math.pi * col / cols
-            nodes.append({"id": node_id(row, col), "coords": [x, radius * math.cos(theta), radius * math.sin(theta)]})
+            nodes.append({"id": node_id(row, col), "coords": [radius * math.cos(theta), radius * math.sin(theta), z]})
 
     shells = []
     element_id = 1
@@ -308,7 +366,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     beams = []
     beam_id = 20_001
     if config.include_stiffeners and geometry.get("has_stiffener"):
-        section = _beam_section(thickness, radius, 0.08)
+        section = _section_or_default(geometry.get("stiffener_section"), thickness, radius, 0.08)
         count = min(8, cols)
         for offset in range(count):
             col = int(round(offset * cols / count)) % cols
@@ -324,8 +382,8 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 )
                 beam_id += 1
     if config.include_girders and geometry.get("has_girder"):
-        section = _beam_section(thickness, radius, 0.12)
-        ring_rows = sorted({0, rows // 2, rows - 1})
+        section = _section_or_default(geometry.get("girder_section"), thickness, radius, 0.12)
+        ring_rows = [rows // 2]
         for row in ring_rows:
             for col in range(cols):
                 beams.append(
@@ -347,10 +405,9 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         "shells": shells,
         "beams": beams,
         "supports": [
-            {"name": "axial_diaphragm_start", "node_ids": start_ring, "constraints": {"ux": 0.0}},
-            {"name": "axial_diaphragm_end", "node_ids": end_ring, "constraints": {"ux": 0.0}},
-            {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"uy": 0.0, "uz": 0.0}},
-            {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"uz": 0.0}},
+            {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0}},
+            {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
+            {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
         ],
         "materials": [
             {
@@ -364,6 +421,8 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         "plot_grid": [[node_id(row, col) for col in range(cols)] + [node_id(row, 0)] for row in range(rows)],
         "plot_type": "cylinder",
         "radius_m": radius,
+        "bottom_ring_node_ids": start_ring,
+        "top_ring_node_ids": end_ring,
     }
 
 
@@ -393,9 +452,15 @@ def _nodal_von_mises(model, displacements: np.ndarray) -> dict[int, float]:
     return {node_id: sums[node_id] / max(counts[node_id], 1) for node_id in sums}
 
 
-def _visualization_from_full_result(generated_geometry: dict, model, displacements: np.ndarray) -> dict[str, object]:
+def _visualization_from_full_result(
+    generated_geometry: dict,
+    model,
+    displacements: np.ndarray,
+    scalar_by_node: dict[int, float] | None = None,
+    scalar_label: str = "stress [Pa]",
+) -> dict[str, object]:
     grid = generated_geometry.get("plot_grid") or []
-    stress_by_node = _nodal_von_mises(model, displacements)
+    scalar_by_node = _nodal_von_mises(model, displacements) if scalar_by_node is None else scalar_by_node
     if not grid or displacements is None:
         return {}
 
@@ -414,15 +479,16 @@ def _visualization_from_full_result(generated_geometry: dict, model, displacemen
                 node = model.mesh.get_node(int(node_id))
                 if node is None:
                     continue
+                x = float(node.x)
                 y = float(node.y)
-                z = float(node.z)
-                theta = math.atan2(z, y)
-                radial = np.array([0.0, math.cos(theta), math.sin(theta)], dtype=float)
+                theta = math.atan2(y, x)
+                radial = np.array([math.cos(theta), math.sin(theta), 0.0], dtype=float)
                 translation = np.asarray(displacements[node.dofs[:3]], dtype=float)
-                axial_row.append(float(node.x))
+                radial_displacement = float(translation @ radial)
+                axial_row.append(float(node.z))
                 theta_row.append(theta if theta >= 0.0 else theta + 2.0 * math.pi)
-                radial_row.append(float(translation @ radial))
-                stress_row.append(float(stress_by_node.get(int(node_id), 0.0)))
+                radial_row.append(radial_displacement)
+                stress_row.append(float(scalar_by_node.get(int(node_id), abs(radial_displacement))))
             axial_grid.append(tuple(axial_row))
             theta_grid.append(tuple(theta_row))
             radial_grid.append(tuple(radial_row))
@@ -434,6 +500,7 @@ def _visualization_from_full_result(generated_geometry: dict, model, displacemen
             "theta_rad": tuple(theta_grid),
             "radial_displacement_m": tuple(radial_grid),
             "stress_pa": tuple(stress_grid),
+            "scalar_label": scalar_label,
         }
 
     x_grid = []
@@ -451,8 +518,9 @@ def _visualization_from_full_result(generated_geometry: dict, model, displacemen
                 continue
             x_row.append(float(node.x))
             y_row.append(float(node.y))
-            w_row.append(float(displacements[node.dofs[2]]))
-            stress_row.append(float(stress_by_node.get(int(node_id), 0.0)))
+            w = float(displacements[node.dofs[2]])
+            w_row.append(w)
+            stress_row.append(float(scalar_by_node.get(int(node_id), abs(w))))
         x_grid.append(tuple(x_row))
         y_grid.append(tuple(y_row))
         w_grid.append(tuple(w_row))
@@ -463,7 +531,34 @@ def _visualization_from_full_result(generated_geometry: dict, model, displacemen
         "y_m": tuple(y_grid),
         "w_m": tuple(w_grid),
         "stress_pa": tuple(stress_grid),
+        "scalar_label": scalar_label,
     }
+
+
+def _buckling_mode_visualizations(generated_geometry: dict, model, buckling_result) -> tuple[dict[str, object], ...]:
+    if buckling_result is None:
+        return ()
+    modes = []
+    for mode in getattr(buckling_result, "modes", []) or []:
+        shape = _visualization_from_full_result(
+            generated_geometry,
+            model,
+            np.asarray(mode.mode_shape, dtype=float),
+            scalar_by_node={},
+            scalar_label="mode amplitude",
+        )
+        if not shape:
+            continue
+        shape["mode_number"] = int(mode.mode_number)
+        shape["load_factor"] = float(mode.load_factor)
+        modes.append(
+            {
+                "mode_number": int(mode.mode_number),
+                "load_factor": float(mode.load_factor),
+                "shape": shape,
+            }
+        )
+    return tuple(modes)
 
 
 def _resultant_dict(load_resultant) -> dict[str, tuple[float, float, float]]:
@@ -475,10 +570,69 @@ def _resultant_dict(load_resultant) -> dict[str, tuple[float, float, float]]:
     }
 
 
+def _add_cylinder_end_moments(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
+    moment = float(moment_nm or 0.0)
+    if abs(moment) <= 0.0:
+        return
+    bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
+    top_ring = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
+    if not bottom_ring or not top_ring:
+        return
+
+    def add_ring_moment(node_ids: list[int], sign: float) -> None:
+        nodes = [model.mesh.get_node(node_id) for node_id in node_ids]
+        nodes = [node for node in nodes if node is not None]
+        denominator = sum(float(node.x) ** 2 for node in nodes)
+        if denominator <= 1.0e-12:
+            return
+        for node in nodes:
+            axial_force = -sign * moment * float(node.x) / denominator
+            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, 0.0, axial_force], dtype=float))
+
+    add_ring_moment(bottom_ring, -1.0)
+    add_ring_moment(top_ring, 1.0)
+
+
+def _stress_statistics_from_model(model, displacements: np.ndarray, percentile: float = 95.0) -> dict[str, float]:
+    if _backend_compute_stresses is None:
+        return {"max": 0.0, "percentile": 0.0}
+    values = []
+    for stress in _backend_compute_stresses(model, displacements).values():
+        if "von_mises" in stress:
+            values.extend(np.asarray(stress["von_mises"], dtype=float).reshape(-1).tolist())
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {"max": 0.0, "percentile": 0.0}
+    return {"max": float(np.max(arr)), "percentile": float(np.percentile(arr, percentile))}
+
+
+def _max_translation(model, displacements: np.ndarray) -> float:
+    value = 0.0
+    for node in model.mesh.nodes.values():
+        value = max(value, float(np.linalg.norm(displacements[node.dofs[:3]])))
+    return value
+
+
+def _cylinder_pressure_prestress_states(model, pressure: float, radius: float) -> dict[int, dict[str, float]]:
+    compression = abs(float(pressure)) * max(float(radius), 1.0e-9)
+    states: dict[int, dict[str, float]] = {}
+    if compression <= 0.0:
+        return states
+    for element_id, element in model.mesh.elements.items():
+        if element.__class__.__name__ == "ShellElement":
+            states[int(element_id)] = {
+                "membrane_compression_x": compression,
+                "membrane_compression_y": 0.5 * compression,
+                "membrane_compression_xy": 0.0,
+            }
+    return states
+
+
 def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> LightweightFEMResult:
     """Run the vendored production FE mesh backend for generated ANYstructure geometry."""
 
-    if _full_backend is None:
+    if _full_backend is None or _backend_solve_linear is None or _backend_solve_buckling is None or _backend_load_case_resultant is None:
         return LightweightFEMResult(
             status="backend_unavailable",
             stress_max_pa=0.0,
@@ -502,42 +656,80 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         poisson_ratio=config.poisson_ratio,
         yield_stress=config.yield_stress_pa,
     )
-    backend_result = _full_backend.run_anystructure_fem_mode(None, generated_geometry, backend_config)
     diagnostics = [
         "ANYstructure production FE mesh backend.",
         "Generated shells and stiffener/girder beams from active-line geometry.",
     ]
-    if backend_result.invalid_reason:
-        diagnostics.append("Backend status: " + str(backend_result.invalid_reason))
+    if config.top_bottom_moment_nm:
+        diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
 
-    visualization = {}
-    if backend_result.displacements is not None:
-        try:
-            model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
-            visualization = _visualization_from_full_result(generated_geometry, model, backend_result.displacements)
-        except Exception as exc:
-            diagnostics.append("Visualization recovery failed: " + str(exc))
+    try:
+        model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
+        load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
+        _add_cylinder_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
+        load_resultant = _backend_load_case_resultant(model, load_case)
+        displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode="auto")
+    except Exception as exc:
+        return LightweightFEMResult(
+            status="production_failed",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            diagnostics=tuple(diagnostics + ["Backend status: " + str(exc)]),
+            solver_name="ANYstructure production FE mesh",
+        )
 
-    static_ok = backend_result.static_solver_status == "converged"
-    buckling_factors = tuple(float(value) for value in backend_result.buckling_load_factors)
-    status = "ok" if static_ok else backend_result.status
-    if static_ok and not buckling_factors:
+    static_status = str((solver_info.get("convergence_info") or {}).get("status", "unknown"))
+    if static_status != "converged":
+        diagnostics.append("Static solve status: " + static_status)
+        return LightweightFEMResult(
+            status="static_failed",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            diagnostics=tuple(diagnostics),
+            mesh_info={"nodes": model.mesh.num_nodes, "shells": len(generated_geometry.get("shells", [])), "beams": len(generated_geometry.get("beams", []))},
+            load_resultant=_resultant_dict(load_resultant),
+            solver_name="ANYstructure production FE mesh",
+        )
+
+    prestress_states, prestress_summary = _full_backend.recover_prestress_from_static_result(model, displacements)
+    buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes))
+    if not buckling_result.modes and geometry.get("geometry") == "cylinder" and abs(float(config.pressure_pa)) > 0.0:
+        pressure_states = _cylinder_pressure_prestress_states(
+            model,
+            float(config.pressure_pa) * float(config.load_scale),
+            _positive(geometry.get("radius_m", generated_geometry.get("radius_m", 1.0)), 1.0),
+        )
+        if pressure_states:
+            pressure_buckling_result = _backend_solve_buckling(model, pressure_states, num_modes=int(config.num_buckling_modes))
+            if pressure_buckling_result.modes:
+                buckling_result = pressure_buckling_result
+                diagnostics.append("Buckling modes use equivalent external-pressure membrane prestress because the full mixed prestress returned no positive modes.")
+    buckling_factors = tuple(float(mode.load_factor) for mode in buckling_result.modes)
+    stress_stats = _stress_statistics_from_model(model, displacements, 95.0)
+    visualization = _visualization_from_full_result(generated_geometry, model, displacements)
+    visualization["buckling_modes"] = _buckling_mode_visualizations(generated_geometry, model, buckling_result)
+
+    if not prestress_states:
+        diagnostics.append("Prestress recovery returned no element states.")
+    if not buckling_factors:
         diagnostics.append("Static solve converged; no positive buckling modes were returned for this load state.")
 
     return LightweightFEMResult(
-        status=status,
-        stress_max_pa=float(backend_result.stress_max),
-        stress_p95_pa=float(backend_result.stress_percentile),
-        displacement_max_m=float(backend_result.max_translation or backend_result.max_displacement),
+        status="ok",
+        stress_max_pa=float(stress_stats["max"]),
+        stress_p95_pa=float(stress_stats["percentile"]),
+        displacement_max_m=_max_translation(model, displacements),
         buckling_factors=buckling_factors,
         diagnostics=tuple(diagnostics),
         mesh_info={
-            "nodes": int(backend_result.node_count),
-            "shells": int(backend_result.shell_element_count),
-            "beams": int(backend_result.beam_element_count),
+            "nodes": int(model.mesh.num_nodes),
+            "shells": int(len(generated_geometry.get("shells", []))),
+            "beams": int(len(generated_geometry.get("beams", []))),
         },
-        prestress_summary=dict(backend_result.prestress_summary or {}),
-        load_resultant=_resultant_dict(backend_result.load_resultant),
+        prestress_summary=dict(prestress_summary or {}),
+        load_resultant=_resultant_dict(load_resultant),
         visualization=visualization,
         solver_name="ANYstructure production FE mesh",
     )

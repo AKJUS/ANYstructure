@@ -102,8 +102,10 @@ def test_runtime_fem_matplotlib_figure_contains_geometry_and_result_axes():
 
     assert isinstance(figure, Figure)
     assert len(figure.axes) >= 2
-    assert figure.axes[0].get_title() == "3D stress/displacement"
-    assert figure.axes[1].get_title() == "Result summary"
+    assert figure.axes[0].get_title() == "Static stress/displacement"
+    assert figure.axes[1].get_title() == "Buckling modes"
+    assert not figure.axes[1].patches
+    assert figure.axes[1].tables
 
 
 def test_lightweight_solver_returns_positive_fast_panel_results():
@@ -177,6 +179,104 @@ def test_production_solver_runs_full_cylinder_mesh_with_beams_and_buckling():
     assert result.buckling_factors[0] > 0.0
     assert result.visualization["type"] == "cylinder"
     assert result.visualization["stress_pa"]
+    assert len(result.visualization["buckling_modes"]) == 2
+    assert result.visualization["buckling_modes"][0]["shape"]["type"] == "cylinder"
+
+
+def test_generated_cylinder_mesh_uses_fb100x10_stiffener_section():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 5.0,
+        "thickness_m": 0.02,
+        "has_stiffener": True,
+        "has_girder": False,
+        "stiffener_section": {
+            "area": 0.1 * 0.01,
+            "Iy": 0.01 * 0.1**3 / 12.0,
+            "Iz": 0.1 * 0.01**3 / 12.0,
+            "J": 0.01 * 0.1**3 / 12.0 + 0.1 * 0.01**3 / 12.0,
+        },
+    }
+
+    generated = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse"),
+    )
+    first_stiffener = next(beam for beam in generated["beams"] if beam["role"] == "stiffener")
+
+    assert first_stiffener["section"]["area"] == 0.001
+    assert first_stiffener["section"]["Iy"] == 0.01 * 0.1**3 / 12.0
+    assert first_stiffener["section"]["Iz"] == 0.1 * 0.01**3 / 12.0
+
+
+def test_generated_cylinder_mesh_honors_mesh_size_and_middle_t_ring_girder():
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "cylinder",
+            "radius_m": 2.0,
+            "length_m": 8.0,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": True,
+            "stiffener_section": {
+                "area": 0.150 * 0.010,
+                "Iy": 0.010 * 0.150**3 / 12.0,
+                "Iz": 0.150 * 0.010**3 / 12.0,
+                "J": 0.010 * 0.150**3 / 12.0 + 0.150 * 0.010**3 / 12.0,
+            },
+            "girder_section": {
+                "area": 0.400 * 0.010 + 0.150 * 0.020,
+                "Iy": 1.0e-4,
+                "Iz": 1.0e-5,
+                "J": 1.1e-4,
+            },
+        },
+        fe_solver.LightweightFEMConfig(mesh_size_m=1.0),
+    )
+
+    assert len(generated["nodes"]) == 9 * 13
+    assert len(generated["shells"]) == 8 * 13
+    girder_rows = {
+        tuple(generated["nodes"][node_id - 1]["coords"] for node_id in beam["node_ids"])[0][2]
+        for beam in generated["beams"]
+        if beam["role"] == "girder"
+    }
+    assert girder_rows == {4.0}
+    assert all(beam["section"]["area"] == 0.007 for beam in generated["beams"] if beam["role"] == "girder")
+
+
+def test_runtime_fem_figure_can_display_cylinder_buckling_modes():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 1.5,
+            "thickness_m": 0.02,
+            "has_stiffener": True,
+            "has_girder": True,
+        },
+        fe_solver.LightweightFEMConfig(pressure_pa=10_000.0, mesh_fidelity="coarse", num_buckling_modes=2),
+    )
+    app = fe_runtime_solver.example_runtime_app()
+    snapshot = fe_runtime_solver.active_line_snapshot(app)
+    runtime_result = fe_runtime_solver.RuntimeFEMRunResult(
+        status=result.status,
+        summary={
+            **fe_runtime_solver.runtime_geometry_summary(snapshot),
+            "solver": result.solver_name,
+            "max_displacement_m": result.displacement_max_m,
+        },
+        buckling_factors=result.buckling_factors,
+        stress_percentiles=(("p95", result.stress_p95_pa), ("max", result.stress_max_pa)),
+        displacement_scale=result.displacement_max_m,
+        visualization=dict(result.visualization),
+    )
+
+    figure = fe_runtime_solver.create_runtime_fem_result_figure(snapshot, runtime_result, display_mode="mode:1")
+
+    assert figure.axes[0].get_title().startswith("Buckling mode 1")
+    assert figure.axes[1].get_title() == "Buckling modes"
 
 
 def test_anystructure_contains_vendored_full_fe_solver_backend():
@@ -193,8 +293,41 @@ def test_runtime_fem_module_has_ready_to_run_main_example():
     snapshot = fe_runtime_solver.active_line_snapshot(app)
 
     assert snapshot.line_name == "line_example"
-    assert snapshot.pressure_pa == 521_418.0
-    assert snapshot.domain == "Flat plate, stiffened with girder"
+    assert snapshot.pressure_pa == 100_000.0
+    assert snapshot.domain == "cylinder"
+    assert snapshot.is_cylinder is True
+    summary = fe_runtime_solver.runtime_geometry_summary(snapshot)
+    assert summary["radius_m"] == 2.0
+    assert summary["length_m"] == 8.0
+    assert summary["thickness_m"] == 0.012
+    assert summary["stiffener_section"]["label"] == "FB150x10"
+    assert summary["stiffener_section"]["area"] == 0.0015
+    assert summary["girder_section"]["label"] == "T400x10+150x20"
+    assert app._fem_default_top_bottom_moment_nm == 30_000_000.0
+
+
+def test_startup_cylinder_example_runs_near_200_mpa_with_buckling_modes():
+    app = fe_runtime_solver.example_runtime_app()
+    snapshot = fe_runtime_solver.active_line_snapshot(app)
+
+    result = fe_runtime_solver.run_runtime_fem(
+        snapshot,
+        fe_runtime_solver.RuntimeFEMOptions(
+            mesh_fidelity="coarse",
+            pressure_pa=snapshot.pressure_pa,
+            load_scale=1.0,
+            include_stiffeners=True,
+            include_girders=True,
+            num_buckling_modes=5,
+            mesh_size_m=0.0,
+            top_bottom_moment_nm=app._fem_default_top_bottom_moment_nm,
+        ),
+    )
+
+    assert result.status == "ok"
+    assert 150.0 <= result.stress_percentiles[0][1] / 1.0e6 <= 250.0
+    assert len(result.buckling_factors) == 5
+    assert len(result.visualization["buckling_modes"]) == 5
 
 
 def test_runtime_fem_file_can_be_run_directly_from_pycharm():

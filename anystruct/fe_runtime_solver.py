@@ -55,6 +55,8 @@ class RuntimeFEMOptions:
     include_stiffeners: bool = True
     include_girders: bool = True
     num_buckling_modes: int = 5
+    mesh_size_m: float = 0.0
+    top_bottom_moment_nm: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,65 @@ def _read_attr_or_call(obj: Any, *names: str, default: Any = None) -> Any:
         except Exception:
             continue
     return default
+
+
+def _mm_or_m_to_m(value: Any, default: float = 0.0) -> float:
+    number = _safe_float(value, default)
+    if number <= 0.0:
+        return default
+    return number / 1000.0 if number > 1.0 else number
+
+
+def _member_section(member: Any) -> dict[str, float] | None:
+    if member is None:
+        return None
+    section = _read_attr_or_call(member, "cross_section", "section", default=None)
+    if isinstance(section, dict):
+        return dict(section)
+
+    stiffener_type = str(_read_attr_or_call(member, "stiffener_type", "stf_type", default="")).upper()
+    height = _mm_or_m_to_m(_read_attr_or_call(member, "hw", "height", "web_height", default=None), 0.0)
+    thickness = _mm_or_m_to_m(_read_attr_or_call(member, "tw", "thickness", "web_thickness", default=None), 0.0)
+    flange_width = _mm_or_m_to_m(_read_attr_or_call(member, "b", "bf", "flange_width", default=None), 0.0)
+    flange_thickness = _mm_or_m_to_m(_read_attr_or_call(member, "tf", "flange_thickness", default=None), 0.0)
+    if stiffener_type in {"T", "TEE", "T-BAR"} and height > 0.0 and thickness > 0.0 and flange_width > 0.0 and flange_thickness > 0.0:
+        web_area = height * thickness
+        flange_area = flange_width * flange_thickness
+        area = web_area + flange_area
+        web_y = 0.5 * height
+        flange_y = height + 0.5 * flange_thickness
+        centroid = (web_area * web_y + flange_area * flange_y) / area
+        iy = thickness * height**3 / 12.0 + web_area * (web_y - centroid) ** 2
+        iy += flange_width * flange_thickness**3 / 12.0 + flange_area * (flange_y - centroid) ** 2
+        iz = height * thickness**3 / 12.0 + flange_thickness * flange_width**3 / 12.0
+        return {
+            "area": area,
+            "Iy": max(iy, 1.0e-12),
+            "Iz": max(iz, 1.0e-12),
+            "J": max(iy + iz, 1.0e-12),
+            "shear_factor_y": 5.0 / 6.0,
+            "shear_factor_z": 5.0 / 6.0,
+            "label": "T" + str(round(height * 1000.0)) + "x" + str(round(thickness * 1000.0))
+            + "+" + str(round(flange_width * 1000.0)) + "x" + str(round(flange_thickness * 1000.0)),
+        }
+
+    if stiffener_type not in {"FB", "FLAT", "FLATBAR", "FLAT BAR"} and not (height > 0.0 and thickness > 0.0):
+        return None
+    if height <= 0.0 or thickness <= 0.0:
+        return None
+
+    area = height * thickness
+    iy = thickness * height**3 / 12.0
+    iz = height * thickness**3 / 12.0
+    return {
+        "area": area,
+        "Iy": max(iy, 1.0e-12),
+        "Iz": max(iz, 1.0e-12),
+        "J": max(iy + iz, 1.0e-12),
+        "shear_factor_y": 5.0 / 6.0,
+        "shear_factor_z": 5.0 / 6.0,
+        "label": "FB" + str(round(height * 1000.0)) + "x" + str(round(thickness * 1000.0)),
+    }
 
 
 def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
@@ -168,13 +229,17 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
     bundle = snapshot.structure_bundle
     cyl_obj = bundle[5] if bundle and len(bundle) > 5 else None
     shell = getattr(cyl_obj, "ShellObj", None)
+    stiffener = getattr(cyl_obj, "LongStfObj", None)
+    girder = getattr(cyl_obj, "RingFrameObj", None)
     return {
         "geometry": "cylinder",
         "radius_m": _safe_float(_read_attr_or_call(shell, "radius", default=None), 1.0),
         "length_m": _safe_float(_read_attr_or_call(shell, "length_of_shell", "tot_cyl_length", default=None), 1.0),
         "thickness_m": _safe_float(_read_attr_or_call(shell, "thk", default=None), 0.0),
-        "has_stiffener": getattr(cyl_obj, "LongStfObj", None) is not None,
-        "has_girder": getattr(cyl_obj, "RingFrameObj", None) is not None,
+        "has_stiffener": stiffener is not None,
+        "has_girder": girder is not None,
+        "stiffener_section": _member_section(stiffener),
+        "girder_section": _member_section(girder),
     }
 
 
@@ -198,6 +263,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         include_stiffeners=options.include_stiffeners,
         include_girders=options.include_girders,
         num_buckling_modes=options.num_buckling_modes,
+        mesh_size_m=options.mesh_size_m,
+        top_bottom_moment_nm=options.top_bottom_moment_nm,
     )
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config)
@@ -218,6 +285,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "include_stiffeners": bool(options.include_stiffeners),
         "include_girders": bool(options.include_girders),
         "num_buckling_modes": int(options.num_buckling_modes),
+        "mesh_size_m": float(options.mesh_size_m),
+        "top_bottom_moment_nm": float(options.top_bottom_moment_nm),
         "solver": solver_result.solver_name,
         "mesh_info": dict(solver_result.mesh_info),
         "max_displacement_m": solver_result.displacement_max_m,
@@ -249,20 +318,35 @@ def _all_grid_values(grid: list[list[float]]) -> list[float]:
     return [value for row in grid for value in row]
 
 
-def _stress_facecolors(stress_mpa: list[list[float]]):
-    values = _all_grid_values(stress_mpa) or [0.0]
+def _surface_facecolors(values_grid: list[list[float]]):
+    values = _all_grid_values(values_grid) or [0.0]
     norm = mcolors.Normalize(vmin=min(values), vmax=max(values) if max(values) > min(values) else min(values) + 1.0)
     cmap = colormaps["viridis"]
-    return [[cmap(norm(value)) for value in row] for row in stress_mpa], norm, cmap
+    return [[cmap(norm(value)) for value in row] for row in values_grid], norm, cmap
 
 
-def _displacement_plot_scale(geometry: dict[str, Any], result: RuntimeFEMRunResult | None) -> float:
-    if result is None or result.displacement_scale <= 0.0:
+def _visualization_displacement_extent(visualization: dict[str, Any]) -> float:
+    if visualization.get("type") == "cylinder":
+        values = _all_grid_values(_plot_grid_values(visualization.get("radial_displacement_m")))
+    else:
+        values = _all_grid_values(_plot_grid_values(visualization.get("w_m")))
+    return max((abs(value) for value in values), default=0.0)
+
+
+def _displacement_plot_scale(
+    geometry: dict[str, Any],
+    result: RuntimeFEMRunResult | None,
+    visualization: dict[str, Any] | None = None,
+) -> float:
+    display_displacement = _visualization_displacement_extent(visualization or {})
+    result_displacement = 0.0 if result is None else result.displacement_scale
+    displacement = max(display_displacement, result_displacement)
+    if displacement <= 0.0:
         return 1.0
     length = _safe_float(geometry.get("length_m"), 1.0)
     width = _safe_float(geometry.get("width_m"), _safe_float(geometry.get("radius_m"), 1.0))
     reference = max(length, width, _safe_float(geometry.get("radius_m"), 0.0), 1.0e-9)
-    return min(max(0.08 * reference / max(result.displacement_scale, 1.0e-12), 1.0), 1.0e5)
+    return min(max(0.08 * reference / max(displacement, 1.0e-12), 1.0), 1.0e5)
 
 
 def _set_3d_axes_limits(axis: Any, x: list[list[float]], y: list[list[float]], z: list[list[float]]) -> None:
@@ -280,41 +364,76 @@ def _set_3d_axes_limits(axis: Any, x: list[list[float]], y: list[list[float]], z
         pass
 
 
-def _plot_visualization_surface(figure: Figure, axis: Any, geometry: dict[str, Any], result: RuntimeFEMRunResult) -> None:
-    visualization = result.visualization or {}
-    stress_pa = _plot_grid_values(visualization.get("stress_pa"))
-    stress_mpa = [[value / 1.0e6 for value in row] for row in stress_pa]
-    facecolors, norm, cmap = _stress_facecolors(stress_mpa)
-    scale = _displacement_plot_scale(geometry, result)
+def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, Any]]:
+    if result is None:
+        return []
+    return list((result.visualization or {}).get("buckling_modes") or [])
+
+
+def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str) -> tuple[dict[str, Any], str, bool]:
+    if display_mode.startswith("mode:"):
+        try:
+            mode_number = int(display_mode.split(":", 1)[1])
+        except (IndexError, ValueError):
+            mode_number = -1
+        for mode in _buckling_mode_shapes(result):
+            if int(mode.get("mode_number", -1)) == mode_number:
+                factor = _safe_float(mode.get("load_factor"))
+                title = "Buckling mode " + str(mode_number) + "  LF=" + str(round(factor, 4))
+                return dict(mode.get("shape") or {}), title, True
+    return dict(result.visualization or {}), "Static stress/displacement", False
+
+
+def _plot_visualization_surface(
+    figure: Figure,
+    axis: Any,
+    geometry: dict[str, Any],
+    result: RuntimeFEMRunResult,
+    display_mode: str = "static",
+) -> None:
+    visualization, title, is_mode = _selected_visualization(result, display_mode)
+    scalar_values = _plot_grid_values(visualization.get("stress_pa"))
+    if is_mode:
+        color_grid = scalar_values
+        colorbar_label = str(visualization.get("scalar_label") or "mode amplitude")
+    else:
+        color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
+        colorbar_label = "stress [MPa]"
+    facecolors, norm, cmap = _surface_facecolors(color_grid)
+    scale = _displacement_plot_scale(geometry, result, visualization)
 
     if visualization.get("type") == "cylinder":
         axial = _plot_grid_values(visualization.get("axial_m"))
         theta = _plot_grid_values(visualization.get("theta_rad"))
         radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
         radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
-        y = [
+        x = [
             [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
              for col_index in range(len(theta[row_index]))]
             for row_index in range(len(theta))
         ]
-        z = [
+        y = [
             [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
              for col_index in range(len(theta[row_index]))]
             for row_index in range(len(theta))
         ]
         axis.plot_surface(
-            np.asarray(axial),
+            np.asarray(x),
             np.asarray(y),
-            np.asarray(z),
+            np.asarray(axial),
             facecolors=np.asarray(facecolors),
             linewidth=0.15,
             antialiased=True,
             shade=False,
         )
-        axis.set_xlabel("length [m]")
+        axis.set_xlabel("x [m]")
         axis.set_ylabel("y [m]")
-        axis.set_zlabel("z [m]")
-        _set_3d_axes_limits(axis, axial, y, z)
+        axis.set_zlabel("height [m]")
+        _set_3d_axes_limits(axis, x, y, axial)
+        try:
+            axis.view_init(elev=18.0, azim=-45.0)
+        except Exception:
+            pass
     else:
         x = _plot_grid_values(visualization.get("x_m"))
         y = _plot_grid_values(visualization.get("y_m"))
@@ -334,13 +453,17 @@ def _plot_visualization_surface(figure: Figure, axis: Any, geometry: dict[str, A
         axis.set_zlabel("w x" + str(round(scale, 1)))
         _set_3d_axes_limits(axis, x, y, z)
 
-    axis.set_title("3D stress/displacement")
+    axis.set_title(title)
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-    mappable.set_array(_all_grid_values(stress_mpa))
-    figure.colorbar(mappable, ax=axis, shrink=0.68, pad=0.1, label="stress [MPa]")
+    mappable.set_array(_all_grid_values(color_grid))
+    figure.colorbar(mappable, ax=axis, shrink=0.68, pad=0.1, label=colorbar_label)
 
 
-def create_runtime_fem_result_figure(snapshot: RuntimeFEMLineSnapshot, result: RuntimeFEMRunResult | None = None) -> Figure:
+def create_runtime_fem_result_figure(
+    snapshot: RuntimeFEMLineSnapshot,
+    result: RuntimeFEMRunResult | None = None,
+    display_mode: str = "static",
+) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
     figure = Figure(figsize=(8.0, 4.1), dpi=100)
@@ -349,7 +472,7 @@ def create_runtime_fem_result_figure(snapshot: RuntimeFEMLineSnapshot, result: R
     geometry = runtime_geometry_summary(snapshot) if result is None else result.summary
 
     if result is None or not result.visualization:
-        geometry_ax.set_title("3D stress/displacement")
+        geometry_ax.set_title("Static stress/displacement")
         geometry_ax.text2D(0.08, 0.56, "Run FEM to plot stresses and displacements.", transform=geometry_ax.transAxes)
         geometry_ax.set_xlabel("length [m]")
         geometry_ax.set_ylabel("width/radius [m]")
@@ -358,26 +481,38 @@ def create_runtime_fem_result_figure(snapshot: RuntimeFEMLineSnapshot, result: R
         result_ax.text(0.5, 0.42, "Results will appear here after Run FEM.", ha="center", va="center", fontsize=9)
         result_ax.set_axis_off()
     else:
-        _plot_visualization_surface(figure, geometry_ax, geometry, result)
-        labels = [label for label, _value in result.stress_percentiles]
-        values = [value / 1.0e6 for _label, value in result.stress_percentiles]
-        colors = ["#2563eb", "#0f766e"][: len(values)]
-        result_ax.bar(labels, values, color=colors)
-        result_ax.set_title("Result summary")
-        result_ax.set_ylabel("MPa")
-        result_ax.grid(True, axis="y", color="#e5e7eb", linewidth=0.8)
-        result_ax.text(0.02, 0.96, result.status.replace("_", " "), transform=result_ax.transAxes,
+        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode)
+        result_ax.set_title("Buckling modes")
+        result_ax.set_axis_off()
+        summary_lines = [
+            "status: " + result.status.replace("_", " "),
+            "solver: " + str(geometry.get("solver", "")),
+            "max disp [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
+        ]
+        for label, value in result.stress_percentiles:
+            summary_lines.append(label + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
+        result_ax.text(0.02, 0.98, "\n".join(summary_lines), transform=result_ax.transAxes,
                        ha="left", va="top", fontsize=9)
         if result.buckling_factors:
-            result_ax.text(
-                0.02,
-                0.86,
-                "critical factor: " + str(round(result.buckling_factors[0], 3)),
-                transform=result_ax.transAxes,
-                ha="left",
-                va="top",
-                fontsize=9,
-            )
+            rows = [
+                [str(index), str(round(factor, 4))]
+                for index, factor in enumerate(result.buckling_factors, start=1)
+            ]
+        else:
+            rows = [["-", "No positive modes"]]
+        table = result_ax.table(
+            cellText=rows,
+            colLabels=["Mode", "Load factor"],
+            cellLoc="center",
+            colLoc="center",
+            bbox=[0.02, 0.08, 0.76, 0.58],
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        for index in range(1, len(rows) + 1):
+            if display_mode == "mode:" + rows[index - 1][0]:
+                for col in range(2):
+                    table[(index, col)].set_facecolor("#dbeafe")
     figure.tight_layout()
     return figure
 
@@ -393,6 +528,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Geometry: " + str(summary.get("geometry", "")),
         "Mesh fidelity: " + str(summary.get("mesh_fidelity", "")),
         "Pressure [Pa]: " + str(round(_safe_float(summary.get("pressure_pa")), 3)),
+        "Mesh size override [m]: " + str(round(_safe_float(summary.get("mesh_size_m")), 4)),
+        "Top/bottom moment [Nm]: " + str(round(_safe_float(summary.get("top_bottom_moment_nm")), 3)),
         "Include stiffener beams: " + str(bool(summary.get("include_stiffeners"))),
         "Include girder/frame beams: " + str(bool(summary.get("include_girders"))),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
@@ -404,7 +541,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
     if mesh_info:
         lines.extend([
             "",
-            "Lightweight mesh estimate:",
+            "FE mesh:",
             " - nodes: " + str(mesh_info.get("nodes", 0)),
             " - shells: " + str(mesh_info.get("shells", 0)),
             " - beams: " + str(mesh_info.get("beams", 0)),
@@ -447,14 +584,21 @@ class RuntimeFEMWindow:
             pass
 
         self.mesh_fidelity = tk.StringVar(value="coarse")
+        self.mesh_size_m = tk.DoubleVar(value=0.0)
         self.load_scale = tk.DoubleVar(value=1.0)
         self.pressure_pa = tk.DoubleVar(value=self.snapshot.pressure_pa)
+        self.top_bottom_moment_nm = tk.DoubleVar(value=_safe_float(getattr(app, "_fem_default_top_bottom_moment_nm", 0.0)))
         self.include_stiffeners = tk.BooleanVar(value=True)
         self.include_girders = tk.BooleanVar(value=True)
         self.num_buckling_modes = tk.IntVar(value=5)
+        self.display_choice = tk.StringVar(value="Static displacement/stress")
+        self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
+        self.current_result: RuntimeFEMRunResult | None = None
         self.result_text = None
         self.figure_canvas = None
         self.figure_toolbar = None
+        self.figure_parent = None
+        self.display_selector = None
 
         self._build()
 
@@ -503,21 +647,25 @@ class RuntimeFEMWindow:
         options = ttk.LabelFrame(outer, text="Run options")
         options.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(options, text="Mesh fidelity").grid(row=0, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.OptionMenu(options, self.mesh_fidelity, self.mesh_fidelity.get(), "coarse", "medium", "fine").grid(
+        ttk.OptionMenu(options, self.mesh_fidelity, self.mesh_fidelity.get(), "coarse", "medium", "fine", "very fine").grid(
             row=0, column=1, sticky=tk.W, padx=8, pady=6
         )
+        ttk.Label(options, text="Mesh size [m]").grid(row=0, column=2, sticky=tk.W, padx=8, pady=6)
+        ttk.Entry(options, textvariable=self.mesh_size_m, width=10).grid(row=0, column=3, sticky=tk.W, padx=8, pady=6)
         ttk.Label(options, text="Pressure [Pa]").grid(row=1, column=0, sticky=tk.W, padx=8, pady=6)
         ttk.Entry(options, textvariable=self.pressure_pa, width=14).grid(row=1, column=1, sticky=tk.W, padx=8, pady=6)
         ttk.Label(options, text="Load scale").grid(row=1, column=2, sticky=tk.W, padx=8, pady=6)
         ttk.Entry(options, textvariable=self.load_scale, width=10).grid(row=1, column=3, sticky=tk.W, padx=8, pady=6)
+        ttk.Label(options, text="Top/bottom moment [Nm]").grid(row=2, column=0, sticky=tk.W, padx=8, pady=6)
+        ttk.Entry(options, textvariable=self.top_bottom_moment_nm, width=14).grid(row=2, column=1, sticky=tk.W, padx=8, pady=6)
         ttk.Checkbutton(options, text="Include stiffener beams", variable=self.include_stiffeners).grid(
-            row=2, column=0, columnspan=2, sticky=tk.W, padx=8, pady=6
+            row=3, column=0, columnspan=2, sticky=tk.W, padx=8, pady=6
         )
         ttk.Checkbutton(options, text="Include girder/frame beams", variable=self.include_girders).grid(
-            row=2, column=2, columnspan=2, sticky=tk.W, padx=8, pady=6
+            row=3, column=2, columnspan=2, sticky=tk.W, padx=8, pady=6
         )
-        ttk.Label(options, text="Buckling modes").grid(row=3, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.num_buckling_modes, width=8).grid(row=3, column=1, sticky=tk.W, padx=8, pady=6)
+        ttk.Label(options, text="Buckling modes").grid(row=4, column=0, sticky=tk.W, padx=8, pady=6)
+        ttk.Entry(options, textvariable=self.num_buckling_modes, width=8).grid(row=4, column=1, sticky=tk.W, padx=8, pady=6)
 
         buttons = ttk.Frame(outer)
         buttons.pack(fill=tk.X, pady=(0, 10))
@@ -535,8 +683,21 @@ class RuntimeFEMWindow:
 
         plot_holder = ttk.Frame(result_frame)
         plot_holder.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)
+        self.figure_parent = plot_holder
+        selector_bar = ttk.Frame(plot_holder)
+        selector_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        ttk.Label(selector_bar, text="Display").pack(side=tk.LEFT, padx=(0, 6))
+        self.display_selector = ttk.Combobox(
+            selector_bar,
+            textvariable=self.display_choice,
+            state="readonly",
+            values=tuple(self.display_mode_labels),
+            width=34,
+        )
+        self.display_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.display_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
         self._show_figure(create_runtime_fem_result_figure(self.snapshot), plot_holder)
-        self._write_status("Ready. ANYstructure lightweight runtime solver is available.")
+        self._write_status("Ready. ANYstructure production FE mesh solver is available.")
 
     def _show_figure(self, figure: Figure, parent: Any | None = None) -> None:
         if parent is None and self.figure_canvas is not None:
@@ -559,6 +720,29 @@ class RuntimeFEMWindow:
         self.figure_canvas.draw()
         self.figure_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+    def _selected_display_mode(self) -> str:
+        return self.display_mode_labels.get(str(self.display_choice.get()), "static")
+
+    def _set_display_modes(self, result: RuntimeFEMRunResult) -> None:
+        labels = {"Static displacement/stress": "static"}
+        for mode in _buckling_mode_shapes(result):
+            mode_number = int(mode.get("mode_number", 0))
+            load_factor = _safe_float(mode.get("load_factor"))
+            label = "Mode " + str(mode_number) + "  LF " + str(round(load_factor, 4))
+            labels[label] = "mode:" + str(mode_number)
+        self.display_mode_labels = labels
+        self.display_choice.set("Static displacement/stress")
+        if self.display_selector is not None:
+            self.display_selector.configure(values=tuple(labels))
+
+    def _refresh_figure(self) -> None:
+        if self.figure_parent is None:
+            return
+        self._show_figure(
+            create_runtime_fem_result_figure(self.snapshot, self.current_result, self._selected_display_mode()),
+            self.figure_parent,
+        )
+
     def _write_status(self, text: str) -> None:
         if self.result_text is None:
             return
@@ -573,6 +757,8 @@ class RuntimeFEMWindow:
             include_stiffeners=bool(self.include_stiffeners.get()),
             include_girders=bool(self.include_girders.get()),
             num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
+            mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
+            top_bottom_moment_nm=_safe_float(self.top_bottom_moment_nm.get(), 0.0),
         )
 
     def run(self) -> None:
@@ -582,8 +768,10 @@ class RuntimeFEMWindow:
             messagebox.showwarning("FEM solver", "At least one member beam family should normally be included.")
 
         result = run_runtime_fem(self.snapshot, self._options())
+        self.current_result = result
+        self._set_display_modes(result)
         self._write_status(format_runtime_fem_result(result))
-        self._show_figure(create_runtime_fem_result_figure(self.snapshot, result))
+        self._refresh_figure()
 
 
 def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:
@@ -616,15 +804,45 @@ class _ExampleAllStructure:
     Girder = object()
 
 
+class _ExampleShell:
+    radius = 2.0
+    length_of_shell = 8.0
+    tot_cyl_length = 8.0
+    thk = 0.012
+
+
+class _ExampleLongitudinalStiffener:
+    stiffener_type = "FB"
+    hw = 150.0
+    tw = 10.0
+    b = 0.0
+    tf = 0.0
+
+
+class _ExampleRingGirder:
+    stiffener_type = "T"
+    hw = 400.0
+    tw = 10.0
+    b = 150.0
+    tf = 20.0
+
+
+class _ExampleCylinder:
+    ShellObj = _ExampleShell()
+    LongStfObj = _ExampleLongitudinalStiffener()
+    RingFrameObj = _ExampleRingGirder()
+
+
 class _ExampleRuntimeApp:
     _general_color = "#f0f0f0"
+    _fem_default_top_bottom_moment_nm = 30_000_000.0
     _active_line = "line_example"
     _line_is_active = True
     _line_dict = {"line_example": [1, 2]}
-    _line_to_struc = {"line_example": [_ExampleAllStructure(), None, None, object(), None, None]}
+    _line_to_struc = {"line_example": [_ExampleAllStructure(), None, None, object(), None, _ExampleCylinder()]}
 
     def get_highest_pressure(self, line):
-        return {"normal": 521_418.0 if line == self._active_line else 0.0}
+        return {"normal": 100_000.0 if line == self._active_line else 0.0}
 
 
 def example_runtime_app() -> _ExampleRuntimeApp:
