@@ -46,6 +46,36 @@ def _check_element_matrix_shape(element_id: int, matrix_name: str, matrix: np.nd
     return matrix
 
 
+def _scatter_element_matrix(
+    element_matrix: np.ndarray,
+    dof_mapping: np.ndarray,
+    rows: list,
+    cols: list,
+    data: list,
+) -> None:
+    """Append element matrix entries to COO triplet buffers (vectorized)."""
+    n_local = dof_mapping.size
+    values = element_matrix.ravel()
+    mask = values != 0.0
+    if not np.any(mask):
+        return
+    rows.append(np.repeat(dof_mapping, n_local)[mask])
+    cols.append(np.tile(dof_mapping, n_local)[mask])
+    data.append(values[mask])
+
+
+def _triplets_to_csr(rows: list, cols: list, data: list, total_dofs: int) -> sparse.csr_matrix:
+    """Build a CSR matrix from COO triplet buffers; duplicates are summed."""
+    if not data:
+        return sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+    coo = sparse.coo_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(total_dofs, total_dofs),
+        dtype=float,
+    )
+    return coo.tocsr()
+
+
 def _assemble_element_matrix(
     model: "FEModel",
     matrix_type: str,
@@ -53,17 +83,17 @@ def _assemble_element_matrix(
 ) -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
-    rows = []
-    cols = []
-    data = []
+    rows: list = []
+    cols: list = []
+    data: list = []
     info = _base_info(model, matrix_type)
     start_time = time.time()
 
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
-        dof_mapping = list(element.get_dof_mapping(mesh))
-        if not dof_mapping:
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
             info["skipped_elements"].append(int(elem_id))
             continue
 
@@ -72,21 +102,15 @@ def _assemble_element_matrix(
             int(elem_id),
             matrix_type,
             element_matrix,
-            len(dof_mapping),
+            int(dof_mapping.size),
         )
-
-        local_i, local_j = np.nonzero(element_matrix)
-        for i, j in zip(local_i, local_j):
-            rows.append(dof_mapping[int(i)])
-            cols.append(dof_mapping[int(j)])
-            data.append(float(element_matrix[int(i), int(j)]))
+        _scatter_element_matrix(element_matrix, dof_mapping, rows, cols, data)
 
         info["element_times"][int(elem_id)] = time.time() - elem_start
         info["num_elements"] += 1
 
     info["assembly_time"] = time.time() - start_time
-    global_matrix = sparse.coo_matrix((data, (rows, cols)), shape=(total_dofs, total_dofs), dtype=float)
-    return global_matrix.tocsr(), info
+    return _triplets_to_csr(rows, cols, data, total_dofs), info
 
 
 def assemble_stiffness_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
@@ -145,37 +169,31 @@ def assemble_geometric_stiffness_matrix(
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
-        dof_mapping = list(element.get_dof_mapping(mesh))
-        if not dof_mapping:
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
             info["skipped_elements"].append(int(elem_id))
             continue
 
         state = _get_element_state(element_states, int(elem_id), element)
         getter = getattr(element, "compute_geometric_stiffness_matrix", None)
         if getter is None:
-            element_matrix = np.zeros((len(dof_mapping), len(dof_mapping)), dtype=float)
+            element_matrix = np.zeros((dof_mapping.size, dof_mapping.size), dtype=float)
         else:
             element_matrix = getter(mesh, material, state)
         element_matrix = _check_element_matrix_shape(
             int(elem_id),
             "geometric_stiffness",
             element_matrix,
-            len(dof_mapping),
+            int(dof_mapping.size),
         )
-
-        local_i, local_j = np.nonzero(element_matrix)
-        for i, j in zip(local_i, local_j):
-            rows.append(dof_mapping[int(i)])
-            cols.append(dof_mapping[int(j)])
-            data.append(float(element_matrix[int(i), int(j)]))
+        _scatter_element_matrix(element_matrix, dof_mapping, rows, cols, data)
 
         info["element_times"][int(elem_id)] = time.time() - elem_start
         info["num_elements"] += 1
 
     info["assembly_time"] = time.time() - start_time
     info["state_source"] = "none" if element_states is None else type(element_states).__name__
-    global_matrix = sparse.coo_matrix((data, (rows, cols)), shape=(total_dofs, total_dofs), dtype=float)
-    return global_matrix.tocsr(), info
+    return _triplets_to_csr(rows, cols, data, total_dofs), info
 
 
 def assemble_load_vector(model: "FEModel", load_case: Optional["LoadCase"] = None) -> Tuple[np.ndarray, Dict[str, Any]]:

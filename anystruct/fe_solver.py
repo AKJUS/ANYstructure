@@ -18,6 +18,7 @@ try:
     from anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
     from anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
     from anystruct.fe_solver_backend.buckling import solve_eigenvalue_buckling as _backend_solve_buckling
+    from anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
     try:
@@ -25,12 +26,14 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
         from ANYstructure.anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
         from ANYstructure.anystruct.fe_solver_backend.buckling import solve_eigenvalue_buckling as _backend_solve_buckling
+        from ANYstructure.anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
         _full_backend = None
         _backend_compute_stresses = None
         _backend_solve_linear = None
         _backend_solve_buckling = None
+        _backend_solve_nonlinear_limit = None
         _backend_load_case_resultant = None
 
 
@@ -47,6 +50,19 @@ class LightweightFEMConfig:
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
+    boundary_condition: str = "auto"
+    symmetry_mode: str = "none"
+    shell_element_order: str = "S4"
+    analysis_type: str = "linear eigenvalue"
+    buckling_analysis_type: str = "linear eigenvalue"
+    pressure_direction: str = "external"
+    axial_force_n: float = 0.0
+    enforced_displacement_m: float = 0.0
+    stiffener_eccentricity_m: float = 0.0
+    girder_eccentricity_m: float = 0.0
+    member_orientation: str = "auto"
+    solver_type: str = "direct"
+    stress_percentile: float = 95.0
     elastic_modulus_pa: float = 210.0e9
     poisson_ratio: float = 0.3
     yield_stress_pa: float = 355.0e6
@@ -85,6 +101,10 @@ def _production_divisions(mesh_fidelity: str) -> int:
     return {"coarse": 4, "medium": 8, "fine": 12, "very fine": 20, "very_fine": 20}.get(str(mesh_fidelity).lower(), 4)
 
 
+def _fidelity_refinement(mesh_fidelity: str) -> int:
+    return {"coarse": 1, "medium": 2, "fine": 3, "very fine": 4, "very_fine": 4}.get(str(mesh_fidelity).lower(), 1)
+
+
 def _requested_mesh_size(config: LightweightFEMConfig) -> float:
     try:
         size = float(config.mesh_size_m)
@@ -101,11 +121,15 @@ def _line_divisions(
 ) -> int:
     mesh_size = _requested_mesh_size(config)
     max_element_size = _positive(max_element_size, 0.0)
-    if max_element_size > 0.0 and (mesh_size <= 0.0 or mesh_size > max_element_size):
-        mesh_size = max_element_size
     if mesh_size > 0.0:
+        if max_element_size > 0.0 and mesh_size > max_element_size:
+            mesh_size = max_element_size
         return max(int(math.ceil(max(length, 1.0e-9) / mesh_size)), 1)
-    return max(int(fallback), 1)
+    divisions = max(int(fallback), 1)
+    if max_element_size > 0.0:
+        target_size = max_element_size / max(_fidelity_refinement(config.mesh_fidelity), 1)
+        divisions = max(divisions, int(math.ceil(max(length, 1.0e-9) / target_size)))
+    return divisions
 
 
 def _axis_breaks(
@@ -296,6 +320,293 @@ def _section_or_default(section: object, thickness: float, reference: float, dep
     return _beam_section(thickness, reference, depth_factor)
 
 
+def _normalized_choice(value: object, default: str = "auto") -> str:
+    text = str(value or default).strip().lower().replace("_", " ").replace("-", " ")
+    return " ".join(text.split()) or default
+
+
+def _wants_s8(config: LightweightFEMConfig) -> bool:
+    return _normalized_choice(config.shell_element_order, "s4") in {"s8", "8 node", "8 node shell", "quadratic"}
+
+
+def _shell_order_from_geometry(generated_geometry: dict) -> str:
+    for shell in generated_geometry.get("shells", []) or []:
+        return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
+    return "S4"
+
+
+def _node_lookup(nodes: list[dict[str, object]]) -> dict[int, np.ndarray]:
+    return {int(node["id"]): np.asarray(node["coords"], dtype=float) for node in nodes}
+
+
+def _project_cylinder_midpoint(a: np.ndarray, b: np.ndarray, radius: float) -> np.ndarray:
+    midpoint = 0.5 * (a + b)
+    if radius <= 0.0:
+        return midpoint
+    radial = midpoint[:2]
+    norm = float(np.linalg.norm(radial))
+    if norm > 1.0e-12:
+        midpoint[:2] = radial / norm * radius
+    return midpoint
+
+
+def _upgrade_shells_to_s8(nodes: list[dict[str, object]], shells: list[dict[str, object]], radius: float = 0.0) -> None:
+    """Convert generated 4-node quads to 8-node serendipity quads in place."""
+    node_coords = _node_lookup(nodes)
+    next_node_id = max(node_coords, default=0) + 1
+    midside_nodes: dict[tuple[int, int], int] = {}
+
+    def midside_id(n1: int, n2: int) -> int:
+        nonlocal next_node_id
+        key = tuple(sorted((int(n1), int(n2))))
+        if key in midside_nodes:
+            return midside_nodes[key]
+        a = node_coords[int(n1)]
+        b = node_coords[int(n2)]
+        coords = _project_cylinder_midpoint(a, b, radius) if radius > 0.0 else 0.5 * (a + b)
+        node_id = next_node_id
+        next_node_id += 1
+        midside_nodes[key] = node_id
+        node_coords[node_id] = coords
+        nodes.append({"id": node_id, "coords": coords.tolist()})
+        return node_id
+
+    for shell in shells:
+        node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
+        if len(node_ids) != 4:
+            continue
+        n1, n2, n3, n4 = node_ids
+        shell["node_ids"] = [
+            n1,
+            n2,
+            n3,
+            n4,
+            midside_id(n1, n2),
+            midside_id(n2, n3),
+            midside_id(n3, n4),
+            midside_id(n4, n1),
+        ]
+
+
+def _axis_symmetry_constraints(axis: str) -> dict[str, float]:
+    if axis == "x":
+        return {"ux": 0.0, "ry": 0.0, "rz": 0.0}
+    if axis == "y":
+        return {"uy": 0.0, "rx": 0.0, "rz": 0.0}
+    if axis == "z":
+        return {"uz": 0.0, "rx": 0.0, "ry": 0.0}
+    return {}
+
+
+def _symmetry_supports(nodes: list[dict[str, object]], config: LightweightFEMConfig) -> list[dict[str, object]]:
+    mode = _normalized_choice(config.symmetry_mode, "none")
+    if mode in {"none", "off", "cyclic"}:
+        return []
+    axis_index = {"x": 0, "y": 1, "z": 2}.get(mode)
+    constraints = _axis_symmetry_constraints(mode)
+    if axis_index is None or not constraints:
+        return []
+    coords = _node_lookup(nodes)
+    values = np.asarray([coord[axis_index] for coord in coords.values()], dtype=float)
+    if values.size == 0:
+        return []
+    span = float(np.max(values) - np.min(values))
+    tol = max(span * 1.0e-8, 1.0e-8)
+    zero_nodes = [node_id for node_id, coord in coords.items() if abs(float(coord[axis_index])) <= tol]
+    if zero_nodes:
+        node_ids = zero_nodes
+        plane_name = f"global_{mode}0"
+    else:
+        target = float(np.min(values))
+        node_ids = [node_id for node_id, coord in coords.items() if abs(float(coord[axis_index]) - target) <= tol]
+        plane_name = f"global_min_{mode}"
+    return [{"name": f"symmetry_{plane_name}", "node_ids": sorted(node_ids), "constraints": constraints}]
+
+
+def _enforced_displacement_supports(
+    nodes: list[dict[str, object]],
+    config: LightweightFEMConfig,
+    plot_type: str,
+    exclude_node_ids: set[int] | None = None,
+) -> list[dict[str, object]]:
+    try:
+        displacement = float(config.enforced_displacement_m)
+    except (TypeError, ValueError):
+        return []
+    if abs(displacement) <= 0.0:
+        return []
+    exclude_node_ids = set(exclude_node_ids or set())
+    coords = _node_lookup(nodes)
+    if not coords:
+        return []
+    if plot_type == "cylinder":
+        z_values = np.asarray([coord[2] for coord in coords.values()], dtype=float)
+        target_z = 0.5 * (float(np.min(z_values)) + float(np.max(z_values)))
+        tol = max((float(np.max(z_values)) - float(np.min(z_values))) * 1.0e-8, 1.0e-8)
+        closest_z = min((float(coord[2]) for coord in coords.values()), key=lambda value: abs(value - target_z))
+        supports = []
+        for node_id, coord in coords.items():
+            if abs(float(coord[2]) - closest_z) > tol:
+                continue
+            radial = np.asarray([coord[0], coord[1]], dtype=float)
+            norm = float(np.linalg.norm(radial))
+            if norm <= 1.0e-12:
+                continue
+            unit = radial / norm
+            supports.append(
+                {
+                    "name": f"enforced_radial_displacement_{node_id}",
+                    "node_ids": [node_id],
+                    "constraints": {"ux": displacement * float(unit[0]), "uy": displacement * float(unit[1])},
+                }
+            )
+        return supports
+    xs = np.asarray([coord[0] for coord in coords.values()], dtype=float)
+    ys = np.asarray([coord[1] for coord in coords.values()], dtype=float)
+    centre = np.asarray([0.5 * (float(np.min(xs)) + float(np.max(xs))), 0.5 * (float(np.min(ys)) + float(np.max(ys)))])
+    candidates = [node_id for node_id in coords if node_id not in exclude_node_ids] or list(coords)
+    node_id = min(candidates, key=lambda nid: float(np.linalg.norm(coords[nid][:2] - centre)))
+    return [{"name": "enforced_panel_displacement", "node_ids": [node_id], "constraints": {"uz": displacement}}]
+
+
+def _offset_beam_nodes_and_couplings(
+    nodes: list[dict[str, object]],
+    beams: list[dict[str, object]],
+    config: LightweightFEMConfig,
+    normal_at_node,
+    start_node_id: int | None = None,
+    start_coupling_id: int = 30_001,
+    exclude_base_node_ids: set[int] | None = None,
+) -> list[dict[str, object]]:
+    node_coords = _node_lookup(nodes)
+    next_node_id = int(start_node_id or (max(node_coords, default=0) + 1))
+    next_coupling_id = int(start_coupling_id)
+    offset_nodes: dict[tuple[int, str, float], int] = {}
+    couplings: list[dict[str, object]] = []
+    exclude_base_node_ids = set(exclude_base_node_ids or set())
+
+    def eccentricity_for(beam: dict[str, object]) -> float:
+        section = beam.get("section") or beam.get("cross_section") or {}
+        if isinstance(section, dict):
+            try:
+                return float(section.get("eccentricity_m", 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
+    def offset_node(base_node_id: int, role: str, eccentricity: float) -> int:
+        nonlocal next_node_id, next_coupling_id
+        key = (int(base_node_id), str(role), round(float(eccentricity), 12))
+        if key in offset_nodes:
+            return offset_nodes[key]
+        base = node_coords[int(base_node_id)]
+        normal = np.asarray(normal_at_node(int(base_node_id), base), dtype=float)
+        norm = float(np.linalg.norm(normal))
+        if norm <= 1.0e-12:
+            normal = np.array([0.0, 0.0, 1.0], dtype=float)
+        else:
+            normal = normal / norm
+        offset = normal * float(eccentricity)
+        node_id = next_node_id
+        next_node_id += 1
+        offset_nodes[key] = node_id
+        node_coords[node_id] = base + offset
+        nodes.append({"id": node_id, "coords": node_coords[node_id].tolist()})
+        couplings.append(
+            {
+                "id": next_coupling_id,
+                "beam_node_id": node_id,
+                "shell_node_ids": [int(base_node_id)],
+                "shape_weights": [1.0],
+                "eccentricity": offset.tolist(),
+            }
+        )
+        next_coupling_id += 1
+        return node_id
+
+    for beam in beams:
+        eccentricity = eccentricity_for(beam)
+        if abs(eccentricity) <= 0.0:
+            continue
+        role = str(beam.get("role", "beam"))
+        beam["node_ids"] = [
+            int(node_id) if int(node_id) in exclude_base_node_ids else offset_node(int(node_id), role, eccentricity)
+            for node_id in beam.get("node_ids", [])
+        ]
+    return couplings
+
+
+def _section_with_runtime_options(
+    section: object,
+    thickness: float,
+    reference: float,
+    depth_factor: float,
+    eccentricity: float,
+    orientation: str,
+) -> dict[str, float]:
+    result = dict(_section_or_default(section, thickness, reference, depth_factor))
+    try:
+        eccentricity = float(eccentricity)
+    except (TypeError, ValueError):
+        eccentricity = 0.0
+    if abs(eccentricity) > 0.0:
+        result["eccentricity_m"] = eccentricity
+    orientation_key = _normalized_choice(orientation)
+    if orientation_key == "global z":
+        result["orientation"] = (0.0, 0.0, 1.0)
+    elif orientation_key == "global y":
+        result["orientation"] = (0.0, 1.0, 0.0)
+    return result
+
+
+def _flat_supports(boundary_nodes: list[int], node_id, rows: int, cols: int, config: LightweightFEMConfig) -> list[dict[str, object]]:
+    mode = _normalized_choice(config.boundary_condition)
+    if mode in {"free", "none"}:
+        return []
+    if mode in {"simply supported", "simple", "ss"}:
+        return [
+            {"name": "simple_panel_boundary", "node_ids": boundary_nodes, "constraints": {"uz": 0.0}},
+            {"name": "simple_panel_inplane_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0}},
+            {"name": "simple_panel_spin_anchor", "node_ids": [node_id(rows - 1, 0)], "constraints": {"uy": 0.0}},
+        ]
+    if mode in {"pinned", "pinned edges"}:
+        return [
+            {
+                "name": "pinned_panel_boundary",
+                "node_ids": boundary_nodes,
+                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0},
+            }
+        ]
+    return [
+        {
+            "name": "clamped_panel_boundary",
+            "node_ids": boundary_nodes,
+            "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+        }
+    ]
+
+
+def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConfig) -> list[dict[str, object]]:
+    mode = _normalized_choice(config.boundary_condition)
+    if mode in {"free", "none"}:
+        return []
+    if mode in {"clamped", "fixed", "fixed ends"}:
+        bottom = [node_id(0, col) for col in range(cols)]
+        top = [node_id(rows - 1, col) for col in range(cols)]
+        return [
+            {
+                "name": "clamped_cylinder_ends",
+                "node_ids": bottom + top,
+                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+            }
+        ]
+    return [
+        {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0}},
+        {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
+        {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
+    ]
+
+
 def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     width = _positive(geometry.get("width_m", 1.0), 1.0)
@@ -368,7 +679,14 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     beam_id = 20_001
     for stiffener_y in stiffener_positions:
         mid_col = _index_of_break(y_breaks, stiffener_y)
-        section = _section_or_default(geometry.get("stiffener_section"), thickness, width, 0.08)
+        section = _section_with_runtime_options(
+            geometry.get("stiffener_section"),
+            thickness,
+            width,
+            0.08,
+            config.stiffener_eccentricity_m,
+            config.member_orientation,
+        )
         for row in range(rows - 1):
             beams.append(
                 {
@@ -382,7 +700,14 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             beam_id += 1
     for girder_x in girder_positions:
         mid_row = _index_of_break(x_breaks, girder_x)
-        section = _section_or_default(geometry.get("girder_section"), thickness, length, 0.10)
+        section = _section_with_runtime_options(
+            geometry.get("girder_section"),
+            thickness,
+            length,
+            0.10,
+            config.girder_eccentricity_m,
+            config.member_orientation,
+        )
         for col in range(cols - 1):
             beams.append(
                 {
@@ -395,6 +720,15 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             )
             beam_id += 1
 
+    if _wants_s8(config):
+        _upgrade_shells_to_s8(nodes, shells)
+
+    couplings = _offset_beam_nodes_and_couplings(
+        nodes,
+        beams,
+        config,
+        lambda _node_id, _coord: np.array([0.0, 0.0, 1.0], dtype=float),
+    )
     boundary_nodes = sorted(
         {
             node_id(row, col)
@@ -403,18 +737,16 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             if row in (0, rows - 1) or col in (0, cols - 1)
         }
     )
+    supports = _flat_supports(boundary_nodes, node_id, rows, cols, config)
+    supports.extend(_symmetry_supports(nodes, config))
+    supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
         "name": "ANYstructureFlatPanelFullMesh",
         "nodes": nodes,
         "shells": shells,
         "beams": beams,
-        "supports": [
-            {
-                "name": "clamped_panel_boundary",
-                "node_ids": boundary_nodes,
-                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
-            }
-        ],
+        "couplings": couplings,
+        "supports": supports,
         "materials": [
             {
                 "name": "steel",
@@ -455,15 +787,19 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         [value for value in (active_stiffener_spacing, girder_spacing) if value > 0.0],
         default=0.0,
     )
-    if mesh_size_cap > 0.0 and (mesh_size <= 0.0 or mesh_size > mesh_size_cap):
-        mesh_size = mesh_size_cap
     if mesh_size > 0.0:
+        if mesh_size_cap > 0.0 and mesh_size > mesh_size_cap:
+            mesh_size = mesh_size_cap
         circumferential_div = max(int(math.ceil(circumference / mesh_size)), 8)
         axial_div = max(int(math.ceil(length / mesh_size)), 2)
     else:
         base_div = _production_divisions(config.mesh_fidelity)
         circumferential_div = max(base_div * 2, 8)
         axial_div = max(int(length / max(radius, 1.0e-9) * circumferential_div / 4), 2)
+        if mesh_size_cap > 0.0:
+            target_size = mesh_size_cap / max(_fidelity_refinement(config.mesh_fidelity), 1)
+            circumferential_div = max(circumferential_div, int(math.ceil(circumference / target_size)))
+            axial_div = max(axial_div, int(math.ceil(length / target_size)))
     if stiffener_count > 0:
         circumferential_div = _multiple_at_least(circumferential_div, stiffener_count)
     girder_positions = []
@@ -513,10 +849,21 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     beams = []
     beam_id = 20_001
     if config.include_stiffeners and geometry.get("has_stiffener"):
-        section = _section_or_default(geometry.get("stiffener_section"), thickness, radius, 0.08)
+        base_section = _section_with_runtime_options(
+            geometry.get("stiffener_section"),
+            thickness,
+            radius,
+            0.08,
+            config.stiffener_eccentricity_m,
+            config.member_orientation,
+        )
         count = stiffener_count if stiffener_count > 0 else min(8, cols)
         for offset in range(count):
             col = int(round(offset * cols / count)) % cols
+            section = dict(base_section)
+            if _normalized_choice(config.member_orientation) == "radial":
+                theta = 2.0 * math.pi * col / cols
+                section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
             for row in range(axial_div):
                 beams.append(
                     {
@@ -529,10 +876,21 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 )
                 beam_id += 1
     if config.include_girders and geometry.get("has_girder"):
-        section = _section_or_default(geometry.get("girder_section"), thickness, radius, 0.12)
+        base_section = _section_with_runtime_options(
+            geometry.get("girder_section"),
+            thickness,
+            radius,
+            0.12,
+            config.girder_eccentricity_m,
+            config.member_orientation,
+        )
         ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
         for row in ring_rows:
             for col in range(cols):
+                section = dict(base_section)
+                if _normalized_choice(config.member_orientation) == "radial":
+                    theta = 2.0 * math.pi * (col + 0.5) / cols
+                    section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
                 beams.append(
                     {
                         "id": beam_id,
@@ -544,16 +902,33 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 )
                 beam_id += 1
 
-    start_ring = [node_id(0, col) for col in range(cols)]
-    end_ring = [node_id(rows - 1, col) for col in range(cols)]
+    if _wants_s8(config):
+        _upgrade_shells_to_s8(nodes, shells, radius=radius)
+
+    def cylinder_normal(_node_id: int, coord: np.ndarray) -> np.ndarray:
+        radial = np.asarray([coord[0], coord[1], 0.0], dtype=float)
+        norm = float(np.linalg.norm(radial))
+        if norm <= 1.0e-12:
+            return np.array([1.0, 0.0, 0.0], dtype=float)
+        return radial / norm
+
+    node_coords_after_shell_order = _node_lookup(nodes)
+    z_tol = max(length * 1.0e-9, 1.0e-9)
+    start_ring = sorted(
+        node_id_value
+        for node_id_value, coord in node_coords_after_shell_order.items()
+        if abs(float(coord[2])) <= z_tol
+    )
+    end_ring = sorted(
+        node_id_value
+        for node_id_value, coord in node_coords_after_shell_order.items()
+        if abs(float(coord[2]) - length) <= z_tol
+    )
     rigid_lids = []
-    supports = [
-        {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0}},
-        {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
-        {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
-    ]
+    supports = _cylinder_supports(rows, cols, node_id, config)
     if config.include_end_lids:
-        bottom_center = rows * cols + 1
+        next_node_id = max(_node_lookup(nodes), default=0) + 1
+        bottom_center = next_node_id
         top_center = bottom_center + 1
         nodes.extend(
             [
@@ -566,11 +941,23 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             {"id": 40_002, "name": "top_rigid_lid", "center_node_id": top_center, "ring_node_ids": end_ring},
         ]
         supports = []
+    rigid_lid_ring_nodes = set(start_ring + end_ring) if config.include_end_lids else set()
+    couplings = _offset_beam_nodes_and_couplings(
+        nodes,
+        beams,
+        config,
+        cylinder_normal,
+        start_node_id=max(_node_lookup(nodes), default=0) + 1,
+        exclude_base_node_ids=rigid_lid_ring_nodes,
+    )
+    supports.extend(_symmetry_supports(nodes, config))
+    supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
     return {
         "name": "ANYstructureCylinderFullMesh",
         "nodes": nodes,
         "shells": shells,
         "beams": beams,
+        "couplings": couplings,
         "rigid_lids": rigid_lids,
         "supports": supports,
         "materials": [
@@ -734,6 +1121,96 @@ def _resultant_dict(load_resultant) -> dict[str, tuple[float, float, float]]:
     }
 
 
+def _pressure_sign(config: LightweightFEMConfig) -> float:
+    direction = _normalized_choice(config.pressure_direction, "external")
+    return 1.0 if direction in {"internal", "outward", "positive normal"} else -1.0
+
+
+def _solver_type(config: LightweightFEMConfig) -> str:
+    solver = _normalized_choice(config.solver_type, "direct").replace(" ", "")
+    return solver if solver in {"direct", "gmres", "minres", "bicgstab"} else "direct"
+
+
+def _wants_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    return _normalized_choice(config.analysis_type, "linear eigenvalue") not in {
+        "linear",
+        "linear eigenvalue",
+        "linear static eigenvalue",
+        "linear static + eigenvalue",
+    }
+
+
+def _wants_nonlinear_buckling(config: LightweightFEMConfig) -> bool:
+    return _normalized_choice(config.buckling_analysis_type, "linear eigenvalue") not in {
+        "linear eigenvalue",
+        "eigenvalue",
+    }
+
+
+def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | str]:
+    nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
+    grid = generated_geometry.get("plot_grid") or []
+    diagnostics: dict[str, float | int | str] = {"shell_order": _shell_order_from_geometry(generated_geometry)}
+    if not grid:
+        return diagnostics
+    if generated_geometry.get("plot_type") == "cylinder":
+        row = list(grid[0][:-1])
+        z_values = sorted({nodes[node_id][2] for line in grid for node_id in line if node_id in nodes})
+        radius = _positive(generated_geometry.get("radius_m", 0.0), 0.0)
+        if row and radius > 0.0:
+            diagnostics["circumferential_divisions"] = len(row)
+            diagnostics["max_circumferential_edge_m"] = 2.0 * math.pi * radius / max(len(row), 1)
+        if len(z_values) > 1:
+            diagnostics["axial_divisions"] = len(z_values) - 1
+            diagnostics["max_axial_edge_m"] = max(b - a for a, b in zip(z_values, z_values[1:]))
+        return diagnostics
+    x_values = sorted({nodes[node_id][0] for line in grid for node_id in line if node_id in nodes})
+    y_values = sorted({nodes[node_id][1] for line in grid for node_id in line if node_id in nodes})
+    if len(x_values) > 1:
+        diagnostics["x_divisions"] = len(x_values) - 1
+        diagnostics["max_x_edge_m"] = max(b - a for a, b in zip(x_values, x_values[1:]))
+    if len(y_values) > 1:
+        diagnostics["y_divisions"] = len(y_values) - 1
+        diagnostics["max_y_edge_m"] = max(b - a for a, b in zip(y_values, y_values[1:]))
+    return diagnostics
+
+
+def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial_force_n: float) -> None:
+    try:
+        axial_force = float(axial_force_n)
+    except (TypeError, ValueError):
+        return
+    if abs(axial_force) <= 0.0:
+        return
+    if generated_geometry.get("plot_type") == "cylinder":
+        bottom = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
+        top = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
+        if not bottom or not top:
+            return
+        for node_id in bottom:
+            load_case.add_nodal_load(node_id, forces=np.array([0.0, 0.0, axial_force / len(bottom)], dtype=float))
+        for node_id in top:
+            load_case.add_nodal_load(node_id, forces=np.array([0.0, 0.0, -axial_force / len(top)], dtype=float))
+        return
+    shell_node_ids = sorted({node_id for shell in generated_geometry.get("shells", []) for node_id in shell.get("node_ids", [])})
+    nodes = [model.mesh.get_node(int(node_id)) for node_id in shell_node_ids]
+    nodes = [node for node in nodes if node is not None]
+    if not nodes:
+        return
+    xs = [float(node.x) for node in nodes]
+    xmin = min(xs)
+    xmax = max(xs)
+    tol = max((xmax - xmin) * 1.0e-9, 1.0e-9)
+    left = [node for node in nodes if abs(float(node.x) - xmin) <= tol]
+    right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
+    if not left or not right:
+        return
+    for node in left:
+        load_case.add_nodal_load(int(node.id), forces=np.array([axial_force / len(left), 0.0, 0.0], dtype=float))
+    for node in right:
+        load_case.add_nodal_load(int(node.id), forces=np.array([-axial_force / len(right), 0.0, 0.0], dtype=float))
+
+
 def _add_cylinder_end_moments(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
     moment = float(moment_nm or 0.0)
     if abs(moment) <= 0.0:
@@ -793,6 +1270,35 @@ def _cylinder_pressure_prestress_states(model, pressure: float, radius: float) -
     return states
 
 
+def _add_cylinder_buckling_gauge(model, generated_geometry: dict) -> bool:
+    """Add minimal buckling-only constraints that remove free rigid-body drift."""
+    rigid_lids = list(generated_geometry.get("rigid_lids") or [])
+    if not rigid_lids or getattr(model, "boundary_conditions", None):
+        return False
+    try:
+        bottom_center = int(rigid_lids[0]["center_node_id"])
+        top_center = int(rigid_lids[-1]["center_node_id"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if model.mesh.get_node(bottom_center) is None or model.mesh.get_node(top_center) is None:
+        return False
+    model.add_boundary_condition(
+        _full_backend.BoundaryCondition(
+            "buckling_gauge_bottom_lid",
+            [bottom_center],
+            {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rz": 0.0},
+        )
+    )
+    model.add_boundary_condition(
+        _full_backend.BoundaryCondition(
+            "buckling_gauge_top_lid",
+            [top_center],
+            {"ux": 0.0, "uy": 0.0},
+        )
+    )
+    return True
+
+
 def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> LightweightFEMResult:
     """Run the vendored production FE mesh backend for generated ANYstructure geometry."""
 
@@ -809,11 +1315,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     generated_geometry = build_generated_geometry(geometry, config)
     backend_config = _full_backend.AnyStructureFEMConfig(
         pressure_pa=abs(float(config.pressure_pa)),
-        pressure_sign=-1.0,
+        pressure_sign=_pressure_sign(config),
         load_scale=float(config.load_scale),
         num_buckling_modes=int(config.num_buckling_modes),
-        solver_type="direct",
-        stress_percentile=95.0,
+        solver_type=_solver_type(config),
+        stress_percentile=min(max(float(config.stress_percentile), 0.0), 100.0),
         add_inplane_edge_loads=False,
         require_idealized_member_beams=False,
         elastic_modulus=config.elastic_modulus_pa,
@@ -828,10 +1334,25 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if config.top_bottom_moment_nm:
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
+    if abs(float(config.axial_force_n or 0.0)) > 0.0:
+        diagnostics.append("Applied balanced axial force: " + str(round(float(config.axial_force_n), 3)) + " N.")
+    if abs(float(config.enforced_displacement_m or 0.0)) > 0.0:
+        diagnostics.append("Applied prescribed displacement constraints from the enforced displacement input.")
+    if _wants_s8(config):
+        diagnostics.append("Generated S8 shell elements with shared midside nodes.")
+    if _normalized_choice(config.symmetry_mode) == "cyclic":
+        diagnostics.append("Cyclic symmetry requested; generated runtime geometry is a full 360-degree model, so no sector coupling was added.")
+    elif _normalized_choice(config.symmetry_mode) not in {"none", "off"}:
+        diagnostics.append("Applied generated global symmetry boundary conditions.")
+    if _normalized_choice(config.member_orientation) == "radial":
+        diagnostics.append("Applied radial member section orientation for cylinder beams where applicable.")
+    if abs(float(config.stiffener_eccentricity_m or 0.0)) > 0.0 or abs(float(config.girder_eccentricity_m or 0.0)) > 0.0:
+        diagnostics.append("Applied eccentric beam-shell MPC offsets for generated member beams.")
 
     try:
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
+        _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
         _add_cylinder_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         load_resultant = _backend_load_case_resultant(model, load_case)
         displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode="auto")
@@ -860,6 +1381,36 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         )
 
     prestress_states, prestress_summary = _full_backend.recover_prestress_from_static_result(model, displacements)
+    nonlinear_result = None
+    nonlinear_factor = None
+    if _wants_nonlinear_analysis(config) or _wants_nonlinear_buckling(config):
+        if _backend_solve_nonlinear_limit is None:
+            diagnostics.append("Nonlinear load-step solver is unavailable in this backend.")
+        else:
+            try:
+                nonlinear_result = _backend_solve_nonlinear_limit(
+                    model,
+                    load_case,
+                    prestress_states,
+                    max_load_factor=3.0,
+                    num_steps=12,
+                    stability_tolerance=1.0e-3,
+                    stop_at_limit=True,
+                )
+                nonlinear_factor = nonlinear_result.critical_load_factor_estimate
+                if nonlinear_factor is None:
+                    nonlinear_factor = nonlinear_result.last_load_factor if nonlinear_result.steps else None
+                prestress_summary["nonlinear_status"] = nonlinear_result.status
+                if nonlinear_factor is not None:
+                    prestress_summary["nonlinear_limit_factor"] = float(nonlinear_factor)
+                prestress_summary["nonlinear_steps"] = len(nonlinear_result.steps)
+                diagnostics.append("Ran nonlinear tangent-stability load stepping: " + str(nonlinear_result.status) + ".")
+                if _wants_nonlinear_analysis(config) and nonlinear_result.converged:
+                    displacements = np.asarray(nonlinear_result.final_displacements, dtype=float)
+            except Exception as exc:
+                diagnostics.append("Nonlinear load-step solver failed: " + str(exc))
+    if geometry.get("geometry") == "cylinder" and config.include_end_lids and _add_cylinder_buckling_gauge(model, generated_geometry):
+        diagnostics.append("Applied buckling-only rigid-body gauge constraints to the lid center nodes.")
     buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes))
     if not buckling_result.modes and geometry.get("geometry") == "cylinder" and abs(float(config.pressure_pa)) > 0.0:
         pressure_states = _cylinder_pressure_prestress_states(
@@ -872,8 +1423,12 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             if pressure_buckling_result.modes:
                 buckling_result = pressure_buckling_result
                 diagnostics.append("Buckling modes use equivalent external-pressure membrane prestress because the full mixed prestress returned no positive modes.")
-    buckling_factors = tuple(float(mode.load_factor) for mode in buckling_result.modes)
-    stress_stats = _stress_statistics_from_model(model, displacements, 95.0)
+    if _wants_nonlinear_buckling(config) and nonlinear_factor is not None and float(nonlinear_factor) > 0.0:
+        buckling_factors = (float(nonlinear_factor),)
+        diagnostics.append("Buckling factors report the nonlinear limit-load estimate for the selected buckling mode.")
+    else:
+        buckling_factors = tuple(float(mode.load_factor) for mode in buckling_result.modes)
+    stress_stats = _stress_statistics_from_model(model, displacements, min(max(float(config.stress_percentile), 0.0), 100.0))
     visualization = _visualization_from_full_result(generated_geometry, model, displacements)
     visualization["buckling_modes"] = _buckling_mode_visualizations(generated_geometry, model, buckling_result)
 
@@ -894,6 +1449,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             "shells": int(len(generated_geometry.get("shells", []))),
             "beams": int(len(generated_geometry.get("beams", []))),
             "rigid_lids": int(len(generated_geometry.get("rigid_lids", []))),
+            **_mesh_size_diagnostics(generated_geometry),
         },
         prestress_summary=dict(prestress_summary or {}),
         load_resultant=_resultant_dict(load_resultant),

@@ -146,6 +146,14 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))" in source
     assert "ttk.Checkbutton(options, text=\"Top/bottom lid\", variable=self.include_end_lids)" in source
     assert "include_end_lids=bool(self.include_end_lids.get())" in source
+    assert "self.boundary_condition = tk.StringVar(value=\"auto\")" in source
+    assert "self.shell_element_order = tk.StringVar(value=\"S4\")" in source
+    assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
+    assert "self.pressure_direction = tk.StringVar(value=\"external\")" in source
+    assert "self.axial_force_n = tk.DoubleVar(value=0.0)" in source
+    assert "self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)" in source
+    assert "boundary_condition=str(self.boundary_condition.get())" in source
+    assert "elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9" in source
     assert "self.progress_bar.start(12)" in source
     assert "threading.Thread(target=worker, daemon=True)" in source
     assert "self.window.after(100, self._poll_solver_result)" in source
@@ -347,6 +355,59 @@ def test_flat_mesh_size_is_not_capped_by_disabled_members():
     assert max(b - a for a, b in zip(x_values, x_values[1:])) > 0.5
 
 
+def test_runtime_generated_mesh_uses_boundary_and_member_orientation_options():
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "flat panel",
+            "length_m": 4.0,
+            "width_m": 1.0,
+            "thickness_m": 0.012,
+            "has_stiffener": True,
+            "has_girder": False,
+            "stiffener_spacing_m": 0.5,
+        },
+        fe_solver.LightweightFEMConfig(
+            boundary_condition="simply supported",
+            member_orientation="global Z",
+            stiffener_eccentricity_m=0.08,
+        ),
+    )
+
+    assert generated["supports"][0]["name"] == "simple_panel_boundary"
+    assert generated["supports"][0]["constraints"] == {"uz": 0.0}
+    first_stiffener = next(beam for beam in generated["beams"] if beam["role"] == "stiffener")
+    assert first_stiffener["section"]["orientation"] == (0.0, 0.0, 1.0)
+    assert first_stiffener["section"]["eccentricity_m"] == 0.08
+    assert generated["couplings"]
+    assert first_stiffener["node_ids"][0] != generated["couplings"][0]["shell_node_ids"][0]
+    assert generated["couplings"][0]["eccentricity"] == [0.0, 0.0, 0.08]
+
+
+def test_runtime_generated_mesh_supports_s8_shells_and_enforced_displacement():
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "flat panel",
+            "length_m": 2.0,
+            "width_m": 1.0,
+            "thickness_m": 0.012,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            shell_element_order="S8",
+            boundary_condition="simply supported",
+            symmetry_mode="x",
+            enforced_displacement_m=0.003,
+        ),
+    )
+
+    assert all(len(shell["node_ids"]) == 8 for shell in generated["shells"])
+    assert len(generated["nodes"]) > len(generated["plot_grid"]) * len(generated["plot_grid"][0])
+    assert any(support["name"].startswith("symmetry_") for support in generated["supports"])
+    assert any(support["name"] == "enforced_panel_displacement" for support in generated["supports"])
+
+
 def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_coarse():
     generated = fe_solver.build_generated_geometry(
         {
@@ -392,6 +453,36 @@ def test_cylinder_generated_mesh_caps_axial_and_circumferential_size_to_stiffene
 
     assert circumferential_segment <= spacing + 1.0e-9
     assert max(b - a for a, b in zip(axial_values, axial_values[1:])) <= spacing + 1.0e-9
+
+
+def test_cylinder_mesh_fidelity_refines_real_mesh_below_member_spacing_cap():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 2.0,
+        "length_m": 8.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": 0.5,
+        "girder_spacing_m": 4.0,
+    }
+
+    coarse = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", include_end_lids=True),
+    )
+    medium = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="medium", include_end_lids=True),
+    )
+    fine = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="fine", include_end_lids=True),
+    )
+
+    assert len(coarse["shells"]) < len(medium["shells"]) < len(fine["shells"])
+    assert len(coarse["plot_grid"]) < len(medium["plot_grid"]) < len(fine["plot_grid"])
+    assert len(coarse["plot_grid"][0]) < len(medium["plot_grid"][0]) < len(fine["plot_grid"][0])
 
 
 def test_cylinder_mesh_size_is_not_capped_by_disabled_members():
@@ -470,6 +561,70 @@ def test_cylinder_end_lids_are_stress_free_rigid_diaphragms():
     assert solver_info["constraint_info"]["num_fixed_dofs"] == 0
     assert displacements[model.mesh.get_node(top_lid["center_node_id"]).dofs[2]] != 0.0
     assert displacements[model.mesh.get_node(bottom_lid["center_node_id"]).dofs[2]] != 0.0
+
+
+def test_runtime_solver_records_new_analysis_material_and_load_options():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 1.5,
+            "thickness_m": 0.02,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=10_000.0,
+            pressure_direction="internal",
+            axial_force_n=25_000.0,
+            shell_element_order="S8",
+            analysis_type="nonlinear stability",
+            buckling_analysis_type="nonlinear limit",
+            symmetry_mode="cyclic",
+            solver_type="direct",
+            stress_percentile=90.0,
+            elastic_modulus_pa=200.0e9,
+            poisson_ratio=0.29,
+            yield_stress_pa=300.0e6,
+        ),
+    )
+
+    assert result.status == "ok"
+    assert result.mesh_info["shell_order"] == "S8"
+    assert "max_axial_edge_m" in result.mesh_info
+    assert any("Applied balanced axial force" in item for item in result.diagnostics)
+    assert any("Generated S8 shell elements" in item for item in result.diagnostics)
+    assert any("Ran nonlinear tangent-stability load stepping" in item for item in result.diagnostics)
+    assert any("Cyclic symmetry requested" in item for item in result.diagnostics)
+    assert result.prestress_summary["nonlinear_steps"] >= 1
+
+
+def test_cylinder_s8_lids_and_eccentric_members_solve_without_mpc_id_collision():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 1.5,
+            "thickness_m": 0.02,
+            "has_stiffener": True,
+            "has_girder": True,
+            "stiffener_spacing_m": 0.8,
+            "girder_spacing_m": 0.75,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=1000.0,
+            include_end_lids=True,
+            shell_element_order="S8",
+            member_orientation="radial",
+            stiffener_eccentricity_m=0.02,
+            girder_eccentricity_m=0.03,
+        ),
+    )
+
+    assert result.status == "ok"
+    assert result.mesh_info["shell_order"] == "S8"
+    assert result.mesh_info["rigid_lids"] == 2
+    assert any("Applied eccentric beam-shell MPC offsets" in item for item in result.diagnostics)
 
 
 def test_generated_cylinder_mesh_honors_mesh_size_and_middle_t_ring_girder():
@@ -589,6 +744,7 @@ def test_startup_cylinder_example_runs_near_200_mpa_with_buckling_modes():
     assert result.status == "ok"
     assert 150.0 <= result.stress_percentiles[0][1] / 1.0e6 <= 250.0
     assert len(result.buckling_factors) == 5
+    assert result.buckling_factors[0] > 0.1
     assert len(result.visualization["buckling_modes"]) == 5
 
 

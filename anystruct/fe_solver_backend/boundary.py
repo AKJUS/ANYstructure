@@ -194,7 +194,13 @@ class LoadCase:
         """
         tangent_xi = coords.T @ dN_dxi
         tangent_eta = coords.T @ dN_deta
-        normal_raw = np.cross(tangent_xi, tangent_eta)
+        normal_raw = np.array(
+            [
+                tangent_xi[1] * tangent_eta[2] - tangent_xi[2] * tangent_eta[1],
+                tangent_xi[2] * tangent_eta[0] - tangent_xi[0] * tangent_eta[2],
+                tangent_xi[0] * tangent_eta[1] - tangent_xi[1] * tangent_eta[0],
+            ]
+        )
         det_j = float(np.linalg.norm(normal_raw))
         if det_j < _SMALL:
             return 0.0, np.array([0.0, 0.0, 1.0])

@@ -319,8 +319,8 @@ class RigidLidMPCElement:
     Constraint-only rigid end diaphragm.
 
     The element ties an end ring to a free center reference node using rigid-body
-    kinematics. It adds local end-ring stiffness without adding lid shell
-    elements, so lid stresses and lid pressure loads are not recovered.
+    kinematics. It adds end-ring coupling without adding lid shell elements, so
+    lid stresses and lid pressure loads are not recovered.
     """
 
     def __init__(

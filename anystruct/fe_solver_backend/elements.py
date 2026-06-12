@@ -67,6 +67,30 @@ if TYPE_CHECKING:
 _SMALL = 1.0e-12
 
 
+def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cross product of two 3-vectors without np.cross dispatch overhead."""
+    return np.array(
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ],
+        dtype=float,
+    )
+
+
+def _inv2(matrix: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Inverse and determinant of a 2x2 matrix without LAPACK overhead."""
+    det = matrix[0, 0] * matrix[1, 1] - matrix[0, 1] * matrix[1, 0]
+    if abs(det) < _SMALL:
+        raise np.linalg.LinAlgError("singular 2x2 matrix")
+    inv = np.array(
+        [[matrix[1, 1], -matrix[0, 1]], [-matrix[1, 0], matrix[0, 0]]],
+        dtype=float,
+    ) / det
+    return inv, float(det)
+
+
 def _section_orientation(cross_section: Dict[str, Any]) -> Optional[np.ndarray]:
     """Return the prescribed local-z (web) direction from a cross-section dict."""
     value = cross_section.get("orientation", cross_section.get("web_direction"))
@@ -90,7 +114,7 @@ def _beam_rotation_matrix(e1: np.ndarray, orientation: Optional[np.ndarray]) -> 
         norm = float(np.linalg.norm(candidate))
         if norm > 1.0e-6 * float(np.linalg.norm(orientation)):
             e3 = candidate / norm
-            e2 = np.cross(e3, e1)
+            e2 = _cross3(e3, e1)
             e2 /= np.linalg.norm(e2)
             return np.column_stack((e1, e2, e3))
     trial = np.array([0.0, 1.0, 0.0])
@@ -98,7 +122,7 @@ def _beam_rotation_matrix(e1: np.ndarray, orientation: Optional[np.ndarray]) -> 
         trial = np.array([0.0, 0.0, 1.0])
     e2 = trial - np.dot(trial, e1) * e1
     e2 /= np.linalg.norm(e2)
-    e3 = np.cross(e1, e2)
+    e3 = _cross3(e1, e2)
     e3 /= np.linalg.norm(e3)
     return np.column_stack((e1, e2, e3))
 
@@ -172,12 +196,13 @@ class Element(ABC):
         dof_mapping = self.get_dof_mapping(mesh)
         if not dof_mapping:
             return np.zeros(self.total_dofs)
-        if max(dof_mapping) >= u.size:
+        dof_indices = np.asarray(dof_mapping, dtype=np.intp)
+        if int(dof_indices.max()) >= u.size:
             raise IndexError(
                 f"Displacement vector has length {u.size}, but element {self.element_id} "
-                f"requires global DOF {max(dof_mapping)}."
+                f"requires global DOF {int(dof_indices.max())}."
             )
-        return np.array([u[dof] for dof in dof_mapping], dtype=float)
+        return u[dof_indices]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -347,7 +372,7 @@ class ShellElement(Element):
 
     @staticmethod
     def _normalize(vector: np.ndarray) -> Tuple[np.ndarray, float]:
-        norm = float(np.linalg.norm(vector))
+        norm = float(np.sqrt(vector @ vector))
         if norm < _SMALL:
             return np.zeros(3, dtype=float), norm
         return vector / norm, norm
@@ -376,7 +401,7 @@ class ShellElement(Element):
         J = self.compute_jacobian(coords, dN_dxi, dN_deta)
         tangent_xi = J[0]
         tangent_eta = J[1]
-        e3, det_j = self._normalize(np.cross(tangent_xi, tangent_eta))
+        e3, det_j = self._normalize(_cross3(tangent_xi, tangent_eta))
         if det_j < _SMALL:
             raise ValueError(f"Shell element {self.element_id} has a near-zero surface Jacobian")
 
@@ -384,10 +409,10 @@ class ShellElement(Element):
         e1, e1_norm = self._normalize(e1_raw)
         if e1_norm < _SMALL:
             e1 = self._fallback_edge_direction(coords, e3)
-        e2, e2_norm = self._normalize(np.cross(e3, e1))
+        e2, e2_norm = self._normalize(_cross3(e3, e1))
         if e2_norm < _SMALL:
             raise ValueError(f"Shell element {self.element_id} has an invalid local y direction")
-        e1, _ = self._normalize(np.cross(e2, e3))
+        e1, _ = self._normalize(_cross3(e2, e3))
         R = np.column_stack((e1, e2, e3))
 
         J_local = np.array(
@@ -398,7 +423,7 @@ class ShellElement(Element):
             dtype=float,
         )
         try:
-            inv_j_local = np.linalg.inv(J_local)
+            inv_j_local, _ = _inv2(J_local)
         except np.linalg.LinAlgError as exc:
             raise ValueError(f"Shell element {self.element_id} has a singular local Jacobian") from exc
 
@@ -407,12 +432,11 @@ class ShellElement(Element):
         return R, dN_dx, dN_dy, det_j
 
     def _local_dof_transform(self, R: np.ndarray) -> np.ndarray:
+        n_blocks = 2 * self.num_nodes
         T = np.zeros((self.total_dofs, self.total_dofs), dtype=float)
-        Rt = R.T
-        for i in range(self.num_nodes):
-            base = i * 6
-            T[base:base + 3, base:base + 3] = Rt
-            T[base + 3:base + 6, base + 3:base + 6] = Rt
+        blocks = T.reshape(n_blocks, 3, n_blocks, 3)
+        indices = np.arange(n_blocks)
+        blocks[indices, :, indices, :] = R.T
         return T
 
     def _build_shell_b_matrices(
@@ -424,22 +448,21 @@ class ShellElement(Element):
         B_m = np.zeros((3, self.total_dofs), dtype=float)
         B_b = np.zeros((3, self.total_dofs), dtype=float)
         B_s = np.zeros((2, self.total_dofs), dtype=float)
-        for i in range(self.num_nodes):
-            b = i * 6
-            B_m[0, b + 0] = dN_dx[i]
-            B_m[1, b + 1] = dN_dy[i]
-            B_m[2, b + 0] = dN_dy[i]
-            B_m[2, b + 1] = dN_dx[i]
 
-            B_b[0, b + 4] = dN_dx[i]
-            B_b[1, b + 3] = -dN_dy[i]
-            B_b[2, b + 4] = dN_dy[i]
-            B_b[2, b + 3] = -dN_dx[i]
+        B_m[0, 0::6] = dN_dx
+        B_m[1, 1::6] = dN_dy
+        B_m[2, 0::6] = dN_dy
+        B_m[2, 1::6] = dN_dx
 
-            B_s[0, b + 2] = dN_dx[i]
-            B_s[0, b + 4] = N[i]
-            B_s[1, b + 2] = dN_dy[i]
-            B_s[1, b + 3] = -N[i]
+        B_b[0, 4::6] = dN_dx
+        B_b[1, 3::6] = -dN_dy
+        B_b[2, 4::6] = dN_dy
+        B_b[2, 3::6] = -dN_dx
+
+        B_s[0, 2::6] = dN_dx
+        B_s[0, 4::6] = N
+        B_s[1, 2::6] = dN_dy
+        B_s[1, 3::6] = -N
         return B_m, B_b, B_s
 
     def _build_drilling_b_matrix(
@@ -455,11 +478,9 @@ class ShellElement(Element):
         physical rigid rotation about the shell normal has exactly zero energy.
         """
         B_d = np.zeros((1, self.total_dofs), dtype=float)
-        for i in range(self.num_nodes):
-            b = i * 6
-            B_d[0, b + 0] = 0.5 * dN_dy[i]
-            B_d[0, b + 1] = -0.5 * dN_dx[i]
-            B_d[0, b + 5] = N[i]
+        B_d[0, 0::6] = 0.5 * dN_dy
+        B_d[0, 1::6] = -0.5 * dN_dx
+        B_d[0, 5::6] = N
         return B_d
 
     # MITC4 assumed natural transverse shear (4-node elements only).
@@ -493,14 +514,12 @@ class ShellElement(Element):
             y_eta = float(dN_deta @ planar[:, 1])
             row_xi = np.zeros(self.total_dofs, dtype=float)
             row_eta = np.zeros(self.total_dofs, dtype=float)
-            for i in range(self.num_nodes):
-                b = i * 6
-                row_xi[b + 2] = dN_dxi[i]
-                row_xi[b + 3] = -N[i] * y_xi
-                row_xi[b + 4] = N[i] * x_xi
-                row_eta[b + 2] = dN_deta[i]
-                row_eta[b + 3] = -N[i] * y_eta
-                row_eta[b + 4] = N[i] * x_eta
+            row_xi[2::6] = dN_dxi
+            row_xi[3::6] = -N * y_xi
+            row_xi[4::6] = N * x_xi
+            row_eta[2::6] = dN_deta
+            row_eta[3::6] = -N * y_eta
+            row_eta[4::6] = N * x_eta
             samples[name] = (row_xi, row_eta)
         return planar, samples
 
@@ -520,16 +539,17 @@ class ShellElement(Element):
             ],
             dtype=float,
         )
-        det_j = float(np.linalg.det(J2))
-        if abs(det_j) < _SMALL:
-            raise ValueError(f"Shell element {self.element_id} has a singular in-plane Jacobian")
+        try:
+            inv_j2, det_j = _inv2(J2)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(f"Shell element {self.element_id} has a singular in-plane Jacobian") from exc
         B_covariant = np.vstack(
             [
                 0.5 * (1.0 - eta) * samples["A"][0] + 0.5 * (1.0 + eta) * samples["C"][0],
                 0.5 * (1.0 - xi) * samples["D"][1] + 0.5 * (1.0 + xi) * samples["B"][1],
             ]
         )
-        return np.linalg.inv(J2) @ B_covariant, det_j
+        return inv_j2 @ B_covariant, det_j
 
     def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
         coords = self.get_node_coordinates(mesh)
@@ -591,13 +611,12 @@ class ShellElement(Element):
             R, _, _, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
             T = self._local_dof_transform(R)
             M_local = np.zeros_like(M)
-            for i in range(self.num_nodes):
-                for j in range(self.num_nodes):
-                    translational = N[i] * N[j] * rho * h * det_j * weight
-                    rotational = N[i] * N[j] * rho * h**3 / 12.0 * det_j * weight
-                    for d in range(3):
-                        M_local[i * 6 + d, j * 6 + d] += translational
-                        M_local[i * 6 + 3 + d, j * 6 + 3 + d] += rotational
+            outer_n = np.outer(N, N) * det_j * weight
+            translational = rho * h * outer_n
+            rotational = rho * h**3 / 12.0 * outer_n
+            for d in range(3):
+                M_local[d::6, d::6] += translational
+                M_local[3 + d::6, 3 + d::6] += rotational
             M += T.T @ M_local @ T
         self._mass_matrix = M
         return M
@@ -663,10 +682,8 @@ class ShellElement(Element):
             R, dN_dx, dN_dy, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
             T = self._local_dof_transform(R)
             G = np.zeros((2, self.total_dofs), dtype=float)
-            for i in range(self.num_nodes):
-                base = i * 6
-                G[0, base + 2] = dN_dx[i]
-                G[1, base + 2] = dN_dy[i]
+            G[0, 2::6] = dN_dx
+            G[1, 2::6] = dN_dy
             N_matrix = np.array([[Nx, Nxy], [Nxy, Ny]], dtype=float)
             KG_local = (G.T @ N_matrix @ G) * det_j * float(weight)
             KG += T.T @ KG_local @ T

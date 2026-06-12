@@ -61,6 +61,22 @@ class RuntimeFEMOptions:
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
+    boundary_condition: str = "auto"
+    symmetry_mode: str = "none"
+    shell_element_order: str = "S4"
+    analysis_type: str = "linear eigenvalue"
+    buckling_analysis_type: str = "linear eigenvalue"
+    pressure_direction: str = "external"
+    axial_force_n: float = 0.0
+    enforced_displacement_m: float = 0.0
+    stiffener_eccentricity_m: float = 0.0
+    girder_eccentricity_m: float = 0.0
+    member_orientation: str = "auto"
+    solver_type: str = "direct"
+    stress_percentile: float = 95.0
+    elastic_modulus_pa: float = 210.0e9
+    poisson_ratio: float = 0.3
+    yield_stress_pa: float = 355.0e6
 
 
 @dataclass(frozen=True)
@@ -275,6 +291,22 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         num_buckling_modes=options.num_buckling_modes,
         mesh_size_m=options.mesh_size_m,
         top_bottom_moment_nm=options.top_bottom_moment_nm,
+        boundary_condition=options.boundary_condition,
+        symmetry_mode=options.symmetry_mode,
+        shell_element_order=options.shell_element_order,
+        analysis_type=options.analysis_type,
+        buckling_analysis_type=options.buckling_analysis_type,
+        pressure_direction=options.pressure_direction,
+        axial_force_n=options.axial_force_n,
+        enforced_displacement_m=options.enforced_displacement_m,
+        stiffener_eccentricity_m=options.stiffener_eccentricity_m,
+        girder_eccentricity_m=options.girder_eccentricity_m,
+        member_orientation=options.member_orientation,
+        solver_type=options.solver_type,
+        stress_percentile=options.stress_percentile,
+        elastic_modulus_pa=options.elastic_modulus_pa,
+        poisson_ratio=options.poisson_ratio,
+        yield_stress_pa=options.yield_stress_pa,
     )
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config)
@@ -298,6 +330,22 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "num_buckling_modes": int(options.num_buckling_modes),
         "mesh_size_m": float(options.mesh_size_m),
         "top_bottom_moment_nm": float(options.top_bottom_moment_nm),
+        "boundary_condition": str(options.boundary_condition),
+        "symmetry_mode": str(options.symmetry_mode),
+        "shell_element_order": str(options.shell_element_order),
+        "analysis_type": str(options.analysis_type),
+        "buckling_analysis_type": str(options.buckling_analysis_type),
+        "pressure_direction": str(options.pressure_direction),
+        "axial_force_n": float(options.axial_force_n),
+        "enforced_displacement_m": float(options.enforced_displacement_m),
+        "stiffener_eccentricity_m": float(options.stiffener_eccentricity_m),
+        "girder_eccentricity_m": float(options.girder_eccentricity_m),
+        "member_orientation": str(options.member_orientation),
+        "solver_type": str(options.solver_type),
+        "stress_percentile": float(options.stress_percentile),
+        "elastic_modulus_pa": float(options.elastic_modulus_pa),
+        "poisson_ratio": float(options.poisson_ratio),
+        "yield_stress_pa": float(options.yield_stress_pa),
         "solver": solver_result.solver_name,
         "mesh_info": dict(solver_result.mesh_info),
         "max_displacement_m": solver_result.displacement_max_m,
@@ -433,6 +481,8 @@ def _plot_visualization_surface(
             np.asarray(y),
             np.asarray(axial),
             facecolors=np.asarray(facecolors),
+            rstride=1,
+            cstride=1,
             linewidth=0.15,
             antialiased=True,
             shade=False,
@@ -455,6 +505,8 @@ def _plot_visualization_surface(
             np.asarray(y),
             np.asarray(z),
             facecolors=np.asarray(facecolors),
+            rstride=1,
+            cstride=1,
             linewidth=0.15,
             antialiased=True,
             shade=False,
@@ -623,12 +675,28 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Line: " + str(summary.get("line", "")),
         "Geometry: " + str(summary.get("geometry", "")),
         "Mesh fidelity: " + str(summary.get("mesh_fidelity", "")),
+        "Shell element: " + str(summary.get("shell_element_order", "")),
+        "Boundary condition: " + str(summary.get("boundary_condition", "")),
+        "Symmetry: " + str(summary.get("symmetry_mode", "")),
+        "Analysis type: " + str(summary.get("analysis_type", "")),
+        "Buckling type: " + str(summary.get("buckling_analysis_type", "")),
+        "Linear solver: " + str(summary.get("solver_type", "")),
         "Pressure [Pa]: " + str(round(_safe_float(summary.get("pressure_pa")), 3)),
+        "Pressure direction: " + str(summary.get("pressure_direction", "")),
+        "Axial force [N]: " + str(round(_safe_float(summary.get("axial_force_n")), 3)),
+        "Enforced displacement [m]: " + str(round(_safe_float(summary.get("enforced_displacement_m")), 6)),
         "Mesh size override [m]: " + str(round(_safe_float(summary.get("mesh_size_m")), 4)),
         "Top/bottom moment [Nm]: " + str(round(_safe_float(summary.get("top_bottom_moment_nm")), 3)),
         "Include stiffener beams: " + str(bool(summary.get("include_stiffeners"))),
         "Include girder/frame beams: " + str(bool(summary.get("include_girders"))),
         "Include top/bottom lid: " + str(bool(summary.get("include_end_lids"))),
+        "Member orientation: " + str(summary.get("member_orientation", "")),
+        "Stiffener eccentricity [m]: " + str(round(_safe_float(summary.get("stiffener_eccentricity_m")), 6)),
+        "Girder eccentricity [m]: " + str(round(_safe_float(summary.get("girder_eccentricity_m")), 6)),
+        "Material E [GPa]: " + str(round(_safe_float(summary.get("elastic_modulus_pa")) / 1.0e9, 3)),
+        "Poisson ratio: " + str(round(_safe_float(summary.get("poisson_ratio")), 4)),
+        "Yield stress [MPa]: " + str(round(_safe_float(summary.get("yield_stress_pa")) / 1.0e6, 3)),
+        "Stress percentile: " + str(round(_safe_float(summary.get("stress_percentile")), 2)),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
         "Max displacement [mm]: " + str(round(1000.0 * _safe_float(summary.get("max_displacement_m")), 4)),
     ]
@@ -643,7 +711,11 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             " - shells: " + str(mesh_info.get("shells", 0)),
             " - beams: " + str(mesh_info.get("beams", 0)),
             " - rigid lids: " + str(mesh_info.get("rigid_lids", 0)),
+            " - shell order: " + str(mesh_info.get("shell_order", "")),
         ])
+        for key in ("max_x_edge_m", "max_y_edge_m", "max_circumferential_edge_m", "max_axial_edge_m"):
+            if key in mesh_info:
+                lines.append(" - " + key + ": " + str(round(_safe_float(mesh_info.get(key)), 4)))
     prestress = summary.get("prestress_summary") or {}
     if prestress:
         lines.extend(["", "Recovered prestress / reference state:"])
@@ -690,6 +762,22 @@ class RuntimeFEMWindow:
         self.include_girders = tk.BooleanVar(value=True)
         self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
         self.num_buckling_modes = tk.IntVar(value=5)
+        self.boundary_condition = tk.StringVar(value="auto")
+        self.symmetry_mode = tk.StringVar(value="none")
+        self.shell_element_order = tk.StringVar(value="S4")
+        self.analysis_type = tk.StringVar(value="linear eigenvalue")
+        self.buckling_analysis_type = tk.StringVar(value="linear eigenvalue")
+        self.pressure_direction = tk.StringVar(value="external")
+        self.axial_force_n = tk.DoubleVar(value=0.0)
+        self.enforced_displacement_m = tk.DoubleVar(value=0.0)
+        self.stiffener_eccentricity_m = tk.DoubleVar(value=0.0)
+        self.girder_eccentricity_m = tk.DoubleVar(value=0.0)
+        self.member_orientation = tk.StringVar(value="auto")
+        self.solver_type = tk.StringVar(value="direct")
+        self.stress_percentile = tk.DoubleVar(value=95.0)
+        self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)
+        self.poisson_ratio = tk.DoubleVar(value=0.3)
+        self.yield_stress_mpa = tk.DoubleVar(value=355.0)
         self.display_choice = tk.StringVar(value="Static displacement/stress")
         self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
         self.current_result: RuntimeFEMRunResult | None = None
@@ -800,6 +888,55 @@ class RuntimeFEMWindow:
 
         future_inputs = ttk.LabelFrame(mid_panel, text="Additional inputs")
         future_inputs.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(future_inputs, text="Boundary").grid(row=0, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.boundary_condition, self.boundary_condition.get(), "auto", "free", "simply supported", "pinned", "clamped").grid(
+            row=0, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Symmetry").grid(row=1, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.symmetry_mode, self.symmetry_mode.get(), "none", "x", "y", "z", "cyclic").grid(
+            row=1, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Shell element").grid(row=2, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.shell_element_order, self.shell_element_order.get(), "S4", "S8").grid(
+            row=2, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Analysis").grid(row=3, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.analysis_type, self.analysis_type.get(), "linear eigenvalue", "nonlinear stability").grid(
+            row=3, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Buckling").grid(row=4, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.buckling_analysis_type, self.buckling_analysis_type.get(), "linear eigenvalue", "nonlinear limit").grid(
+            row=4, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Pressure dir.").grid(row=5, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.pressure_direction, self.pressure_direction.get(), "external", "internal").grid(
+            row=5, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Axial force [N]").grid(row=6, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.axial_force_n, width=12).grid(row=6, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="Enforced disp. [m]").grid(row=7, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.enforced_displacement_m, width=12).grid(row=7, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="Stf. ecc. [m]").grid(row=8, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.stiffener_eccentricity_m, width=12).grid(row=8, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="Girder ecc. [m]").grid(row=9, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.girder_eccentricity_m, width=12).grid(row=9, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="Member orient.").grid(row=10, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.member_orientation, self.member_orientation.get(), "auto", "global Y", "global Z", "radial").grid(
+            row=10, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Solver").grid(row=11, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.OptionMenu(future_inputs, self.solver_type, self.solver_type.get(), "direct", "gmres", "minres", "bicgstab").grid(
+            row=11, column=1, sticky=tk.EW, padx=8, pady=5
+        )
+        ttk.Label(future_inputs, text="Stress pct.").grid(row=12, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.stress_percentile, width=12).grid(row=12, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="E [GPa]").grid(row=13, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.elastic_modulus_gpa, width=12).grid(row=13, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="Poisson").grid(row=14, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.poisson_ratio, width=12).grid(row=14, column=1, sticky=tk.EW, padx=8, pady=5)
+        ttk.Label(future_inputs, text="Yield [MPa]").grid(row=15, column=0, sticky=tk.W, padx=8, pady=5)
+        ttk.Entry(future_inputs, textvariable=self.yield_stress_mpa, width=12).grid(row=15, column=1, sticky=tk.EW, padx=8, pady=5)
+        future_inputs.columnconfigure(1, weight=1)
 
         preview = ttk.LabelFrame(right_panel, text="3D section view")
         preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -987,6 +1124,22 @@ class RuntimeFEMWindow:
             num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
             mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
             top_bottom_moment_nm=_safe_float(self.top_bottom_moment_nm.get(), 0.0),
+            boundary_condition=str(self.boundary_condition.get()),
+            symmetry_mode=str(self.symmetry_mode.get()),
+            shell_element_order=str(self.shell_element_order.get()),
+            analysis_type=str(self.analysis_type.get()),
+            buckling_analysis_type=str(self.buckling_analysis_type.get()),
+            pressure_direction=str(self.pressure_direction.get()),
+            axial_force_n=_safe_float(self.axial_force_n.get(), 0.0),
+            enforced_displacement_m=_safe_float(self.enforced_displacement_m.get(), 0.0),
+            stiffener_eccentricity_m=_safe_float(self.stiffener_eccentricity_m.get(), 0.0),
+            girder_eccentricity_m=_safe_float(self.girder_eccentricity_m.get(), 0.0),
+            member_orientation=str(self.member_orientation.get()),
+            solver_type=str(self.solver_type.get()),
+            stress_percentile=min(max(_safe_float(self.stress_percentile.get(), 95.0), 0.0), 100.0),
+            elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9,
+            poisson_ratio=min(max(_safe_float(self.poisson_ratio.get(), 0.3), 0.0), 0.49),
+            yield_stress_pa=max(_safe_float(self.yield_stress_mpa.get(), 355.0), 0.0) * 1.0e6,
         )
 
     def run(self) -> None:
