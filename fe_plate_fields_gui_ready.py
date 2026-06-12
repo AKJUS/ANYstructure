@@ -23,33 +23,6 @@ from typing import Any, Iterable, Sequence
 Point3D = tuple[float, float, float]
 Vector3D = tuple[float, float, float]
 
-STRESS_REDUCTION_METHODS: tuple[str, ...] = (
-    "CSR area weighted mean",
-    "Whole panel nodal mean",
-    "Centre strip mean",
-)
-
-_STRESS_REDUCTION_METHOD_ALIASES = {
-    "csr": "CSR area weighted mean",
-    "csr area mean": "CSR area weighted mean",
-    "csr area average": "CSR area weighted mean",
-    "csr area weighted": "CSR area weighted mean",
-    "csr area weighted mean": "CSR area weighted mean",
-    "area": "CSR area weighted mean",
-    "area weighted": "CSR area weighted mean",
-    "area weighted mean": "CSR area weighted mean",
-    "nodal": "Whole panel nodal mean",
-    "nodal mean": "Whole panel nodal mean",
-    "whole panel nodal mean": "Whole panel nodal mean",
-    "whole panel mean": "Whole panel nodal mean",
-    "centre strip": "Centre strip mean",
-    "centre strip mean": "Centre strip mean",
-    "center strip": "Centre strip mean",
-    "center strip mean": "Centre strip mean",
-    "line": "Centre strip mean",
-    "line mean": "Centre strip mean",
-}
-
 
 @dataclass(frozen=True)
 class ShellElement:
@@ -246,29 +219,6 @@ class _PatchInference:
     base_normal: Vector3D
     member_direction: Vector3D
     transverse_direction: Vector3D
-
-
-def available_stress_reduction_methods() -> tuple[str, ...]:
-    """Return the supported FE-to-buckling-panel stress reduction methods."""
-
-    return STRESS_REDUCTION_METHODS
-
-
-def normalize_stress_reduction_method(method: str | None) -> str:
-    """Normalize a public stress-reduction method label or shorthand."""
-
-    if method is None:
-        return STRESS_REDUCTION_METHODS[0]
-    text = str(method).strip()
-    if text in STRESS_REDUCTION_METHODS:
-        return text
-    normalized = _STRESS_REDUCTION_METHOD_ALIASES.get(text.lower())
-    if normalized is None:
-        raise ValueError(
-            "stress_reduction_method must be one of: "
-            + ", ".join(STRESS_REDUCTION_METHODS)
-        )
-    return normalized
 
 
 def read_calculix_inp(path: str | os.PathLike[str]) -> FeShellModel:
@@ -497,19 +447,15 @@ def reduce_field_stresses(
     frd_stress: FrdStressResult,
     *,
     transverse_edge_fraction: float = 0.2,
-    stress_reduction_method: str | None = None,
-    centre_strip_fraction: float = 0.25,
 ) -> list[PanelStress]:
     """Reduce FRD shell stresses to one ANYstructure/PULS stress set per field.
 
-    The default method follows the CSR/PULS-style recommendation to use area
-    weighted average membrane stresses over the finite elements of the panel.
-    Alternative methods are offered for sensitivity checks.  CalculiX stresses
-    are interpreted as tension-positive Pa; returned normal stresses are
-    compression-positive MPa.
+    The reduction follows the PULS S3/U3 nominal-load shape: axial stress and
+    shear are uniform nominal values, while transverse stress may vary linearly
+    between the two transverse sides.  CalculiX stresses are interpreted as
+    tension-positive Pa; returned normal stresses are compression-positive MPa.
     """
 
-    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     patches = detect_surface_patches(model)
     if not patches:
         return []
@@ -521,23 +467,14 @@ def reduce_field_stresses(
 
     panel_stresses: list[PanelStress] = []
     for field_item in fields:
-        if reduction_method == "CSR area weighted mean":
-            samples = _field_element_stress_samples(
-                model,
-                field_item,
-                frd_stress,
-                member_direction,
-                transverse_direction,
-            )
-        else:
-            samples = _field_stress_samples(
-                field_item,
-                frd_stress,
-                base_normal,
-                base_offset,
-                member_direction,
-                transverse_direction,
-            )
+        samples = _field_stress_samples(
+            field_item,
+            frd_stress,
+            base_normal,
+            base_offset,
+            member_direction,
+            transverse_direction,
+        )
         if not samples:
             panel_stresses.append(
                 PanelStress(
@@ -554,13 +491,42 @@ def reduce_field_stresses(
             )
             continue
 
+        sigma_x = [-sample[1] / 1.0e6 for sample in samples]
+        sigma_y = [-sample[2] / 1.0e6 for sample in samples]
+        tau_xy = [sample[3] / 1.0e6 for sample in samples]
+        transverse_values = [sample[0] for sample in samples]
+        lower_transverse, upper_transverse = field_item.transverse_bounds
+        edge_width = max((upper_transverse - lower_transverse) * transverse_edge_fraction, 1.0e-9)
+        lower_indices = [
+            index for index, value in enumerate(transverse_values)
+            if value <= lower_transverse + edge_width
+        ]
+        upper_indices = [
+            index for index, value in enumerate(transverse_values)
+            if value >= upper_transverse - edge_width
+        ]
+        if not lower_indices or not upper_indices:
+            ordered = sorted(range(len(samples)), key=lambda index: transverse_values[index])
+            take = max(1, int(math.ceil(len(ordered) * transverse_edge_fraction)))
+            lower_indices = ordered[:take]
+            upper_indices = ordered[-take:]
+
+        sigma_x_nominal = _mean(sigma_x)
         panel_stresses.append(
-            _reduced_panel_stress_from_samples(
-                field_item,
-                samples,
-                reduction_method,
-                transverse_edge_fraction=transverse_edge_fraction,
-                centre_strip_fraction=centre_strip_fraction,
+            PanelStress(
+                field_id=field_item.field_id,
+                sigma_x1_mpa=sigma_x_nominal,
+                sigma_x2_mpa=sigma_x_nominal,
+                sigma_y1_mpa=_mean(sigma_y[index] for index in lower_indices),
+                sigma_y2_mpa=_mean(sigma_y[index] for index in upper_indices),
+                tau_xy_mpa=_mean(tau_xy),
+                sample_count=len(samples),
+                reduction="nominal membrane: mean axial/shear, transverse side-band means",
+                diagnostics=(
+                    "FRD stress tensors projected to inferred panel axes",
+                    "normal stresses converted from FE tension-positive Pa to compression-positive MPa",
+                    "mid-surface shell result nodes preferred to avoid bending peak stress input",
+                ),
             )
         )
     return panel_stresses
@@ -597,7 +563,6 @@ def calculate_field_buckling(
     elastic_modulus_mpa: float = 210000.0,
     material_factor: float = 1.15,
     poisson: float = 0.3,
-    ml_algo: Any = None,
 ) -> list[dict[str, Any]]:
     """Run ANYstructure buckling checks for fields using reduced FE stresses."""
 
@@ -663,34 +628,24 @@ def calculate_field_buckling(
             panel.set_buckling_parameters(
                 calculation_method=calculation_method,
                 buckling_acceptance=buckling_acceptance,
-                ml_algo=ml_algo,
             )
-            buckling_result = panel.get_buckling_results(calculation_method=calculation_method, ml_algo=ml_algo)
-            result_record = {
-                "field_id": field_item.field_id,
-                "domain": domain,
-                "calculation_method": calculation_method,
-                "buckling_acceptance": buckling_acceptance,
-                "stress": summarize_panel_stresses([stress])[0],
-                "result": buckling_result,
-            }
-            selected_uf = _selected_uf_from_buckling_result(result_record)
-            api_available = (
+            buckling_result = panel.get_buckling_results(calculation_method=calculation_method)
+            result_available = (
                 bool(buckling_result.get("available", True))
                 if isinstance(buckling_result, dict)
-                else buckling_result is not None
+                else True
             )
-            # A finite UF is a valid result even when an older/newer API wrapper
-            # reports ``available`` differently.
-            result_record["available"] = selected_uf is not None or api_available
-            result_record["usage_factor"] = selected_uf
-            if selected_uf is None and isinstance(buckling_result, dict):
-                result_record["error"] = str(
-                    buckling_result.get("error")
-                    or buckling_result.get("message")
-                    or "buckling calculation returned no identifiable usage factor"
-                )
-            results.append(result_record)
+            results.append(
+                {
+                    "field_id": field_item.field_id,
+                    "domain": domain,
+                    "available": result_available,
+                    "calculation_method": calculation_method,
+                    "buckling_acceptance": buckling_acceptance,
+                    "stress": summarize_panel_stresses([stress])[0],
+                    "result": buckling_result,
+                }
+            )
         except Exception as err:
             results.append(
                 {
@@ -717,9 +672,7 @@ def _create_flat_fea_buckling_session(
     elastic_modulus_mpa: float = 210000.0,
     material_factor: float = 1.15,
     poisson: float = 0.3,
-    ml_algo: Any = None,
     run_buckling: bool = True,
-    stress_reduction_method: str | None = None,
 ) -> FeaBucklingSession:
     """Create a selectable FE-result buckling session for API and GUI callers."""
 
@@ -729,19 +682,10 @@ def _create_flat_fea_buckling_session(
     fields = tuple(infer_plate_fields(model))
     frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
-    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
-    diagnostics.append(f"stress reduction method: {reduction_method}")
 
     if frd_path_text:
         frd_stress = read_calculix_frd_stress(frd_path_text)
-        panel_stresses = tuple(
-            reduce_field_stresses(
-                model,
-                fields,
-                frd_stress,
-                stress_reduction_method=reduction_method,
-            )
-        )
+        panel_stresses = tuple(reduce_field_stresses(model, fields, frd_stress))
     else:
         panel_stresses = ()
         diagnostics.append("no FRD result file supplied; panel stresses set to defaults")
@@ -759,22 +703,7 @@ def _create_flat_fea_buckling_session(
                 elastic_modulus_mpa=elastic_modulus_mpa,
                 material_factor=material_factor,
                 poisson=poisson,
-                ml_algo=ml_algo,
             )
-        )
-
-    unavailable_results = [
-        result for result in buckling_results
-        if not result.get("available", False)
-    ]
-    if unavailable_results:
-        diagnostics.append(
-            f"{len(unavailable_results)} of {len(buckling_results)} flat-panel buckling calculations "
-            "returned no identifiable usage factor"
-        )
-        diagnostics.extend(
-            f"{result.get('field_id', '?')}: {result.get('error', 'no result')}"
-            for result in unavailable_results[:20]
         )
 
     plot_records = panel_plot_records(model, fields)
@@ -945,13 +874,6 @@ def panel_3d_records(
             field_values=field_values,
         )
 
-    patches = detect_surface_patches(model)
-    try:
-        inference = _infer_members_from_patches(model, patches) if patches else None
-    except Exception:
-        inference = None
-    local_x = inference.member_direction if inference is not None else (1.0, 0.0, 0.0)
-    local_y = inference.transverse_direction if inference is not None else (0.0, 1.0, 0.0)
     records: list[dict[str, Any]] = []
     for index, field_item in enumerate(fields):
         polygons = [_field_representative_panel_polygon(model, field_item)]
@@ -972,8 +894,6 @@ def panel_3d_records(
                     (bbox[2][0] + bbox[2][1]) / 2.0,
                 ),
                 "normal": _field_representative_normal(model, field_item),
-                "local_x": local_x,
-                "local_y": local_y,
                 "value": value,
                 "span_m": field_item.span_m,
                 "spacing_m": field_item.spacing_m,
@@ -1796,127 +1716,49 @@ def _buckling_uf_by_field(buckling_results: Sequence[dict[str, Any]]) -> dict[st
 
 
 def _selected_uf_from_buckling_result(item: dict[str, Any]) -> float | None:
-    """Return the governing UF from one stored panel calculation.
-
-    API result dictionaries have changed shape over time.  Do not require one
-    exact key layout; search recognised UF/utilisation keys recursively and use
-    the governing finite value.
-    """
-    if not isinstance(item, dict):
-        return None
-    result = item.get("result", item)
+    result = item.get("result")
     if not isinstance(result, dict):
-        return _first_finite_float(result)
-    cylinder_uf = _find_cylinder_usage_factor(result)
-    if cylinder_uf is not None:
-        return cylinder_uf
+        return None
     return _find_usage_factor(result)
 
 
-def _find_cylinder_usage_factor(result: dict[str, Any]) -> float | None:
-    values: list[float] = []
-    for key in (
-        "Unstiffened shell",
-        "Unstiffened conical shell",
-        "Longitudinal stiffened shell",
-        "Ring stiffened shell",
-        "Heavy ring frame",
-    ):
-        uf = _first_finite_float(result.get(key))
-        if uf is not None:
-            values.append(uf)
-    need_column = result.get("Need to check column buckling", False) is True
-    if need_column:
-        column_uf = _first_finite_float(result.get("Column stability UF"))
-        if column_uf is not None:
-            values.append(column_uf)
-    return max(values) if values else None
-
-
-def _usage_key_priority(key: object) -> int:
-    """Return a positive priority for keys that represent utilisation factors."""
-    normalized = re.sub(r"[^a-z0-9]+", " ", str(key).lower()).strip()
-    exact = {
-        "selected uf": 100,
-        "governing uf": 100,
-        "ultimate uf": 95,
-        "buckling uf": 95,
-        "actual usage factor": 95,
-        "usage factor": 90,
-        "utilization factor": 90,
-        "utilisation factor": 90,
-        "plate buckling": 85,
-        "uf": 80,
-    }
-    if normalized in exact:
-        return exact[normalized]
-    words = set(normalized.split())
-    if "uf" in words:
-        return 70
-    if "usage" in words and "factor" in words:
-        return 65
-    if ("utilization" in words or "utilisation" in words) and "factor" in words:
-        return 65
-    if "buckling" in words and ("factor" in words or "ratio" in words):
-        return 55
-    return 0
-
-
 def _find_usage_factor(value: object) -> float | None:
-    """Find the governing finite UF in nested API output.
-
-    Earlier code returned the first numeric scalar found during recursion.
-    That could miss valid UFs in newer result layouts or accidentally select a
-    confidence/geometry value.  Only UF-like keys are considered first; the
-    governing value is the maximum finite candidate.
-    """
-    candidates: list[tuple[int, float]] = []
-
-    def visit(item: object) -> None:
-        if isinstance(item, dict):
-            for key, nested in item.items():
-                priority = _usage_key_priority(key)
-                if priority:
-                    numeric = _first_finite_float(nested)
-                    if numeric is not None:
-                        candidates.append((priority, numeric))
-                visit(nested)
-        elif isinstance(item, (list, tuple, set)):
-            for nested in item:
-                visit(nested)
-
-    visit(value)
-    if candidates:
-        highest_priority = max(priority for priority, _value in candidates)
-        preferred = [number for priority, number in candidates if priority == highest_priority]
-        return max(preferred) if preferred else None
-
-    # Compatibility fallback for APIs returning a bare scalar/list as result.
-    if not isinstance(value, dict):
-        return _first_finite_float(value)
-    return None
+    preferred_keys = (
+        "selected UF",
+        "ultimate UF",
+        "buckling UF",
+        "Plate buckling",
+        "Actual usage Factor",
+        "actual usage factor",
+        "usage_factor",
+        "usage factor",
+        "UF",
+    )
+    if isinstance(value, dict):
+        lower_lookup = {str(key).lower(): key for key in value}
+        for key in preferred_keys:
+            actual_key = lower_lookup.get(key.lower())
+            if actual_key is not None:
+                uf = _first_finite_float(value.get(actual_key))
+                if uf is not None:
+                    return uf
+        for nested in value.values():
+            uf = _find_usage_factor(nested)
+            if uf is not None:
+                return uf
+        return None
+    return _first_finite_float(value)
 
 
 def _first_finite_float(value: object) -> float | None:
     direct = _safe_float(value)
     if direct is not None:
         return direct
-    if isinstance(value, dict):
-        values = [
-            nested
-            for nested_value in value.values()
-            for nested in [_first_finite_float(nested_value)]
-            if nested is not None
-        ]
-        return max(values) if values else None
-    if isinstance(value, (list, tuple, set)):
-        values = [
-            nested
-            for item in value
-            for nested in [_first_finite_float(item)]
-            if nested is not None
-        ]
-        return max(values) if values else None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            nested = _first_finite_float(item)
+            if nested is not None:
+                return nested
     return None
 
 
@@ -1937,7 +1779,7 @@ def _field_stress_samples(
     base_offset: float,
     member_direction: Vector3D,
     transverse_direction: Vector3D,
-) -> list[tuple[float, float, float, float, float]]:
+) -> list[tuple[float, float, float, float]]:
     all_samples: list[tuple[float, float, float, float, float]] = []
     seen_node_ids: set[int] = set()
     for element_id in field_item.element_ids:
@@ -1963,122 +1805,7 @@ def _field_stress_samples(
     mid_surface_tolerance = max((field_item.shell_section_thickness_m or 0.0) * 0.2, 1.0e-8)
     mid_surface_samples = [sample for sample in all_samples if sample[4] <= mid_surface_tolerance]
     selected = mid_surface_samples or all_samples
-    return [sample[:4] + (1.0,) for sample in selected]
-
-
-def _field_element_stress_samples(
-    model: FeShellModel,
-    field_item: PlateField,
-    frd_stress: FrdStressResult,
-    member_direction: Vector3D,
-    transverse_direction: Vector3D,
-) -> list[tuple[float, float, float, float, float]]:
-    samples: list[tuple[float, float, float, float, float]] = []
-    for element_id in field_item.element_ids:
-        element = model.shell_elements.get(element_id)
-        if element is None:
-            continue
-        corner_points = [model.nodes[node_id] for node_id in element.corner_node_ids if node_id in model.nodes]
-        if len(corner_points) < 3:
-            continue
-        projected_values = []
-        for node_id in frd_stress.element_nodes.get(element_id, element.corner_node_ids):
-            if node_id not in frd_stress.nodal_stress:
-                continue
-            projected_values.append(
-                _project_frd_stress(
-                    frd_stress.components,
-                    frd_stress.nodal_stress[node_id],
-                    member_direction,
-                    transverse_direction,
-                )
-            )
-        if not projected_values:
-            continue
-        centroid = _mean_point(corner_points)
-        area = _element_area(corner_points)
-        samples.append(
-            (
-                _dot(centroid, transverse_direction),
-                _mean(value[0] for value in projected_values),
-                _mean(value[1] for value in projected_values),
-                _mean(value[2] for value in projected_values),
-                max(area, 1.0e-12),
-            )
-        )
-    return samples
-
-
-def _weighted_mean(values: Iterable[tuple[float, float]]) -> float:
-    weighted_sum = 0.0
-    weight_sum = 0.0
-    for value, weight in values:
-        weighted_sum += float(value) * float(weight)
-        weight_sum += float(weight)
-    return 0.0 if weight_sum == 0.0 else weighted_sum / weight_sum
-
-
-def _reduced_panel_stress_from_samples(
-    field_item: PlateField,
-    samples: Sequence[tuple[float, float, float, float, float]],
-    reduction_method: str,
-    *,
-    transverse_edge_fraction: float,
-    centre_strip_fraction: float,
-) -> PanelStress:
-    selected_samples = list(samples)
-    lower_transverse, upper_transverse = field_item.transverse_bounds
-    width = max(upper_transverse - lower_transverse, 1.0e-9)
-
-    if reduction_method == "Centre strip mean":
-        centre = 0.5 * (lower_transverse + upper_transverse)
-        half_strip = max(width * centre_strip_fraction * 0.5, 1.0e-9)
-        selected_samples = [
-            sample for sample in samples
-            if abs(sample[0] - centre) <= half_strip
-        ]
-        if not selected_samples:
-            ordered = sorted(samples, key=lambda sample: abs(sample[0] - centre))
-            selected_samples = ordered[: max(1, int(math.ceil(len(ordered) * centre_strip_fraction)))]
-
-    sigma_x = [-sample[1] / 1.0e6 for sample in selected_samples]
-    sigma_y = [-sample[2] / 1.0e6 for sample in selected_samples]
-    tau_xy = [sample[3] / 1.0e6 for sample in selected_samples]
-    weights = [sample[4] for sample in selected_samples]
-
-    if reduction_method == "Whole panel nodal mean":
-        weights = [1.0 for _sample in selected_samples]
-
-    sigma_x_nominal = _weighted_mean(zip(sigma_x, weights))
-    sigma_y_nominal = _weighted_mean(zip(sigma_y, weights))
-    tau_xy_nominal = _weighted_mean(zip(tau_xy, weights))
-
-    if reduction_method == "Whole panel nodal mean":
-        reduction = "whole-panel nodal membrane mean"
-        sample_note = "all matching mid-surface result nodes weighted equally"
-    elif reduction_method == "Centre strip mean":
-        reduction = f"centre-strip membrane mean over {centre_strip_fraction:.0%} panel width"
-        sample_note = "only stresses in the centre strip are averaged"
-    else:
-        reduction = "CSR area weighted membrane mean"
-        sample_note = "finite-element membrane stresses weighted by shell element area"
-
-    return PanelStress(
-        field_id=field_item.field_id,
-        sigma_x1_mpa=sigma_x_nominal,
-        sigma_x2_mpa=sigma_x_nominal,
-        sigma_y1_mpa=sigma_y_nominal,
-        sigma_y2_mpa=sigma_y_nominal,
-        tau_xy_mpa=tau_xy_nominal,
-        sample_count=len(selected_samples),
-        reduction=reduction,
-        diagnostics=(
-            "FRD stress tensors projected to inferred panel axes",
-            "normal stresses converted from FE tension-positive Pa to compression-positive MPa",
-            sample_note,
-            "CSR reference: area-weighted average membrane stress over panel finite elements",
-        ),
-    )
+    return [sample[:4] for sample in selected]
 
 
 def _project_frd_stress(
@@ -2418,29 +2145,6 @@ class CylinderField:
     @property
     def angular_span_rad(self) -> float:
         return _positive_angle(self.angular_bounds_rad[1] - self.angular_bounds_rad[0])
-
-    # Compatibility aliases used by the existing FEA-result GUI.  The GUI was
-    # originally written for PlateField and expects span/spacing/thickness names.
-    # For a cylinder bay, span is axial and spacing is circumferential arc length.
-    @property
-    def span_m(self) -> float:
-        return self.axial_length_m
-
-    @property
-    def spacing_m(self) -> float:
-        return self.circumferential_spacing_m
-
-    @property
-    def shell_section_thickness_m(self) -> float | None:
-        return self.shell_thickness_m
-
-    @property
-    def transverse_bounds(self) -> tuple[float, float]:
-        return self.angular_bounds_rad
-
-    @property
-    def base_patch_id(self) -> str:
-        return "cylinder_skin"
 
 
 @dataclass(frozen=True)
@@ -2838,9 +2542,6 @@ def reduce_cylinder_stresses(
     geometry: CylinderGeometry,
     fields: Sequence[CylinderField],
     frd_stress: FrdStressResult,
-    *,
-    stress_reduction_method: str | None = None,
-    centre_strip_fraction: float = 0.25,
 ) -> list[CylinderStress]:
     """Project FRD stresses into local axial/circumferential cylinder axes.
 
@@ -2848,54 +2549,41 @@ def reduce_cylinder_stresses(
     which matches the ANYstructure cylinder API where compression is negative.
     """
 
-    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     result: list[CylinderStress] = []
     for field_item in fields:
-        if reduction_method == "CSR area weighted mean":
-            samples = _cylinder_element_stress_samples(model, geometry, field_item, frd_stress)
-        else:
-            samples = _cylinder_nodal_stress_samples(model, geometry, field_item, frd_stress)
+        samples: list[tuple[float, float, float]] = []
+        seen: set[int] = set()
+        for element_id in field_item.element_ids:
+            for node_id in frd_stress.element_nodes.get(element_id, ()):
+                if node_id in seen or node_id not in frd_stress.nodal_stress:
+                    continue
+                point = frd_stress.nodes.get(node_id)
+                if point is None:
+                    continue
+                seen.add(node_id)
+                radial = _normalise(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
+                circumferential = _normalise(_cross(geometry.axis_direction, radial))
+                axial, hoop, shear = _project_frd_stress(
+                    frd_stress.components,
+                    frd_stress.nodal_stress[node_id],
+                    geometry.axis_direction,
+                    circumferential,
+                )
+                samples.append((axial / 1.0e6, hoop / 1.0e6, shear / 1.0e6))
 
-        selected_samples = list(samples)
-        if reduction_method == "Centre strip mean" and selected_samples:
-            lower_axial, upper_axial = field_item.axial_bounds
-            width = max(upper_axial - lower_axial, 1.0e-9)
-            centre = 0.5 * (lower_axial + upper_axial)
-            half_strip = max(width * centre_strip_fraction * 0.5, 1.0e-9)
-            selected_samples = [
-                sample for sample in samples
-                if abs(sample[0] - centre) <= half_strip
-            ]
-            if not selected_samples:
-                ordered = sorted(samples, key=lambda sample: abs(sample[0] - centre))
-                selected_samples = ordered[: max(1, int(math.ceil(len(ordered) * centre_strip_fraction)))]
-
-        if reduction_method == "Whole panel nodal mean":
-            selected_samples = [
-                (sample[0], sample[1], sample[2], sample[3], 1.0)
-                for sample in selected_samples
-            ]
-
-        if selected_samples:
-            if reduction_method == "Whole panel nodal mean":
-                reduction = "whole-panel nodal membrane mean in axial/circumferential axes"
-            elif reduction_method == "Centre strip mean":
-                reduction = f"centre-strip membrane mean over {centre_strip_fraction:.0%} axial panel length"
-            else:
-                reduction = "CSR area weighted membrane mean in axial/circumferential axes"
+        if samples:
             result.append(
                 CylinderStress(
                     field_id=field_item.field_id,
-                    axial_stress_mpa=_weighted_mean((sample[1], sample[4]) for sample in selected_samples),
-                    hoop_stress_mpa=_weighted_mean((sample[2], sample[4]) for sample in selected_samples),
-                    torsional_shear_mpa=_weighted_mean((sample[3], sample[4]) for sample in selected_samples),
+                    axial_stress_mpa=_mean(sample[0] for sample in samples),
+                    hoop_stress_mpa=_mean(sample[1] for sample in samples),
+                    torsional_shear_mpa=_mean(sample[2] for sample in samples),
                     transverse_shear_mpa=0.0,
-                    sample_count=len(selected_samples),
-                    reduction=reduction,
+                    sample_count=len(samples),
+                    reduction="mean local membrane stress in axial/circumferential axes",
                     diagnostics=(
                         "CalculiX tension-positive sign retained; cylinder compression is negative",
                         "S_axial, S_hoop and tau_axial-hoop projected at every result node",
-                        "CSR reference: area-weighted average membrane stress over panel finite elements",
                     ),
                 )
             )
@@ -2915,82 +2603,6 @@ def reduce_cylinder_stresses(
     return result
 
 
-def _cylinder_nodal_stress_samples(
-    model: FeShellModel,
-    geometry: CylinderGeometry,
-    field_item: CylinderField,
-    frd_stress: FrdStressResult,
-) -> list[tuple[float, float, float, float, float]]:
-    samples: list[tuple[float, float, float, float, float]] = []
-    seen: set[int] = set()
-    for element_id in field_item.element_ids:
-        for node_id in frd_stress.element_nodes.get(element_id, ()):
-            if node_id in seen or node_id not in frd_stress.nodal_stress:
-                continue
-            point = frd_stress.nodes.get(node_id)
-            if point is None:
-                continue
-            seen.add(node_id)
-            axial, hoop, shear = _project_cylinder_point_stress(point, geometry, frd_stress, node_id)
-            samples.append((_dot(_subtract(point, geometry.axis_origin), geometry.axis_direction), axial, hoop, shear, 1.0))
-    return samples
-
-
-def _cylinder_element_stress_samples(
-    model: FeShellModel,
-    geometry: CylinderGeometry,
-    field_item: CylinderField,
-    frd_stress: FrdStressResult,
-) -> list[tuple[float, float, float, float, float]]:
-    samples: list[tuple[float, float, float, float, float]] = []
-    for element_id in field_item.element_ids:
-        element = model.shell_elements.get(element_id)
-        if element is None:
-            continue
-        corner_points = [model.nodes[node_id] for node_id in element.corner_node_ids if node_id in model.nodes]
-        if len(corner_points) < 3:
-            continue
-        projected_values = []
-        for node_id in frd_stress.element_nodes.get(element_id, element.corner_node_ids):
-            if node_id not in frd_stress.nodal_stress:
-                continue
-            point = frd_stress.nodes.get(node_id)
-            if point is None:
-                continue
-            projected_values.append(_project_cylinder_point_stress(point, geometry, frd_stress, node_id))
-        if not projected_values:
-            continue
-        centroid = _mean_point(corner_points)
-        area = _element_area(corner_points)
-        samples.append(
-            (
-                _dot(_subtract(centroid, geometry.axis_origin), geometry.axis_direction),
-                _mean(value[0] for value in projected_values),
-                _mean(value[1] for value in projected_values),
-                _mean(value[2] for value in projected_values),
-                max(area, 1.0e-12),
-            )
-        )
-    return samples
-
-
-def _project_cylinder_point_stress(
-    point: Point3D,
-    geometry: CylinderGeometry,
-    frd_stress: FrdStressResult,
-    node_id: int,
-) -> tuple[float, float, float]:
-    radial = _normalise(_radial_vector(point, geometry.axis_origin, geometry.axis_direction))
-    circumferential = _normalise(_cross(geometry.axis_direction, radial))
-    axial, hoop, shear = _project_frd_stress(
-        frd_stress.components,
-        frd_stress.nodal_stress[node_id],
-        geometry.axis_direction,
-        circumferential,
-    )
-    return axial / 1.0e6, hoop / 1.0e6, shear / 1.0e6
-
-
 def anystructure_input_for_cylinder_field(
     field_item: CylinderField,
     stress: CylinderStress | None = None,
@@ -3004,6 +2616,8 @@ def anystructure_input_for_cylinder_field(
     """Return CylStru-compatible values inferred for one cylindrical bay."""
 
     longitudinal = _first_cylinder_member(field_item, "longitudinal_stiffener")
+    ring = _first_cylinder_member(field_item, "ring_stiffener")
+    frame = _first_cylinder_member(field_item, "ring_frame")
     panel_stress = stress or CylinderStress(
         field_id=field_item.field_id,
         axial_stress_mpa=0.0,
@@ -3014,10 +2628,6 @@ def anystructure_input_for_cylinder_field(
         reduction="default zero stress",
     )
     domain = _cylinder_domain_for_field(field_item)
-    calculation_longitudinal, calculation_ring, calculation_frame = _cylinder_calculation_members(
-        field_item,
-        domain,
-    )
     return {
         "field_id": field_item.field_id,
         "calculation_domain": domain,
@@ -3028,9 +2638,9 @@ def anystructure_input_for_cylinder_field(
             "distance_between_rings_mm": field_item.axial_length_m * 1000.0,
             "panel_spacing_mm": field_item.circumferential_spacing_m * 1000.0,
         },
-        "longitudinal_stiffener": _cylinder_member_input(calculation_longitudinal or longitudinal),
-        "ring_stiffener": _cylinder_member_input(calculation_ring),
-        "ring_frame": _cylinder_member_input(calculation_frame),
+        "longitudinal_stiffener": _cylinder_member_input(longitudinal),
+        "ring_stiffener": _cylinder_member_input(ring),
+        "ring_frame": _cylinder_member_input(frame),
         "material": {
             "yield_mpa": material_yield_mpa,
             "elastic_modulus_mpa": elastic_modulus_mpa,
@@ -3050,130 +2660,10 @@ def anystructure_input_for_cylinder_field(
     }
 
 
-_FLAT_PANEL_BUCKLING_METHODS = {"SemiAnalytical S3/U3", "ML-Numeric (PULS based)"}
-
-
-def _cylinder_flat_panel_method_warning(calculation_method: str) -> str:
-    return (
-        "WARNING: "
-        f"{calculation_method} is calibrated for flat plate/stiffened-panel checks. "
-        "For cylindrical FE bays ANYstructure maps axial length, circumferential spacing, "
-        "axial/hoop stresses and local stiffener data to an equivalent flat panel. "
-        "Use this as an engineering approximation; cylindrical DNV rule checks may have "
-        "separate geometry and validity limits."
-    )
-
-
-def _cylinder_member_to_flat_member(member: CylinderMember, role: str) -> InferredMember:
-    return InferredMember(
-        member_id=member.member_id,
-        role=role,
-        section_type=member.section_type,
-        web_patch_id=member.member_id,
-        flange_patch_id=member.member_id if member.flange_element_ids else None,
-        direction=member.direction,
-        station=member.station,
-        web_height_m=member.web_height_m,
-        flange_width_m=member.flange_width_m,
-        web_thickness_m=member.web_thickness_m,
-        flange_thickness_m=member.flange_thickness_m,
-        thickness_source="cylinder shell section metadata",
-        confidence=member.confidence,
-        diagnostics=member.diagnostics + ("mapped from cylindrical member for equivalent flat-panel buckling",),
-    )
-
-
-def _equivalent_flat_field_for_cylinder(field_item: CylinderField) -> PlateField:
-    flat_members: list[InferredMember] = []
-    for member in field_item.members:
-        if member.role == "longitudinal_stiffener":
-            flat_members.append(_cylinder_member_to_flat_member(member, "stiffener"))
-        elif member.role in {"ring_stiffener", "ring_frame"}:
-            flat_members.append(_cylinder_member_to_flat_member(member, "girder"))
-
-    return PlateField(
-        field_id=field_item.field_id,
-        base_patch_id="equivalent_cylinder_flat_panel",
-        element_ids=field_item.element_ids,
-        bbox=((0.0, field_item.axial_length_m), (0.0, field_item.circumferential_spacing_m), (0.0, 0.0)),
-        span_m=field_item.axial_length_m,
-        spacing_m=field_item.circumferential_spacing_m,
-        transverse_bounds=(0.0, field_item.circumferential_spacing_m),
-        attached_member_ids=field_item.attached_member_ids,
-        members=tuple(flat_members),
-        shell_section_thickness_m=field_item.shell_thickness_m,
-        confidence=field_item.confidence,
-        diagnostics=field_item.diagnostics + (
-            "equivalent flat-panel input: span=axial length, spacing=circumferential arc length",
-        ),
-    )
-
-
-def _equivalent_panel_stress_for_cylinder(stress: CylinderStress) -> PanelStress:
-    return PanelStress(
-        field_id=stress.field_id,
-        sigma_x1_mpa=-stress.axial_stress_mpa,
-        sigma_x2_mpa=-stress.axial_stress_mpa,
-        sigma_y1_mpa=-stress.hoop_stress_mpa,
-        sigma_y2_mpa=-stress.hoop_stress_mpa,
-        tau_xy_mpa=stress.torsional_shear_mpa,
-        sample_count=stress.sample_count,
-        reduction=(
-            "equivalent flat-panel stress: axial compression -> sigma_x, "
-            "hoop compression -> sigma_y, torsion -> tau_xy"
-        ),
-        source_units="MPa",
-        diagnostics=stress.diagnostics + (
-            "converted from cylinder tension-positive convention to flat compression-positive convention",
-        ),
-    )
-
-
-def calculate_equivalent_flat_buckling_for_cylinder(
-    fields: Sequence[CylinderField],
-    stresses: Sequence[CylinderStress],
-    *,
-    calculation_method: str,
-    buckling_acceptance: str = "ultimate",
-    pressure_mpa: float = 0.0,
-    material_yield_mpa: float = 355.0,
-    elastic_modulus_mpa: float = 210000.0,
-    material_factor: float = 1.15,
-    poisson: float = 0.3,
-    ml_algo: Any = None,
-) -> list[dict[str, Any]]:
-    """Run flat-panel methods on cylindrical bays using a documented equivalent mapping."""
-
-    equivalent_fields = tuple(_equivalent_flat_field_for_cylinder(field_item) for field_item in fields)
-    equivalent_stresses = tuple(_equivalent_panel_stress_for_cylinder(stress) for stress in stresses)
-    warning = _cylinder_flat_panel_method_warning(calculation_method)
-    results = calculate_field_buckling(
-        equivalent_fields,
-        equivalent_stresses,
-        calculation_method=calculation_method,
-        buckling_acceptance=buckling_acceptance,
-        pressure_mpa=pressure_mpa,
-        material_yield_mpa=material_yield_mpa,
-        elastic_modulus_mpa=elastic_modulus_mpa,
-        material_factor=material_factor,
-        poisson=poisson,
-        ml_algo=ml_algo,
-    )
-    for result in results:
-        result["domain"] = "Equivalent flat panel from cylindrical shell"
-        result["cylinder_method_warning"] = warning
-        result["warnings"] = tuple(dict.fromkeys(tuple(result.get("warnings", ())) + (warning,)))
-        result["calculation_method"] = calculation_method
-        result["buckling_acceptance"] = buckling_acceptance
-    return results
-
-
 def calculate_cylinder_buckling(
     fields: Sequence[CylinderField],
     stresses: Sequence[CylinderStress],
     *,
-    calculation_method: str = "DNV-RP-C201 - prescriptive",
-    buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,
     material_yield_mpa: float = 355.0,
     elastic_modulus_mpa: float = 210000.0,
@@ -3181,23 +2671,8 @@ def calculate_cylinder_buckling(
     poisson: float = 0.3,
     imperfection_factor: float = 0.005,
     effective_buckling_length_factor: float = 1.0,
-    ml_algo: Any = None,
 ) -> list[dict[str, Any]]:
     """Run the existing ANYstructure CylStru check for each inferred bay."""
-
-    if calculation_method in _FLAT_PANEL_BUCKLING_METHODS:
-        return calculate_equivalent_flat_buckling_for_cylinder(
-            fields,
-            stresses,
-            calculation_method=calculation_method,
-            buckling_acceptance=buckling_acceptance,
-            pressure_mpa=pressure_mpa,
-            material_yield_mpa=material_yield_mpa,
-            elastic_modulus_mpa=elastic_modulus_mpa,
-            material_factor=material_factor,
-            poisson=poisson,
-            ml_algo=ml_algo,
-        )
 
     from anystruct.api import CylStru
 
@@ -3235,20 +2710,15 @@ def calculate_cylinder_buckling(
             cylinder.set_length_between_girder(input_data["shell"]["distance_between_rings_mm"])
             cylinder.set_panel_spacing(input_data["shell"]["panel_spacing_mm"])
 
-            calculation_longitudinal, calculation_ring, calculation_frame = _cylinder_calculation_members(
-                field_item,
-                input_data["calculation_domain"],
-            )
-            if calculation_longitudinal is not None:
-                _set_cylinder_member(
-                    cylinder.set_longitudinal_stiffener,
-                    calculation_longitudinal,
-                    field_item.circumferential_spacing_m,
-                )
-            if calculation_ring is not None:
-                _set_cylinder_member(cylinder.set_ring_stiffener, calculation_ring, field_item.axial_length_m)
-            if calculation_frame is not None:
-                _set_cylinder_member(cylinder.set_ring_girder, calculation_frame, field_item.axial_length_m)
+            longitudinal = _first_cylinder_member(field_item, "longitudinal_stiffener")
+            ring = _first_cylinder_member(field_item, "ring_stiffener")
+            frame = _first_cylinder_member(field_item, "ring_frame")
+            if longitudinal is not None:
+                _set_cylinder_member(cylinder.set_longitudinal_stiffener, longitudinal, field_item.circumferential_spacing_m)
+            if ring is not None:
+                _set_cylinder_member(cylinder.set_ring_stiffener, ring, field_item.axial_length_m)
+            if frame is not None:
+                _set_cylinder_member(cylinder.set_ring_girder, frame, field_item.axial_length_m)
 
             cylinder.set_stresses(
                 sasd=0.0 if stress is None else stress.axial_stress_mpa,
@@ -3264,8 +2734,6 @@ def calculate_cylinder_buckling(
                     "field_id": field_item.field_id,
                     "domain": input_data["calculation_domain"],
                     "available": True,
-                    "calculation_method": calculation_method,
-                    "buckling_acceptance": buckling_acceptance,
                     "input": input_data,
                     "result": buckling_result,
                 }
@@ -3276,8 +2744,6 @@ def calculate_cylinder_buckling(
                     "field_id": field_item.field_id,
                     "domain": input_data["calculation_domain"],
                     "available": False,
-                    "calculation_method": calculation_method,
-                    "buckling_acceptance": buckling_acceptance,
                     "input": input_data,
                     "error": str(err),
                 }
@@ -3289,23 +2755,14 @@ def create_fea_cylinder_buckling_session(
     inp_path: str | os.PathLike[str],
     frd_path: str | os.PathLike[str] | None = None,
     *,
-    calculation_method: str = "DNV-RP-C202",
-    buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,
     material_yield_mpa: float = 355.0,
     elastic_modulus_mpa: float = 210000.0,
     material_factor: float = 1.15,
     poisson: float = 0.3,
-    ml_algo: Any = None,
     run_buckling: bool = True,
-    stress_reduction_method: str | None = None,
 ) -> FeaCylinderSession:
-    """Create the cylinder equivalent of ``create_fea_buckling_session``.
-
-    ``calculation_method`` and ``buckling_acceptance`` are accepted because the
-    FEA-result GUI sends the same common keyword set for flat and cylindrical
-    models. Cylinder buckling is still evaluated by ``CylStru``.
-    """
+    """Create the cylinder equivalent of ``create_fea_buckling_session``."""
 
     inp_path = str(inp_path)
     frd_path_text = None if frd_path is None else str(frd_path)
@@ -3314,27 +2771,10 @@ def create_fea_cylinder_buckling_session(
     fields = tuple(infer_cylinder_fields(model, geometry))
     frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
-    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
-    diagnostics.append(f"stress reduction method: {reduction_method}")
-    if calculation_method in _FLAT_PANEL_BUCKLING_METHODS:
-        diagnostics.append(_cylinder_flat_panel_method_warning(calculation_method))
-    else:
-        diagnostics.append(
-            "cylinder calculation uses CylStru; requested common GUI method="
-            f"{calculation_method!r}, acceptance={buckling_acceptance!r}"
-        )
 
     if frd_path_text:
         frd_stress = read_calculix_frd_stress(frd_path_text)
-        stresses = tuple(
-            reduce_cylinder_stresses(
-                model,
-                geometry,
-                fields,
-                frd_stress,
-                stress_reduction_method=reduction_method,
-            )
-        )
+        stresses = tuple(reduce_cylinder_stresses(model, geometry, fields, frd_stress))
     else:
         stresses = ()
         diagnostics.append("no FRD result file supplied; cylinder stresses set to defaults")
@@ -3345,29 +2785,12 @@ def create_fea_cylinder_buckling_session(
             calculate_cylinder_buckling(
                 fields,
                 stresses,
-                calculation_method=calculation_method,
-                buckling_acceptance=buckling_acceptance,
                 pressure_mpa=pressure_mpa,
                 material_yield_mpa=material_yield_mpa,
                 elastic_modulus_mpa=elastic_modulus_mpa,
                 material_factor=material_factor,
                 poisson=poisson,
-                ml_algo=ml_algo,
             )
-        )
-
-    unavailable_results = [
-        result for result in buckling_results
-        if not result.get("available", False)
-    ]
-    if unavailable_results:
-        diagnostics.append(
-            f"{len(unavailable_results)} of {len(buckling_results)} cylinder buckling calculations "
-            "returned no identifiable usage factor"
-        )
-        diagnostics.extend(
-            f"{result.get('field_id', '?')}: {result.get('error', 'no result')}"
-            for result in unavailable_results[:20]
         )
 
     stress_by_field = {stress.field_id: stress for stress in stresses}
@@ -3479,19 +2902,13 @@ def cylinder_3d_records(
             ),
         )
         points = [point for polygon in polygons for point in polygon]
-        centroid = _mean_point(points)
-        radial = _normalise(_radial_vector(centroid, geometry.axis_origin, geometry.axis_direction))
-        local_y = _normalise(_cross(geometry.axis_direction, radial))
         records.append(
             {
                 "field_id": field_item.field_id,
                 "index": index,
                 "polygons": polygons,
                 "bbox": _bbox(points) if points else None,
-                "centroid": centroid,
-                "normal": radial,
-                "local_x": geometry.axis_direction,
-                "local_y": local_y,
+                "centroid": _mean_point(points),
                 "value": None if field_values is None else field_values.get(field_item.field_id),
                 "axial_length_m": field_item.axial_length_m,
                 "circumferential_spacing_m": field_item.circumferential_spacing_m,
@@ -3765,35 +3182,6 @@ def _cylinder_domain_for_field(field_item: CylinderField) -> str:
     return "Unstiffened shell"
 
 
-def _cylinder_calculation_members(
-    field_item: CylinderField,
-    domain: str | None = None,
-) -> tuple[CylinderMember | None, CylinderMember | None, CylinderMember | None]:
-    """Return member objects compatible with the selected ``CylStru`` domain.
-
-    The FE geometry may contain several plausible calculation domains in one
-    bay.  The legacy cylinder API represents orthogonal stiffening as
-    longitudinal stiffeners plus a ring frame object; when the scan finds a
-    transverse ring stiffener but no heavy frame, use that transverse member as
-    the frame for the calculation instead of calling a setter for an object the
-    selected domain does not own.
-    """
-
-    domain = _cylinder_domain_for_field(field_item) if domain is None else str(domain)
-    longitudinal = _first_cylinder_member(field_item, "longitudinal_stiffener")
-    ring = _first_cylinder_member(field_item, "ring_stiffener")
-    frame = _first_cylinder_member(field_item, "ring_frame")
-    domain_lower = domain.lower()
-
-    if "orthogonally" in domain_lower:
-        return longitudinal, None, frame or ring
-    if "longitudinal" in domain_lower:
-        return longitudinal, None, None
-    if "ring stiffened" in domain_lower:
-        return None, ring or frame, None
-    return None, None, None
-
-
 def _cylinder_member_input(member: CylinderMember | None) -> dict[str, Any] | None:
     if member is None:
         return None
@@ -4022,12 +3410,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Color plot by panel id or buckling utilization factor; default is uf with --buckling, otherwise panel",
     )
     parser.add_argument("--stresses", action="store_true", help="Reduce FRD stresses to one stress set per field")
-    parser.add_argument(
-        "--stress-method",
-        default=STRESS_REDUCTION_METHODS[0],
-        choices=STRESS_REDUCTION_METHODS,
-        help="Representative FE stress interpretation used with --stresses/--buckling",
-    )
     parser.add_argument("--buckling", action="store_true", help="Run ANYstructure buckling checks from reduced FRD stresses")
     parser.add_argument(
         "--buckling-method",
@@ -4053,12 +3435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.frd:
             parser.error("--stresses/--buckling requires --frd")
         frd_stress = read_calculix_frd_stress(args.frd)
-        panel_stresses = reduce_field_stresses(
-            model,
-            fields,
-            frd_stress,
-            stress_reduction_method=args.stress_method,
-        )
+        panel_stresses = reduce_field_stresses(model, fields, frd_stress)
         payload["panel_stresses"] = summarize_panel_stresses(panel_stresses)
     if args.buckling:
         payload["buckling_results"] = calculate_field_buckling(

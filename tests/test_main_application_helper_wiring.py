@@ -91,6 +91,7 @@ def test_file_menu_exposes_export_options():
     assert "command=self.export_prop_3d_ifc_model" in file_menu_block
     assert "Selected structure IFC/CAD shell/surface model..." in file_menu_block
     assert "command=self.export_prop_3d_ifc_shell_model" in file_menu_block
+    assert "Open FEA result buckling files..." not in file_menu_block
 
 
 def test_conical_shell_uses_single_domain_and_existing_force_stress_toggle():
@@ -133,9 +134,16 @@ def test_functional_modes_keep_3d_section_checkbox_visible():
     source = main_source.read_text(encoding="utf-8")
 
     assert "def _place_3d_section_view_checkbox(self):" in source
+    assert "def create_prop_3d_figure_for_line(self, line_name=None):" in source
+    assert "self.draw_cylinder_prop_3d(self._line_to_struc[selected_line][5], embed=False)" in source
+    assert "self.draw_flat_panel_prop_3d(self._line_to_struc[selected_line][0], embed=False)" in source
     assert "self._chk_show_prop_3d.place(relx=0.637, rely=0.705)" in source
     assert "self._chk_show_prop_3d.lift()" in source
     assert source.count("self._place_3d_section_view_checkbox()") >= 3
+    single_mode_source = source[source.index("def switch_to_single_calculation_mode"):source.index("def switch_to_multiple_calculation_mode")]
+    multiple_mode_source = source[source.index("def switch_to_multiple_calculation_mode"):source.index("def switch_to_fea_result_buckling_mode")]
+    assert "self._place_3d_section_view_checkbox()" in single_mode_source
+    assert "self._place_3d_section_view_checkbox()" in multiple_mode_source
 
 
 def test_help_tab_includes_cylinder_panel_buckling_image():
@@ -174,6 +182,12 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
 
     assert "self._simplified_calculation_mode = False" in source
     assert "self._single_line_name = 'line1'" in source
+    assert "self._experimental_mode_enabled = False" in source
+    assert "self._sync_experimental_menu_entries()" in source
+    assert "def _sync_experimental_menu_entries(self):" in source
+    assert "Hide FEA/FRD import menu entries unless experimental mode is enabled." in source
+    assert "'_file_menu'" in source
+    assert "'_gui_menu'" in source
     assert "def _prompt_startup_calculation_mode(self):" in source
     assert "from importlib import metadata as importlib_metadata" in source
     assert "def _get_application_version_from_metadata():" in source
@@ -195,6 +209,8 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "text='Experimental'" in source
     assert "tk.BooleanVar(value=False)" in source
     assert "def toggle_experimental():" in source
+    assert "self._experimental_mode_enabled = bool(experimental_var.get())" in source
+    assert "self._sync_experimental_menu_entries()" in source[source.index("def choose(mode):"):source.index("dialog.protocol")]
     assert "fea_card.pack_forget()" in source
     assert "if experimental_var.get():" in source
     assert "dialog.bind('<Return>', lambda _event: choose('multiple'))" in source
@@ -203,9 +219,16 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "Mode - Single panel/cylinder" in source
     assert "Mode - Multiple panels" in source
     assert "Mode - FEA result buckling" in source
+    gui_menu_block = source[
+        source.index("menu.add_cascade(label='GUI', menu=sub_colors)"):
+        source.index("# base_mult = 1.2")
+    ]
+    assert "Mode - FEA result buckling" not in gui_menu_block
     assert "def switch_to_single_calculation_mode(self):" in source
     assert "def switch_to_multiple_calculation_mode(self):" in source
     assert "def switch_to_fea_result_buckling_mode(self):" in source
+    assert "Enable experimental mode at startup to use FEA result buckling." in source
+    assert "Enable experimental mode at startup to import INP/FRD files." in source
     assert "self._single_line_name = selected_line" in source
     assert "self._activate_simplified_calculation_pipeline()" in source
     assert "def _ensure_single_dummy_line(self):" in source
@@ -254,6 +277,14 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def _draw_flat_structure_2d_preview(self, all_obj, selected_text=''):" in source
     assert "self._fea_uf_color_lower = tk.DoubleVar()" in source
     assert "self._fea_uf_color_upper = tk.DoubleVar()" in source
+    assert "self._fea_stress_reduction_method = tk.StringVar()" in source
+    assert "fe_plate_fields.available_stress_reduction_methods()[0]" in source
+    assert "self._fea_show_uf_text = tk.BooleanVar(value=False)" in source
+    assert "self._fea_show_panel_text = tk.BooleanVar(value=False)" in source
+    assert "self._fea_show_local_x_arrow = tk.BooleanVar(value=False)" in source
+    assert "self._fea_show_local_y_arrow = tk.BooleanVar(value=False)" in source
+    assert "self._fea_show_mesh = tk.BooleanVar(value=False)" in source
+    assert "self._fea_color_code = tk.BooleanVar(value=True)" in source
     assert "self._fea_panel_line_by_field = {}" in source
     assert "self._fea_imported_line_names = []" in source
     assert "def _rebuild_fea_panel_line_model(self):" in source
@@ -275,6 +306,13 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "colorbar_ax = fig.add_axes([0.90, 0.18, 0.025, 0.64])" in source
     assert "fig.colorbar(scalar_map, cax=colorbar_ax)" in source
     assert "colorbar.set_label('UF'" in source
+    assert "ax_width = 0.86 if self._fea_color_code.get() else 0.96" in source
+    assert "if self._fea_show_panel_text.get():" in source
+    assert "if self._fea_show_uf_text.get() and panel.usage_factor is not None:" in source
+    assert "if self._fea_show_local_x_arrow.get():" in source
+    assert "if self._fea_show_local_y_arrow.get():" in source
+    assert "if self._fea_color_code.get():" in source
+    assert "ax.quiver(" in source
     assert "self._build_flat_structure_properties()" in source
     assert "def _apply_selected_fea_cylinder_panel_to_inputs(self, data):" in source
     assert "api_helpers.cylinder_domain_with_input_mode(domain)" in source
@@ -289,10 +327,15 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "self._line_to_struc[result_line][5] = None" in source
     assert "if old_result_bundle is not None:" in source
     assert "self.get_color_and_calc_state(current_line=result_line, active_line_only=True)" in source
+    assert "def _fea_stress_method_description(method):" in source
+    assert "def _draw_fea_stress_interpretation_canvas(self, canvas, panel):" in source
+    assert "Stress Interpretation" in source
+    assert "Apply stress method" in source
+    assert "stress_reduction_method=self._fea_stress_reduction_method.get()" in source
     assert "pressure_mpa * 1.0e6" in source
     assert "panel.anystructure_input.get('stresses', {}).get('pressure_mpa', 0.0)" in source
-    assert "edgecolor='red' if selected else 'none'" in source
-    assert "linewidth=1.8 if selected else 0.0" in source
+    assert "edgecolor='red' if selected else ('#333333' if self._fea_show_mesh.get() else 'none')" in source
+    assert "linewidth=1.8 if selected else (0.25 if self._fea_show_mesh.get() else 0.0)" in source
     assert "collection.set_gid(field_id)" in source
     assert "collection.set_picker(True)" in source
     assert "self._fea_pick_cid = self._prop_3d_fig_canvas.mpl_connect(" in source
@@ -330,6 +373,13 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "ML-Numeric (PULS based)" in load_block
     assert "UF basis" in load_block
     assert "command=self._on_fea_buckling_option_changed" in load_block
+    assert "3D view" in load_block
+    assert "UF text" in load_block
+    assert "Panel number text" in load_block
+    assert "Panel local x arrow" in load_block
+    assert "Panel local y arrow" in load_block
+    assert "Show mesh" in load_block
+    assert "Color code" in load_block
 
 
 def test_initial_property_layout_uses_domain_selection_after_root_geometry_is_realized():
@@ -561,9 +611,15 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     source = main_source.read_text(encoding="utf-8")
 
     assert "import anystruct.solid_export as solid_export" in source
+    assert "import anystruct.fe_runtime_solver as fe_runtime_solver" in source
     assert "ttk.Button(view_row, text='Solid export'" in source
     assert "ttk.Button(view_row, text='Shell export'" in source
     assert "ttk.Button(view_row, text='FE buckling'" not in source
+    assert "text='FEM run'" in source
+    assert "def on_open_runtime_fem_solver(self):" in source
+    assert "fe_runtime_solver.open_runtime_fem_window(self._parent, self)" in source
+    assert "def _place_runtime_fem_button(self):" in source
+    assert "getattr(self, '_experimental_mode_enabled', False)" in source
     assert "run_prop_3d_opensees_buckling" not in source
     assert "ttk.Button(view_row, text='STL solid'" not in source
     assert "ttk.Button(view_row, text='Mesh solid'" not in source
