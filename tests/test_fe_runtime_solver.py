@@ -110,6 +110,58 @@ def test_runtime_fem_matplotlib_figure_contains_geometry_and_result_axes():
     assert figure.axes[1].tables
 
 
+def test_runtime_fem_result_print_explains_unavailable_nonlinear_factor():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={
+            "line": "line1",
+            "geometry": "cylinder",
+            "mesh_fidelity": "coarse",
+            "shell_element_order": "S8",
+            "boundary_condition": "auto",
+            "symmetry_mode": "none",
+            "analysis_type": "nonlinear stability",
+            "buckling_analysis_type": "nonlinear limit",
+            "solver_type": "direct",
+            "pressure_pa": 1000.0,
+            "pressure_direction": "external",
+            "axial_force_n": 0.0,
+            "enforced_displacement_m": 0.0,
+            "mesh_size_m": 0.0,
+            "top_bottom_moment_nm": 0.0,
+            "include_stiffeners": True,
+            "include_girders": True,
+            "include_end_lids": True,
+            "member_orientation": "auto",
+            "stiffener_eccentricity_m": 0.0,
+            "girder_eccentricity_m": 0.0,
+            "elastic_modulus_pa": 210.0e9,
+            "poisson_ratio": 0.3,
+            "yield_stress_pa": 355.0e6,
+            "stress_percentile": 95.0,
+            "num_buckling_modes": 5,
+            "max_displacement_m": 0.0,
+            "prestress_summary": {
+                "shell_elements": 800,
+                "nonlinear_status": "initial_tangent_not_positive",
+                "nonlinear_limit_factor": 0.0,
+                "nonlinear_steps": 0,
+            },
+        },
+        stress_percentiles=(),
+        buckling_factors=(),
+        diagnostics=(),
+        visualization={},
+    )
+
+    text = fe_runtime_solver.format_runtime_fem_result(result)
+
+    assert "Nonlinear tangent-stability check:" in text
+    assert "estimated nonlinear load factor: not available" in text
+    assert "initial tangent stiffness was not positive" in text
+    assert " - nonlinear_limit_factor: 0.0" not in text
+
+
 def test_runtime_fem_popup_has_compact_3d_section_preview():
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
 
@@ -130,7 +182,15 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "body.add(left_panel, weight=2)" in source
     assert "body.add(mid_panel, weight=2)" in source
     assert "body.add(right_panel, weight=3)" in source
-    assert "future_inputs = ttk.LabelFrame(mid_panel, text=\"Additional inputs\")" in source
+    assert "FEM_OPTION_INFO: dict[str, dict[str, str]]" in source
+    assert "def _info_button(self, parent: Any, key: str) -> ttk.Button:" in source
+    assert "def _show_solver_info(self, key: str) -> None:" in source
+    assert "ttk.Button(parent, text=\"i\", width=2" in source
+    assert "future_inputs = ttk.LabelFrame(mid_panel, text=\"Analysis options\")" in source
+    assert "constraints = ttk.LabelFrame(future_inputs, text=\"Supports and load path\")" in source
+    assert "solver_options = ttk.LabelFrame(future_inputs, text=\"Solver\")" in source
+    assert "members = ttk.LabelFrame(future_inputs, text=\"Member modelling\")" in source
+    assert "material = ttk.LabelFrame(future_inputs, text=\"Material and recovery\")" in source
     assert "preview = ttk.LabelFrame(right_panel, text=\"3D section view\")" in source
     assert "preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
     assert "self._show_preview_figure(create_runtime_fem_geometry_preview_figure(self.snapshot, self.app), preview)" in source
@@ -138,13 +198,16 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "redraw_after_id" in source
     assert "def _fit_preview_figure_to_canvas" in source
     assert "figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)" in source
-    assert "figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)" in source
-    assert "axis.set_position([0.01, 0.03, 0.98, 0.93])" in source
+    assert "figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)" in source
+    assert "axis.set_position([0.0, 0.0, 1.0, 0.96])" in source
+    assert "def _preview_axis_data_extents" in source
+    assert "axis.set_xlim3d" in source
+    assert "zoom = 1.55" in source
     assert "axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)" in source
     assert "self.run_button = ttk.Button(buttons, text=\"Run FEM\", command=self.run)" in source
     assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
     assert "self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))" in source
-    assert "ttk.Checkbutton(options, text=\"Top/bottom lid\", variable=self.include_end_lids)" in source
+    assert "self._add_check_row(contents, 2, \"include_end_lids\", \"Top/bottom lid\", self.include_end_lids)" in source
     assert "include_end_lids=bool(self.include_end_lids.get())" in source
     assert "self.boundary_condition = tk.StringVar(value=\"auto\")" in source
     assert "self.shell_element_order = tk.StringVar(value=\"S4\")" in source
@@ -159,6 +222,10 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.window.after(100, self._poll_solver_result)" in source
     assert "def _poll_solver_result(self) -> None:" in source
     assert "except queue.Empty:" in source
+    assert "self._info_button(selector_bar, \"display_choice\").pack" in source
+    assert "\"mesh_fidelity\"" in source
+    assert "\"pressure_pa\"" in source
+    assert "\"yield_stress_mpa\"" in source
     assert "horizontal_span" not in source
 
 

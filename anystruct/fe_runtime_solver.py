@@ -719,8 +719,28 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
     prestress = summary.get("prestress_summary") or {}
     if prestress:
         lines.extend(["", "Recovered prestress / reference state:"])
+        special_keys = {"nonlinear_status", "nonlinear_limit_factor", "nonlinear_steps"}
         for key, value in prestress.items():
+            if key in special_keys:
+                continue
             lines.append(" - " + key + ": " + str(round(_safe_float(value), 3)))
+        nonlinear_status = str(prestress.get("nonlinear_status", "") or "")
+        if nonlinear_status:
+            lines.extend(["", "Nonlinear tangent-stability check:"])
+            lines.append(" - status: " + nonlinear_status.replace("_", " "))
+            steps = _safe_float(prestress.get("nonlinear_steps"), 0.0)
+            lines.append(" - completed load steps: " + str(int(steps)))
+            limit_factor = _safe_float(prestress.get("nonlinear_limit_factor"), 0.0)
+            if nonlinear_status in {"limit_point_detected", "near_limit_point", "completed"} and limit_factor > 0.0:
+                lines.append(" - estimated nonlinear load factor: " + str(round(limit_factor, 4)))
+            else:
+                lines.append(" - estimated nonlinear load factor: not available")
+                if nonlinear_status == "initial_tangent_not_positive":
+                    lines.append(" - explanation: the initial tangent stiffness was not positive for the selected prestress state.")
+                elif steps == 0:
+                    lines.append(" - explanation: the nonlinear check stopped before the first load increment.")
+                else:
+                    lines.append(" - explanation: no usable limit point was found in the configured load-step range.")
     load_resultant = summary.get("load_resultant") or {}
     if load_resultant:
         force = load_resultant.get("force_n", (0.0, 0.0, 0.0))
@@ -729,6 +749,192 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         lines.extend(["", "Diagnostics:"])
         lines.extend(" - " + item for item in result.diagnostics)
     return "\n".join(lines)
+
+
+FEM_OPTION_INFO: dict[str, dict[str, str]] = {
+    "mesh_fidelity": {
+        "title": "Mesh Fidelity",
+        "purpose": "Controls the default shell mesh density when no explicit mesh size is given.",
+        "use": "The runtime generator refines the plating mesh and always inserts mesh lines at stiffeners and girders. Coarser meshes run faster; finer meshes give better stress and buckling-mode resolution.",
+        "output": "Changes node, shell and beam counts, stress recovery, displacement shape and eigenvalue buckling factors.",
+        "caution": "Very fine meshes can become expensive for cylinders with many stiffeners. Use explicit mesh size when you need a repeatable target element length.",
+    },
+    "mesh_size_m": {
+        "title": "Mesh Size",
+        "purpose": "Optional target element edge length in metres.",
+        "use": "When greater than zero, generated mesh divisions are based on this size. The generator still limits the size so stiffener and girder lines remain represented by mesh edges.",
+        "output": "Reported in FE mesh diagnostics as maximum axial, circumferential, x or y edge size.",
+        "caution": "A value of zero lets the selected mesh fidelity decide. A very small value can make the solve slow.",
+    },
+    "pressure_pa": {
+        "title": "Pressure",
+        "purpose": "Uniform pressure magnitude used for the static prestress calculation.",
+        "use": "The pressure is applied to shell elements using the selected pressure direction and load scale. The recovered membrane stresses are then used for buckling.",
+        "output": "Affects displacements, stresses, recovered prestress and buckling load factors.",
+        "caution": "When analysing imported FEA result stresses, avoid double counting pressure unless pressure is intentionally part of the buckling load case.",
+    },
+    "load_scale": {
+        "title": "Load Scale",
+        "purpose": "Multiplier on pressure and generated design loads.",
+        "use": "The solver multiplies the input pressure by this factor before the static solve.",
+        "output": "Changes load resultant, static stresses and buckling prestress.",
+        "caution": "Keep at 1.0 unless running a sensitivity or intentionally scaling the load case.",
+    },
+    "top_bottom_moment_nm": {
+        "title": "Top/Bottom Moment",
+        "purpose": "Applies an opposite shell bending-style moment couple at cylinder ends.",
+        "use": "The generated load case distributes nodal moments on the end rings. It is mainly useful for cylinder examples and controlled studies.",
+        "output": "Shown in diagnostics and contributes to static displacement/stress recovery.",
+        "caution": "This is a simplified end moment input, not a full end-cap or external frame model.",
+    },
+    "include_stiffeners": {
+        "title": "Include Stiffener Beams",
+        "purpose": "Controls whether generated stiffener beam members are included in the FE model.",
+        "use": "When enabled, stiffeners are represented as beam elements tied to shell plating. When disabled, only shell plating and other enabled members are solved.",
+        "output": "Changes beam count, local stiffness, stress distribution and buckling modes.",
+        "caution": "Disabling stiffeners is useful for comparison only; it usually does not represent the real structure.",
+    },
+    "include_girders": {
+        "title": "Include Girder/Frame Beams",
+        "purpose": "Controls whether generated girders, frames or ring members are included.",
+        "use": "When enabled, girders are represented as beam elements. Cylinder ring frames are tied into the shell model.",
+        "output": "Changes beam count, global stiffness, local buckling boundary behaviour and recovered stresses.",
+        "caution": "For stiffened cylinders, girder/frame modelling has a strong effect on global shell modes.",
+    },
+    "include_end_lids": {
+        "title": "Top/Bottom Lid",
+        "purpose": "Adds stress-free rigid diaphragm constraints at cylinder ends.",
+        "use": "The end ring nodes are tied to free reference nodes. The lid adds local diaphragm behaviour without shell elements, pressure loads or lid stress recovery.",
+        "output": "Shown as rigid lids in mesh diagnostics and affects cylinder end deformation.",
+        "caution": "At least one global motion remains free before buckling gauge constraints are added, avoiding artificial axial membrane locking.",
+    },
+    "num_buckling_modes": {
+        "title": "Buckling Modes",
+        "purpose": "Number of positive buckling factors/mode shapes requested.",
+        "use": "The eigensolver returns the lowest positive modes available from the recovered prestress state.",
+        "output": "Controls the number of mode entries in the display selector and load-factor table.",
+        "caution": "More modes require more solver work and may include local modes that are not design governing.",
+    },
+    "boundary_condition": {
+        "title": "Boundary Condition",
+        "purpose": "Defines the generated global support assumptions.",
+        "use": "Flat panels can be free, simply supported, pinned or clamped. Cylinders use rigid-body anchors unless clamped/free is selected or rigid lids are active.",
+        "output": "Affects stiffness, displacement, stress recovery and buckling factors.",
+        "caution": "Boundary conditions are often the largest modelling assumption. Check whether the generated support matches the intended physical restraint.",
+    },
+    "symmetry_mode": {
+        "title": "Symmetry",
+        "purpose": "Applies global symmetry constraints for x, y or z symmetry planes.",
+        "use": "The generator constrains normal displacement and compatible rotations on the detected symmetry plane. Cyclic is recorded for full 360 degree cylinder models.",
+        "output": "Shown in diagnostics and changes the constrained DOF set.",
+        "caution": "Only use symmetry if the geometry, load and expected buckling mode are symmetric.",
+    },
+    "shell_element_order": {
+        "title": "Shell Element",
+        "purpose": "Selects 4-node or 8-node quadrilateral shell elements.",
+        "use": "S4 is faster. S8 adds shared midside nodes and uses higher-order shell interpolation in the core solver.",
+        "output": "Mesh diagnostics report the shell order. S8 usually increases node count and runtime.",
+        "caution": "S8 can improve curvature and bending representation, but it should be verified with mesh convergence.",
+    },
+    "analysis_type": {
+        "title": "Analysis Type",
+        "purpose": "Controls how the reference stress/prestress state is established before buckling capacity is interpreted.",
+        "use": "Linear eigenvalue runs one linear static solve at the selected load level, recovers membrane prestress from that response, and then sends the prestress to the buckling solver. Nonlinear stability starts from the same linear reference state, then performs proportional load steps and checks the tangent stiffness K - lambda KG at each step. If the tangent stiffness approaches zero, the model is approaching a limit point.",
+        "output": "Linear analysis produces static displacements, stresses, recovered prestress and eigenvalue buckling factors. Nonlinear stability also prints a nonlinear status, number of completed load steps and, when found, an estimated nonlinear load factor.",
+        "caution": "If the report says initial tangent not positive, the selected prestress state is already unstable or numerically indefinite for the tangent-stability check. In that case the nonlinear load factor is intentionally reported as not available rather than as a useful zero.",
+    },
+    "buckling_analysis_type": {
+        "title": "Buckling Type",
+        "purpose": "Controls how the instability result is reported after the reference stress state has been recovered.",
+        "use": "Linear eigenvalue solves K phi = lambda KG phi and reports positive eigenvalues as load factors with corresponding mode shapes. Nonlinear limit uses the tangent-stability load-step estimate when available; it is a capacity estimate from stiffness loss rather than an eigenmode table.",
+        "output": "Linear eigenvalue output gives several mode numbers and load factors. Nonlinear limit output gives one estimated limit factor when the load-step procedure finds a limit point; otherwise the output explains why the estimate is unavailable.",
+        "caution": "Eigenvalue factors are elastic bifurcation factors around the current prestress state. Nonlinear limit estimates include tangent-stiffness degradation in the current simplified solver, but they are not a full post-buckling collapse trace.",
+    },
+    "pressure_direction": {
+        "title": "Pressure Direction",
+        "purpose": "Selects whether pressure acts with or against the shell normal.",
+        "use": "External pressure is destabilizing for typical cylinders; internal pressure reverses the sign.",
+        "output": "Changes load resultant, stress signs and buckling prestress.",
+        "caution": "Shell normal direction follows generated element ordering. Verify sign using displacement direction and diagnostics.",
+    },
+    "axial_force_n": {
+        "title": "Axial Force",
+        "purpose": "Adds a balanced axial force to the generated model.",
+        "use": "For flat panels the force is applied on opposite x edges. For cylinders it is applied to the end rings.",
+        "output": "Shown in diagnostics and included in load resultant/prestress recovery.",
+        "caution": "Positive sign follows the current runtime convention; verify whether it produces tension or compression for the case.",
+    },
+    "enforced_displacement_m": {
+        "title": "Enforced Displacement",
+        "purpose": "Adds a prescribed displacement constraint to study displacement-controlled response.",
+        "use": "Flat panels prescribe out-of-plane displacement near the panel centre. Cylinders prescribe radial displacement on a representative ring.",
+        "output": "Appears as prescribed displacement constraints and affects static stress recovery.",
+        "caution": "This is a modelling study input. Avoid combining with incompatible supports that over-constrain the same DOF.",
+    },
+    "stiffener_eccentricity_m": {
+        "title": "Stiffener Eccentricity",
+        "purpose": "Offsets generated stiffener beam nodes from the shell midsurface.",
+        "use": "The offset is represented with exact beam-shell MPC constraints, so beam nodes are separate from shell nodes.",
+        "output": "Changes beam-shell coupling stiffness and member stress recovery.",
+        "caution": "Positive eccentricity follows the generated shell normal/radial direction.",
+    },
+    "girder_eccentricity_m": {
+        "title": "Girder Eccentricity",
+        "purpose": "Offsets generated girder/frame beam nodes from the shell midsurface.",
+        "use": "The runtime creates separate girder nodes and beam-shell MPC coupling where applicable.",
+        "output": "Changes frame/girder stiffness contribution and stress recovery.",
+        "caution": "For cylinders with rigid lids, lid-ring nodes are kept compatible with one-level MPC constraints.",
+    },
+    "member_orientation": {
+        "title": "Member Orientation",
+        "purpose": "Controls beam local section orientation for asymmetric members.",
+        "use": "Auto uses the backend default. Global Y/Z prescribe section local direction. Radial aligns cylinder members with the local radial direction.",
+        "output": "Affects bending stiffness axes and member stress recovery.",
+        "caution": "Wrong orientation can swap strong/weak axes. Use the 3D preview and diagnostics to verify.",
+    },
+    "solver_type": {
+        "title": "Linear Solver",
+        "purpose": "Selects the linear equation solver used by the static solve.",
+        "use": "Direct is robust for normal model sizes. Iterative solvers are available for experiments on larger sparse systems.",
+        "output": "Solver status and convergence information are printed in run status.",
+        "caution": "Use direct unless memory or runtime requires experimenting with iterative solvers.",
+    },
+    "stress_percentile": {
+        "title": "Stress Percentile",
+        "purpose": "Controls the reported percentile stress used for summary output.",
+        "use": "The solver samples recovered von Mises stresses and reports the requested percentile.",
+        "output": "Affects p95/pXX stress summaries and plot annotations.",
+        "caution": "Percentile stress is for summary robustness; design checks may require location-specific stresses.",
+    },
+    "elastic_modulus_gpa": {
+        "title": "Elastic Modulus",
+        "purpose": "Young's modulus used for shell and beam material stiffness.",
+        "use": "Converted from GPa to Pa before the solver is called.",
+        "output": "Affects stiffness, displacement, stress recovery and buckling factors.",
+        "caution": "Typical steel value is about 210 GPa.",
+    },
+    "poisson_ratio": {
+        "title": "Poisson Ratio",
+        "purpose": "Material Poisson ratio used in shell constitutive stiffness.",
+        "use": "The GUI clamps it below 0.5 for numerical stability.",
+        "output": "Affects shell bending/membrane stiffness and buckling estimates.",
+        "caution": "Typical steel value is about 0.3.",
+    },
+    "yield_stress_mpa": {
+        "title": "Yield Stress",
+        "purpose": "Material yield stress stored in the FE material model.",
+        "use": "Converted from MPa to Pa and passed to the backend. It is primarily metadata for checks and future result interpretation.",
+        "output": "Included in run summary and available for downstream utilization checks.",
+        "caution": "Current eigenvalue buckling is elastic; yielding is not a nonlinear material model here.",
+    },
+    "display_choice": {
+        "title": "Display",
+        "purpose": "Chooses which result visualization is shown after a run.",
+        "use": "Static view shows displacement/stress. Buckling mode views show mode shape and load factor.",
+        "output": "Only affects plotting; it does not rerun the solver.",
+        "caution": "Mode amplitudes are normalized for visualization, not physical displacement magnitudes.",
+    },
+}
 
 
 class RuntimeFEMWindow:
@@ -794,6 +1000,127 @@ class RuntimeFEMWindow:
 
         self._build()
 
+    def _info_button(self, parent: Any, key: str) -> ttk.Button:
+        return ttk.Button(parent, text="i", width=2, command=lambda info_key=key: self._show_solver_info(info_key))
+
+    def _add_control_row(
+        self,
+        parent: Any,
+        row: int,
+        key: str,
+        label: str,
+        control: Any,
+        sticky: str = tk.EW,
+    ) -> Any:
+        self._info_button(parent, key).grid(row=row, column=0, sticky=tk.W, padx=(8, 4), pady=4)
+        ttk.Label(parent, text=label).grid(row=row, column=1, sticky=tk.W, padx=(0, 8), pady=4)
+        control.grid(row=row, column=2, sticky=sticky, padx=(0, 8), pady=4)
+        return control
+
+    def _add_option_row(
+        self,
+        parent: Any,
+        row: int,
+        key: str,
+        label: str,
+        variable: tk.Variable,
+        values: tuple[str, ...],
+        width: int | None = None,
+    ) -> ttk.OptionMenu:
+        control = ttk.OptionMenu(parent, variable, variable.get(), *values)
+        if width is not None:
+            try:
+                control.configure(width=width)
+            except Exception:
+                pass
+        return self._add_control_row(parent, row, key, label, control)
+
+    def _add_entry_row(
+        self,
+        parent: Any,
+        row: int,
+        key: str,
+        label: str,
+        variable: tk.Variable,
+        width: int = 12,
+    ) -> ttk.Entry:
+        control = ttk.Entry(parent, textvariable=variable, width=width)
+        return self._add_control_row(parent, row, key, label, control)
+
+    def _add_check_row(self, parent: Any, row: int, key: str, text: str, variable: tk.BooleanVar) -> ttk.Checkbutton:
+        self._info_button(parent, key).grid(row=row, column=0, sticky=tk.W, padx=(8, 4), pady=4)
+        control = ttk.Checkbutton(parent, text=text, variable=variable)
+        control.grid(row=row, column=1, columnspan=2, sticky=tk.W, padx=(0, 8), pady=4)
+        return control
+
+    @staticmethod
+    def _configure_option_grid(parent: Any) -> None:
+        parent.columnconfigure(0, weight=0)
+        parent.columnconfigure(1, weight=0)
+        parent.columnconfigure(2, weight=1)
+
+    def _show_solver_info(self, key: str) -> None:
+        info = FEM_OPTION_INFO.get(key)
+        if not info:
+            messagebox.showinfo("FEM option", "No detailed information is available for this option.")
+            return
+        dialog = tk.Toplevel(self.window)
+        dialog.title(str(info.get("title", "FEM option")))
+        dialog.geometry("560x520")
+        dialog.minsize(480, 420)
+        dialog.transient(self.window)
+        dialog.configure(background="#f5f7fb")
+
+        header = tk.Frame(dialog, background="#172033")
+        header.pack(fill=tk.X)
+        tk.Label(
+            header,
+            text=str(info.get("title", "FEM option")),
+            background="#172033",
+            foreground="white",
+            font=("Segoe UI", 14, "bold"),
+            padx=16,
+            pady=12,
+        ).pack(anchor=tk.W)
+
+        body = ttk.Frame(dialog, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        text = tk.Text(
+            body,
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=12,
+            pady=10,
+            background="white",
+            foreground="#111827",
+            font=("Segoe UI", 10),
+        )
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.tag_configure("section", font=("Segoe UI", 10, "bold"), foreground="#172033", spacing1=8, spacing3=2)
+        text.tag_configure("body", lmargin1=10, lmargin2=10, spacing3=6)
+        for title, field in (
+            ("Purpose", "purpose"),
+            ("How It Is Used", "use"),
+            ("Output Affected", "output"),
+            ("Cautions", "caution"),
+        ):
+            text.insert(tk.END, title + "\n", "section")
+            text.insert(tk.END, str(info.get(field, "")) + "\n", "body")
+        text.configure(state=tk.DISABLED)
+
+        footer = ttk.Frame(dialog, padding=(14, 0, 14, 14))
+        footer.pack(fill=tk.X)
+        ttk.Button(footer, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        try:
+            dialog.grab_set()
+            dialog.focus_set()
+        except Exception:
+            pass
+
     def _build(self) -> None:
         outer = ttk.Frame(self.window, padding=12)
         outer.pack(fill=tk.BOTH, expand=True)
@@ -846,31 +1173,25 @@ class RuntimeFEMWindow:
         )
         ttk.Label(summary, text=summary_text, justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=8)
 
-        options = ttk.LabelFrame(left_panel, text="Run options")
+        options = ttk.LabelFrame(left_panel, text="Run setup")
         options.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(options, text="Mesh fidelity").grid(row=0, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.OptionMenu(options, self.mesh_fidelity, self.mesh_fidelity.get(), "coarse", "medium", "fine", "very fine").grid(
-            row=0, column=1, sticky=tk.W, padx=8, pady=6
-        )
-        ttk.Label(options, text="Mesh size [m]").grid(row=0, column=2, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.mesh_size_m, width=10).grid(row=0, column=3, sticky=tk.W, padx=8, pady=6)
-        ttk.Label(options, text="Pressure [Pa]").grid(row=1, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.pressure_pa, width=14).grid(row=1, column=1, sticky=tk.W, padx=8, pady=6)
-        ttk.Label(options, text="Load scale").grid(row=1, column=2, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.load_scale, width=10).grid(row=1, column=3, sticky=tk.W, padx=8, pady=6)
-        ttk.Label(options, text="Top/bottom moment [Nm]").grid(row=2, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.top_bottom_moment_nm, width=14).grid(row=2, column=1, sticky=tk.W, padx=8, pady=6)
-        ttk.Checkbutton(options, text="Include stiffener beams", variable=self.include_stiffeners).grid(
-            row=3, column=0, columnspan=2, sticky=tk.W, padx=8, pady=6
-        )
-        ttk.Checkbutton(options, text="Include girder/frame beams", variable=self.include_girders).grid(
-            row=3, column=2, columnspan=2, sticky=tk.W, padx=8, pady=6
-        )
-        ttk.Checkbutton(options, text="Top/bottom lid", variable=self.include_end_lids).grid(
-            row=4, column=0, columnspan=2, sticky=tk.W, padx=8, pady=6
-        )
-        ttk.Label(options, text="Buckling modes").grid(row=5, column=0, sticky=tk.W, padx=8, pady=6)
-        ttk.Entry(options, textvariable=self.num_buckling_modes, width=8).grid(row=5, column=1, sticky=tk.W, padx=8, pady=6)
+
+        mesh_loads = ttk.LabelFrame(options, text="Mesh and loads")
+        mesh_loads.pack(fill=tk.X, padx=8, pady=(8, 6))
+        self._configure_option_grid(mesh_loads)
+        self._add_option_row(mesh_loads, 0, "mesh_fidelity", "Mesh fidelity", self.mesh_fidelity, ("coarse", "medium", "fine", "very fine"))
+        self._add_entry_row(mesh_loads, 1, "mesh_size_m", "Mesh size [m]", self.mesh_size_m)
+        self._add_entry_row(mesh_loads, 2, "pressure_pa", "Pressure [Pa]", self.pressure_pa)
+        self._add_entry_row(mesh_loads, 3, "load_scale", "Load scale", self.load_scale)
+        self._add_entry_row(mesh_loads, 4, "top_bottom_moment_nm", "Top/bottom moment [Nm]", self.top_bottom_moment_nm)
+        self._add_entry_row(mesh_loads, 5, "num_buckling_modes", "Buckling modes", self.num_buckling_modes, width=8)
+
+        contents = ttk.LabelFrame(options, text="Model contents")
+        contents.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(contents)
+        self._add_check_row(contents, 0, "include_stiffeners", "Include stiffener beams", self.include_stiffeners)
+        self._add_check_row(contents, 1, "include_girders", "Include girder/frame beams", self.include_girders)
+        self._add_check_row(contents, 2, "include_end_lids", "Top/bottom lid", self.include_end_lids)
 
         buttons = ttk.Frame(left_panel)
         buttons.pack(fill=tk.X, pady=(0, 10))
@@ -886,57 +1207,40 @@ class RuntimeFEMWindow:
         self.result_text = tk.Text(status_frame, height=12, wrap=tk.WORD)
         self.result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        future_inputs = ttk.LabelFrame(mid_panel, text="Additional inputs")
+        future_inputs = ttk.LabelFrame(mid_panel, text="Analysis options")
         future_inputs.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(future_inputs, text="Boundary").grid(row=0, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.boundary_condition, self.boundary_condition.get(), "auto", "free", "simply supported", "pinned", "clamped").grid(
-            row=0, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Symmetry").grid(row=1, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.symmetry_mode, self.symmetry_mode.get(), "none", "x", "y", "z", "cyclic").grid(
-            row=1, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Shell element").grid(row=2, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.shell_element_order, self.shell_element_order.get(), "S4", "S8").grid(
-            row=2, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Analysis").grid(row=3, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.analysis_type, self.analysis_type.get(), "linear eigenvalue", "nonlinear stability").grid(
-            row=3, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Buckling").grid(row=4, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.buckling_analysis_type, self.buckling_analysis_type.get(), "linear eigenvalue", "nonlinear limit").grid(
-            row=4, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Pressure dir.").grid(row=5, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.pressure_direction, self.pressure_direction.get(), "external", "internal").grid(
-            row=5, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Axial force [N]").grid(row=6, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.axial_force_n, width=12).grid(row=6, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="Enforced disp. [m]").grid(row=7, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.enforced_displacement_m, width=12).grid(row=7, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="Stf. ecc. [m]").grid(row=8, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.stiffener_eccentricity_m, width=12).grid(row=8, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="Girder ecc. [m]").grid(row=9, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.girder_eccentricity_m, width=12).grid(row=9, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="Member orient.").grid(row=10, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.member_orientation, self.member_orientation.get(), "auto", "global Y", "global Z", "radial").grid(
-            row=10, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Solver").grid(row=11, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.OptionMenu(future_inputs, self.solver_type, self.solver_type.get(), "direct", "gmres", "minres", "bicgstab").grid(
-            row=11, column=1, sticky=tk.EW, padx=8, pady=5
-        )
-        ttk.Label(future_inputs, text="Stress pct.").grid(row=12, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.stress_percentile, width=12).grid(row=12, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="E [GPa]").grid(row=13, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.elastic_modulus_gpa, width=12).grid(row=13, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="Poisson").grid(row=14, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.poisson_ratio, width=12).grid(row=14, column=1, sticky=tk.EW, padx=8, pady=5)
-        ttk.Label(future_inputs, text="Yield [MPa]").grid(row=15, column=0, sticky=tk.W, padx=8, pady=5)
-        ttk.Entry(future_inputs, textvariable=self.yield_stress_mpa, width=12).grid(row=15, column=1, sticky=tk.EW, padx=8, pady=5)
-        future_inputs.columnconfigure(1, weight=1)
+
+        constraints = ttk.LabelFrame(future_inputs, text="Supports and load path")
+        constraints.pack(fill=tk.X, padx=8, pady=(8, 6))
+        self._configure_option_grid(constraints)
+        self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition, ("auto", "free", "simply supported", "pinned", "clamped"))
+        self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode, ("none", "x", "y", "z", "cyclic"))
+        self._add_option_row(constraints, 2, "pressure_direction", "Pressure dir.", self.pressure_direction, ("external", "internal"))
+        self._add_entry_row(constraints, 3, "axial_force_n", "Axial force [N]", self.axial_force_n)
+        self._add_entry_row(constraints, 4, "enforced_displacement_m", "Enforced disp. [m]", self.enforced_displacement_m)
+
+        solver_options = ttk.LabelFrame(future_inputs, text="Solver")
+        solver_options.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_option_grid(solver_options)
+        self._add_option_row(solver_options, 0, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8"))
+        self._add_option_row(solver_options, 1, "analysis_type", "Analysis", self.analysis_type, ("linear eigenvalue", "nonlinear stability"))
+        self._add_option_row(solver_options, 2, "buckling_analysis_type", "Buckling", self.buckling_analysis_type, ("linear eigenvalue", "nonlinear limit"))
+        self._add_option_row(solver_options, 3, "solver_type", "Linear solver", self.solver_type, ("direct", "gmres", "minres", "bicgstab"))
+
+        members = ttk.LabelFrame(future_inputs, text="Member modelling")
+        members.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_option_grid(members)
+        self._add_entry_row(members, 0, "stiffener_eccentricity_m", "Stf. ecc. [m]", self.stiffener_eccentricity_m)
+        self._add_entry_row(members, 1, "girder_eccentricity_m", "Girder ecc. [m]", self.girder_eccentricity_m)
+        self._add_option_row(members, 2, "member_orientation", "Member orient.", self.member_orientation, ("auto", "global Y", "global Z", "radial"))
+
+        material = ttk.LabelFrame(future_inputs, text="Material and recovery")
+        material.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(material)
+        self._add_entry_row(material, 0, "stress_percentile", "Stress pct.", self.stress_percentile)
+        self._add_entry_row(material, 1, "elastic_modulus_gpa", "E [GPa]", self.elastic_modulus_gpa)
+        self._add_entry_row(material, 2, "poisson_ratio", "Poisson", self.poisson_ratio)
+        self._add_entry_row(material, 3, "yield_stress_mpa", "Yield [MPa]", self.yield_stress_mpa)
 
         preview = ttk.LabelFrame(right_panel, text="3D section view")
         preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -950,6 +1254,7 @@ class RuntimeFEMWindow:
         self.figure_parent = plot_holder
         selector_bar = ttk.Frame(plot_holder)
         selector_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        self._info_button(selector_bar, "display_choice").pack(side=tk.LEFT, padx=(0, 4))
         ttk.Label(selector_bar, text="Display").pack(side=tk.LEFT, padx=(0, 6))
         self.display_selector = ttk.Combobox(
             selector_bar,
@@ -990,24 +1295,37 @@ class RuntimeFEMWindow:
             return
         figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)
         try:
-            figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+            figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
         except Exception:
             pass
-        zoom = 1.18
+        zoom = 1.55
         if min(width, height) > 340:
-            zoom = 1.28
+            zoom = 1.8
         if min(width, height) > 520:
-            zoom = 1.38
+            zoom = 2.05
         for axis in figure.axes:
             if not hasattr(axis, "get_zlim"):
                 continue
-            axis.set_position([0.01, 0.03, 0.98, 0.93])
+            axis.set_position([0.0, 0.0, 1.0, 0.96])
             axis.margins(0.0)
             try:
                 axis.set_proj_type("ortho")
             except Exception:
                 pass
             try:
+                extents = RuntimeFEMWindow._preview_axis_data_extents(axis)
+                if extents is not None:
+                    x_limits, y_limits, z_limits = extents
+                    x_span_raw = max(abs(x_limits[1] - x_limits[0]), 1.0e-6)
+                    y_span_raw = max(abs(y_limits[1] - y_limits[0]), 1.0e-6)
+                    z_span_raw = max(abs(z_limits[1] - z_limits[0]), 1.0e-6)
+                    pad = 0.04 * max(x_span_raw, y_span_raw, z_span_raw)
+                    x_mid = 0.5 * (x_limits[0] + x_limits[1])
+                    y_mid = 0.5 * (y_limits[0] + y_limits[1])
+                    z_mid = 0.5 * (z_limits[0] + z_limits[1])
+                    axis.set_xlim3d(x_mid - 0.5 * x_span_raw - pad, x_mid + 0.5 * x_span_raw + pad)
+                    axis.set_ylim3d(y_mid - 0.5 * y_span_raw - pad, y_mid + 0.5 * y_span_raw + pad)
+                    axis.set_zlim3d(z_mid - 0.5 * z_span_raw - pad, z_mid + 0.5 * z_span_raw + pad)
                 x_limits = axis.get_xlim3d()
                 y_limits = axis.get_ylim3d()
                 z_limits = axis.get_zlim3d()
@@ -1022,6 +1340,49 @@ class RuntimeFEMWindow:
                     pass
             except Exception:
                 pass
+
+    @staticmethod
+    def _preview_axis_data_extents(axis: Any) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None:
+        xs: list[float] = []
+        ys: list[float] = []
+        zs: list[float] = []
+
+        def add(values: Any, target: list[float]) -> None:
+            try:
+                arr = np.asarray(values, dtype=float).reshape(-1)
+            except Exception:
+                return
+            arr = arr[np.isfinite(arr)]
+            target.extend(float(value) for value in arr)
+
+        for line in getattr(axis, "lines", []):
+            try:
+                x_data, y_data, z_data = line.get_data_3d()
+            except Exception:
+                continue
+            add(x_data, xs)
+            add(y_data, ys)
+            add(z_data, zs)
+        for collection in getattr(axis, "collections", []):
+            segments = getattr(collection, "_segments3d", None)
+            if segments is not None:
+                for segment in segments:
+                    arr = np.asarray(segment, dtype=float)
+                    if arr.ndim == 2 and arr.shape[1] >= 3:
+                        add(arr[:, 0], xs)
+                        add(arr[:, 1], ys)
+                        add(arr[:, 2], zs)
+                continue
+            vec = getattr(collection, "_vec", None)
+            if vec is not None:
+                arr = np.asarray(vec, dtype=float)
+                if arr.ndim == 2 and arr.shape[0] >= 3:
+                    add(arr[0], xs)
+                    add(arr[1], ys)
+                    add(arr[2], zs)
+        if not xs or not ys or not zs:
+            return None
+        return ((min(xs), max(xs)), (min(ys), max(ys)), (min(zs), max(zs)))
 
     def _show_preview_figure(self, figure: Figure, parent: Any) -> None:
         if self.preview_canvas is not None:
