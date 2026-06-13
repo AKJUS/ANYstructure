@@ -77,6 +77,27 @@ class RuntimeFEMOptions:
     elastic_modulus_pa: float = 210.0e9
     poisson_ratio: float = 0.3
     yield_stress_pa: float = 355.0e6
+    material_model: str = "linear elastic"
+    steel_grade: str = "S355"
+    steel_thickness_class: str = "auto"
+    nonlinear_max_load_factor: float = 3.0
+    nonlinear_steps: int = 12
+    nonlinear_max_iterations: int = 25
+    nonlinear_tolerance: float = 1.0e-6
+    nonlinear_layers: int = 5
+    custom_load_bc_enabled: bool = False
+    plate_edge_x0_support: str = "free"
+    plate_edge_x1_support: str = "free"
+    plate_edge_y0_support: str = "free"
+    plate_edge_y1_support: str = "free"
+    cylinder_lower_support: str = "free"
+    cylinder_upper_support: str = "free"
+    plate_edge_x0_load_n_per_m: float = 0.0
+    plate_edge_x1_load_n_per_m: float = 0.0
+    plate_edge_y0_load_n_per_m: float = 0.0
+    plate_edge_y1_load_n_per_m: float = 0.0
+    cylinder_lower_edge_load_n_per_m: float = 0.0
+    cylinder_upper_edge_load_n_per_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -106,6 +127,12 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _nearest_nonlinear_layer_count(value: Any) -> int:
+    requested = max(_safe_int(value, 5), 3)
+    supported = (3, 5, 7, 9, 11)
+    return min(supported, key=lambda item: abs(item - requested))
 
 
 def _read_attr_or_call(obj: Any, *names: str, default: Any = None) -> Any:
@@ -307,6 +334,27 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         elastic_modulus_pa=options.elastic_modulus_pa,
         poisson_ratio=options.poisson_ratio,
         yield_stress_pa=options.yield_stress_pa,
+        material_model=options.material_model,
+        steel_grade=options.steel_grade,
+        steel_thickness_class=options.steel_thickness_class,
+        nonlinear_max_load_factor=options.nonlinear_max_load_factor,
+        nonlinear_steps=options.nonlinear_steps,
+        nonlinear_max_iterations=options.nonlinear_max_iterations,
+        nonlinear_tolerance=options.nonlinear_tolerance,
+        nonlinear_layers=options.nonlinear_layers,
+        custom_load_bc_enabled=options.custom_load_bc_enabled,
+        plate_edge_x0_support=options.plate_edge_x0_support,
+        plate_edge_x1_support=options.plate_edge_x1_support,
+        plate_edge_y0_support=options.plate_edge_y0_support,
+        plate_edge_y1_support=options.plate_edge_y1_support,
+        cylinder_lower_support=options.cylinder_lower_support,
+        cylinder_upper_support=options.cylinder_upper_support,
+        plate_edge_x0_load_n_per_m=options.plate_edge_x0_load_n_per_m,
+        plate_edge_x1_load_n_per_m=options.plate_edge_x1_load_n_per_m,
+        plate_edge_y0_load_n_per_m=options.plate_edge_y0_load_n_per_m,
+        plate_edge_y1_load_n_per_m=options.plate_edge_y1_load_n_per_m,
+        cylinder_lower_edge_load_n_per_m=options.cylinder_lower_edge_load_n_per_m,
+        cylinder_upper_edge_load_n_per_m=options.cylinder_upper_edge_load_n_per_m,
     )
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config)
@@ -346,6 +394,27 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "elastic_modulus_pa": float(options.elastic_modulus_pa),
         "poisson_ratio": float(options.poisson_ratio),
         "yield_stress_pa": float(options.yield_stress_pa),
+        "material_model": str(options.material_model),
+        "steel_grade": str(options.steel_grade),
+        "steel_thickness_class": str(options.steel_thickness_class),
+        "nonlinear_max_load_factor": float(options.nonlinear_max_load_factor),
+        "nonlinear_steps": int(options.nonlinear_steps),
+        "nonlinear_max_iterations": int(options.nonlinear_max_iterations),
+        "nonlinear_tolerance": float(options.nonlinear_tolerance),
+        "nonlinear_layers": int(options.nonlinear_layers),
+        "custom_load_bc_enabled": bool(options.custom_load_bc_enabled),
+        "plate_edge_x0_support": str(options.plate_edge_x0_support),
+        "plate_edge_x1_support": str(options.plate_edge_x1_support),
+        "plate_edge_y0_support": str(options.plate_edge_y0_support),
+        "plate_edge_y1_support": str(options.plate_edge_y1_support),
+        "cylinder_lower_support": str(options.cylinder_lower_support),
+        "cylinder_upper_support": str(options.cylinder_upper_support),
+        "plate_edge_x0_load_n_per_m": float(options.plate_edge_x0_load_n_per_m),
+        "plate_edge_x1_load_n_per_m": float(options.plate_edge_x1_load_n_per_m),
+        "plate_edge_y0_load_n_per_m": float(options.plate_edge_y0_load_n_per_m),
+        "plate_edge_y1_load_n_per_m": float(options.plate_edge_y1_load_n_per_m),
+        "cylinder_lower_edge_load_n_per_m": float(options.cylinder_lower_edge_load_n_per_m),
+        "cylinder_upper_edge_load_n_per_m": float(options.cylinder_upper_edge_load_n_per_m),
         "solver": solver_result.solver_name,
         "mesh_info": dict(solver_result.mesh_info),
         "max_displacement_m": solver_result.displacement_max_m,
@@ -693,13 +762,58 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Member orientation: " + str(summary.get("member_orientation", "")),
         "Stiffener eccentricity [m]: " + str(round(_safe_float(summary.get("stiffener_eccentricity_m")), 6)),
         "Girder eccentricity [m]: " + str(round(_safe_float(summary.get("girder_eccentricity_m")), 6)),
+        "Material model: " + str(summary.get("material_model", "")),
+        "Steel grade/class: " + str(summary.get("steel_grade", "")) + " / " + str(summary.get("steel_thickness_class", "")),
         "Material E [GPa]: " + str(round(_safe_float(summary.get("elastic_modulus_pa")) / 1.0e9, 3)),
         "Poisson ratio: " + str(round(_safe_float(summary.get("poisson_ratio")), 4)),
         "Yield stress [MPa]: " + str(round(_safe_float(summary.get("yield_stress_pa")) / 1.0e6, 3)),
         "Stress percentile: " + str(round(_safe_float(summary.get("stress_percentile")), 2)),
+        "Nonlinear max LF / steps: "
+        + str(round(_safe_float(summary.get("nonlinear_max_load_factor")), 3))
+        + " / "
+        + str(_safe_int(summary.get("nonlinear_steps"), 0)),
+        "Nonlinear layers / max iterations: "
+        + str(_safe_int(summary.get("nonlinear_layers"), 0))
+        + " / "
+        + str(_safe_int(summary.get("nonlinear_max_iterations"), 0)),
+        "Custom load/BC mode: " + str(bool(summary.get("custom_load_bc_enabled"))),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
         "Max displacement [mm]: " + str(round(1000.0 * _safe_float(summary.get("max_displacement_m")), 4)),
     ]
+    if summary.get("custom_load_bc_enabled"):
+        if str(summary.get("geometry", "")).lower().startswith("cylinder"):
+            lines.extend(
+                [
+                    "Cylinder lower/upper support: "
+                    + str(summary.get("cylinder_lower_support", ""))
+                    + " / "
+                    + str(summary.get("cylinder_upper_support", "")),
+                    "Cylinder lower/upper edge load [N/m]: "
+                    + str(round(_safe_float(summary.get("cylinder_lower_edge_load_n_per_m")), 3))
+                    + " / "
+                    + str(round(_safe_float(summary.get("cylinder_upper_edge_load_n_per_m")), 3)),
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "Plate edge supports x0/x1/y0/y1: "
+                    + ", ".join(
+                        str(summary.get(key, ""))
+                        for key in ("plate_edge_x0_support", "plate_edge_x1_support", "plate_edge_y0_support", "plate_edge_y1_support")
+                    ),
+                    "Plate edge loads x0/x1/y0/y1 [N/m]: "
+                    + ", ".join(
+                        str(round(_safe_float(summary.get(key)), 3))
+                        for key in (
+                            "plate_edge_x0_load_n_per_m",
+                            "plate_edge_x1_load_n_per_m",
+                            "plate_edge_y0_load_n_per_m",
+                            "plate_edge_y1_load_n_per_m",
+                        )
+                    ),
+                ]
+            )
     if result.buckling_factors:
         lines.append("Critical load factor: " + str(round(result.buckling_factors[0], 4)))
     mesh_info = summary.get("mesh_info") or {}
@@ -718,8 +832,70 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(" - " + key + ": " + str(round(_safe_float(mesh_info.get(key)), 4)))
     prestress = summary.get("prestress_summary") or {}
     if prestress:
+        constraint_method = str(prestress.get("constraint_method", "") or "")
+        if constraint_method:
+            lines.extend(["", "Linear constraint handling:"])
+            lines.append(" - method: " + constraint_method)
+            if _safe_float(prestress.get("nullspace_projection"), 0.0) > 0.0:
+                lines.append(" - nullspace projection: used")
+                lines.append(" - meaning: rigid-body modes were projected out because no fixed DOFs remained after support/MPC reduction.")
+            else:
+                lines.append(" - nullspace projection: not used")
         lines.extend(["", "Recovered prestress / reference state:"])
-        special_keys = {"nonlinear_status", "nonlinear_limit_factor", "nonlinear_steps"}
+        material_keys = {
+            "material_model",
+            "steel_grade",
+            "steel_thickness_class",
+            "sigma_prop_pa",
+            "sigma_yield_pa",
+            "sigma_yield_2_pa",
+            "eps_p_y1",
+            "eps_p_y2",
+            "hardening_K_pa",
+            "hardening_n",
+        }
+        nonlinear_static_keys = {
+            "nonlinear_static_status",
+            "nonlinear_static_load_factor",
+            "nonlinear_static_steps",
+            "nonlinear_static_total_iterations",
+            "nonlinear_static_layers",
+            "nonlinear_static_max_plastic_strain",
+        }
+        special_keys = {
+            "nonlinear_status",
+            "nonlinear_limit_factor",
+            "nonlinear_steps",
+            "constraint_method",
+            "constraint_mode",
+            "nullspace_projection",
+            "nullspace_rank",
+            *material_keys,
+            *nonlinear_static_keys,
+        }
+        if prestress.get("material_model"):
+            lines.extend(["", "DNV-RP-C208 material curve:"])
+            lines.append(" - grade: " + str(prestress.get("steel_grade", "")))
+            lines.append(" - thickness class: " + str(prestress.get("steel_thickness_class", "")))
+            lines.append(" - sigma_prop/yield/yield2 [MPa]: " + " / ".join(
+                str(round(_safe_float(prestress.get(key)) / 1.0e6, 3))
+                for key in ("sigma_prop_pa", "sigma_yield_pa", "sigma_yield_2_pa")
+            ))
+            lines.append(" - eps_p_y1/eps_p_y2: " + str(prestress.get("eps_p_y1", "")) + " / " + str(prestress.get("eps_p_y2", "")))
+            lines.append(" - K [MPa] / n: " + str(round(_safe_float(prestress.get("hardening_K_pa")) / 1.0e6, 3)) + " / " + str(prestress.get("hardening_n", "")))
+        nonlinear_static_status = str(prestress.get("nonlinear_static_status", "") or "")
+        if nonlinear_static_status:
+            lines.extend(["", "Incremental nonlinear static solve:"])
+            lines.append(" - status: " + nonlinear_static_status.replace("_", " "))
+            lines.append(" - last converged load factor: " + str(round(_safe_float(prestress.get("nonlinear_static_load_factor")), 4)))
+            lines.append(" - completed steps: " + str(_safe_int(prestress.get("nonlinear_static_steps"), 0)))
+            lines.append(" - Newton iterations: " + str(_safe_int(prestress.get("nonlinear_static_total_iterations"), 0)))
+            lines.append(" - through-thickness layers: " + str(_safe_int(prestress.get("nonlinear_static_layers"), 0)))
+            lines.append(" - max equivalent plastic strain: " + str(round(_safe_float(prestress.get("nonlinear_static_max_plastic_strain")), 6)))
+            if nonlinear_static_status == "completed":
+                lines.append(" - interpretation: all requested proportional load was reached; this is not necessarily a collapse load.")
+            elif nonlinear_static_status == "stopped_at_limit":
+                lines.append(" - interpretation: the adaptive Newton solve stopped at the last stable converged load increment.")
         for key, value in prestress.items():
             if key in special_keys:
                 continue
@@ -839,9 +1015,9 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "analysis_type": {
         "title": "Analysis Type",
         "purpose": "Controls how the reference stress/prestress state is established before buckling capacity is interpreted.",
-        "use": "Linear eigenvalue runs one linear static solve at the selected load level, recovers membrane prestress from that response, and then sends the prestress to the buckling solver. Nonlinear stability starts from the same linear reference state, then performs proportional load steps and checks the tangent stiffness K - lambda KG at each step. If the tangent stiffness approaches zero, the model is approaching a limit point.",
-        "output": "Linear analysis produces static displacements, stresses, recovered prestress and eigenvalue buckling factors. Nonlinear stability also prints a nonlinear status, number of completed load steps and, when found, an estimated nonlinear load factor.",
-        "caution": "If the report says initial tangent not positive, the selected prestress state is already unstable or numerically indefinite for the tangent-stability check. In that case the nonlinear load factor is intentionally reported as not available rather than as a useful zero.",
+        "use": "Linear eigenvalue runs one linear static solve, recovers membrane prestress, and sends that state to the eigenvalue buckling solver. Nonlinear stability is the older tangent-stability check: it scales the linear prestress and monitors K - lambda KG. Geometric nonlinear static uses incremental Newton-Raphson with von Karman shell kinematics and beam-column axial coupling. Geometric + material nonlinear static also attaches the DNV-RP-C208 layered J2 plasticity curve to shell elements.",
+        "output": "Linear analysis produces static displacement/stress and eigenvalue buckling factors. Tangent stability prints a tangent limit estimate when one is found. Incremental nonlinear static prints status, completed load factor, Newton iterations, through-thickness layers and maximum equivalent plastic strain.",
+        "caution": "Incremental nonlinear static is more expensive than linear eigenvalue analysis. A completed nonlinear static run at the requested max load factor means the target load was reached; it is not automatically a collapse load unless the run stops at a limit.",
     },
     "buckling_analysis_type": {
         "title": "Buckling Type",
@@ -923,9 +1099,65 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "yield_stress_mpa": {
         "title": "Yield Stress",
         "purpose": "Material yield stress stored in the FE material model.",
-        "use": "Converted from MPa to Pa and passed to the backend. It is primarily metadata for checks and future result interpretation.",
-        "output": "Included in run summary and available for downstream utilization checks.",
-        "caution": "Current eigenvalue buckling is elastic; yielding is not a nonlinear material model here.",
+        "use": "Converted from MPa to Pa and passed to the backend. For linear elastic material this is metadata. For DNV-RP-C208 material, the selected table row supplies sigma_yield and overrides this value in the nonlinear shell material.",
+        "output": "Included in run summary and used by downstream utilization checks. In material nonlinear static the DNV curve section reports the active low-fractile yield values.",
+        "caution": "Linear eigenvalue buckling is still elastic. Select geometric + material nonlinear static and a DNV-RP-C208 material model to include yielding in the incremental static solve.",
+    },
+    "material_model": {
+        "title": "Material Model",
+        "purpose": "Selects whether the FE material remains linear elastic or uses the DNV-RP-C208 low-fractile steel curve in nonlinear static analysis.",
+        "use": "Linear elastic keeps shell and beam stiffness elastic. DNV-RP-C208 steel attaches a true-stress versus true-plastic-strain curve to shell elements. The curve combines a proportional/yield transition, a yield plateau and a power-law hardening branch.",
+        "output": "Affects incremental nonlinear static response, plastic strain output and the nonlinear load-factor estimate. Linear static and eigenvalue buckling stay elastic.",
+        "caution": "The current material nonlinearity is for shell plane-stress layers. Beam plasticity is not included in this local runtime formulation.",
+    },
+    "steel_grade": {
+        "title": "Steel Grade",
+        "purpose": "DNV-RP-C208 steel grade used for nonlinear shell plasticity.",
+        "use": "Available presets are S235, S275, S355, S420 and S460. The values are the low-fractile true stress-strain properties from DNV-RP-C208 Table 4-2 to Table 4-6.",
+        "output": "Sets E, sigma_prop, sigma_yield, sigma_yield_2, eps_p_y1, eps_p_y2, K and n for the nonlinear shell material curve.",
+        "caution": "Use the grade matching the plate material. If an imported model has mixed steels, this single setting is still a simplification.",
+    },
+    "steel_thickness_class": {
+        "title": "Steel Thickness Class",
+        "purpose": "Selects the DNV-RP-C208 table column for the chosen steel grade.",
+        "use": "Auto uses the generated plate thickness. Manual choices force a table class such as t <= 16 mm or 16 < t <= 40 mm.",
+        "output": "Changes the low-fractile yield and hardening values used by the material nonlinear solver.",
+        "caution": "Some grades in the RP tables are only provided up to 63 mm in the attached values; auto uses the largest available class when the thickness exceeds the listed range.",
+    },
+    "nonlinear_max_load_factor": {
+        "title": "Nonlinear Max Load Factor",
+        "purpose": "Maximum proportional load multiplier attempted by the incremental nonlinear static solver.",
+        "use": "The load case is ramped from zero to this factor using adaptive increments. If convergence fails repeatedly, the solver reports the last stable factor.",
+        "output": "Controls whether the result is a reached target load or a stopped-at-limit estimate.",
+        "caution": "A very high value can increase runtime. A value of 1.0 checks the design load only; it may not find collapse.",
+    },
+    "nonlinear_steps": {
+        "title": "Nonlinear Steps",
+        "purpose": "Initial number of proportional load increments for nonlinear static analysis.",
+        "use": "The solver starts with max load factor divided by this count, then halves or grows the increment adaptively depending on Newton convergence.",
+        "output": "Affects runtime, convergence robustness and the load factor resolution near a limit.",
+        "caution": "Too few steps can make a nonlinear solve fail early. Too many steps can be slow.",
+    },
+    "nonlinear_max_iterations": {
+        "title": "Nonlinear Max Iterations",
+        "purpose": "Maximum Newton iterations allowed inside one nonlinear load increment.",
+        "use": "Each increment solves internal force equilibrium. The solver retries difficult increments with line search before cutting the step size.",
+        "output": "Printed as total Newton iterations in the nonlinear static result.",
+        "caution": "Increasing this may help difficult cases but can also spend time on a step that should be cut smaller.",
+    },
+    "nonlinear_tolerance": {
+        "title": "Nonlinear Tolerance",
+        "purpose": "Relative residual tolerance for Newton convergence in nonlinear static analysis.",
+        "use": "The increment converges when the reduced residual norm is below this tolerance times the reference load norm.",
+        "output": "Controls numerical convergence strictness of the nonlinear static status.",
+        "caution": "Very tight tolerances can make plastic or near-limit steps expensive. Very loose tolerances can hide residual imbalance.",
+    },
+    "nonlinear_layers": {
+        "title": "Nonlinear Layers",
+        "purpose": "Number of through-thickness Gauss-Lobatto layers used for shell plasticity.",
+        "use": "Layered integration captures bending plastification through the plate thickness. Supported values are odd Lobatto rules such as 3, 5, 7, 9 or 11.",
+        "output": "Affects plastic strain, bending capacity and nonlinear static runtime.",
+        "caution": "Five layers is a practical default. More layers cost more but can improve plastic bending resolution.",
     },
     "display_choice": {
         "title": "Display",
@@ -933,6 +1165,48 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "use": "Static view shows displacement/stress. Buckling mode views show mode shape and load factor.",
         "output": "Only affects plotting; it does not rerun the solver.",
         "caution": "Mode amplitudes are normalized for visualization, not physical displacement magnitudes.",
+    },
+    "nullspace_projection": {
+        "title": "Nullspace Projection",
+        "purpose": "Explains how the linear solver handles a free-free or under-constrained model.",
+        "use": "After fixed supports and MPCs are applied, the solver checks for rigid-body modes. If no fixed DOFs remain and rigid-body modes are present, the static solve uses an augmented nullspace system. This projects out pure rigid-body motion and returns a gauged deformation field.",
+        "output": "The run print says whether nullspace projection was used. If it is used with non-self-equilibrated loads, the core solver may also report balancing generalized reactions.",
+        "caution": "Nullspace projection is not a physical support. It prevents numerical rigid-body drift so stress recovery can proceed. For a physical static solution, use self-equilibrated loads or define real supports.",
+    },
+    "custom_load_bc_enabled": {
+        "title": "Custom Load/BC Mode",
+        "purpose": "Switches from automatic generated boundary/load assumptions to user-defined supports and edge loads.",
+        "use": "When enabled, plate side supports or cylinder end supports are taken from the custom fields below. Pressure still uses the pressure input, and additional edge line loads are added in N/m.",
+        "output": "The run summary prints the custom support choices and edge loads. Diagnostics show that custom mode is active.",
+        "caution": "This mode can easily create free-free or over-constrained models. Check the nullspace projection status and load resultant after each run.",
+    },
+    "plate_edge_supports": {
+        "title": "Plate Edge Supports",
+        "purpose": "Defines supports on the four generated plate sides x0, x1, y0 and y1.",
+        "use": "Free applies no restraint. Simply supported restrains out-of-plane displacement. Fixed restrains translations and rotations on the selected edge.",
+        "output": "Changes support constraints, displacement, stress recovery and buckling factors.",
+        "caution": "The side names follow generated coordinates: x0/x1 are the low/high x edges, y0/y1 are the low/high y edges.",
+    },
+    "cylinder_end_supports": {
+        "title": "Cylinder End Supports",
+        "purpose": "Defines support assumptions at the lower and upper cylinder ends.",
+        "use": "Free applies no restraint. Simply supported restrains axial displacement at the end. Fixed restrains translations at the end. If rigid lids are active, support is applied to the lid reference node.",
+        "output": "Changes cylinder global stiffness, membrane stress recovery and buckling factors.",
+        "caution": "Fixed cylinder ends can significantly increase membrane stiffness. Use free or simple ends when global motion should be allowed.",
+    },
+    "plate_edge_loads": {
+        "title": "Plate Edge Loads",
+        "purpose": "Adds in-plane normal line loads to plate edges in N/m.",
+        "use": "Positive x0/x1 loads act outward from the low/high x sides. Positive y0/y1 loads act outward from the low/high y sides.",
+        "output": "Loads are distributed to edge nodes and included in the load resultant, recovered stresses and buckling prestress.",
+        "caution": "Use sign carefully. Compressive edge load usually means load directed into the panel, which may require a negative value on an outward-positive edge.",
+    },
+    "cylinder_edge_loads": {
+        "title": "Cylinder End Edge Loads",
+        "purpose": "Adds axial line loads to lower and upper cylinder end rings in N/m.",
+        "use": "Positive lower load acts in negative global z, and positive upper load acts in positive global z, giving an outward end-pull convention.",
+        "output": "Loads are distributed around the end ring and included in load resultant, stresses and buckling prestress.",
+        "caution": "For axial compression, choose signs so the loads act toward the cylinder mid-height.",
     },
 }
 
@@ -984,6 +1258,27 @@ class RuntimeFEMWindow:
         self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)
         self.poisson_ratio = tk.DoubleVar(value=0.3)
         self.yield_stress_mpa = tk.DoubleVar(value=355.0)
+        self.material_model = tk.StringVar(value="linear elastic")
+        self.steel_grade = tk.StringVar(value="S355")
+        self.steel_thickness_class = tk.StringVar(value="auto")
+        self.nonlinear_max_load_factor = tk.DoubleVar(value=3.0)
+        self.nonlinear_steps = tk.IntVar(value=12)
+        self.nonlinear_max_iterations = tk.IntVar(value=25)
+        self.nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
+        self.nonlinear_layers = tk.IntVar(value=5)
+        self.custom_load_bc_enabled = tk.BooleanVar(value=False)
+        self.plate_edge_x0_support = tk.StringVar(value="free")
+        self.plate_edge_x1_support = tk.StringVar(value="free")
+        self.plate_edge_y0_support = tk.StringVar(value="free")
+        self.plate_edge_y1_support = tk.StringVar(value="free")
+        self.cylinder_lower_support = tk.StringVar(value="free")
+        self.cylinder_upper_support = tk.StringVar(value="free")
+        self.plate_edge_x0_load_n_per_m = tk.DoubleVar(value=0.0)
+        self.plate_edge_x1_load_n_per_m = tk.DoubleVar(value=0.0)
+        self.plate_edge_y0_load_n_per_m = tk.DoubleVar(value=0.0)
+        self.plate_edge_y1_load_n_per_m = tk.DoubleVar(value=0.0)
+        self.cylinder_lower_edge_load_n_per_m = tk.DoubleVar(value=0.0)
+        self.cylinder_upper_edge_load_n_per_m = tk.DoubleVar(value=0.0)
         self.display_choice = tk.StringVar(value="Static displacement/stress")
         self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
         self.current_result: RuntimeFEMRunResult | None = None
@@ -1223,9 +1518,20 @@ class RuntimeFEMWindow:
         solver_options.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(solver_options)
         self._add_option_row(solver_options, 0, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8"))
-        self._add_option_row(solver_options, 1, "analysis_type", "Analysis", self.analysis_type, ("linear eigenvalue", "nonlinear stability"))
+        self._add_option_row(
+            solver_options,
+            1,
+            "analysis_type",
+            "Analysis",
+            self.analysis_type,
+            ("linear eigenvalue", "nonlinear stability", "geometric nonlinear static", "geom. + material nonlinear static"),
+        )
         self._add_option_row(solver_options, 2, "buckling_analysis_type", "Buckling", self.buckling_analysis_type, ("linear eigenvalue", "nonlinear limit"))
         self._add_option_row(solver_options, 3, "solver_type", "Linear solver", self.solver_type, ("direct", "gmres", "minres", "bicgstab"))
+        self._add_entry_row(solver_options, 4, "nonlinear_max_load_factor", "NL max LF", self.nonlinear_max_load_factor)
+        self._add_entry_row(solver_options, 5, "nonlinear_steps", "NL steps", self.nonlinear_steps, width=8)
+        self._add_entry_row(solver_options, 6, "nonlinear_max_iterations", "NL iterations", self.nonlinear_max_iterations, width=8)
+        self._add_entry_row(solver_options, 7, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
 
         members = ttk.LabelFrame(future_inputs, text="Member modelling")
         members.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -1238,9 +1544,38 @@ class RuntimeFEMWindow:
         material.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(material)
         self._add_entry_row(material, 0, "stress_percentile", "Stress pct.", self.stress_percentile)
-        self._add_entry_row(material, 1, "elastic_modulus_gpa", "E [GPa]", self.elastic_modulus_gpa)
-        self._add_entry_row(material, 2, "poisson_ratio", "Poisson", self.poisson_ratio)
-        self._add_entry_row(material, 3, "yield_stress_mpa", "Yield [MPa]", self.yield_stress_mpa)
+        self._add_option_row(material, 1, "material_model", "Material", self.material_model, ("linear elastic", "DNV-RP-C208 steel"))
+        self._add_option_row(material, 2, "steel_grade", "Steel grade", self.steel_grade, ("S235", "S275", "S355", "S420", "S460"))
+        self._add_option_row(
+            material,
+            3,
+            "steel_thickness_class",
+            "Steel class",
+            self.steel_thickness_class,
+            ("auto", "t <= 16", "16 < t <= 40", "40 < t <= 63", "63 < t <= 100"),
+        )
+        self._add_entry_row(material, 4, "elastic_modulus_gpa", "E [GPa]", self.elastic_modulus_gpa)
+        self._add_entry_row(material, 5, "poisson_ratio", "Poisson", self.poisson_ratio)
+        self._add_entry_row(material, 6, "yield_stress_mpa", "Yield [MPa]", self.yield_stress_mpa)
+        self._add_entry_row(material, 7, "nonlinear_layers", "NL layers", self.nonlinear_layers, width=8)
+
+        custom = ttk.LabelFrame(future_inputs, text="Custom loads and boundary conditions")
+        custom.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(custom)
+        self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
+        self._add_option_row(custom, 1, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
+        self._add_option_row(custom, 2, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=1, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom, 3, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 4, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 5, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 6, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        custom.columnconfigure(3, weight=1)
 
         preview = ttk.LabelFrame(right_panel, text="3D section view")
         preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -1298,16 +1633,20 @@ class RuntimeFEMWindow:
             figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
         except Exception:
             pass
-        zoom = 1.55
+        zoom = 2.25
         if min(width, height) > 340:
-            zoom = 1.8
+            zoom = 2.75
         if min(width, height) > 520:
-            zoom = 2.05
+            zoom = 3.25
         for axis in figure.axes:
             if not hasattr(axis, "get_zlim"):
                 continue
-            axis.set_position([0.0, 0.0, 1.0, 0.96])
+            axis.set_position([-0.08, -0.12, 1.16, 1.16])
             axis.margins(0.0)
+            try:
+                axis.set_anchor("C")
+            except Exception:
+                pass
             try:
                 axis.set_proj_type("ortho")
             except Exception:
@@ -1501,6 +1840,27 @@ class RuntimeFEMWindow:
             elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9,
             poisson_ratio=min(max(_safe_float(self.poisson_ratio.get(), 0.3), 0.0), 0.49),
             yield_stress_pa=max(_safe_float(self.yield_stress_mpa.get(), 355.0), 0.0) * 1.0e6,
+            material_model=str(self.material_model.get()),
+            steel_grade=str(self.steel_grade.get()),
+            steel_thickness_class=str(self.steel_thickness_class.get()),
+            nonlinear_max_load_factor=max(_safe_float(self.nonlinear_max_load_factor.get(), 3.0), 1.0e-9),
+            nonlinear_steps=max(_safe_int(self.nonlinear_steps.get(), 12), 1),
+            nonlinear_max_iterations=max(_safe_int(self.nonlinear_max_iterations.get(), 25), 1),
+            nonlinear_tolerance=max(_safe_float(self.nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
+            nonlinear_layers=_nearest_nonlinear_layer_count(self.nonlinear_layers.get()),
+            custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
+            plate_edge_x0_support=str(self.plate_edge_x0_support.get()),
+            plate_edge_x1_support=str(self.plate_edge_x1_support.get()),
+            plate_edge_y0_support=str(self.plate_edge_y0_support.get()),
+            plate_edge_y1_support=str(self.plate_edge_y1_support.get()),
+            cylinder_lower_support=str(self.cylinder_lower_support.get()),
+            cylinder_upper_support=str(self.cylinder_upper_support.get()),
+            plate_edge_x0_load_n_per_m=_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0),
+            plate_edge_x1_load_n_per_m=_safe_float(self.plate_edge_x1_load_n_per_m.get(), 0.0),
+            plate_edge_y0_load_n_per_m=_safe_float(self.plate_edge_y0_load_n_per_m.get(), 0.0),
+            plate_edge_y1_load_n_per_m=_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0),
+            cylinder_lower_edge_load_n_per_m=_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0),
+            cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0),
         )
 
     def run(self) -> None:

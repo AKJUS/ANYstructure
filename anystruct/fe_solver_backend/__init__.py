@@ -61,6 +61,12 @@ from .cylinder_benchmarks import (
 )
 from .buckling import BucklingMode, BucklingResult, solve_eigenvalue_buckling
 from .nonlinear import NonlinearLimitPointResult, NonlinearLoadStep, solve_nonlinear_load_stepping
+from .material_curves import DNVC208MaterialCurve, curve_from_properties
+from .nonlinear_static import (
+    NonlinearStaticResult,
+    NonlinearStaticStep,
+    solve_static_nonlinear,
+)
 from .anystructure_fem_mode import (
     AnyStructureFEMConfig,
     AnyStructureFEMResult,
@@ -174,6 +180,12 @@ __all__ = [
     "NonlinearLimitPointResult",
     "NonlinearLoadStep",
     "solve_nonlinear_load_stepping",
+    # Incremental geometric/material nonlinear statics
+    "DNVC208MaterialCurve",
+    "curve_from_properties",
+    "NonlinearStaticResult",
+    "NonlinearStaticStep",
+    "solve_static_nonlinear",
     # ANYstructure generated-geometry FEM mode
     "AnyStructureFEMConfig",
     "AnyStructureFEMResult",

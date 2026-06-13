@@ -2,6 +2,8 @@ from matplotlib.figure import Figure
 from pathlib import Path
 import math
 
+import pytest
+
 from anystruct import fe_runtime_solver, fe_solver
 
 
@@ -162,6 +164,183 @@ def test_runtime_fem_result_print_explains_unavailable_nonlinear_factor():
     assert " - nonlinear_limit_factor: 0.0" not in text
 
 
+def test_runtime_fem_result_print_explains_nullspace_projection():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={
+            "line": "line1",
+            "geometry": "cylinder",
+            "mesh_fidelity": "coarse",
+            "shell_element_order": "S4",
+            "boundary_condition": "auto",
+            "symmetry_mode": "none",
+            "analysis_type": "linear eigenvalue",
+            "buckling_analysis_type": "linear eigenvalue",
+            "solver_type": "direct",
+            "pressure_pa": 1000.0,
+            "pressure_direction": "external",
+            "axial_force_n": 0.0,
+            "enforced_displacement_m": 0.0,
+            "mesh_size_m": 0.0,
+            "top_bottom_moment_nm": 0.0,
+            "include_stiffeners": True,
+            "include_girders": True,
+            "include_end_lids": True,
+            "member_orientation": "auto",
+            "stiffener_eccentricity_m": 0.0,
+            "girder_eccentricity_m": 0.0,
+            "elastic_modulus_pa": 210.0e9,
+            "poisson_ratio": 0.3,
+            "yield_stress_pa": 355.0e6,
+            "stress_percentile": 95.0,
+            "custom_load_bc_enabled": True,
+            "cylinder_lower_support": "free",
+            "cylinder_upper_support": "free",
+            "cylinder_lower_edge_load_n_per_m": 0.0,
+            "cylinder_upper_edge_load_n_per_m": 0.0,
+            "num_buckling_modes": 5,
+            "max_displacement_m": 0.0,
+            "prestress_summary": {
+                "shell_elements": 800,
+                "constraint_method": "transformation_fixed_plus_mpc_nullspace",
+                "nullspace_projection": 1.0,
+            },
+        },
+        stress_percentiles=(),
+        buckling_factors=(),
+        diagnostics=(),
+        visualization={},
+    )
+
+    text = fe_runtime_solver.format_runtime_fem_result(result)
+
+    assert "Custom load/BC mode: True" in text
+    assert "Linear constraint handling:" in text
+    assert "nullspace projection: used" in text
+    assert "rigid-body modes were projected out" in text
+
+
+def test_dnv_c208_steel_properties_use_grade_and_thickness_class():
+    props = fe_solver.dnv_c208_steel_properties("S355", thickness_m=0.018, thickness_class="auto")
+
+    assert props["grade"] == "S355"
+    assert props["thickness_class"] == "16 < t <= 40"
+    assert props["sigma_prop"] == pytest.approx(311.0e6)
+    assert props["sigma_yield"] == pytest.approx(346.9e6)
+    assert props["sigma_yield_2"] == pytest.approx(353.1e6)
+    assert props["eps_p_y1"] == pytest.approx(0.004)
+    assert props["eps_p_y2"] == pytest.approx(0.015)
+    assert props["K"] == pytest.approx(740.0e6)
+    assert props["n"] == pytest.approx(0.166)
+
+
+def test_production_solver_runs_incremental_material_nonlinear_static_path():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "flat panel",
+            "length_m": 0.6,
+            "width_m": 0.3,
+            "thickness_m": 0.01,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=1000.0,
+            mesh_fidelity="coarse",
+            num_buckling_modes=1,
+            analysis_type="geom. + material nonlinear static",
+            material_model="DNV-RP-C208 steel",
+            steel_grade="S355",
+            nonlinear_max_load_factor=1.0,
+            nonlinear_steps=2,
+            nonlinear_layers=4,
+        ),
+    )
+
+    prestress = result.prestress_summary
+
+    assert result.status == "ok"
+    assert prestress["material_model"] == "DNV-RP-C208"
+    assert prestress["steel_grade"] == "S355"
+    assert prestress["nonlinear_static_status"] == "completed"
+    assert prestress["nonlinear_static_load_factor"] == pytest.approx(1.0)
+    assert prestress["nonlinear_static_layers"] in {3.0, 5.0}
+    assert "Ran incremental geometric/material nonlinear static solve: completed." in result.diagnostics
+
+
+def test_runtime_result_print_includes_dnv_curve_and_nonlinear_static_summary():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={
+            "line": "line1",
+            "geometry": "flat panel",
+            "mesh_fidelity": "coarse",
+            "shell_element_order": "S4",
+            "boundary_condition": "auto",
+            "symmetry_mode": "none",
+            "analysis_type": "geom. + material nonlinear static",
+            "buckling_analysis_type": "linear eigenvalue",
+            "solver_type": "direct",
+            "pressure_pa": 1000.0,
+            "pressure_direction": "external",
+            "axial_force_n": 0.0,
+            "enforced_displacement_m": 0.0,
+            "mesh_size_m": 0.0,
+            "top_bottom_moment_nm": 0.0,
+            "include_stiffeners": False,
+            "include_girders": False,
+            "include_end_lids": False,
+            "member_orientation": "auto",
+            "stiffener_eccentricity_m": 0.0,
+            "girder_eccentricity_m": 0.0,
+            "material_model": "DNV-RP-C208 steel",
+            "steel_grade": "S355",
+            "steel_thickness_class": "auto",
+            "elastic_modulus_pa": 210.0e9,
+            "poisson_ratio": 0.3,
+            "yield_stress_pa": 355.0e6,
+            "stress_percentile": 95.0,
+            "nonlinear_max_load_factor": 1.0,
+            "nonlinear_steps": 2,
+            "nonlinear_max_iterations": 25,
+            "nonlinear_layers": 5,
+            "custom_load_bc_enabled": False,
+            "num_buckling_modes": 1,
+            "max_displacement_m": 0.0,
+            "prestress_summary": {
+                "material_model": "DNV-RP-C208",
+                "steel_grade": "S355",
+                "steel_thickness_class": "t <= 16",
+                "sigma_prop_pa": 320.0e6,
+                "sigma_yield_pa": 357.0e6,
+                "sigma_yield_2_pa": 363.3e6,
+                "eps_p_y1": 0.004,
+                "eps_p_y2": 0.015,
+                "hardening_K_pa": 740.0e6,
+                "hardening_n": 0.166,
+                "nonlinear_static_status": "completed",
+                "nonlinear_static_load_factor": 1.0,
+                "nonlinear_static_steps": 2,
+                "nonlinear_static_total_iterations": 6,
+                "nonlinear_static_layers": 5,
+                "nonlinear_static_max_plastic_strain": 0.0,
+            },
+        },
+        stress_percentiles=(),
+        buckling_factors=(),
+        diagnostics=(),
+        visualization={},
+    )
+
+    text = fe_runtime_solver.format_runtime_fem_result(result)
+
+    assert "Material model: DNV-RP-C208 steel" in text
+    assert "DNV-RP-C208 material curve:" in text
+    assert "sigma_prop/yield/yield2 [MPa]: 320.0 / 357.0 / 363.3" in text
+    assert "Incremental nonlinear static solve:" in text
+    assert "last converged load factor: 1.0" in text
+
+
 def test_runtime_fem_popup_has_compact_3d_section_preview():
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
 
@@ -199,10 +378,11 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "def _fit_preview_figure_to_canvas" in source
     assert "figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)" in source
     assert "figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)" in source
-    assert "axis.set_position([0.0, 0.0, 1.0, 0.96])" in source
+    assert "axis.set_position([-0.08, -0.12, 1.16, 1.16])" in source
     assert "def _preview_axis_data_extents" in source
     assert "axis.set_xlim3d" in source
-    assert "zoom = 1.55" in source
+    assert "zoom = 2.25" in source
+    assert "axis.set_anchor(\"C\")" in source
     assert "axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)" in source
     assert "self.run_button = ttk.Button(buttons, text=\"Run FEM\", command=self.run)" in source
     assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
@@ -226,6 +406,11 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "\"mesh_fidelity\"" in source
     assert "\"pressure_pa\"" in source
     assert "\"yield_stress_mpa\"" in source
+    assert "self.custom_load_bc_enabled = tk.BooleanVar(value=False)" in source
+    assert "custom = ttk.LabelFrame(future_inputs, text=\"Custom loads and boundary conditions\")" in source
+    assert "plate_edge_x0_support=str(self.plate_edge_x0_support.get())" in source
+    assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
+    assert "\"nullspace_projection\"" in source
     assert "horizontal_span" not in source
 
 
@@ -473,6 +658,61 @@ def test_runtime_generated_mesh_supports_s8_shells_and_enforced_displacement():
     assert len(generated["nodes"]) > len(generated["plot_grid"]) * len(generated["plot_grid"][0])
     assert any(support["name"].startswith("symmetry_") for support in generated["supports"])
     assert any(support["name"] == "enforced_panel_displacement" for support in generated["supports"])
+
+
+def test_custom_plate_supports_and_edge_loads_are_applied():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        pressure_pa=100.0,
+        custom_load_bc_enabled=True,
+        plate_edge_x0_support="fixed",
+        plate_edge_x1_support="simply supported",
+        plate_edge_x1_load_n_per_m=-1000.0,
+    )
+
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert generated["supports"][0]["name"] == "custom_plate_x0_fixed"
+    assert generated["supports"][1]["name"] == "custom_plate_x1_simply_supported"
+    assert result.status == "ok"
+    assert result.load_resultant["force_n"][0] == pytest.approx(-1000.0)
+    assert any("custom load and boundary-condition mode" in item.lower() for item in result.diagnostics)
+
+
+def test_custom_cylinder_lid_support_and_edge_loads_are_applied_to_reference_node():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 2.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        pressure_pa=100.0,
+        include_end_lids=True,
+        custom_load_bc_enabled=True,
+        cylinder_lower_support="free",
+        cylinder_upper_support="simply supported",
+        cylinder_upper_edge_load_n_per_m=-500.0,
+    )
+
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert len(generated["supports"]) == 1
+    assert generated["supports"][0]["name"] == "custom_cylinder_upper_simply_supported"
+    assert generated["supports"][0]["node_ids"] == [generated["rigid_lids"][1]["center_node_id"]]
+    assert result.status == "ok"
+    assert result.load_resultant["force_n"][2] == pytest.approx(-2.0 * math.pi * 1.0 * 500.0)
 
 
 def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_coarse():

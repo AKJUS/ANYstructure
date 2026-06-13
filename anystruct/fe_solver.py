@@ -18,7 +18,9 @@ try:
     from anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
     from anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
     from anystruct.fe_solver_backend.buckling import solve_eigenvalue_buckling as _backend_solve_buckling
+    from anystruct.fe_solver_backend.material_curves import curve_from_properties as _backend_curve_from_properties
     from anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
+    from anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
     try:
@@ -26,14 +28,18 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
         from ANYstructure.anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
         from ANYstructure.anystruct.fe_solver_backend.buckling import solve_eigenvalue_buckling as _backend_solve_buckling
+        from ANYstructure.anystruct.fe_solver_backend.material_curves import curve_from_properties as _backend_curve_from_properties
         from ANYstructure.anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
+        from ANYstructure.anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
         _full_backend = None
         _backend_compute_stresses = None
         _backend_solve_linear = None
         _backend_solve_buckling = None
+        _backend_curve_from_properties = None
         _backend_solve_nonlinear_limit = None
+        _backend_solve_static_nonlinear = None
         _backend_load_case_resultant = None
 
 
@@ -66,6 +72,27 @@ class LightweightFEMConfig:
     elastic_modulus_pa: float = 210.0e9
     poisson_ratio: float = 0.3
     yield_stress_pa: float = 355.0e6
+    material_model: str = "linear elastic"
+    steel_grade: str = "S355"
+    steel_thickness_class: str = "auto"
+    nonlinear_max_load_factor: float = 3.0
+    nonlinear_steps: int = 12
+    nonlinear_max_iterations: int = 25
+    nonlinear_tolerance: float = 1.0e-6
+    nonlinear_layers: int = 5
+    custom_load_bc_enabled: bool = False
+    plate_edge_x0_support: str = "free"
+    plate_edge_x1_support: str = "free"
+    plate_edge_y0_support: str = "free"
+    plate_edge_y1_support: str = "free"
+    cylinder_lower_support: str = "free"
+    cylinder_upper_support: str = "free"
+    plate_edge_x0_load_n_per_m: float = 0.0
+    plate_edge_x1_load_n_per_m: float = 0.0
+    plate_edge_y0_load_n_per_m: float = 0.0
+    plate_edge_y1_load_n_per_m: float = 0.0
+    cylinder_lower_edge_load_n_per_m: float = 0.0
+    cylinder_upper_edge_load_n_per_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +118,88 @@ def _positive(value: float, fallback: float) -> float:
     except (TypeError, ValueError):
         return fallback
     return value if value > 0.0 else fallback
+
+
+_DNV_C208_STEEL_TABLES_MPA: dict[str, tuple[dict[str, float | str], ...]] = {
+    "S235": (
+        {"label": "t <= 16", "max_t_mm": 16.0, "E": 210000.0, "sigma_prop": 211.7, "sigma_yield": 236.2, "sigma_yield_2": 243.4, "eps_p_y1": 0.004, "eps_p_y2": 0.020, "K": 520.0, "n": 0.166},
+        {"label": "16 < t <= 40", "max_t_mm": 40.0, "E": 210000.0, "sigma_prop": 202.7, "sigma_yield": 226.1, "sigma_yield_2": 233.2, "eps_p_y1": 0.004, "eps_p_y2": 0.020, "K": 520.0, "n": 0.166},
+        {"label": "40 < t <= 63", "max_t_mm": 63.0, "E": 210000.0, "sigma_prop": 193.7, "sigma_yield": 216.1, "sigma_yield_2": 223.0, "eps_p_y1": 0.004, "eps_p_y2": 0.020, "K": 520.0, "n": 0.166},
+        {"label": "63 < t <= 100", "max_t_mm": 100.0, "E": 210000.0, "sigma_prop": 193.7, "sigma_yield": 216.1, "sigma_yield_2": 223.0, "eps_p_y1": 0.004, "eps_p_y2": 0.020, "K": 520.0, "n": 0.166},
+    ),
+    "S275": (
+        {"label": "t <= 16", "max_t_mm": 16.0, "E": 210000.0, "sigma_prop": 247.8, "sigma_yield": 276.5, "sigma_yield_2": 282.8, "eps_p_y1": 0.004, "eps_p_y2": 0.017, "K": 620.0, "n": 0.166},
+        {"label": "16 < t <= 40", "max_t_mm": 40.0, "E": 210000.0, "sigma_prop": 238.8, "sigma_yield": 266.4, "sigma_yield_2": 272.6, "eps_p_y1": 0.004, "eps_p_y2": 0.017, "K": 620.0, "n": 0.166},
+        {"label": "40 < t <= 63", "max_t_mm": 63.0, "E": 210000.0, "sigma_prop": 229.8, "sigma_yield": 256.3, "sigma_yield_2": 262.4, "eps_p_y1": 0.004, "eps_p_y2": 0.017, "K": 620.0, "n": 0.166},
+    ),
+    "S355": (
+        {"label": "t <= 16", "max_t_mm": 16.0, "E": 210000.0, "sigma_prop": 320.0, "sigma_yield": 357.0, "sigma_yield_2": 363.3, "eps_p_y1": 0.004, "eps_p_y2": 0.015, "K": 740.0, "n": 0.166},
+        {"label": "16 < t <= 40", "max_t_mm": 40.0, "E": 210000.0, "sigma_prop": 311.0, "sigma_yield": 346.9, "sigma_yield_2": 353.1, "eps_p_y1": 0.004, "eps_p_y2": 0.015, "K": 740.0, "n": 0.166},
+        {"label": "40 < t <= 63", "max_t_mm": 63.0, "E": 210000.0, "sigma_prop": 301.9, "sigma_yield": 336.9, "sigma_yield_2": 342.9, "eps_p_y1": 0.004, "eps_p_y2": 0.015, "K": 725.0, "n": 0.166},
+        {"label": "63 < t <= 100", "max_t_mm": 100.0, "E": 210000.0, "sigma_prop": 283.9, "sigma_yield": 316.7, "sigma_yield_2": 322.5, "eps_p_y1": 0.004, "eps_p_y2": 0.015, "K": 725.0, "n": 0.166},
+    ),
+    "S420": (
+        {"label": "t <= 16", "max_t_mm": 16.0, "E": 210000.0, "sigma_prop": 378.7, "sigma_yield": 422.5, "sigma_yield_2": 427.6, "eps_p_y1": 0.004, "eps_p_y2": 0.012, "K": 738.0, "n": 0.140},
+        {"label": "16 < t <= 40", "max_t_mm": 40.0, "E": 210000.0, "sigma_prop": 360.6, "sigma_yield": 402.4, "sigma_yield_2": 407.3, "eps_p_y1": 0.004, "eps_p_y2": 0.012, "K": 703.0, "n": 0.140},
+        {"label": "40 < t <= 63", "max_t_mm": 63.0, "E": 210000.0, "sigma_prop": 351.6, "sigma_yield": 392.3, "sigma_yield_2": 397.1, "eps_p_y1": 0.004, "eps_p_y2": 0.012, "K": 686.0, "n": 0.140},
+    ),
+    "S460": (
+        {"label": "t <= 16", "max_t_mm": 16.0, "E": 210000.0, "sigma_prop": 414.8, "sigma_yield": 462.8, "sigma_yield_2": 466.9, "eps_p_y1": 0.004, "eps_p_y2": 0.010, "K": 772.0, "n": 0.120},
+        {"label": "16 < t <= 40", "max_t_mm": 40.0, "E": 210000.0, "sigma_prop": 396.7, "sigma_yield": 442.7, "sigma_yield_2": 446.6, "eps_p_y1": 0.004, "eps_p_y2": 0.010, "K": 745.0, "n": 0.120},
+        {"label": "40 < t <= 63", "max_t_mm": 63.0, "E": 210000.0, "sigma_prop": 374.2, "sigma_yield": 417.5, "sigma_yield_2": 421.2, "eps_p_y1": 0.004, "eps_p_y2": 0.010, "K": 703.0, "n": 0.120},
+    ),
+}
+
+
+def dnv_c208_steel_properties(
+    grade: str = "S355",
+    thickness_m: float = 0.0,
+    thickness_class: str = "auto",
+) -> dict[str, float | str]:
+    """Return DNV-RP-C208 low-fractile steel true-stress curve properties.
+
+    Stress values and K are returned in Pa, E in Pa and strain values as true
+    plastic strain.  ``thickness_class`` may be one of the table labels or
+    ``auto`` to select by plate thickness.
+    """
+
+    grade_key = str(grade or "S355").strip().upper()
+    rows = _DNV_C208_STEEL_TABLES_MPA.get(grade_key, _DNV_C208_STEEL_TABLES_MPA["S355"])
+    class_choice = _normalized_choice(thickness_class, "auto")
+    try:
+        thickness_mm = float(thickness_m) * 1000.0
+    except (TypeError, ValueError):
+        thickness_mm = 0.0
+    if thickness_mm <= 0.0:
+        thickness_mm = 16.0
+
+    selected = rows[-1]
+    if class_choice not in {"auto", "automatic", "by thickness", "auto by plate thickness"}:
+        simplified = class_choice.replace(" ", "")
+        for row in rows:
+            if simplified == str(row["label"]).lower().replace(" ", ""):
+                selected = row
+                break
+    else:
+        for row in rows:
+            if thickness_mm <= float(row["max_t_mm"]) + 1.0e-9:
+                selected = row
+                break
+
+    result: dict[str, float | str] = {
+        "grade": grade_key if grade_key in _DNV_C208_STEEL_TABLES_MPA else "S355",
+        "thickness_class": str(selected["label"]),
+        "thickness_mm": float(thickness_mm),
+        "source": "DNV-RP-C208 Table 4-2 to 4-6 low-fractile true stress-strain values",
+    }
+    for key, value in selected.items():
+        if key in {"label", "max_t_mm"}:
+            continue
+        if key in {"E", "sigma_prop", "sigma_yield", "sigma_yield_2", "K"}:
+            result[key if key != "E" else "E_pa"] = float(value) * 1.0e6
+        else:
+            result[key] = float(value)
+    return result
 
 
 def _mesh_divisions(mesh_fidelity: str) -> int:
@@ -586,6 +695,40 @@ def _flat_supports(boundary_nodes: list[int], node_id, rows: int, cols: int, con
     ]
 
 
+def _support_constraints(choice: object, geometry: str = "flat") -> dict[str, float]:
+    mode = _normalized_choice(choice, "free")
+    if mode in {"free", "none", "off"}:
+        return {}
+    if mode in {"simple", "simply", "simply supported", "ss"}:
+        return {"uz": 0.0}
+    if geometry == "cylinder" and mode in {"fixed", "clamped"}:
+        return {"ux": 0.0, "uy": 0.0, "uz": 0.0}
+    if mode in {"fixed", "clamped"}:
+        return {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+    return {}
+
+
+def _custom_flat_supports(node_id, rows: int, cols: int, config: LightweightFEMConfig) -> list[dict[str, object]]:
+    edges = (
+        ("x0", [node_id(0, col) for col in range(cols)], config.plate_edge_x0_support),
+        ("x1", [node_id(rows - 1, col) for col in range(cols)], config.plate_edge_x1_support),
+        ("y0", [node_id(row, 0) for row in range(rows)], config.plate_edge_y0_support),
+        ("y1", [node_id(row, cols - 1) for row in range(rows)], config.plate_edge_y1_support),
+    )
+    supports = []
+    for edge_name, node_ids, choice in edges:
+        constraints = _support_constraints(choice, "flat")
+        if constraints:
+            supports.append(
+                {
+                    "name": "custom_plate_" + edge_name + "_" + _normalized_choice(choice, "free").replace(" ", "_"),
+                    "node_ids": sorted(set(int(node) for node in node_ids)),
+                    "constraints": constraints,
+                }
+            )
+    return supports
+
+
 def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConfig) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
     if mode in {"free", "none"}:
@@ -605,6 +748,24 @@ def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConf
         {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
         {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
     ]
+
+
+def _custom_cylinder_supports(lower_ring: list[int], upper_ring: list[int], config: LightweightFEMConfig) -> list[dict[str, object]]:
+    supports = []
+    for name, ring_nodes, choice in (
+        ("lower", lower_ring, config.cylinder_lower_support),
+        ("upper", upper_ring, config.cylinder_upper_support),
+    ):
+        constraints = _support_constraints(choice, "cylinder")
+        if constraints:
+            supports.append(
+                {
+                    "name": "custom_cylinder_" + name + "_" + _normalized_choice(choice, "free").replace(" ", "_"),
+                    "node_ids": sorted(set(int(node) for node in ring_nodes)),
+                    "constraints": constraints,
+                }
+            )
+    return supports
 
 
 def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
@@ -737,7 +898,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             if row in (0, rows - 1) or col in (0, cols - 1)
         }
     )
-    supports = _flat_supports(boundary_nodes, node_id, rows, cols, config)
+    supports = _custom_flat_supports(node_id, rows, cols, config) if config.custom_load_bc_enabled else _flat_supports(boundary_nodes, node_id, rows, cols, config)
     supports.extend(_symmetry_supports(nodes, config))
     supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
@@ -926,6 +1087,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     )
     rigid_lids = []
     supports = _cylinder_supports(rows, cols, node_id, config)
+    custom_lid_support_nodes: tuple[list[int], list[int]] | None = None
     if config.include_end_lids:
         next_node_id = max(_node_lookup(nodes), default=0) + 1
         bottom_center = next_node_id
@@ -941,6 +1103,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             {"id": 40_002, "name": "top_rigid_lid", "center_node_id": top_center, "ring_node_ids": end_ring},
         ]
         supports = []
+        custom_lid_support_nodes = ([bottom_center], [top_center])
     rigid_lid_ring_nodes = set(start_ring + end_ring) if config.include_end_lids else set()
     couplings = _offset_beam_nodes_and_couplings(
         nodes,
@@ -950,6 +1113,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         start_node_id=max(_node_lookup(nodes), default=0) + 1,
         exclude_base_node_ids=rigid_lid_ring_nodes,
     )
+    if config.custom_load_bc_enabled:
+        if custom_lid_support_nodes is not None:
+            supports = _custom_cylinder_supports(custom_lid_support_nodes[0], custom_lid_support_nodes[1], config)
+        else:
+            supports = _custom_cylinder_supports(start_ring, end_ring, config)
     supports.extend(_symmetry_supports(nodes, config))
     supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
     return {
@@ -1147,6 +1315,78 @@ def _wants_nonlinear_buckling(config: LightweightFEMConfig) -> bool:
     }
 
 
+def _wants_static_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
+    return choice in {
+        "geometric nonlinear static",
+        "material nonlinear static",
+        "geom. + material nonlinear static",
+        "geom + material nonlinear static",
+        "geometric and material nonlinear static",
+    }
+
+
+def _wants_material_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
+    model = _normalized_choice(config.material_model, "linear elastic")
+    return "material" in choice or model in {
+        "dnv rp c208 steel",
+        "dnv c208 steel",
+        "dnv rp c208",
+        "rp c208 steel",
+    }
+
+
+def _wants_tangent_stability_analysis(config: LightweightFEMConfig) -> bool:
+    choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
+    buckling_choice = _normalized_choice(config.buckling_analysis_type, "linear eigenvalue")
+    if choice == "nonlinear stability":
+        return True
+    return buckling_choice == "nonlinear limit" and not _wants_static_nonlinear_analysis(config)
+
+
+def _positive_int(value: object, fallback: int, minimum: int = 1) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = fallback
+    return max(number, minimum)
+
+
+def _nonlinear_layer_count(value: object) -> int:
+    requested = _positive_int(value, 5, 3)
+    supported = (3, 5, 7, 9, 11)
+    return min(supported, key=lambda item: abs(item - requested))
+
+
+def _nonlinear_curve_payload(config: LightweightFEMConfig, geometry: dict) -> tuple[object | None, dict[str, float | str]]:
+    if _backend_curve_from_properties is None:
+        return None, {}
+    if not _wants_material_nonlinear_analysis(config):
+        return None, {}
+    thickness = _positive(geometry.get("thickness_m", 0.0), 0.016)
+    properties = dnv_c208_steel_properties(config.steel_grade, thickness, config.steel_thickness_class)
+    curve_properties = {
+        "sigma_prop": properties["sigma_prop"],
+        "sigma_yield": properties["sigma_yield"],
+        "sigma_yield_2": properties["sigma_yield_2"],
+        "eps_p_y1": properties["eps_p_y1"],
+        "eps_p_y2": properties["eps_p_y2"],
+        "K": properties["K"],
+        "n": properties["n"],
+    }
+    return _backend_curve_from_properties(curve_properties), properties
+
+
+def _apply_material_curve_to_model(model, curve: object | None, properties: dict[str, float | str]) -> None:
+    if curve is None:
+        return
+    for material in getattr(model, "materials", {}).values():
+        material.hardening_curve = curve
+        material.elastic_modulus = float(properties.get("E_pa", material.elastic_modulus))
+        material.yield_stress = float(properties.get("sigma_yield", material.yield_stress))
+
+
 def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | str]:
     nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
     grid = generated_geometry.get("plot_grid") or []
@@ -1209,6 +1449,68 @@ def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial
         load_case.add_nodal_load(int(node.id), forces=np.array([axial_force / len(left), 0.0, 0.0], dtype=float))
     for node in right:
         load_case.add_nodal_load(int(node.id), forces=np.array([-axial_force / len(right), 0.0, 0.0], dtype=float))
+
+
+def _line_node_weights(nodes: list[object], axis: int, closed_length: float = 0.0) -> dict[int, float]:
+    if not nodes:
+        return {}
+    if closed_length > 0.0:
+        return {int(node.id): float(closed_length) / len(nodes) for node in nodes}
+    if len(nodes) == 1:
+        return {int(nodes[0].id): 1.0}
+    ordered = sorted(nodes, key=lambda node: float(node.coords()[axis]))
+    coords = [float(node.coords()[axis]) for node in ordered]
+    weights: dict[int, float] = {}
+    for index, node in enumerate(ordered):
+        if index == 0:
+            weight = 0.5 * abs(coords[1] - coords[0])
+        elif index == len(ordered) - 1:
+            weight = 0.5 * abs(coords[-1] - coords[-2])
+        else:
+            weight = 0.5 * abs(coords[index + 1] - coords[index - 1])
+        weights[int(node.id)] = float(weight)
+    return weights
+
+
+def _apply_weighted_edge_load(load_case, weights: dict[int, float], force_per_length: np.ndarray) -> None:
+    if not weights:
+        return
+    vector = np.asarray(force_per_length, dtype=float)
+    for node_id, weight in weights.items():
+        load_case.add_nodal_load(int(node_id), forces=vector * float(weight))
+
+
+def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: LightweightFEMConfig) -> None:
+    if not config.custom_load_bc_enabled:
+        return
+    nodes = [model.mesh.get_node(int(node["id"])) for node in generated_geometry.get("nodes", [])]
+    nodes = [node for node in nodes if node is not None]
+    if not nodes:
+        return
+    coords = np.asarray([node.coords() for node in nodes], dtype=float)
+    tol = max(float(np.ptp(coords[:, 0]) + np.ptp(coords[:, 1]) + np.ptp(coords[:, 2])) * 1.0e-9, 1.0e-9)
+    if generated_geometry.get("plot_type") == "cylinder":
+        lower_ids = set(int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", []))
+        upper_ids = set(int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", []))
+        lower = [node for node in nodes if int(node.id) in lower_ids]
+        upper = [node for node in nodes if int(node.id) in upper_ids]
+        radius = _positive(generated_geometry.get("radius_m", 0.0), 0.0)
+        circumference = 2.0 * math.pi * radius if radius > 0.0 else 0.0
+        _apply_weighted_edge_load(load_case, _line_node_weights(lower, 0, circumference), np.array([0.0, 0.0, -float(config.cylinder_lower_edge_load_n_per_m)]))
+        _apply_weighted_edge_load(load_case, _line_node_weights(upper, 0, circumference), np.array([0.0, 0.0, float(config.cylinder_upper_edge_load_n_per_m)]))
+        return
+    xmin = float(np.min(coords[:, 0]))
+    xmax = float(np.max(coords[:, 0]))
+    ymin = float(np.min(coords[:, 1]))
+    ymax = float(np.max(coords[:, 1]))
+    x0_nodes = [node for node in nodes if abs(float(node.x) - xmin) <= tol]
+    x1_nodes = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
+    y0_nodes = [node for node in nodes if abs(float(node.y) - ymin) <= tol]
+    y1_nodes = [node for node in nodes if abs(float(node.y) - ymax) <= tol]
+    _apply_weighted_edge_load(load_case, _line_node_weights(x0_nodes, 1), np.array([-float(config.plate_edge_x0_load_n_per_m), 0.0, 0.0]))
+    _apply_weighted_edge_load(load_case, _line_node_weights(x1_nodes, 1), np.array([float(config.plate_edge_x1_load_n_per_m), 0.0, 0.0]))
+    _apply_weighted_edge_load(load_case, _line_node_weights(y0_nodes, 0), np.array([0.0, -float(config.plate_edge_y0_load_n_per_m), 0.0]))
+    _apply_weighted_edge_load(load_case, _line_node_weights(y1_nodes, 0), np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
 
 
 def _add_cylinder_end_moments(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
@@ -1313,6 +1615,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         )
 
     generated_geometry = build_generated_geometry(geometry, config)
+    material_curve, material_properties = _nonlinear_curve_payload(config, geometry)
+    effective_elastic_modulus = float(material_properties.get("E_pa", config.elastic_modulus_pa)) if material_properties else config.elastic_modulus_pa
+    effective_yield_stress = float(material_properties.get("sigma_yield", config.yield_stress_pa)) if material_properties else config.yield_stress_pa
     backend_config = _full_backend.AnyStructureFEMConfig(
         pressure_pa=abs(float(config.pressure_pa)),
         pressure_sign=_pressure_sign(config),
@@ -1322,9 +1627,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         stress_percentile=min(max(float(config.stress_percentile), 0.0), 100.0),
         add_inplane_edge_loads=False,
         require_idealized_member_beams=False,
-        elastic_modulus=config.elastic_modulus_pa,
+        elastic_modulus=effective_elastic_modulus,
         poisson_ratio=config.poisson_ratio,
-        yield_stress=config.yield_stress_pa,
+        yield_stress=effective_yield_stress,
     )
     diagnostics = [
         "ANYstructure production FE mesh backend.",
@@ -1348,11 +1653,23 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         diagnostics.append("Applied radial member section orientation for cylinder beams where applicable.")
     if abs(float(config.stiffener_eccentricity_m or 0.0)) > 0.0 or abs(float(config.girder_eccentricity_m or 0.0)) > 0.0:
         diagnostics.append("Applied eccentric beam-shell MPC offsets for generated member beams.")
+    if config.custom_load_bc_enabled:
+        diagnostics.append("Using custom load and boundary-condition mode.")
+    if material_properties:
+        diagnostics.append(
+            "Using DNV-RP-C208 material curve "
+            + str(material_properties.get("grade", ""))
+            + ", "
+            + str(material_properties.get("thickness_class", ""))
+            + " for nonlinear static shell plasticity."
+        )
 
     try:
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
+        _apply_material_curve_to_model(model, material_curve, material_properties)
         load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
         _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
+        _add_custom_edge_loads(model, load_case, generated_geometry, config)
         _add_cylinder_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         load_resultant = _backend_load_case_resultant(model, load_case)
         displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode="auto")
@@ -1381,9 +1698,83 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         )
 
     prestress_states, prestress_summary = _full_backend.recover_prestress_from_static_result(model, displacements)
+    prestress_summary["constraint_method"] = str(solver_info.get("constraint_method", ""))
+    prestress_summary["constraint_mode"] = str(solver_info.get("constraint_mode", ""))
+    nullspace_info = solver_info.get("nullspace_info") or {}
+    if solver_info.get("constraint_method") == "transformation_fixed_plus_mpc_nullspace":
+        prestress_summary["nullspace_projection"] = 1.0
+        prestress_summary["nullspace_rank"] = float((solver_info.get("convergence_info") or {}).get("nullspace_rank", nullspace_info.get("reduced_rank", 0)))
+        diagnostics.append("Linear solve used rigid-body nullspace projection because no fixed DOFs remained after MPC/fixed-DOF reduction.")
+    else:
+        prestress_summary["nullspace_projection"] = 0.0
+    if material_properties:
+        prestress_summary["material_model"] = "DNV-RP-C208"
+        prestress_summary["steel_grade"] = str(material_properties.get("grade", ""))
+        prestress_summary["steel_thickness_class"] = str(material_properties.get("thickness_class", ""))
+        prestress_summary["sigma_prop_pa"] = float(material_properties.get("sigma_prop", 0.0))
+        prestress_summary["sigma_yield_pa"] = float(material_properties.get("sigma_yield", 0.0))
+        prestress_summary["sigma_yield_2_pa"] = float(material_properties.get("sigma_yield_2", 0.0))
+        prestress_summary["eps_p_y1"] = float(material_properties.get("eps_p_y1", 0.0))
+        prestress_summary["eps_p_y2"] = float(material_properties.get("eps_p_y2", 0.0))
+        prestress_summary["hardening_K_pa"] = float(material_properties.get("K", 0.0))
+        prestress_summary["hardening_n"] = float(material_properties.get("n", 0.0))
+
     nonlinear_result = None
     nonlinear_factor = None
-    if _wants_nonlinear_analysis(config) or _wants_nonlinear_buckling(config):
+    nonlinear_static_factor = None
+    nonlinear_static_result = None
+    if _wants_static_nonlinear_analysis(config):
+        if _backend_solve_static_nonlinear is None:
+            diagnostics.append("Incremental geometric/material nonlinear static solver is unavailable in this backend.")
+        else:
+            try:
+                nonlinear_static_result = _backend_solve_static_nonlinear(
+                    model,
+                    load_case,
+                    max_load_factor=max(float(config.nonlinear_max_load_factor), 1.0e-9),
+                    num_steps=_positive_int(config.nonlinear_steps, 12),
+                    max_iterations=_positive_int(config.nonlinear_max_iterations, 25),
+                    tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
+                    num_layers=_nonlinear_layer_count(config.nonlinear_layers),
+                )
+                nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
+                prestress_summary["nonlinear_static_status"] = str(nonlinear_static_result.status)
+                prestress_summary["nonlinear_static_load_factor"] = nonlinear_static_factor
+                prestress_summary["nonlinear_static_steps"] = float(len(nonlinear_static_result.steps))
+                prestress_summary["nonlinear_static_total_iterations"] = float((nonlinear_static_result.info or {}).get("total_newton_iterations", 0.0))
+                prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
+                if nonlinear_static_result.steps:
+                    prestress_summary["nonlinear_static_max_plastic_strain"] = float(
+                        max(step.max_equivalent_plastic_strain for step in nonlinear_static_result.steps)
+                    )
+                diagnostics.append("Ran incremental geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
+                if nonlinear_static_result.converged:
+                    displacements = np.asarray(nonlinear_static_result.displacements, dtype=float)
+                    prestress_states, recovered = _full_backend.recover_prestress_from_static_result(model, displacements)
+                    recovered.update({key: value for key, value in prestress_summary.items() if str(key).startswith("nonlinear_static")})
+                    for key in (
+                        "constraint_method",
+                        "constraint_mode",
+                        "nullspace_projection",
+                        "nullspace_rank",
+                        "material_model",
+                        "steel_grade",
+                        "steel_thickness_class",
+                        "sigma_prop_pa",
+                        "sigma_yield_pa",
+                        "sigma_yield_2_pa",
+                        "eps_p_y1",
+                        "eps_p_y2",
+                        "hardening_K_pa",
+                        "hardening_n",
+                    ):
+                        if key in prestress_summary:
+                            recovered[key] = prestress_summary[key]
+                    prestress_summary = recovered
+            except Exception as exc:
+                diagnostics.append("Incremental nonlinear static solver failed: " + str(exc))
+
+    if _wants_tangent_stability_analysis(config):
         if _backend_solve_nonlinear_limit is None:
             diagnostics.append("Nonlinear load-step solver is unavailable in this backend.")
         else:
@@ -1423,7 +1814,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             if pressure_buckling_result.modes:
                 buckling_result = pressure_buckling_result
                 diagnostics.append("Buckling modes use equivalent external-pressure membrane prestress because the full mixed prestress returned no positive modes.")
-    if _wants_nonlinear_buckling(config) and nonlinear_factor is not None and float(nonlinear_factor) > 0.0:
+    if _wants_nonlinear_buckling(config) and nonlinear_static_factor is not None and float(nonlinear_static_factor) > 0.0:
+        buckling_factors = (float(nonlinear_static_factor),)
+        diagnostics.append("Buckling factors report the incremental nonlinear static load-factor estimate for the selected buckling mode.")
+    elif _wants_nonlinear_buckling(config) and nonlinear_factor is not None and float(nonlinear_factor) > 0.0:
         buckling_factors = (float(nonlinear_factor),)
         diagnostics.append("Buckling factors report the nonlinear limit-load estimate for the selected buckling mode.")
     else:
