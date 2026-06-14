@@ -476,7 +476,7 @@ def solve_linear(
     mode = (constraint_mode or "auto").strip().lower()
     if mode not in {"auto", "transformation", "nullspace"}:
         raise ValueError(f"Unknown constraint_mode '{constraint_mode}'. Use auto, transformation or nullspace.")
-    use_nullspace = mode == "nullspace" or (mode == "auto" and int(constraint_info["num_fixed_dofs"]) == 0 and Q.shape[1] > 0)
+    use_nullspace = mode == "nullspace" or (mode == "auto" and Q.shape[1] > 0)
 
     solver_info: Dict[str, Any] = {
         "assembly": assembly_info,

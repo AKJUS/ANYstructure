@@ -85,7 +85,10 @@ class RuntimeFEMOptions:
     nonlinear_max_iterations: int = 25
     nonlinear_tolerance: float = 1.0e-6
     nonlinear_layers: int = 5
+    deformation_scale: float = 0.0
     custom_load_bc_enabled: bool = False
+    custom_loads_add_to_imported: bool = False
+    custom_use_nullspace_projection: bool = False
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
     plate_edge_y0_support: str = "free"
@@ -342,6 +345,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         nonlinear_max_iterations=options.nonlinear_max_iterations,
         nonlinear_tolerance=options.nonlinear_tolerance,
         nonlinear_layers=options.nonlinear_layers,
+        custom_loads_add_to_imported=options.custom_loads_add_to_imported,
+        custom_use_nullspace_projection=options.custom_use_nullspace_projection,
         custom_load_bc_enabled=options.custom_load_bc_enabled,
         plate_edge_x0_support=options.plate_edge_x0_support,
         plate_edge_x1_support=options.plate_edge_x1_support,
@@ -402,7 +407,10 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "nonlinear_max_iterations": int(options.nonlinear_max_iterations),
         "nonlinear_tolerance": float(options.nonlinear_tolerance),
         "nonlinear_layers": int(options.nonlinear_layers),
+        "deformation_scale": float(options.deformation_scale),
         "custom_load_bc_enabled": bool(options.custom_load_bc_enabled),
+        "custom_loads_add_to_imported": bool(options.custom_loads_add_to_imported),
+        "custom_use_nullspace_projection": bool(options.custom_use_nullspace_projection),
         "plate_edge_x0_support": str(options.plate_edge_x0_support),
         "plate_edge_x1_support": str(options.plate_edge_x1_support),
         "plate_edge_y0_support": str(options.plate_edge_y0_support),
@@ -465,7 +473,13 @@ def _displacement_plot_scale(
     geometry: dict[str, Any],
     result: RuntimeFEMRunResult | None,
     visualization: dict[str, Any] | None = None,
+    override_scale: float | None = None,
 ) -> float:
+    if override_scale is not None and override_scale > 0.0:
+        return float(override_scale)
+    summary_scale = _safe_float((result.summary if result is not None else {}).get("deformation_scale"), 0.0)
+    if summary_scale > 0.0:
+        return summary_scale
     display_displacement = _visualization_displacement_extent(visualization or {})
     result_displacement = 0.0 if result is None else result.displacement_scale
     displacement = max(display_displacement, result_displacement)
@@ -499,6 +513,13 @@ def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, 
 
 
 def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str) -> tuple[dict[str, Any], str, bool]:
+    if display_mode == "plastic":
+        visualization = dict(result.visualization or {})
+        if visualization.get("plastic_strain"):
+            visualization["stress_pa"] = visualization.get("plastic_strain")
+            visualization["scalar_label"] = visualization.get("plastic_strain_label") or "equiv. engineering plastic strain [-]"
+            visualization["scalar_kind"] = "raw"
+            return visualization, "Engineering plastic strain", False
     if display_mode.startswith("mode:"):
         try:
             mode_number = int(display_mode.split(":", 1)[1])
@@ -518,17 +539,21 @@ def _plot_visualization_surface(
     geometry: dict[str, Any],
     result: RuntimeFEMRunResult,
     display_mode: str = "static",
+    deformation_scale: float | None = None,
 ) -> None:
     visualization, title, is_mode = _selected_visualization(result, display_mode)
     scalar_values = _plot_grid_values(visualization.get("stress_pa"))
     if is_mode:
         color_grid = scalar_values
         colorbar_label = str(visualization.get("scalar_label") or "mode amplitude")
+    elif visualization.get("scalar_kind") == "raw":
+        color_grid = scalar_values
+        colorbar_label = str(visualization.get("scalar_label") or "value")
     else:
         color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
         colorbar_label = "stress [MPa]"
     facecolors, norm, cmap = _surface_facecolors(color_grid)
-    scale = _displacement_plot_scale(geometry, result, visualization)
+    scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
 
     if visualization.get("type") == "cylinder":
         axial = _plot_grid_values(visualization.get("axial_m"))
@@ -595,6 +620,7 @@ def create_runtime_fem_result_figure(
     snapshot: RuntimeFEMLineSnapshot,
     result: RuntimeFEMRunResult | None = None,
     display_mode: str = "static",
+    deformation_scale: float | None = None,
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
@@ -613,7 +639,7 @@ def create_runtime_fem_result_figure(
         result_ax.text(0.5, 0.42, "Results will appear here after Run FEM.", ha="center", va="center", fontsize=9)
         result_ax.set_axis_off()
     else:
-        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode)
+        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale)
         result_ax.set_title("Buckling modes")
         result_ax.set_axis_off()
         summary_lines = [
@@ -776,11 +802,14 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         + str(_safe_int(summary.get("nonlinear_layers"), 0))
         + " / "
         + str(_safe_int(summary.get("nonlinear_max_iterations"), 0)),
+        "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("deformation_scale")), 3))),
         "Custom load/BC mode: " + str(bool(summary.get("custom_load_bc_enabled"))),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
         "Max displacement [mm]: " + str(round(1000.0 * _safe_float(summary.get("max_displacement_m")), 4)),
     ]
     if summary.get("custom_load_bc_enabled"):
+        lines.append("Custom loads add to imported/generated loads: " + str(bool(summary.get("custom_loads_add_to_imported"))))
+        lines.append("Custom nullspace boundary: " + str(bool(summary.get("custom_use_nullspace_projection"))))
         if str(summary.get("geometry", "")).lower().startswith("cylinder"):
             lines.extend(
                 [
@@ -838,7 +867,9 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             lines.append(" - method: " + constraint_method)
             if _safe_float(prestress.get("nullspace_projection"), 0.0) > 0.0:
                 lines.append(" - nullspace projection: used")
-                lines.append(" - meaning: rigid-body modes were projected out because no fixed DOFs remained after support/MPC reduction.")
+                lines.append(" - remaining rigid-body modes: " + str(_safe_int(prestress.get("nullspace_rank"), 0)))
+                lines.append(" - relative load imbalance: " + str(round(_safe_float(prestress.get("relative_rigid_body_load_imbalance")), 6)))
+                lines.append(" - meaning: remaining rigid-body modes were projected out and any rigid-body load imbalance was carried as generalized balancing reactions.")
             else:
                 lines.append(" - nullspace projection: not used")
         lines.extend(["", "Recovered prestress / reference state:"])
@@ -870,6 +901,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "constraint_mode",
             "nullspace_projection",
             "nullspace_rank",
+            "relative_rigid_body_load_imbalance",
+            "rigid_body_load_imbalance_norm",
             *material_keys,
             *nonlinear_static_keys,
         }
@@ -1162,9 +1195,16 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "display_choice": {
         "title": "Display",
         "purpose": "Chooses which result visualization is shown after a run.",
-        "use": "Static view shows displacement/stress. Buckling mode views show mode shape and load factor.",
+        "use": "Static view shows displacement/stress. Engineering plastic strain is available after a material nonlinear run. Buckling mode views show mode shape and load factor.",
         "output": "Only affects plotting; it does not rerun the solver.",
         "caution": "Mode amplitudes are normalized for visualization, not physical displacement magnitudes.",
+    },
+    "deformation_scale": {
+        "title": "Deformation Scale",
+        "purpose": "Controls the visual magnification of displacement in the 3D result plot.",
+        "use": "Set 0 for automatic scaling. Set a positive value to multiply physical displacements by that value in the plot.",
+        "output": "Only affects the visualization. The solver, stresses and load factors are not changed.",
+        "caution": "A very large scale can make the shape easier to see but can also make the geometry look physically misleading.",
     },
     "nullspace_projection": {
         "title": "Nullspace Projection",
@@ -1176,9 +1216,23 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "custom_load_bc_enabled": {
         "title": "Custom Load/BC Mode",
         "purpose": "Switches from automatic generated boundary/load assumptions to user-defined supports and edge loads.",
-        "use": "When enabled, plate side supports or cylinder end supports are taken from the custom fields below. Pressure still uses the pressure input, and additional edge line loads are added in N/m.",
+        "use": "When enabled, plate side supports or cylinder end supports are taken only from the custom fields below. By default the pressure, axial force and end moment inputs are not used; tick the additive-load option if the custom edge loads should be added to those imported/generated loads.",
         "output": "The run summary prints the custom support choices and edge loads. Diagnostics show that custom mode is active.",
         "caution": "This mode can easily create free-free or over-constrained models. Check the nullspace projection status and load resultant after each run.",
+    },
+    "custom_loads_add_to_imported": {
+        "title": "Add To Imported Loads",
+        "purpose": "Controls whether custom edge loads replace or supplement the pressure and other generated load inputs.",
+        "use": "Unchecked means custom loads are the complete load case. Checked means pressure, axial force and top/bottom moment are applied first, then the custom edge loads are added.",
+        "output": "Changes load resultant, stress recovery and buckling prestress.",
+        "caution": "Use this deliberately. Leaving it unchecked is safest when studying a clean custom load path.",
+    },
+    "custom_use_nullspace_projection": {
+        "title": "Nullspace Boundary",
+        "purpose": "Uses rigid-body nullspace projection as the boundary condition for custom load/BC mode.",
+        "use": "No explicit support edges are applied. The solver projects out rigid-body motion and reports any rigid-body load imbalance as balancing generalized reactions.",
+        "output": "The result print reports nullspace rank and relative rigid-body load imbalance.",
+        "caution": "This is a mathematical free-body gauge, not a physical support. It is useful for understanding self-equilibrated loads and free-body behaviour.",
     },
     "plate_edge_supports": {
         "title": "Plate Edge Supports",
@@ -1266,7 +1320,10 @@ class RuntimeFEMWindow:
         self.nonlinear_max_iterations = tk.IntVar(value=25)
         self.nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.nonlinear_layers = tk.IntVar(value=5)
+        self.deformation_scale = tk.DoubleVar(value=0.0)
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
+        self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
+        self.custom_use_nullspace_projection = tk.BooleanVar(value=False)
         self.plate_edge_x0_support = tk.StringVar(value="free")
         self.plate_edge_x1_support = tk.StringVar(value="free")
         self.plate_edge_y0_support = tk.StringVar(value="free")
@@ -1285,6 +1342,7 @@ class RuntimeFEMWindow:
         self.result_text = None
         self.figure_canvas = None
         self.figure_toolbar = None
+        self.figure_toolbar_frame = None
         self.preview_canvas = None
         self.figure_parent = None
         self.display_selector = None
@@ -1292,6 +1350,10 @@ class RuntimeFEMWindow:
         self.progress_bar = None
         self.solver_thread = None
         self.solver_queue = queue.Queue()
+        try:
+            self.deformation_scale.trace_add("write", lambda *_args: self._refresh_figure())
+        except Exception:
+            pass
 
         self._build()
 
@@ -1480,6 +1542,7 @@ class RuntimeFEMWindow:
         self._add_entry_row(mesh_loads, 3, "load_scale", "Load scale", self.load_scale)
         self._add_entry_row(mesh_loads, 4, "top_bottom_moment_nm", "Top/bottom moment [Nm]", self.top_bottom_moment_nm)
         self._add_entry_row(mesh_loads, 5, "num_buckling_modes", "Buckling modes", self.num_buckling_modes, width=8)
+        self._add_entry_row(mesh_loads, 6, "deformation_scale", "Def. scale", self.deformation_scale, width=8)
 
         contents = ttk.LabelFrame(options, text="Model contents")
         contents.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -1563,18 +1626,20 @@ class RuntimeFEMWindow:
         custom.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(custom)
         self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
-        self._add_option_row(custom, 1, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
-        self._add_option_row(custom, 2, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=1, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_option_row(custom, 3, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 4, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 5, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 6, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_check_row(custom, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads", self.custom_loads_add_to_imported)
+        self._add_check_row(custom, 2, "custom_use_nullspace_projection", "Use nullspace projection as boundary", self.custom_use_nullspace_projection)
+        self._add_option_row(custom, 3, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
+        self._add_option_row(custom, 4, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom, 5, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 6, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 7, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 8, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         custom.columnconfigure(3, weight=1)
 
         preview = ttk.LabelFrame(right_panel, text="3D section view")
@@ -1614,8 +1679,12 @@ class RuntimeFEMWindow:
         if self.figure_toolbar is not None:
             self.figure_toolbar.destroy()
             self.figure_toolbar = None
+        if self.figure_toolbar_frame is not None:
+            self.figure_toolbar_frame.destroy()
+            self.figure_toolbar_frame = None
 
         toolbar_frame = ttk.Frame(parent)
+        self.figure_toolbar_frame = toolbar_frame
         toolbar_frame.pack(side=tk.TOP, fill=tk.X)
         self.figure_canvas = FigureCanvasTkAgg(figure, master=parent)
         self.figure_toolbar = NavigationToolbar2Tk(self.figure_canvas, toolbar_frame, pack_toolbar=False)
@@ -1780,6 +1849,8 @@ class RuntimeFEMWindow:
 
     def _set_display_modes(self, result: RuntimeFEMRunResult) -> None:
         labels = {"Static displacement/stress": "static"}
+        if (result.visualization or {}).get("plastic_strain"):
+            labels["Engineering plastic strain"] = "plastic"
         for mode in _buckling_mode_shapes(result):
             mode_number = int(mode.get("mode_number", 0))
             load_factor = _safe_float(mode.get("load_factor"))
@@ -1794,7 +1865,12 @@ class RuntimeFEMWindow:
         if self.figure_parent is None:
             return
         self._show_figure(
-            create_runtime_fem_result_figure(self.snapshot, self.current_result, self._selected_display_mode()),
+            create_runtime_fem_result_figure(
+                self.snapshot,
+                self.current_result,
+                self._selected_display_mode(),
+                max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
+            ),
             self.figure_parent,
         )
 
@@ -1848,7 +1924,10 @@ class RuntimeFEMWindow:
             nonlinear_max_iterations=max(_safe_int(self.nonlinear_max_iterations.get(), 25), 1),
             nonlinear_tolerance=max(_safe_float(self.nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             nonlinear_layers=_nearest_nonlinear_layer_count(self.nonlinear_layers.get()),
+            deformation_scale=max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
+            custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
+            custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get()),
             plate_edge_x0_support=str(self.plate_edge_x0_support.get()),
             plate_edge_x1_support=str(self.plate_edge_x1_support.get()),
             plate_edge_y0_support=str(self.plate_edge_y0_support.get()),

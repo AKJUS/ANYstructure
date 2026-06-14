@@ -81,6 +81,8 @@ class LightweightFEMConfig:
     nonlinear_tolerance: float = 1.0e-6
     nonlinear_layers: int = 5
     custom_load_bc_enabled: bool = False
+    custom_loads_add_to_imported: bool = False
+    custom_use_nullspace_projection: bool = False
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
     plate_edge_y0_support: str = "free"
@@ -697,7 +699,7 @@ def _flat_supports(boundary_nodes: list[int], node_id, rows: int, cols: int, con
 
 def _support_constraints(choice: object, geometry: str = "flat") -> dict[str, float]:
     mode = _normalized_choice(choice, "free")
-    if mode in {"free", "none", "off"}:
+    if mode in {"free", "none", "off", "nullspace", "nullspace projection"}:
         return {}
     if mode in {"simple", "simply", "simply supported", "ss"}:
         return {"uz": 0.0}
@@ -709,6 +711,8 @@ def _support_constraints(choice: object, geometry: str = "flat") -> dict[str, fl
 
 
 def _custom_flat_supports(node_id, rows: int, cols: int, config: LightweightFEMConfig) -> list[dict[str, object]]:
+    if config.custom_use_nullspace_projection:
+        return []
     edges = (
         ("x0", [node_id(0, col) for col in range(cols)], config.plate_edge_x0_support),
         ("x1", [node_id(rows - 1, col) for col in range(cols)], config.plate_edge_x1_support),
@@ -731,7 +735,7 @@ def _custom_flat_supports(node_id, rows: int, cols: int, config: LightweightFEMC
 
 def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConfig) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
-    if mode in {"free", "none"}:
+    if mode in {"free", "none", "nullspace", "nullspace projection"}:
         return []
     if mode in {"clamped", "fixed", "fixed ends"}:
         bottom = [node_id(0, col) for col in range(cols)]
@@ -751,6 +755,8 @@ def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConf
 
 
 def _custom_cylinder_supports(lower_ring: list[int], upper_ring: list[int], config: LightweightFEMConfig) -> list[dict[str, object]]:
+    if config.custom_use_nullspace_projection:
+        return []
     supports = []
     for name, ring_nodes, choice in (
         ("lower", lower_ring, config.cylinder_lower_support),
@@ -898,9 +904,12 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             if row in (0, rows - 1) or col in (0, cols - 1)
         }
     )
-    supports = _custom_flat_supports(node_id, rows, cols, config) if config.custom_load_bc_enabled else _flat_supports(boundary_nodes, node_id, rows, cols, config)
-    supports.extend(_symmetry_supports(nodes, config))
-    supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
+    if config.custom_load_bc_enabled:
+        supports = _custom_flat_supports(node_id, rows, cols, config)
+    else:
+        supports = _flat_supports(boundary_nodes, node_id, rows, cols, config)
+        supports.extend(_symmetry_supports(nodes, config))
+        supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
         "name": "ANYstructureFlatPanelFullMesh",
         "nodes": nodes,
@@ -1118,8 +1127,9 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             supports = _custom_cylinder_supports(custom_lid_support_nodes[0], custom_lid_support_nodes[1], config)
         else:
             supports = _custom_cylinder_supports(start_ring, end_ring, config)
-    supports.extend(_symmetry_supports(nodes, config))
-    supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
+    else:
+        supports.extend(_symmetry_supports(nodes, config))
+        supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
     return {
         "name": "ANYstructureCylinderFullMesh",
         "nodes": nodes,
@@ -1169,6 +1179,28 @@ def _nodal_von_mises(model, displacements: np.ndarray) -> dict[int, float]:
             sums[node_id] = sums.get(node_id, 0.0) + value
             counts[node_id] = counts.get(node_id, 0) + 1
     return {node_id: sums[node_id] / max(counts[node_id], 1) for node_id in sums}
+
+
+def _nodal_engineering_plastic_strain(model, element_states: dict[int, object] | None) -> dict[int, float]:
+    if not element_states:
+        return {}
+    values: dict[int, float] = {}
+    for element_id, state in element_states.items():
+        element = model.mesh.get_element(int(element_id))
+        if element is None or not isinstance(state, dict) or "alpha" not in state:
+            continue
+        alpha = np.asarray(state.get("alpha"), dtype=float)
+        alpha = alpha[np.isfinite(alpha)]
+        if alpha.size == 0:
+            continue
+        # The material return-map stores equivalent true plastic strain.  Use
+        # the equivalent engineering strain for display so it is easier to
+        # compare with ordinary engineering strain values in the GUI.
+        engineering_value = float(np.expm1(max(float(np.max(alpha)), 0.0)))
+        for node_id in getattr(element, "node_ids", []):
+            node_id = int(node_id)
+            values[node_id] = max(values.get(node_id, 0.0), engineering_value)
+    return values
 
 
 def _visualization_from_full_result(
@@ -1297,6 +1329,32 @@ def _pressure_sign(config: LightweightFEMConfig) -> float:
 def _solver_type(config: LightweightFEMConfig) -> str:
     solver = _normalized_choice(config.solver_type, "direct").replace(" ", "")
     return solver if solver in {"direct", "gmres", "minres", "bicgstab"} else "direct"
+
+
+def _include_imported_loads(config: LightweightFEMConfig) -> bool:
+    return (not config.custom_load_bc_enabled) or bool(config.custom_loads_add_to_imported)
+
+
+def _custom_has_fixed_support(config: LightweightFEMConfig) -> bool:
+    choices = (
+        config.plate_edge_x0_support,
+        config.plate_edge_x1_support,
+        config.plate_edge_y0_support,
+        config.plate_edge_y1_support,
+        config.cylinder_lower_support,
+        config.cylinder_upper_support,
+    )
+    return any(_normalized_choice(choice, "free") in {"fixed", "clamped"} for choice in choices)
+
+
+def _constraint_mode(config: LightweightFEMConfig) -> str:
+    if config.custom_load_bc_enabled and config.custom_use_nullspace_projection:
+        return "nullspace"
+    if config.custom_load_bc_enabled and _custom_has_fixed_support(config):
+        return "transformation"
+    if _normalized_choice(config.boundary_condition) in {"nullspace", "nullspace projection"}:
+        return "nullspace"
+    return "auto"
 
 
 def _wants_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
@@ -1618,8 +1676,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     material_curve, material_properties = _nonlinear_curve_payload(config, geometry)
     effective_elastic_modulus = float(material_properties.get("E_pa", config.elastic_modulus_pa)) if material_properties else config.elastic_modulus_pa
     effective_yield_stress = float(material_properties.get("sigma_yield", config.yield_stress_pa)) if material_properties else config.yield_stress_pa
+    include_imported_loads = _include_imported_loads(config)
     backend_config = _full_backend.AnyStructureFEMConfig(
-        pressure_pa=abs(float(config.pressure_pa)),
+        pressure_pa=abs(float(config.pressure_pa)) if include_imported_loads else 0.0,
         pressure_sign=_pressure_sign(config),
         load_scale=float(config.load_scale),
         num_buckling_modes=int(config.num_buckling_modes),
@@ -1637,11 +1696,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     ]
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
-    if config.top_bottom_moment_nm:
+    if include_imported_loads and config.top_bottom_moment_nm:
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
-    if abs(float(config.axial_force_n or 0.0)) > 0.0:
+    if include_imported_loads and abs(float(config.axial_force_n or 0.0)) > 0.0:
         diagnostics.append("Applied balanced axial force: " + str(round(float(config.axial_force_n), 3)) + " N.")
-    if abs(float(config.enforced_displacement_m or 0.0)) > 0.0:
+    if (not config.custom_load_bc_enabled) and abs(float(config.enforced_displacement_m or 0.0)) > 0.0:
         diagnostics.append("Applied prescribed displacement constraints from the enforced displacement input.")
     if _wants_s8(config):
         diagnostics.append("Generated S8 shell elements with shared midside nodes.")
@@ -1655,6 +1714,12 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         diagnostics.append("Applied eccentric beam-shell MPC offsets for generated member beams.")
     if config.custom_load_bc_enabled:
         diagnostics.append("Using custom load and boundary-condition mode.")
+        if include_imported_loads:
+            diagnostics.append("Custom loads are added to the imported/generated pressure, axial force and end moment inputs.")
+        else:
+            diagnostics.append("Custom loads replace imported/generated pressure, axial force and end moment inputs.")
+        if config.custom_use_nullspace_projection:
+            diagnostics.append("Custom boundary condition is rigid-body nullspace projection with automatic generalized load balancing.")
     if material_properties:
         diagnostics.append(
             "Using DNV-RP-C208 material curve "
@@ -1667,12 +1732,15 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     try:
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         _apply_material_curve_to_model(model, material_curve, material_properties)
-        load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
-        _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
+        if include_imported_loads:
+            load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
+            _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
+            _add_cylinder_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
+        else:
+            load_case = _full_backend.LoadCase("custom_fem_loads")
         _add_custom_edge_loads(model, load_case, generated_geometry, config)
-        _add_cylinder_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         load_resultant = _backend_load_case_resultant(model, load_case)
-        displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode="auto")
+        displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode=_constraint_mode(config))
     except Exception as exc:
         return LightweightFEMResult(
             status="production_failed",
@@ -1702,9 +1770,14 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     prestress_summary["constraint_mode"] = str(solver_info.get("constraint_mode", ""))
     nullspace_info = solver_info.get("nullspace_info") or {}
     if solver_info.get("constraint_method") == "transformation_fixed_plus_mpc_nullspace":
+        convergence_info = solver_info.get("convergence_info") or {}
         prestress_summary["nullspace_projection"] = 1.0
-        prestress_summary["nullspace_rank"] = float((solver_info.get("convergence_info") or {}).get("nullspace_rank", nullspace_info.get("reduced_rank", 0)))
-        diagnostics.append("Linear solve used rigid-body nullspace projection because no fixed DOFs remained after MPC/fixed-DOF reduction.")
+        prestress_summary["nullspace_rank"] = float(convergence_info.get("nullspace_rank", nullspace_info.get("reduced_rank", 0)))
+        prestress_summary["relative_rigid_body_load_imbalance"] = float(convergence_info.get("relative_rigid_body_load_imbalance", 0.0) or 0.0)
+        prestress_summary["rigid_body_load_imbalance_norm"] = float(convergence_info.get("rigid_body_load_imbalance_norm", 0.0) or 0.0)
+        diagnostics.append("Linear solve used rigid-body nullspace projection for the remaining unsupported rigid-body modes.")
+        for warning in convergence_info.get("warnings", []) or []:
+            diagnostics.append(str(warning))
     else:
         prestress_summary["nullspace_projection"] = 0.0
     if material_properties:
@@ -1723,6 +1796,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     nonlinear_factor = None
     nonlinear_static_factor = None
     nonlinear_static_result = None
+    plastic_strain_by_node: dict[int, float] = {}
     if _wants_static_nonlinear_analysis(config):
         if _backend_solve_static_nonlinear is None:
             diagnostics.append("Incremental geometric/material nonlinear static solver is unavailable in this backend.")
@@ -1747,6 +1821,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
                     prestress_summary["nonlinear_static_max_plastic_strain"] = float(
                         max(step.max_equivalent_plastic_strain for step in nonlinear_static_result.steps)
                     )
+                plastic_strain_by_node = _nodal_engineering_plastic_strain(model, nonlinear_static_result.element_states)
                 diagnostics.append("Ran incremental geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
                 if nonlinear_static_result.converged:
                     displacements = np.asarray(nonlinear_static_result.displacements, dtype=float)
@@ -1803,7 +1878,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     if geometry.get("geometry") == "cylinder" and config.include_end_lids and _add_cylinder_buckling_gauge(model, generated_geometry):
         diagnostics.append("Applied buckling-only rigid-body gauge constraints to the lid center nodes.")
     buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes))
-    if not buckling_result.modes and geometry.get("geometry") == "cylinder" and abs(float(config.pressure_pa)) > 0.0:
+    if not buckling_result.modes and include_imported_loads and geometry.get("geometry") == "cylinder" and abs(float(config.pressure_pa)) > 0.0:
         pressure_states = _cylinder_pressure_prestress_states(
             model,
             float(config.pressure_pa) * float(config.load_scale),
@@ -1824,6 +1899,17 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         buckling_factors = tuple(float(mode.load_factor) for mode in buckling_result.modes)
     stress_stats = _stress_statistics_from_model(model, displacements, min(max(float(config.stress_percentile), 0.0), 100.0))
     visualization = _visualization_from_full_result(generated_geometry, model, displacements)
+    if plastic_strain_by_node:
+        plastic_visualization = _visualization_from_full_result(
+            generated_geometry,
+            model,
+            displacements,
+            scalar_by_node=plastic_strain_by_node,
+            scalar_label="equiv. engineering plastic strain [-]",
+        )
+        if plastic_visualization:
+            visualization["plastic_strain"] = plastic_visualization.get("stress_pa", ())
+            visualization["plastic_strain_label"] = "equiv. engineering plastic strain [-]"
     visualization["buckling_modes"] = _buckling_mode_visualizations(generated_geometry, model, buckling_result)
 
     if not prestress_states:
@@ -1856,7 +1942,7 @@ def _run_flat_panel(geometry: dict, config: LightweightFEMConfig) -> Lightweight
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     width = _positive(geometry.get("width_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
-    pressure = abs(float(config.pressure_pa) * float(config.load_scale))
+    pressure = abs(float(config.pressure_pa) * float(config.load_scale)) if _include_imported_loads(config) else 0.0
     short_span = min(length, width)
 
     pressure_bending = 0.125 * pressure * short_span**2 / max(thickness**2, 1.0e-12)
@@ -1898,7 +1984,7 @@ def _run_cylinder(geometry: dict, config: LightweightFEMConfig) -> LightweightFE
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
-    pressure = abs(float(config.pressure_pa) * float(config.load_scale))
+    pressure = abs(float(config.pressure_pa) * float(config.load_scale)) if _include_imported_loads(config) else 0.0
 
     hoop = pressure * radius / thickness
     axial = hoop / 2.0

@@ -265,7 +265,33 @@ def test_production_solver_runs_incremental_material_nonlinear_static_path():
     assert prestress["nonlinear_static_status"] == "completed"
     assert prestress["nonlinear_static_load_factor"] == pytest.approx(1.0)
     assert prestress["nonlinear_static_layers"] in {3.0, 5.0}
+    assert result.visualization["plastic_strain"]
+    assert result.visualization["plastic_strain_label"] == "equiv. engineering plastic strain [-]"
     assert "Ran incremental geometric/material nonlinear static solve: completed." in result.diagnostics
+
+
+def test_runtime_fem_plots_engineering_plastic_strain_and_uses_deformation_scale():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+    result = fe_runtime_solver.run_runtime_fem(
+        snapshot,
+        fe_runtime_solver.RuntimeFEMOptions(
+            pressure_pa=1000.0,
+            mesh_fidelity="coarse",
+            num_buckling_modes=1,
+            analysis_type="geom. + material nonlinear static",
+            material_model="DNV-RP-C208 steel",
+            nonlinear_max_load_factor=1.0,
+            nonlinear_steps=2,
+            nonlinear_layers=3,
+            deformation_scale=12.0,
+        ),
+    )
+
+    figure = fe_runtime_solver.create_runtime_fem_result_figure(snapshot, result, "plastic", deformation_scale=12.0)
+
+    assert result.visualization["plastic_strain"]
+    assert figure.axes[0].get_title() == "Engineering plastic strain"
+    assert any(getattr(axis, "get_ylabel", lambda: "")() == "equiv. engineering plastic strain [-]" for axis in figure.axes)
 
 
 def test_runtime_result_print_includes_dnv_curve_and_nonlinear_static_summary():
@@ -374,6 +400,8 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
     assert "self._show_preview_figure(create_runtime_fem_geometry_preview_figure(self.snapshot, self.app), preview)" in source
     assert "self.preview_canvas = FigureCanvasTkAgg(figure, master=parent)" in source
+    assert "self.figure_toolbar_frame = toolbar_frame" in source
+    assert "self.figure_toolbar_frame.destroy()" in source
     assert "redraw_after_id" in source
     assert "def _fit_preview_figure_to_canvas" in source
     assert "figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)" in source
@@ -407,7 +435,12 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "\"pressure_pa\"" in source
     assert "\"yield_stress_mpa\"" in source
     assert "self.custom_load_bc_enabled = tk.BooleanVar(value=False)" in source
+    assert "self.custom_loads_add_to_imported = tk.BooleanVar(value=False)" in source
+    assert "self.custom_use_nullspace_projection = tk.BooleanVar(value=False)" in source
+    assert "self.deformation_scale = tk.DoubleVar(value=0.0)" in source
     assert "custom = ttk.LabelFrame(future_inputs, text=\"Custom loads and boundary conditions\")" in source
+    assert "custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get())" in source
+    assert "custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get())" in source
     assert "plate_edge_x0_support=str(self.plate_edge_x0_support.get())" in source
     assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
     assert "\"nullspace_projection\"" in source
@@ -684,7 +717,62 @@ def test_custom_plate_supports_and_edge_loads_are_applied():
     assert generated["supports"][1]["name"] == "custom_plate_x1_simply_supported"
     assert result.status == "ok"
     assert result.load_resultant["force_n"][0] == pytest.approx(-1000.0)
+    assert result.load_resultant["force_n"][2] == pytest.approx(0.0)
+    assert result.prestress_summary["constraint_method"] == "transformation_fixed_plus_mpc"
+    assert result.prestress_summary["nullspace_projection"] == 0.0
     assert any("custom load and boundary-condition mode" in item.lower() for item in result.diagnostics)
+    assert any("replace imported/generated" in item.lower() for item in result.diagnostics)
+
+
+def test_custom_plate_loads_can_be_added_to_imported_pressure():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        pressure_pa=100.0,
+        custom_load_bc_enabled=True,
+        custom_loads_add_to_imported=True,
+        plate_edge_x0_support="fixed",
+        plate_edge_x1_load_n_per_m=-1000.0,
+    )
+
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert result.status == "ok"
+    assert result.load_resultant["force_n"][0] == pytest.approx(-1000.0)
+    assert result.load_resultant["force_n"][2] == pytest.approx(-200.0)
+    assert any("added to the imported/generated" in item.lower() for item in result.diagnostics)
+
+
+def test_custom_nullspace_boundary_balances_free_body_loads():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=True,
+        plate_edge_x1_load_n_per_m=-1000.0,
+    )
+
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert generated["supports"] == []
+    assert result.status == "ok"
+    assert result.prestress_summary["constraint_method"] == "transformation_fixed_plus_mpc_nullspace"
+    assert result.prestress_summary["constraint_mode"] == "nullspace"
+    assert result.prestress_summary["relative_rigid_body_load_imbalance"] > 0.0
+    assert any("automatic generalized load balancing" in item.lower() for item in result.diagnostics)
 
 
 def test_custom_cylinder_lid_support_and_edge_loads_are_applied_to_reference_node():
