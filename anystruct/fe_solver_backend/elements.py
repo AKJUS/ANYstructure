@@ -60,11 +60,37 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .plasticity import lobatto_layers, plane_stress_elastic_matrix, plane_stress_return_map
+
 if TYPE_CHECKING:
     from .fe_core import FEMesh, Material
 
 
 _SMALL = 1.0e-12
+
+
+def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cross product of two 3-vectors without np.cross dispatch overhead."""
+    return np.array(
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ],
+        dtype=float,
+    )
+
+
+def _inv2(matrix: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Inverse and determinant of a 2x2 matrix without LAPACK overhead."""
+    det = matrix[0, 0] * matrix[1, 1] - matrix[0, 1] * matrix[1, 0]
+    if abs(det) < _SMALL:
+        raise np.linalg.LinAlgError("singular 2x2 matrix")
+    inv = np.array(
+        [[matrix[1, 1], -matrix[0, 1]], [-matrix[1, 0], matrix[0, 0]]],
+        dtype=float,
+    ) / det
+    return inv, float(det)
 
 
 def _section_orientation(cross_section: Dict[str, Any]) -> Optional[np.ndarray]:
@@ -90,7 +116,7 @@ def _beam_rotation_matrix(e1: np.ndarray, orientation: Optional[np.ndarray]) -> 
         norm = float(np.linalg.norm(candidate))
         if norm > 1.0e-6 * float(np.linalg.norm(orientation)):
             e3 = candidate / norm
-            e2 = np.cross(e3, e1)
+            e2 = _cross3(e3, e1)
             e2 /= np.linalg.norm(e2)
             return np.column_stack((e1, e2, e3))
     trial = np.array([0.0, 1.0, 0.0])
@@ -98,7 +124,7 @@ def _beam_rotation_matrix(e1: np.ndarray, orientation: Optional[np.ndarray]) -> 
         trial = np.array([0.0, 0.0, 1.0])
     e2 = trial - np.dot(trial, e1) * e1
     e2 /= np.linalg.norm(e2)
-    e3 = np.cross(e1, e2)
+    e3 = _cross3(e1, e2)
     e3 /= np.linalg.norm(e3)
     return np.column_stack((e1, e2, e3))
 
@@ -152,6 +178,29 @@ class Element(ABC):
     ) -> np.ndarray:
         return np.zeros(self.total_dofs)
 
+    def compute_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Optional[Any] = None,
+        num_layers: int = 5,
+        tangent: bool = True,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
+        """Internal force vector, tangent stiffness and trial state at u_elem.
+
+        The default is linear elastic: F = K u with the constant stiffness as
+        tangent.  Elements supporting geometric and/or material nonlinearity
+        override this.  The returned state is a trial state; the incremental
+        solver commits it only when the load step converges.  With
+        ``tangent=False`` the stiffness entry may be None (used by the line
+        search, which only needs residuals).
+        """
+        K = self._stiffness_matrix
+        if K is None:
+            K = self.compute_stiffness_matrix(mesh, material)
+        return K @ u_elem, (K if tangent else None), state
+
     def compute_stresses(
         self, mesh: "FEMesh", displacements: np.ndarray, material: "Material"
     ) -> Dict[str, np.ndarray]:
@@ -172,12 +221,13 @@ class Element(ABC):
         dof_mapping = self.get_dof_mapping(mesh)
         if not dof_mapping:
             return np.zeros(self.total_dofs)
-        if max(dof_mapping) >= u.size:
+        dof_indices = np.asarray(dof_mapping, dtype=np.intp)
+        if int(dof_indices.max()) >= u.size:
             raise IndexError(
                 f"Displacement vector has length {u.size}, but element {self.element_id} "
-                f"requires global DOF {max(dof_mapping)}."
+                f"requires global DOF {int(dof_indices.max())}."
             )
-        return np.array([u[dof] for dof in dof_mapping], dtype=float)
+        return u[dof_indices]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -347,7 +397,7 @@ class ShellElement(Element):
 
     @staticmethod
     def _normalize(vector: np.ndarray) -> Tuple[np.ndarray, float]:
-        norm = float(np.linalg.norm(vector))
+        norm = float(np.sqrt(vector @ vector))
         if norm < _SMALL:
             return np.zeros(3, dtype=float), norm
         return vector / norm, norm
@@ -376,7 +426,7 @@ class ShellElement(Element):
         J = self.compute_jacobian(coords, dN_dxi, dN_deta)
         tangent_xi = J[0]
         tangent_eta = J[1]
-        e3, det_j = self._normalize(np.cross(tangent_xi, tangent_eta))
+        e3, det_j = self._normalize(_cross3(tangent_xi, tangent_eta))
         if det_j < _SMALL:
             raise ValueError(f"Shell element {self.element_id} has a near-zero surface Jacobian")
 
@@ -384,10 +434,10 @@ class ShellElement(Element):
         e1, e1_norm = self._normalize(e1_raw)
         if e1_norm < _SMALL:
             e1 = self._fallback_edge_direction(coords, e3)
-        e2, e2_norm = self._normalize(np.cross(e3, e1))
+        e2, e2_norm = self._normalize(_cross3(e3, e1))
         if e2_norm < _SMALL:
             raise ValueError(f"Shell element {self.element_id} has an invalid local y direction")
-        e1, _ = self._normalize(np.cross(e2, e3))
+        e1, _ = self._normalize(_cross3(e2, e3))
         R = np.column_stack((e1, e2, e3))
 
         J_local = np.array(
@@ -398,7 +448,7 @@ class ShellElement(Element):
             dtype=float,
         )
         try:
-            inv_j_local = np.linalg.inv(J_local)
+            inv_j_local, _ = _inv2(J_local)
         except np.linalg.LinAlgError as exc:
             raise ValueError(f"Shell element {self.element_id} has a singular local Jacobian") from exc
 
@@ -407,12 +457,11 @@ class ShellElement(Element):
         return R, dN_dx, dN_dy, det_j
 
     def _local_dof_transform(self, R: np.ndarray) -> np.ndarray:
+        n_blocks = 2 * self.num_nodes
         T = np.zeros((self.total_dofs, self.total_dofs), dtype=float)
-        Rt = R.T
-        for i in range(self.num_nodes):
-            base = i * 6
-            T[base:base + 3, base:base + 3] = Rt
-            T[base + 3:base + 6, base + 3:base + 6] = Rt
+        blocks = T.reshape(n_blocks, 3, n_blocks, 3)
+        indices = np.arange(n_blocks)
+        blocks[indices, :, indices, :] = R.T
         return T
 
     def _build_shell_b_matrices(
@@ -424,22 +473,21 @@ class ShellElement(Element):
         B_m = np.zeros((3, self.total_dofs), dtype=float)
         B_b = np.zeros((3, self.total_dofs), dtype=float)
         B_s = np.zeros((2, self.total_dofs), dtype=float)
-        for i in range(self.num_nodes):
-            b = i * 6
-            B_m[0, b + 0] = dN_dx[i]
-            B_m[1, b + 1] = dN_dy[i]
-            B_m[2, b + 0] = dN_dy[i]
-            B_m[2, b + 1] = dN_dx[i]
 
-            B_b[0, b + 4] = dN_dx[i]
-            B_b[1, b + 3] = -dN_dy[i]
-            B_b[2, b + 4] = dN_dy[i]
-            B_b[2, b + 3] = -dN_dx[i]
+        B_m[0, 0::6] = dN_dx
+        B_m[1, 1::6] = dN_dy
+        B_m[2, 0::6] = dN_dy
+        B_m[2, 1::6] = dN_dx
 
-            B_s[0, b + 2] = dN_dx[i]
-            B_s[0, b + 4] = N[i]
-            B_s[1, b + 2] = dN_dy[i]
-            B_s[1, b + 3] = -N[i]
+        B_b[0, 4::6] = dN_dx
+        B_b[1, 3::6] = -dN_dy
+        B_b[2, 4::6] = dN_dy
+        B_b[2, 3::6] = -dN_dx
+
+        B_s[0, 2::6] = dN_dx
+        B_s[0, 4::6] = N
+        B_s[1, 2::6] = dN_dy
+        B_s[1, 3::6] = -N
         return B_m, B_b, B_s
 
     def _build_drilling_b_matrix(
@@ -455,11 +503,9 @@ class ShellElement(Element):
         physical rigid rotation about the shell normal has exactly zero energy.
         """
         B_d = np.zeros((1, self.total_dofs), dtype=float)
-        for i in range(self.num_nodes):
-            b = i * 6
-            B_d[0, b + 0] = 0.5 * dN_dy[i]
-            B_d[0, b + 1] = -0.5 * dN_dx[i]
-            B_d[0, b + 5] = N[i]
+        B_d[0, 0::6] = 0.5 * dN_dy
+        B_d[0, 1::6] = -0.5 * dN_dx
+        B_d[0, 5::6] = N
         return B_d
 
     # MITC4 assumed natural transverse shear (4-node elements only).
@@ -493,14 +539,12 @@ class ShellElement(Element):
             y_eta = float(dN_deta @ planar[:, 1])
             row_xi = np.zeros(self.total_dofs, dtype=float)
             row_eta = np.zeros(self.total_dofs, dtype=float)
-            for i in range(self.num_nodes):
-                b = i * 6
-                row_xi[b + 2] = dN_dxi[i]
-                row_xi[b + 3] = -N[i] * y_xi
-                row_xi[b + 4] = N[i] * x_xi
-                row_eta[b + 2] = dN_deta[i]
-                row_eta[b + 3] = -N[i] * y_eta
-                row_eta[b + 4] = N[i] * x_eta
+            row_xi[2::6] = dN_dxi
+            row_xi[3::6] = -N * y_xi
+            row_xi[4::6] = N * x_xi
+            row_eta[2::6] = dN_deta
+            row_eta[3::6] = -N * y_eta
+            row_eta[4::6] = N * x_eta
             samples[name] = (row_xi, row_eta)
         return planar, samples
 
@@ -520,16 +564,17 @@ class ShellElement(Element):
             ],
             dtype=float,
         )
-        det_j = float(np.linalg.det(J2))
-        if abs(det_j) < _SMALL:
-            raise ValueError(f"Shell element {self.element_id} has a singular in-plane Jacobian")
+        try:
+            inv_j2, det_j = _inv2(J2)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(f"Shell element {self.element_id} has a singular in-plane Jacobian") from exc
         B_covariant = np.vstack(
             [
                 0.5 * (1.0 - eta) * samples["A"][0] + 0.5 * (1.0 + eta) * samples["C"][0],
                 0.5 * (1.0 - xi) * samples["D"][1] + 0.5 * (1.0 + xi) * samples["B"][1],
             ]
         )
-        return np.linalg.inv(J2) @ B_covariant, det_j
+        return inv_j2 @ B_covariant, det_j
 
     def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
         coords = self.get_node_coordinates(mesh)
@@ -591,13 +636,12 @@ class ShellElement(Element):
             R, _, _, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
             T = self._local_dof_transform(R)
             M_local = np.zeros_like(M)
-            for i in range(self.num_nodes):
-                for j in range(self.num_nodes):
-                    translational = N[i] * N[j] * rho * h * det_j * weight
-                    rotational = N[i] * N[j] * rho * h**3 / 12.0 * det_j * weight
-                    for d in range(3):
-                        M_local[i * 6 + d, j * 6 + d] += translational
-                        M_local[i * 6 + 3 + d, j * 6 + 3 + d] += rotational
+            outer_n = np.outer(N, N) * det_j * weight
+            translational = rho * h * outer_n
+            rotational = rho * h**3 / 12.0 * outer_n
+            for d in range(3):
+                M_local[d::6, d::6] += translational
+                M_local[3 + d::6, 3 + d::6] += rotational
             M += T.T @ M_local @ T
         self._mass_matrix = M
         return M
@@ -663,14 +707,210 @@ class ShellElement(Element):
             R, dN_dx, dN_dy, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
             T = self._local_dof_transform(R)
             G = np.zeros((2, self.total_dofs), dtype=float)
-            for i in range(self.num_nodes):
-                base = i * 6
-                G[0, base + 2] = dN_dx[i]
-                G[1, base + 2] = dN_dy[i]
+            G[0, 2::6] = dN_dx
+            G[1, 2::6] = dN_dy
             N_matrix = np.array([[Nx, Nxy], [Nxy, Ny]], dtype=float)
             KG_local = (G.T @ N_matrix @ G) * det_j * float(weight)
             KG += T.T @ KG_local @ T
         return KG
+
+    # ------------------------------------------------------------------
+    # Incremental nonlinear response: total-Lagrangian von Karman membrane
+    # kinematics in the flat-facet centre frame, layered J2 plane-stress
+    # plasticity through the thickness, elastic transverse shear (MITC4 for
+    # 4-node, reduced for 8-node) and elastic drilling stabilization.
+    # ------------------------------------------------------------------
+
+    def _nonlinear_geometry(self, mesh: "FEMesh") -> Dict[str, Any]:
+        """Reference-configuration data, computed once per element."""
+        cache = getattr(self, "_nl_cache", None)
+        if cache is not None:
+            return cache
+        coords = self.get_node_coordinates(mesh)
+        R0 = self._center_frame(coords)
+        T0 = self._local_dof_transform(R0)
+        planar = coords @ R0[:, :2]
+
+        gp_data = []
+        for (xi, eta), weight in zip(self.gauss_points, self.gauss_weights):
+            N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
+            J2 = np.array(
+                [
+                    [float(dN_dxi @ planar[:, 0]), float(dN_dxi @ planar[:, 1])],
+                    [float(dN_deta @ planar[:, 0]), float(dN_deta @ planar[:, 1])],
+                ],
+                dtype=float,
+            )
+            inv_j2, det_j = _inv2(J2)
+            dN_dx = inv_j2[0, 0] * dN_dxi + inv_j2[0, 1] * dN_deta
+            dN_dy = inv_j2[1, 0] * dN_dxi + inv_j2[1, 1] * dN_deta
+            B_m, B_b, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
+            B_d = self._build_drilling_b_matrix(N, dN_dx, dN_dy)
+            Gw = np.zeros((2, self.total_dofs), dtype=float)
+            Gw[0, 2::6] = dN_dx
+            Gw[1, 2::6] = dN_dy
+            gp_data.append(
+                {
+                    "B_m": B_m,
+                    "B_b": B_b,
+                    "B_d": B_d,
+                    "Gw": Gw,
+                    "detw": abs(det_j) * float(weight),
+                }
+            )
+
+        shear_data = []
+        if self._is_4node:
+            _, samples = self._mitc4_shear_samples(coords, R0)
+            for (xi, eta), weight in zip(self.GAUSS_POINTS_2x2, self.GAUSS_WEIGHTS_2x2):
+                B_s, det_j = self._mitc4_shear_b_matrix(planar, samples, float(xi), float(eta))
+                shear_data.append({"B_s": B_s, "detw": abs(det_j) * float(weight)})
+        else:
+            for (xi, eta), weight in zip(self.shear_gauss_points, self.shear_gauss_weights):
+                N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
+                J2 = np.array(
+                    [
+                        [float(dN_dxi @ planar[:, 0]), float(dN_dxi @ planar[:, 1])],
+                        [float(dN_deta @ planar[:, 0]), float(dN_deta @ planar[:, 1])],
+                    ],
+                    dtype=float,
+                )
+                inv_j2, det_j = _inv2(J2)
+                dN_dx = inv_j2[0, 0] * dN_dxi + inv_j2[0, 1] * dN_deta
+                dN_dy = inv_j2[1, 0] * dN_dxi + inv_j2[1, 1] * dN_deta
+                _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
+                shear_data.append({"B_s": B_s, "detw": abs(det_j) * float(weight)})
+
+        cache = {"T0": T0, "gp": gp_data, "shear": shear_data}
+        self._nl_cache = cache
+        return cache
+
+    def init_nonlinear_state(self, num_layers: int) -> Dict[str, np.ndarray]:
+        n_points = len(self.gauss_points) * num_layers
+        return {
+            "plastic_strain": np.zeros((n_points, 3), dtype=float),
+            "alpha": np.zeros(n_points, dtype=float),
+        }
+
+    def compute_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Optional[Any] = None,
+        num_layers: int = 5,
+        tangent: bool = True,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
+        cache = self._nonlinear_geometry(mesh)
+        T0 = cache["T0"]
+        u_loc = T0 @ np.asarray(u_elem, dtype=float)
+
+        E = material.elastic_modulus
+        nu = material.poisson_ratio
+        G_mod = material.shear_modulus
+        h = self.thickness
+        curve = getattr(material, "hardening_curve", None)
+        C_el = plane_stress_elastic_matrix(E, nu)
+        D_shear = G_mod * (5.0 / 6.0) * h * np.eye(2, dtype=float)
+        drilling_stiffness = C_el[0, 0] * h * 1.0e-6
+
+        n_gp = len(cache["gp"])
+        z_layers, w_layers = lobatto_layers(num_layers, h)
+
+        if state is None:
+            state = self.init_nonlinear_state(num_layers)
+
+        # Membrane and bending strains at every integration point.
+        memb_strain = np.zeros((n_gp, 3), dtype=float)
+        curvature = np.zeros((n_gp, 3), dtype=float)
+        B_eff_list = []
+        theta_list = []
+        for g, gp in enumerate(cache["gp"]):
+            theta = gp["Gw"] @ u_loc  # (2,) transverse deflection gradients
+            B_nl = np.vstack(
+                [
+                    theta[0] * gp["Gw"][0],
+                    theta[1] * gp["Gw"][1],
+                    theta[0] * gp["Gw"][1] + theta[1] * gp["Gw"][0],
+                ]
+            )
+            B_eff = gp["B_m"] + B_nl
+            memb_strain[g] = gp["B_m"] @ u_loc + np.array(
+                [0.5 * theta[0] ** 2, 0.5 * theta[1] ** 2, theta[0] * theta[1]]
+            )
+            curvature[g] = gp["B_b"] @ u_loc
+            B_eff_list.append(B_eff)
+            theta_list.append(theta)
+
+        if curve is None:
+            # Elastic shortcut: resultants and integrated moduli in closed form.
+            trial_state = state
+            N_res = memb_strain @ (h * C_el).T
+            M_res = curvature @ (h**3 / 12.0 * C_el).T
+            C0 = np.broadcast_to(h * C_el, (n_gp, 3, 3))
+            C1 = np.zeros((n_gp, 3, 3), dtype=float)
+            C2 = np.broadcast_to(h**3 / 12.0 * C_el, (n_gp, 3, 3))
+        else:
+            # Layer strains for all (gp, layer) points at once, then one
+            # vectorized return-map call for the whole element.
+            layer_strain = (
+                memb_strain[:, None, :] + z_layers[None, :, None] * curvature[:, None, :]
+            ).reshape(n_gp * num_layers, 3)
+            sigma, C_tan, ep_new, alpha_new = plane_stress_return_map(
+                layer_strain,
+                state["plastic_strain"],
+                state["alpha"],
+                E,
+                nu,
+                curve,
+            )
+            trial_state = {"plastic_strain": ep_new, "alpha": alpha_new}
+
+            sigma = sigma.reshape(n_gp, num_layers, 3)
+            C_tan = C_tan.reshape(n_gp, num_layers, 3, 3)
+
+            # Through-thickness resultants and integrated tangent moduli.
+            N_res = np.einsum("l,gli->gi", w_layers, sigma)
+            M_res = np.einsum("l,l,gli->gi", w_layers, z_layers, sigma)
+            C0 = np.einsum("l,glij->gij", w_layers, C_tan)
+            C1 = np.einsum("l,l,glij->gij", w_layers, z_layers, C_tan)
+            C2 = np.einsum("l,l,l,glij->gij", w_layers, z_layers, z_layers, C_tan)
+
+        n_dof = self.total_dofs
+        F_loc = np.zeros(n_dof, dtype=float)
+        K_loc = np.zeros((n_dof, n_dof), dtype=float) if tangent else None
+        for g, gp in enumerate(cache["gp"]):
+            detw = gp["detw"]
+            B_eff = B_eff_list[g]
+            B_b = gp["B_b"]
+            B_d = gp["B_d"]
+            F_loc += (B_eff.T @ N_res[g] + B_b.T @ M_res[g]) * detw
+            F_loc += B_d.T @ (drilling_stiffness * (B_d @ u_loc)) * detw
+            if not tangent:
+                continue
+            K_loc += (B_eff.T @ C0[g] @ B_eff + B_b.T @ C2[g] @ B_b) * detw
+            if curve is not None:
+                coupling = B_eff.T @ C1[g] @ B_b
+                K_loc += (coupling + coupling.T) * detw
+            # Geometric (initial stress) stiffness from current membrane
+            # resultants; tension-positive, so tension stiffens.
+            N_mat = np.array(
+                [[N_res[g, 0], N_res[g, 2]], [N_res[g, 2], N_res[g, 1]]], dtype=float
+            )
+            K_loc += gp["Gw"].T @ N_mat @ gp["Gw"] * detw
+            # Elastic drilling stabilization.
+            K_loc += B_d.T @ (drilling_stiffness * B_d) * detw
+
+        for sh in cache["shear"]:
+            B_s = sh["B_s"]
+            K_s = B_s.T @ D_shear @ B_s * sh["detw"]
+            F_loc += K_s @ u_loc
+            if tangent:
+                K_loc += K_s
+
+        if not tangent:
+            return T0.T @ F_loc, None, trial_state
+        return T0.T @ F_loc, T0.T @ K_loc @ T0, trial_state
 
     def compute_stresses(
         self, mesh: "FEMesh", displacements: np.ndarray, material: "Material"
@@ -967,6 +1207,69 @@ class BeamElement(Element):
 
         return T.T @ K_geo @ T
 
+    def compute_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Optional[Any] = None,
+        num_layers: int = 5,
+        tangent: bool = True,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
+        """Elastic beam-column response with von Karman axial coupling.
+
+        The axial strain includes the transverse-displacement rotation terms
+
+            eps = (u2-u1)/L + ((v2-v1)^2 + (w2-w1)^2) / (2 L^2)
+
+        which gives the P-delta string effect consistently (internal force
+        and tangent from the same potential).  Bending, shear and torsion
+        remain linear elastic; material plasticity for beams is not part of
+        this formulation.
+        """
+        cache = getattr(self, "_nl_cache", None)
+        if cache is None:
+            coords = self.get_node_coordinates(mesh)
+            L, T = self._beam_frame_and_transform(coords)
+            K_global = self.compute_stiffness_matrix(mesh, material)
+            K_loc = T @ K_global @ T.T
+            # Remove the linear axial block; the von Karman axial response
+            # replaces it entirely.
+            for i in (0, 6):
+                K_loc[i, :] = 0.0
+                K_loc[:, i] = 0.0
+            cache = {"L": L, "T": T, "K_noax": K_loc, "EA": material.elastic_modulus * self._A}
+            self._nl_cache = cache
+
+        L = cache["L"]
+        T = cache["T"]
+        EA = cache["EA"]
+        u_loc = T @ np.asarray(u_elem, dtype=float)
+
+        du = u_loc[6] - u_loc[0]
+        dv = u_loc[7] - u_loc[1]
+        dw = u_loc[8] - u_loc[2]
+        eps = du / L + (dv**2 + dw**2) / (2.0 * L**2)
+        N_force = EA * eps
+
+        d_eps = np.zeros(12, dtype=float)
+        d_eps[0], d_eps[6] = -1.0 / L, 1.0 / L
+        d_eps[1], d_eps[7] = -dv / L**2, dv / L**2
+        d_eps[2], d_eps[8] = -dw / L**2, dw / L**2
+
+        F_loc = cache["K_noax"] @ u_loc + N_force * L * d_eps
+        if not tangent:
+            return T.T @ F_loc, None, state
+        K_loc = cache["K_noax"] + EA * L * np.outer(d_eps, d_eps)
+        string = N_force / L
+        for a, b in ((1, 7), (2, 8)):
+            K_loc[a, a] += string
+            K_loc[b, b] += string
+            K_loc[a, b] -= string
+            K_loc[b, a] -= string
+
+        return T.T @ F_loc, T.T @ K_loc @ T, state
+
     def _end_displacements(self, u_local: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Local DOF vectors of the two geometric end nodes."""
         return u_local[0:6], u_local[6:12]
@@ -1044,6 +1347,21 @@ class QuadraticBeamElement(BeamElement):
         # end-difference over the full length equals the quadratic shape
         # function derivative evaluated at the element centre.
         return u_local[0:6], u_local[12:18]
+
+    def compute_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Optional[Any] = None,
+        num_layers: int = 5,
+        tangent: bool = True,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
+        # The 2-node beam-column formulation does not apply to the 3-node
+        # topology; fall back to the linear elastic response.
+        return Element.compute_nonlinear_response(
+            self, mesh, material, u_elem, state, num_layers, tangent
+        )
 
     @property
     def num_nodes(self) -> int:

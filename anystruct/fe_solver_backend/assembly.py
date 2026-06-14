@@ -37,6 +37,8 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import bicgstab, gmres, minres, spsolve
 
+from .matrix_assembly import _scatter_element_matrix, _triplets_to_csr
+
 if TYPE_CHECKING:
     from .boundary import LoadCase
     from .fe_core import FEModel, FEMesh
@@ -57,9 +59,13 @@ def assemble_system(
     dof_manager = mesh.dof_manager
     total_dofs = dof_manager.total_dofs
 
-    K_global = sparse.lil_matrix((total_dofs, total_dofs), dtype=float)
-    M_global = sparse.lil_matrix((total_dofs, total_dofs), dtype=float) if include_mass else None
     F_global = np.zeros(total_dofs, dtype=float)
+    k_rows: List[np.ndarray] = []
+    k_cols: List[np.ndarray] = []
+    k_data: List[np.ndarray] = []
+    m_rows: List[np.ndarray] = []
+    m_cols: List[np.ndarray] = []
+    m_data: List[np.ndarray] = []
 
     assembly_info: Dict[str, Any] = {
         "num_elements": 0,
@@ -74,20 +80,16 @@ def assemble_system(
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
-        dof_mapping = element.get_dof_mapping(mesh)
-        if not dof_mapping:
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
             continue
 
-        K_elem = element.compute_stiffness_matrix(mesh, material)
-        for i, global_i in enumerate(dof_mapping):
-            for j, global_j in enumerate(dof_mapping):
-                K_global[global_i, global_j] += K_elem[i, j]
+        K_elem = np.asarray(element.compute_stiffness_matrix(mesh, material), dtype=float)
+        _scatter_element_matrix(K_elem, dof_mapping, k_rows, k_cols, k_data)
 
         if include_mass:
-            M_elem = element.compute_mass_matrix(mesh, material)
-            for i, global_i in enumerate(dof_mapping):
-                for j, global_j in enumerate(dof_mapping):
-                    M_global[global_i, global_j] += M_elem[i, j]
+            M_elem = np.asarray(element.compute_mass_matrix(mesh, material), dtype=float)
+            _scatter_element_matrix(M_elem, dof_mapping, m_rows, m_cols, m_data)
 
         assembly_info["element_times"][elem_id] = time.time() - elem_start
         assembly_info["num_elements"] += 1
@@ -96,16 +98,18 @@ def assemble_system(
         F_global = load_case.get_load_vector(mesh, dof_manager, model.get_material)
 
     assembly_info["assembly_time"] = time.time() - start_time
-    if M_global is not None:
-        assembly_info["mass_matrix"] = M_global.tocsr()
-    return K_global.tocsr(), F_global, assembly_info
+    if include_mass:
+        assembly_info["mass_matrix"] = _triplets_to_csr(m_rows, m_cols, m_data, total_dofs)
+    return _triplets_to_csr(k_rows, k_cols, k_data, total_dofs), F_global, assembly_info
 
 
 def assemble_mass_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
     """Assemble the global mass matrix without mixing it into stiffness."""
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
-    M_global = sparse.lil_matrix((total_dofs, total_dofs), dtype=float)
+    m_rows: List[np.ndarray] = []
+    m_cols: List[np.ndarray] = []
+    m_data: List[np.ndarray] = []
     info: Dict[str, Any] = {
         "num_elements": 0,
         "num_nodes": mesh.num_nodes,
@@ -118,20 +122,18 @@ def assemble_mass_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str,
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
-        dof_mapping = element.get_dof_mapping(mesh)
-        if not dof_mapping:
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
             continue
 
-        M_elem = element.compute_mass_matrix(mesh, material)
-        for i, global_i in enumerate(dof_mapping):
-            for j, global_j in enumerate(dof_mapping):
-                M_global[global_i, global_j] += M_elem[i, j]
+        M_elem = np.asarray(element.compute_mass_matrix(mesh, material), dtype=float)
+        _scatter_element_matrix(M_elem, dof_mapping, m_rows, m_cols, m_data)
 
         info["element_times"][elem_id] = time.time() - elem_start
         info["num_elements"] += 1
 
     info["assembly_time"] = time.time() - start_time
-    return M_global.tocsr(), info
+    return _triplets_to_csr(m_rows, m_cols, m_data, total_dofs), info
 
 
 def _constraint_value_map(model: "FEModel") -> Dict[int, float]:
@@ -474,7 +476,7 @@ def solve_linear(
     mode = (constraint_mode or "auto").strip().lower()
     if mode not in {"auto", "transformation", "nullspace"}:
         raise ValueError(f"Unknown constraint_mode '{constraint_mode}'. Use auto, transformation or nullspace.")
-    use_nullspace = mode == "nullspace" or (mode == "auto" and int(constraint_info["num_fixed_dofs"]) == 0 and Q.shape[1] > 0)
+    use_nullspace = mode == "nullspace" or (mode == "auto" and Q.shape[1] > 0)
 
     solver_info: Dict[str, Any] = {
         "assembly": assembly_info,
@@ -571,13 +573,12 @@ def compute_internal_forces(model: "FEModel", displacements: np.ndarray) -> np.n
 
     for elem_id, element in mesh.elements.items():
         material = model.get_material(element.material_name)
-        dof_mapping = element.get_dof_mapping(mesh)
-        if not dof_mapping:
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
             continue
-        u_elem = np.array([displacements[dof] for dof in dof_mapping], dtype=float)
-        F_elem = element.compute_internal_forces(mesh, u_elem, material)
-        for i, global_dof in enumerate(dof_mapping):
-            F_int[global_dof] += F_elem[i]
+        u_elem = displacements[dof_mapping]
+        F_elem = np.asarray(element.compute_internal_forces(mesh, u_elem, material), dtype=float)
+        np.add.at(F_int, dof_mapping, F_elem)
     return F_int
 
 
@@ -610,17 +611,14 @@ def compute_stresses(model: "FEModel", displacements: np.ndarray) -> Dict[int, D
     """Compute stresses for all elements."""
     mesh = model.mesh
     stresses: Dict[int, Dict[str, np.ndarray]] = {}
+    displacements = np.asarray(displacements, dtype=float)
     for elem_id, element in mesh.elements.items():
         material = model.get_material(element.material_name)
-        dof_mapping = element.get_dof_mapping(mesh)
-        if not dof_mapping:
-            continue
-        max_dof = max(dof_mapping)
-        if max_dof >= len(displacements):
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0 or int(dof_mapping.max()) >= displacements.size:
             continue
         try:
-            u_elem = np.array([displacements[dof] for dof in dof_mapping], dtype=float)
-            stresses[elem_id] = element.compute_stresses(mesh, u_elem, material)
+            stresses[elem_id] = element.compute_stresses(mesh, displacements[dof_mapping], material)
         except (IndexError, ValueError):
             continue
     return stresses
@@ -628,14 +626,19 @@ def compute_stresses(model: "FEModel", displacements: np.ndarray) -> Dict[int, D
 
 def extract_node_displacements(displacements: np.ndarray, mesh: "FEMesh") -> Dict[int, np.ndarray]:
     """Extract displacements for each node from the global vector."""
-    return {node_id: np.array([displacements[dof] for dof in node.dofs], dtype=float) for node_id, node in mesh.nodes.items()}
+    displacements = np.asarray(displacements, dtype=float)
+    return {
+        node_id: displacements[np.asarray(node.dofs, dtype=np.intp)]
+        for node_id, node in mesh.nodes.items()
+    }
 
 
 def extract_element_displacements(displacements: np.ndarray, mesh: "FEMesh") -> Dict[int, np.ndarray]:
     """Extract element displacement vectors."""
+    displacements = np.asarray(displacements, dtype=float)
     elem_displacements: Dict[int, np.ndarray] = {}
     for elem_id, element in mesh.elements.items():
-        dof_mapping = element.get_dof_mapping(mesh)
-        if dof_mapping:
-            elem_displacements[elem_id] = np.array([displacements[dof] for dof in dof_mapping], dtype=float)
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size:
+            elem_displacements[elem_id] = displacements[dof_mapping]
     return elem_displacements

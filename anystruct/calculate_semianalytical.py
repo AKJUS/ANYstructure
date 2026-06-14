@@ -305,7 +305,7 @@ class MembraneField:
     thickness: float
     coupling: np.ndarray
     imperfection_offset: np.ndarray
-    energy_coefficient: np.ndarray
+    energy_matrix: np.ndarray
     sigma_x_grid: np.ndarray
     sigma_y_grid: np.ndarray
     tau_grid: np.ndarray
@@ -2180,6 +2180,110 @@ def _mode_shear_geometric_integral(
     )
 
 
+_PARITY_COS_COS = 0
+_PARITY_COS_SIN = 1
+
+
+def _half_range_cos_sin_integral(cos_count: int, sin_count: int, span: float) -> float:
+    """Return ``int_0^L cos(nc pi y / L) sin(ns pi y / L) dy`` exactly."""
+
+    if sin_count == 0 or cos_count == sin_count or (cos_count + sin_count) % 2 == 0:
+        return 0.0
+    return (
+        2.0
+        * span
+        * sin_count
+        / (math.pi * (sin_count * sin_count - cos_count * cos_count))
+    )
+
+
+def _membrane_energy_matrix(
+    keys: Sequence[tuple[int, int, int]],
+    length: float,
+    width: float,
+    thickness: float,
+    elastic_modulus: float,
+    poisson_ratio: float,
+) -> np.ndarray:
+    """Return the exact membrane-energy Gram matrix over the Airy harmonics.
+
+    Each harmonic carries the unit-amplitude stress field of its particular
+    solution.  Same-parity harmonics are orthogonal unless identical, while
+    cos*cos and cos*sin harmonics couple in the energy whenever they share the
+    x harmonic and their y harmonic counts have an odd sum, through the exact
+    half-range integrals.  ``U = A^T M A / 2`` then replaces the diagonal
+    coefficient form without approximation.
+    """
+
+    count = len(keys)
+    matrix = np.zeros((count, count))
+    p_waves = [key[0] * math.pi / length for key in keys]
+    q_waves = [key[1] * math.pi / width for key in keys]
+    inverse_biharmonic = [
+        1.0 / max((p * p + q * q) ** 2, EPS)
+        for p, q in zip(p_waves, q_waves)
+    ]
+    sigma_x_amp = [
+        elastic_modulus * q * q * inv for q, inv in zip(q_waves, inverse_biharmonic)
+    ]
+    sigma_y_amp = [
+        elastic_modulus * p * p * inv for p, inv in zip(p_waves, inverse_biharmonic)
+    ]
+    tau_amp = [
+        elastic_modulus
+        * p
+        * q
+        * inv
+        * (1.0 if key[2] == _PARITY_COS_COS else -1.0)
+        for key, p, q, inv in zip(keys, p_waves, q_waves, inverse_biharmonic)
+    ]
+
+    for h in range(count):
+        p_h, q_h, parity_h = keys[h]
+        for k in range(h, count):
+            p_k, q_k, parity_k = keys[k]
+            if p_h != p_k:
+                continue
+            # x integrals over [0, length]
+            ix_cos = length if p_h == 0 else 0.5 * length
+            ix_sin = 0.0 if p_h == 0 else 0.5 * length
+            # y integrals over [0, width] for the sigma (Y1) and tau (Y2)
+            # shape pairs.
+            if parity_h == parity_k:
+                if q_h != q_k:
+                    continue
+                if parity_h == _PARITY_COS_COS:
+                    iy_sigma = width if q_h == 0 else 0.5 * width
+                    iy_tau = 0.0 if q_h == 0 else 0.5 * width
+                else:
+                    iy_sigma = 0.5 * width
+                    iy_tau = 0.5 * width
+            else:
+                if parity_h == _PARITY_COS_COS:
+                    cos_q, sin_q = q_h, q_k
+                else:
+                    cos_q, sin_q = q_k, q_h
+                # sigma shapes: cos(cos_q) * sin(sin_q); tau shapes:
+                # sin(cos-parity q) * cos(sin-parity q).
+                iy_sigma = _half_range_cos_sin_integral(cos_q, sin_q, width)
+                iy_tau = _half_range_cos_sin_integral(sin_q, cos_q, width)
+                if iy_sigma == 0.0 and iy_tau == 0.0:
+                    continue
+            normal_part = (
+                sigma_x_amp[h] * sigma_x_amp[k]
+                + sigma_y_amp[h] * sigma_y_amp[k]
+                - poisson_ratio
+                * (sigma_x_amp[h] * sigma_y_amp[k] + sigma_y_amp[h] * sigma_x_amp[k])
+            )
+            shear_part = 2.0 * (1.0 + poisson_ratio) * tau_amp[h] * tau_amp[k]
+            value = (thickness / elastic_modulus) * (
+                normal_part * ix_cos * iy_sigma + shear_part * ix_sin * iy_tau
+            )
+            matrix[h, k] = value
+            matrix[k, h] = value
+    return matrix
+
+
 def build_membrane_field(
     modes: Sequence[RitzMode],
     length: float,
@@ -2188,42 +2292,63 @@ def build_membrane_field(
     elastic_modulus: float,
     imperfection: Sequence[float],
     grid_fractions: Sequence[float],
+    poisson_ratio: float = 0.3,
 ) -> MembraneField | None:
-    """Build the exact second-order membrane field for the given sine modes.
+    """Build the exact second-order membrane field for the Ritz basis.
 
-    The bilinear operator ``L(phi_i, phi_j)`` expands into the four cosine
-    harmonics ``(|m_i - m_j|, |n_i - n_j|)``, ``(|m_i - m_j|, n_i + n_j)``,
-    ``(m_i + m_j, |n_i - n_j|)`` and ``(m_i + m_j, n_i + n_j)`` with closed-form
-    coefficients.  The constant ``(0, 0)`` harmonic always cancels, which is the
-    analytic statement that the classical particular solution keeps straight
-    panel edges with no induced mean stress.
+    Sine-sine modes (``n >= 1``) expand pairwise into the four cos*cos
+    harmonics ``(|m_i - m_j|, |n_i - n_j|)`` ... ``(m_i + m_j, n_i + n_j)``
+    with closed-form coefficients; the constant ``(0, 0)`` harmonic always
+    cancels, which is the analytic statement that the classical particular
+    solution keeps straight panel edges with no induced mean stress.
+
+    Cylindrical modes (``n == 0``, y-uniform ``sin(kx x)`` shapes) have
+    identically zero self-coupling (a developable surface produces no
+    second-order membrane stress), while their mixed pairs with sine-sine
+    modes expand into cos*sin harmonics
+
+        L(cyl_k, ss_i) = -kx_k^2 ky_i^2 / 4 *
+            [cos(|m_k - m_i| pi x / a) - cos((m_k + m_i) pi x / a)] *
+            sin(n_i pi y / b)
+
+    which is the analytic carrier of the local-buckling to global-deflection
+    membrane interaction.
     """
 
     count = len(modes)
     if count == 0:
         return None
-    harmonics: dict[tuple[int, int], np.ndarray] = {}
+    harmonics: dict[tuple[int, int, int], np.ndarray] = {}
+
+    def accumulate(p: int, q: int, parity: int, i: int, j: int, coefficient: float) -> None:
+        if (p == 0 and q == 0) or abs(coefficient) <= EPS:
+            return
+        matrix = harmonics.setdefault((p, q, parity), np.zeros((count, count)))
+        matrix[i, j] += coefficient
+        if i != j:
+            matrix[j, i] += coefficient
+
     for i, first in enumerate(modes):
         for j in range(i, count):
             second = modes[j]
-            cross = first.kx * first.ky * second.kx * second.ky
-            normal = 0.5 * (
-                first.kx**2 * second.ky**2 + second.kx**2 * first.ky**2
-            )
-            m_diff, m_sum = abs(first.m - second.m), first.m + second.m
-            n_diff, n_sum = abs(first.n - second.n), first.n + second.n
-            for p, q, coefficient in (
-                (m_diff, n_diff, 0.25 * (cross - normal)),
-                (m_diff, n_sum, 0.25 * (cross + normal)),
-                (m_sum, n_diff, 0.25 * (cross + normal)),
-                (m_sum, n_sum, 0.25 * (cross - normal)),
-            ):
-                if (p == 0 and q == 0) or abs(coefficient) <= EPS:
-                    continue
-                matrix = harmonics.setdefault((p, q), np.zeros((count, count)))
-                matrix[i, j] += coefficient
-                if i != j:
-                    matrix[j, i] += coefficient
+            if first.n == 0 and second.n == 0:
+                continue
+            if first.n > 0 and second.n > 0:
+                cross = first.kx * first.ky * second.kx * second.ky
+                normal = 0.5 * (
+                    first.kx**2 * second.ky**2 + second.kx**2 * first.ky**2
+                )
+                m_diff, m_sum = abs(first.m - second.m), first.m + second.m
+                n_diff, n_sum = abs(first.n - second.n), first.n + second.n
+                accumulate(m_diff, n_diff, _PARITY_COS_COS, i, j, 0.25 * (cross - normal))
+                accumulate(m_diff, n_sum, _PARITY_COS_COS, i, j, 0.25 * (cross + normal))
+                accumulate(m_sum, n_diff, _PARITY_COS_COS, i, j, 0.25 * (cross + normal))
+                accumulate(m_sum, n_sum, _PARITY_COS_COS, i, j, 0.25 * (cross - normal))
+                continue
+            cylinder, sine = (first, second) if first.n == 0 else (second, first)
+            mixed = 0.25 * cylinder.kx**2 * sine.ky**2
+            accumulate(abs(cylinder.m - sine.m), sine.n, _PARITY_COS_SIN, i, j, -mixed)
+            accumulate(cylinder.m + sine.m, sine.n, _PARITY_COS_SIN, i, j, mixed)
     if not harmonics:
         return None
 
@@ -2233,13 +2358,15 @@ def build_membrane_field(
     q_waves = np.asarray([key[1] * math.pi / width for key in keys])
     wave_sq = p_waves**2 + q_waves**2
     inverse_biharmonic = 1.0 / np.maximum(wave_sq**2, EPS)
-    area_weight = np.asarray(
-        [
-            length * width * (0.25 if key[0] > 0 and key[1] > 0 else 0.5)
-            for key in keys
-        ]
+    is_cos_cos = np.asarray([key[2] == _PARITY_COS_COS for key in keys])
+    energy_matrix = _membrane_energy_matrix(
+        keys,
+        length,
+        width,
+        thickness,
+        elastic_modulus,
+        poisson_ratio,
     )
-    energy_coefficient = elastic_modulus * thickness * area_weight * inverse_biharmonic
 
     imperfection_array = np.asarray(imperfection, dtype=float)
     if imperfection_array.shape != (count,):
@@ -2253,23 +2380,26 @@ def build_membrane_field(
     grid_y = np.tile(fractions, len(fractions))
     p_counts = np.asarray([key[0] for key in keys], dtype=float)
     q_counts = np.asarray([key[1] for key in keys], dtype=float)
-    cos_grid = np.cos(math.pi * np.outer(grid_x, p_counts)) * np.cos(
-        math.pi * np.outer(grid_y, q_counts)
-    )
-    sin_grid = np.sin(math.pi * np.outer(grid_x, p_counts)) * np.sin(
-        math.pi * np.outer(grid_y, q_counts)
-    )
+    cos_px = np.cos(math.pi * np.outer(grid_x, p_counts))
+    sin_px = np.sin(math.pi * np.outer(grid_x, p_counts))
+    cos_qy = np.cos(math.pi * np.outer(grid_y, q_counts))
+    sin_qy = np.sin(math.pi * np.outer(grid_y, q_counts))
+    sigma_shape = cos_px * np.where(is_cos_cos, cos_qy, sin_qy)
+    tau_shape = sin_px * np.where(is_cos_cos, sin_qy, -cos_qy)
     # Compression-positive stress factors: the tension-convention solution
-    # sigma_x = F_yy = -E A Q^2 / (P^2+Q^2)^2 cos cos concentrates compression
-    # at the supported edges; flipping all three components preserves the von
-    # Mises stress while matching the panel input sign convention.
-    sigma_x_grid = cos_grid * (elastic_modulus * q_waves**2 * inverse_biharmonic)
-    sigma_y_grid = cos_grid * (elastic_modulus * p_waves**2 * inverse_biharmonic)
-    tau_grid = sin_grid * (elastic_modulus * p_waves * q_waves * inverse_biharmonic)
+    # sigma_x = F_yy concentrates compression at the supported edges; flipping
+    # all three components preserves the von Mises stress while matching the
+    # panel input sign convention.  The cos*sin tau picks up the opposite sign
+    # from the y derivative of its shape, absorbed into tau_shape above.
+    sigma_x_grid = sigma_shape * (elastic_modulus * q_waves**2 * inverse_biharmonic)
+    sigma_y_grid = sigma_shape * (elastic_modulus * p_waves**2 * inverse_biharmonic)
+    tau_grid = tau_shape * (elastic_modulus * p_waves * q_waves * inverse_biharmonic)
     # Averaging sigma_x2 along a junction line y = const keeps only the p = 0
-    # harmonics; rows are the two long edges y = 0 and y = b, where the
-    # redistribution sheds plate load into the stiffeners.
-    p_zero = p_counts == 0.0
+    # cos*cos harmonics; the cos*sin harmonics vanish identically at both
+    # junction lines (sin(0) = sin(q pi) = 0).  Rows are the two long edges
+    # y = 0 and y = b, where the redistribution sheds plate load into the
+    # stiffeners.
+    p_zero = (p_counts == 0.0) & is_cos_cos
     edge_factor = elastic_modulus * q_waves**2 * inverse_biharmonic
     edge_mean_axial_factors = np.vstack(
         [
@@ -2282,7 +2412,7 @@ def build_membrane_field(
         thickness=thickness,
         coupling=coupling,
         imperfection_offset=imperfection_offset,
-        energy_coefficient=energy_coefficient,
+        energy_matrix=energy_matrix,
         sigma_x_grid=sigma_x_grid,
         sigma_y_grid=sigma_y_grid,
         tau_grid=tau_grid,
@@ -2304,7 +2434,7 @@ def _membrane_force(
     total_deflection: np.ndarray,
     amplitudes: np.ndarray,
 ) -> np.ndarray:
-    weighted = field.energy_coefficient * amplitudes
+    weighted = field.energy_matrix @ amplitudes
     return 2.0 * np.einsum("h,hij,j->i", weighted, field.coupling, total_deflection)
 
 
@@ -2314,10 +2444,9 @@ def _membrane_tangent(
     amplitudes: np.ndarray,
 ) -> np.ndarray:
     gradients = np.einsum("hij,j->hi", field.coupling, total_deflection)
-    return 4.0 * np.einsum(
-        "h,hi,hj->ij", field.energy_coefficient, gradients, gradients
-    ) + 2.0 * np.einsum(
-        "h,hij->ij", field.energy_coefficient * amplitudes, field.coupling
+    weighted = field.energy_matrix @ amplitudes
+    return 4.0 * gradients.T @ (field.energy_matrix @ gradients) + 2.0 * np.einsum(
+        "h,hij->ij", weighted, field.coupling
     )
 
 
@@ -2368,6 +2497,24 @@ def _assign_family_imperfections(
             continue
         updated[index] = replace(updated[index], imperfection=amplitude)
     return updated
+
+
+def _local_pressure_imperfection(panel: S3PanelInput) -> float:
+    """Return the pressure-induced extra local plate imperfection.
+
+    DNV-CG-0128 Sec.4.3 on the S3 element: "The lateral pressure amplifies the
+    local plate deflections between primary stiffeners and it is modelled as
+    an extra imperfection on top [of the] production model imperfection."
+    The amplitude is the linear clamped plate-strip deflection
+    ``p s^4 / (384 D)`` that follows from multi-bay continuity across the
+    stiffener lines.
+    """
+
+    if panel.pressure <= 0.0:
+        return 0.0
+    return panel.pressure * panel.width**4 / (
+        384.0 * _plate_bending_rigidity(panel)
+    )
 
 
 def build_ritz_modes(
@@ -2444,13 +2591,67 @@ def build_ritz_modes(
                 nonlinear_stiffness=max(nonlinear, EPS),
             )
         )
-    return _assign_family_imperfections(
+    # Wide-panel cylindrical global modes: y-uniform sin(kx x) shapes of the
+    # smeared stiffener/plate strip.  Their bending and geometric terms follow
+    # from the same energy integrals with the y-uniform shape (area factor
+    # a b / 2); the axial resultant acts on the full smeared section.  They
+    # carry no second-order self-stiffening (developable surface), no shear or
+    # transverse geometric drive, and no direct pressure share (the symmetric
+    # clamped pressure response keeps its dedicated mode); their interaction
+    # with the buckled plating enters exactly through the mixed cos*sin
+    # membrane harmonics.
+    cylindrical_stiffness = _with_longitudinal_stiffness_scale(
+        build_orthotropic_stiffness(panel, section, "global", config),
+        global_stiffness_scale,
+    )
+    cylinder_area_factor = panel.length * panel.width / 2.0
+    cylinder_axial_resultant = (
+        max(panel.axial_stress, 0.0) * cylindrical_stiffness.membrane_thickness
+    )
+    for m in config.longitudinal_modes:
+        kx = m * math.pi / panel.length
+        modes.append(
+            RitzMode(
+                family="global-cylindrical",
+                m=m,
+                n=0,
+                kx=kx,
+                ky=0.0,
+                linear_stiffness=cylinder_area_factor
+                * cylindrical_stiffness.d11
+                * kx**4,
+                geometric_stiffness=cylinder_area_factor
+                * cylinder_axial_resultant
+                * kx
+                * kx,
+                pressure_force=0.0,
+                imperfection=0.0,
+                nonlinear_stiffness=EPS,
+            )
+        )
+    # The stiffener production imperfection is a bow of the stiffener/plate
+    # unit (L/1000 per DNV-CG-0128 Sec.6), which is the cylindrical shape.
+    modes = _assign_family_imperfections(
         modes,
         {
             "local": config.plate_imperfection_breadth_fraction * panel.width,
-            "global": config.stiffener_imperfection_length_fraction * panel.length,
+            "global-cylindrical": config.stiffener_imperfection_length_fraction
+            * panel.length,
         },
     )
+    # The pressure-induced extra local deflection keeps its own symmetric
+    # long-wave shape: it adds to the fundamental (1,1) local mode rather than
+    # to whichever local mode is elastically critical.
+    pressure_imperfection = _local_pressure_imperfection(panel)
+    if pressure_imperfection > EPS:
+        for index, mode in enumerate(modes):
+            if mode.family == "local" and mode.m == 1 and mode.n == 1:
+                modes[index] = replace(
+                    mode,
+                    imperfection=mode.imperfection + pressure_imperfection,
+                )
+                break
+    return modes
 
 
 def _isotropic_plate_stiffness(panel: U3PanelInput | S3PanelInput) -> OrthotropicStiffness:
@@ -2616,19 +2817,27 @@ def _curvature_point(
     y: float,
     x_fraction: float,
     y_fraction: float,
-    family: str | None = None,
+    family: str | Sequence[str] | None = None,
 ) -> CurvaturePoint:
+    families = (
+        None
+        if family is None
+        else {family}
+        if isinstance(family, str)
+        else set(family)
+    )
     d2x = []
     d2y = []
     dxy = []
     for mode in modes:
-        if family is not None and mode.family != family:
+        if families is not None and mode.family not in families:
             d2x.append(0.0)
             d2y.append(0.0)
             dxy.append(0.0)
             continue
         sin_x = math.sin(mode.kx * x)
-        sin_y = math.sin(mode.ky * y)
+        # Cylindrical modes (n == 0) are uniform across the width.
+        sin_y = math.sin(mode.ky * y) if mode.n > 0 else 1.0
         cos_x = math.cos(mode.kx * x)
         cos_y = math.cos(mode.ky * y)
         d2x.append(-mode.kx * mode.kx * sin_x * sin_y)
@@ -2683,7 +2892,7 @@ def _build_ritz_runtime(
             0.5 * panel.width,
             x_fraction,
             0.5,
-            family="global",
+            family=("global", "global-cylindrical"),
         )
         for x_fraction in config.hot_spot_grid
     )
@@ -2697,6 +2906,7 @@ def _build_ritz_runtime(
         panel.elastic_modulus,
         [mode.imperfection for mode in modes],
         config.membrane_hot_spot_fractions,
+        poisson_ratio=panel.poisson_ratio,
     )
     return RitzRuntime(
         modes=modes,
@@ -3403,6 +3613,10 @@ def elastic_buckling_factors(
             capacity_factor = 1.0
             factor = raw_factor
             failure_family = "global-stiffened-strip"
+        elif mode.family == "global-cylindrical":
+            capacity_factor = 1.0
+            factor = raw_factor
+            failure_family = "global-stiffener-cutoff"
         else:
             capacity_factor = 1.0
             factor = raw_factor
@@ -3849,16 +4063,23 @@ def _mode_curvatures(
     amplitudes: Sequence[float],
     x: float,
     y: float,
-    family: str | None = None,
+    family: str | Sequence[str] | None = None,
 ) -> tuple[float, float, float]:
+    families = (
+        None
+        if family is None
+        else {family}
+        if isinstance(family, str)
+        else set(family)
+    )
     d2x = 0.0
     d2y = 0.0
     dxy = 0.0
     for mode, amplitude in zip(modes, amplitudes):
-        if family is not None and mode.family != family:
+        if families is not None and mode.family not in families:
             continue
         sin_x = math.sin(mode.kx * x)
-        sin_y = math.sin(mode.ky * y)
+        sin_y = math.sin(mode.ky * y) if mode.n > 0 else 1.0
         cos_x = math.cos(mode.kx * x)
         cos_y = math.cos(mode.ky * y)
         d2x -= amplitude * mode.kx * mode.kx * sin_x * sin_y
@@ -3876,6 +4097,18 @@ def _runtime_curvatures(point: CurvaturePoint, amplitudes: np.ndarray) -> tuple[
 
 
 def _pressure_stiffener_bending_moment(panel: S3PanelInput) -> float:
+    """Return the controlling pressure bending moment for the SI/PI branches.
+
+    The clamped continuous beam carries ``p s L^2 / 12`` at the frame support
+    and ``p s L^2 / 24`` at midspan.  The PULS stiffener limit states are not
+    always evaluated at midspan ("maximum curvature ... could be closer to
+    the ends", User Manual Sec.3.10.1) and the support is additionally
+    governed by the combined axial/bending limit state i = 6, so the reduced
+    SI/PI branches keep the larger support moment as the envelope of both
+    locations.  Sniped stiffeners are simply supported with the midspan
+    moment ``p s L^2 / 8``.
+    """
+
     if panel.pressure <= 0.0:
         return 0.0
     span_factor = 12.0 if panel.stiffener_boundary == "Cont" else 8.0
@@ -4091,6 +4324,7 @@ def _plate_membrane_field(
         panel.elastic_modulus,
         [mode.imperfection for mode in modes],
         config.membrane_hot_spot_fractions,
+        poisson_ratio=panel.poisson_ratio,
     )
 
 
@@ -4406,7 +4640,7 @@ def _stiffener_yield_ratios(
                 amplitudes,
                 panel.length * x_fraction,
                 0.5 * panel.width,
-                family="global",
+                family=("global", "global-cylindrical"),
             )
             max_curvature = max(max_curvature, abs(d2x))
     si_deflection_stress = panel.elastic_modulus * stiffener_section.top_distance * max_curvature
@@ -4419,6 +4653,10 @@ def _stiffener_yield_ratios(
     pi_moment_stress = (
         -common_moment + sniped_moments["plate_induced"]
     ) / max(stiffener_section.attached_plate_section_modulus, EPS)
+    # The Ritz response deflection stresses stay diagnostic: the guide-style
+    # Perry lateral-deformation moment (with its slenderness reduction)
+    # carries the global bending in the SI/PI branches, while the cylindrical
+    # response enters the limit states through the membrane field.
     si_bending_stress = si_moment_stress + torsional_deformation["stress"]
     pi_bending_stress = pi_moment_stress
     si_stress = _stiffener_branch_stress_ratio(
@@ -4931,6 +5169,17 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         column_factor = buckling["stiffener_column_factor"]
     global_family = buckling["modeled_failure_families"].get("global-stiffened-strip", {})
     global_elastic_cutoff_factor = _optional_float(global_family.get("critical_factor"))
+    # The Perry lateral-deformation amplification uses the governing global
+    # eigenvalue: the minimum of the orthotropic strip mode and the wide-panel
+    # (column-limit) candidate.
+    governing_global_factor = min(
+        (
+            value
+            for value in (global_elastic_cutoff_factor, column_factor)
+            if value is not None
+        ),
+        default=None,
+    )
     s3_major_yield_limit = _s3_major_yield_utilization_limit(config)
 
     previous_load = 0.0
@@ -5029,7 +5278,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             else max(max_accepted_step, attempted_step)
         )
         ultimate_yield_global_factor = (
-            global_elastic_cutoff_factor
+            governing_global_factor
             if config.include_lateral_deformation_in_ultimate_yield
             else None
         )

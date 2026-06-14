@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 from scipy import linalg
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import eigsh, spsolve
 
 from .assembly import build_constraint_transformation
 from .matrix_assembly import (
@@ -86,14 +86,33 @@ class NonlinearLimitPointResult:
         }
 
 
-def _symmetric_dense(matrix: Any) -> np.ndarray:
-    dense = np.asarray(matrix.toarray(), dtype=float)
-    return 0.5 * (dense + dense.T)
+_DENSE_EIGEN_LIMIT = 600
 
 
-def _minimum_tangent_eigenvalue(K_dense: np.ndarray, KG_dense: np.ndarray, load_factor: float) -> float:
-    tangent = K_dense - float(load_factor) * KG_dense
-    eigenvalues = linalg.eigvalsh(0.5 * (tangent + tangent.T))
+def _minimum_tangent_eigenvalue(K_red: Any, KG_red: Any, load_factor: float) -> float:
+    """Smallest eigenvalue of the symmetrized reduced tangent stiffness.
+
+    Small systems use dense ``eigvalsh``.  Larger systems use shift-invert
+    Lanczos around zero, which targets exactly the eigenvalue that drives the
+    limit-point check, with a dense fallback if the factorization fails
+    (e.g. an exactly singular tangent).
+    """
+    if load_factor != 0.0 and KG_red.nnz > 0:
+        tangent = (K_red - float(load_factor) * KG_red).tocsr()
+    else:
+        tangent = K_red.tocsr()
+    tangent = 0.5 * (tangent + tangent.T)
+    n = int(tangent.shape[0])
+    if n == 0:
+        return 0.0
+    if n > _DENSE_EIGEN_LIMIT:
+        try:
+            k = min(2, n - 1)
+            values = eigsh(tangent.tocsc(), k=k, sigma=0.0, which="LM", return_eigenvectors=False)
+            return float(np.min(values))
+        except Exception:
+            pass
+    eigenvalues = linalg.eigvalsh(tangent.toarray())
     if eigenvalues.size == 0:
         return 0.0
     return float(eigenvalues[0])
@@ -158,9 +177,7 @@ def solve_nonlinear_load_stepping(
     if K_red.shape[0] == 0:
         return NonlinearLimitPointResult([], "empty_reduced_system", u0.copy(), None, assembly_info, constraint_info)
 
-    K_dense = _symmetric_dense(K_red)
-    KG_dense = _symmetric_dense(KG_red)
-    initial_min = _minimum_tangent_eigenvalue(K_dense, KG_dense, 0.0)
+    initial_min = _minimum_tangent_eigenvalue(K_red, KG_red, 0.0)
     if initial_min <= 0.0:
         return NonlinearLimitPointResult(
             [],
@@ -209,7 +226,7 @@ def solve_nonlinear_load_stepping(
 
         u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
         residual = np.asarray(KT_red @ q - rhs, dtype=float).reshape(-1)
-        tangent_min = _minimum_tangent_eigenvalue(K_dense, KG_dense, float(load_factor))
+        tangent_min = _minimum_tangent_eigenvalue(K_red, KG_red, float(load_factor))
         stability_index = tangent_min / initial_min
 
         if tangent_min <= 0.0:

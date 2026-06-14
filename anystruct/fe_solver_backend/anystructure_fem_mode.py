@@ -23,7 +23,7 @@ from .boundary import BoundaryCondition, LoadCase
 from .buckling import BucklingResult, solve_eigenvalue_buckling
 from .elements import BeamElement, QuadraticBeamElement, ShellElement
 from .fe_core import FEModel
-from .mesh_gen import InterpolatedBeamShellMPCElement
+from .mesh_gen import InterpolatedBeamShellMPCElement, RigidLidMPCElement
 from .validation import LoadResultant, load_case_resultant
 
 
@@ -427,6 +427,7 @@ def idealize_generated_geometry_members(
             "transverses",
         )],
         "couplings": [_item_copy(item) for _source, item in _combined_collections(generated_geometry, "couplings", "mpcs")],
+        "rigid_lids": [_item_copy(item) for _source, item in _combined_collections(generated_geometry, "rigid_lids", "diaphragms")],
         "supports": [_item_copy(item) for _source, item in _combined_collections(generated_geometry, "supports", "boundary_conditions")],
         "materials": [_item_copy(item) for item in _collection(generated_geometry, "materials")],
         "idealization": {"auto_member_beams": [], "excluded_member_plates": []},
@@ -460,7 +461,7 @@ def idealize_generated_geometry_members(
         int(element_id)
         for element_id in (
             _value(item, "id", "element_id", default=None)
-            for item in output["shells"] + output["beams"] + output["couplings"]
+            for item in output["shells"] + output["beams"] + output["couplings"] + output["rigid_lids"]
         )
         if element_id is not None
     }
@@ -611,6 +612,24 @@ def build_fe_model_from_generated_geometry(
                 shell_node_ids,
                 shape_weights,
                 eccentricity,
+                material_name=config.default_material,
+            ),
+        )
+        element_count += 1
+
+    for lid in _collection(generated_geometry, "rigid_lids", "diaphragms"):
+        elem_id = int(_value(lid, "id", "element_id", default=40_000 + element_count + 1))
+        center_node_id = int(_value(lid, "center_node_id", "reference_node", "master_node"))
+        ring_node_ids = [int(node_id) for node_id in _value(lid, "ring_node_ids", "node_ids", "nodes", default=[])]
+        if len(ring_node_ids) < 3:
+            raise ValueError("invalid-rigid-lid-ring")
+        _add_model_element(
+            model,
+            elem_id,
+            RigidLidMPCElement(
+                elem_id,
+                center_node_id,
+                ring_node_ids,
                 material_name=config.default_material,
             ),
         )

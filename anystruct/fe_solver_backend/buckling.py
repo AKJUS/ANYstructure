@@ -131,44 +131,45 @@ def solve_eigenvalue_buckling(
     if KG_red.nnz == 0:
         return BucklingResult([], num_modes, "zero_geometric_stiffness", constraint_info, assembly_info)
 
-    K_dense = None
-    KG_dense = None
-    if K_red.shape[0] > dense_size_limit and K_red.shape[0] > num_modes + 2:
-        try:
-            k = min(max(num_modes * 4, num_modes + 2), K_red.shape[0] - 2)
-            eigenvalues, eigenvectors = sparse_linalg.eigs(K_red, M=KG_red, k=k, sigma=0.0)
-        except Exception:
-            K_dense = _as_symmetric_dense(K_red)
-            KG_dense = _as_symmetric_dense(KG_red)
-            eigenvalues, eigenvectors = linalg.eig(K_dense, KG_dense)
-    else:
-        K_dense = _as_symmetric_dense(K_red)
-        KG_dense = _as_symmetric_dense(KG_red)
-        eigenvalues, eigenvectors = linalg.eig(K_dense, KG_dense)
+    # Work with the inverted symmetric pencil KG phi = mu K phi where K is
+    # positive definite after constraint elimination.  The largest mu
+    # correspond to the smallest positive load factors lambda = 1/mu, and the
+    # symmetric formulation lets both the Lanczos and the dense solver work on
+    # well-posed problems (KG itself may be indefinite or singular).
+    n_red = int(K_red.shape[0])
+    K_sym = (0.5 * (K_red + K_red.T)).tocsr()
+    KG_sym = (0.5 * (KG_red + KG_red.T)).tocsr()
+    k = min(max(num_modes * 4, num_modes + 2), n_red - 1)
 
-    if K_dense is None:
+    eigenvectors = None
+    if n_red > dense_size_limit and 1 <= k < n_red:
+        try:
+            _, eigenvectors = sparse_linalg.eigsh(KG_sym.tocsc(), k=k, M=K_sym.tocsc(), which="LA")
+        except Exception:
+            eigenvectors = None
+    if eigenvectors is None:
         K_dense = _as_symmetric_dense(K_red)
-    if KG_dense is None:
         KG_dense = _as_symmetric_dense(KG_red)
+        try:
+            _, eigenvectors = linalg.eigh(KG_dense, K_dense)
+        except linalg.LinAlgError:
+            # Singular K (e.g. unconstrained model): fall back to the general
+            # nonsymmetric pencil and let the Rayleigh filtering sort it out.
+            _, eigenvectors = linalg.eig(K_dense, KG_dense)
 
     candidates: List[tuple[float, np.ndarray, float, float]] = []
-    for i, raw_value in enumerate(eigenvalues):
-        if not np.isfinite(raw_value):
-            continue
-        real_value = float(np.real(raw_value))
-        imag_value = float(np.imag(raw_value))
-        if abs(imag_value) > eigen_tolerance * max(1.0, abs(real_value)):
-            continue
-        if real_value <= eigen_tolerance:
-            continue
-
+    for i in range(eigenvectors.shape[1]):
         reduced_mode = np.asarray(np.real(eigenvectors[:, i]), dtype=float)
-        modal_geometric = float(reduced_mode @ KG_dense @ reduced_mode)
-        modal_stiffness = float(reduced_mode @ K_dense @ reduced_mode)
+        mode_norm = float(np.linalg.norm(reduced_mode))
+        if not np.isfinite(mode_norm) or mode_norm <= 0.0:
+            continue
+        reduced_mode = reduced_mode / mode_norm
+        modal_geometric = float(reduced_mode @ (KG_sym @ reduced_mode))
+        modal_stiffness = float(reduced_mode @ (K_sym @ reduced_mode))
         if modal_geometric <= eigen_tolerance or modal_stiffness <= 0.0:
             continue
         rayleigh_value = modal_stiffness / modal_geometric
-        if rayleigh_value <= eigen_tolerance:
+        if rayleigh_value <= eigen_tolerance or not np.isfinite(rayleigh_value):
             continue
         candidates.append((rayleigh_value, reduced_mode, modal_stiffness, modal_geometric))
 

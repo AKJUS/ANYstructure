@@ -98,13 +98,19 @@ class Node:
 
 @dataclass
 class Material:
-    """Material properties for FE elements."""
+    """Material properties for FE elements.
+
+    ``hardening_curve`` (e.g. a DNVC208MaterialCurve) enables material
+    nonlinearity in the incremental nonlinear solver; None keeps the
+    material linear elastic.
+    """
     name: str
     elastic_modulus: float  # Pa
     poisson_ratio: float
     density: float = 0.0  # kg/m^3
     yield_stress: float = 0.0  # Pa
-    
+    hardening_curve: Optional[object] = None
+
     @property
     def shear_modulus(self) -> float:
         """Calculate shear modulus."""
@@ -181,15 +187,17 @@ class FEModel:
                 poisson_ratio=0.3
             )
     
-    def add_material(self, name: str, elastic_modulus: float, poisson_ratio: float, 
-                    density: float = 0.0, yield_stress: float = 0.0) -> Material:
+    def add_material(self, name: str, elastic_modulus: float, poisson_ratio: float,
+                    density: float = 0.0, yield_stress: float = 0.0,
+                    hardening_curve: Optional[object] = None) -> Material:
         """Add a material to the model."""
         mat = Material(
             name=name,
             elastic_modulus=elastic_modulus,
             poisson_ratio=poisson_ratio,
             density=density,
-            yield_stress=yield_stress
+            yield_stress=yield_stress,
+            hardening_curve=hardening_curve
         )
         self.materials[name] = mat
         return mat
