@@ -83,6 +83,7 @@ class LightweightFEMConfig:
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
     custom_use_nullspace_projection: bool = False
+    custom_pressure_pa: float = 0.0
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
     plate_edge_y0_support: str = "free"
@@ -296,6 +297,25 @@ def _member_positions(total_length: float, spacing: float, fallback_midpoint: bo
     return tuple(positions)
 
 
+def _centered_member_positions(total_length: float, spacing: float, fallback_midpoint: bool = True) -> tuple[float, ...]:
+    """Return member stations with any cut length shared symmetrically."""
+
+    total_length = max(float(total_length), 1.0e-9)
+    spacing = _positive_spacing(spacing)
+    tol = max(total_length * 1.0e-9, 1.0e-9)
+    if spacing <= 0.0:
+        return (0.5 * total_length,) if fallback_midpoint else ()
+    full_count = int(math.floor(total_length / spacing))
+    if full_count <= 0:
+        return (0.5 * total_length,) if fallback_midpoint else ()
+    offset = 0.5 * (total_length - full_count * spacing)
+    if offset <= tol:
+        positions = [spacing * idx for idx in range(1, full_count)]
+    else:
+        positions = [offset + spacing * idx for idx in range(full_count + 1)]
+    return tuple(position for position in positions if tol < position < total_length - tol)
+
+
 def _index_of_break(breaks: list[float], value: float) -> int:
     return min(range(len(breaks)), key=lambda index: abs(float(breaks[index]) - float(value)))
 
@@ -420,7 +440,7 @@ def _section_or_default(section: object, thickness: float, reference: float, dep
             iz = 0.0
             j = 0.0
         if area > 0.0 and iy > 0.0 and iz > 0.0:
-            return {
+            result = {
                 "area": area,
                 "Iy": max(iy, 1.0e-12),
                 "Iz": max(iz, 1.0e-12),
@@ -428,6 +448,9 @@ def _section_or_default(section: object, thickness: float, reference: float, dep
                 "shear_factor_y": float(section.get("shear_factor_y", 5.0 / 6.0)),
                 "shear_factor_z": float(section.get("shear_factor_z", 5.0 / 6.0)),
             }
+            if section.get("label"):
+                result["label"] = str(section.get("label"))
+            return result
     return _beam_section(thickness, reference, depth_factor)
 
 
@@ -670,10 +693,72 @@ def _section_with_runtime_options(
     return result
 
 
-def _flat_supports(boundary_nodes: list[int], node_id, rows: int, cols: int, config: LightweightFEMConfig) -> list[dict[str, object]]:
+def _support_choice_from_any(value: object) -> str:
+    text = _normalized_choice(value, "simply supported")
+    if text in {"c", "cl", "clamped", "fixed", "continuous"}:
+        return "fixed"
+    if text in {"s", "ss", "simple", "simply", "simply supported", "sniped"}:
+        return "simply supported"
+    if text in {"free", "none", "off"}:
+        return "free"
+    return "simply supported"
+
+
+def _normalize_plate_edge_supports(value: object) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {key: _support_choice_from_any(value.get(key, "simply supported")) for key in ("x0", "x1", "y0", "y1")}
+    if isinstance(value, (list, tuple)) and len(value) >= 4:
+        return {key: _support_choice_from_any(value[index]) for index, key in enumerate(("x0", "x1", "y0", "y1"))}
+    return {key: "simply supported" for key in ("x0", "x1", "y0", "y1")}
+
+
+def _flat_edge_node_ids(node_id, rows: int, cols: int) -> dict[str, list[int]]:
+    return {
+        "x0": [node_id(0, col) for col in range(cols)],
+        "x1": [node_id(rows - 1, col) for col in range(cols)],
+        "y0": [node_id(row, 0) for row in range(rows)],
+        "y1": [node_id(row, cols - 1) for row in range(rows)],
+    }
+
+
+def _flat_edge_supports(edge_nodes: dict[str, list[int]], choices: dict[str, object], node_id, rows: int) -> list[dict[str, object]]:
+    supports: list[dict[str, object]] = []
+    has_inplane_restraint = False
+    for edge_name in ("x0", "x1", "y0", "y1"):
+        choice = choices.get(edge_name, "simply supported")
+        constraints = _support_constraints(choice, "flat")
+        if not constraints:
+            continue
+        has_inplane_restraint = has_inplane_restraint or any(key in constraints for key in ("ux", "uy"))
+        supports.append(
+            {
+                "name": "plate_" + edge_name + "_" + _normalized_choice(choice, "simply supported").replace(" ", "_"),
+                "node_ids": sorted(set(int(node) for node in edge_nodes[edge_name])),
+                "constraints": constraints,
+            }
+        )
+    if supports and not has_inplane_restraint:
+        supports.extend(
+            [
+                {"name": "simple_panel_inplane_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0}},
+                {"name": "simple_panel_spin_anchor", "node_ids": [node_id(rows - 1, 0)], "constraints": {"uy": 0.0}},
+            ]
+        )
+    return supports
+
+
+def _flat_supports(
+    boundary_nodes: list[int],
+    node_id,
+    rows: int,
+    cols: int,
+    config: LightweightFEMConfig,
+    geometry: dict | None = None,
+) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
-    if mode in {"free", "none"}:
-        return []
+    if mode in {"auto", "free", "none", "nullspace", "nullspace projection"}:
+        choices = _normalize_plate_edge_supports((geometry or {}).get("plate_edge_supports"))
+        return _flat_edge_supports(_flat_edge_node_ids(node_id, rows, cols), choices, node_id, rows)
     if mode in {"simply supported", "simple", "ss"}:
         return [
             {"name": "simple_panel_boundary", "node_ids": boundary_nodes, "constraints": {"uz": 0.0}},
@@ -796,12 +881,12 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         default=0.0,
     )
     stiffener_positions = (
-        _member_positions(width, stiffener_spacing, fallback_midpoint=True)
+        _centered_member_positions(width, stiffener_spacing, fallback_midpoint=True)
         if config.include_stiffeners and geometry.get("has_stiffener")
         else ()
     )
     girder_positions = (
-        _member_positions(length, girder_spacing, fallback_midpoint=True)
+        _centered_member_positions(length, girder_spacing, fallback_midpoint=True)
         if config.include_girders and geometry.get("has_girder")
         else ()
     )
@@ -907,7 +992,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     if config.custom_load_bc_enabled:
         supports = _custom_flat_supports(node_id, rows, cols, config)
     else:
-        supports = _flat_supports(boundary_nodes, node_id, rows, cols, config)
+        supports = _flat_supports(boundary_nodes, node_id, rows, cols, config, geometry)
         supports.extend(_symmetry_supports(nodes, config))
         supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
@@ -1203,6 +1288,38 @@ def _nodal_engineering_plastic_strain(model, element_states: dict[int, object] |
     return values
 
 
+def _visualization_member_lines(generated_geometry: dict, model, displacements: np.ndarray) -> tuple[dict[str, object], ...]:
+    lines: list[dict[str, object]] = []
+    if displacements is None:
+        return ()
+    for beam in generated_geometry.get("beams", []) or []:
+        node_ids = [int(node_id) for node_id in beam.get("node_ids", [])]
+        if len(node_ids) < 2:
+            continue
+        points = []
+        displaced = []
+        for node_id in node_ids[:2]:
+            node = model.mesh.get_node(node_id)
+            if node is None:
+                break
+            base = np.asarray(node.coords(), dtype=float)
+            translation = np.asarray(displacements[node.dofs[:3]], dtype=float)
+            points.append(tuple(float(value) for value in base))
+            displaced.append(tuple(float(value) for value in base + translation))
+        if len(points) != 2:
+            continue
+        lines.append(
+            {
+                "role": str(beam.get("role", "member")),
+                "node_ids": tuple(node_ids[:2]),
+                "points": tuple(points),
+                "displaced_points": tuple(displaced),
+                "section_label": str((beam.get("section") or {}).get("label", "")),
+            }
+        )
+    return tuple(lines)
+
+
 def _visualization_from_full_result(
     generated_geometry: dict,
     model,
@@ -1252,6 +1369,7 @@ def _visualization_from_full_result(
             "radial_displacement_m": tuple(radial_grid),
             "stress_pa": tuple(stress_grid),
             "scalar_label": scalar_label,
+            "member_lines": _visualization_member_lines(generated_geometry, model, displacements),
         }
 
     x_grid = []
@@ -1283,6 +1401,7 @@ def _visualization_from_full_result(
         "w_m": tuple(w_grid),
         "stress_pa": tuple(stress_grid),
         "scalar_label": scalar_label,
+        "member_lines": _visualization_member_lines(generated_geometry, model, displacements),
     }
 
 
@@ -1335,6 +1454,16 @@ def _include_imported_loads(config: LightweightFEMConfig) -> bool:
     return (not config.custom_load_bc_enabled) or bool(config.custom_loads_add_to_imported)
 
 
+def _effective_pressure_pa(config: LightweightFEMConfig) -> float:
+    imported = float(config.pressure_pa or 0.0)
+    custom = float(config.custom_pressure_pa or 0.0)
+    if not config.custom_load_bc_enabled:
+        return imported
+    if config.custom_loads_add_to_imported:
+        return imported + custom
+    return custom
+
+
 def _custom_has_fixed_support(config: LightweightFEMConfig) -> bool:
     choices = (
         config.plate_edge_x0_support,
@@ -1347,13 +1476,28 @@ def _custom_has_fixed_support(config: LightweightFEMConfig) -> bool:
     return any(_normalized_choice(choice, "free") in {"fixed", "clamped"} for choice in choices)
 
 
-def _constraint_mode(config: LightweightFEMConfig) -> str:
+def _has_custom_support(config: LightweightFEMConfig) -> bool:
+    choices = (
+        config.plate_edge_x0_support,
+        config.plate_edge_x1_support,
+        config.plate_edge_y0_support,
+        config.plate_edge_y1_support,
+        config.cylinder_lower_support,
+        config.cylinder_upper_support,
+    )
+    return any(_support_constraints(choice, "flat") for choice in choices)
+
+
+def _constraint_mode(config: LightweightFEMConfig, geometry: dict | None = None) -> str:
     if config.custom_load_bc_enabled and config.custom_use_nullspace_projection:
         return "nullspace"
-    if config.custom_load_bc_enabled and _custom_has_fixed_support(config):
+    if config.custom_load_bc_enabled and (_custom_has_fixed_support(config) or _has_custom_support(config)):
         return "transformation"
     if _normalized_choice(config.boundary_condition) in {"nullspace", "nullspace projection"}:
         return "nullspace"
+    is_flat = (geometry or {}).get("geometry") != "cylinder"
+    if is_flat and _normalized_choice(config.boundary_condition) in {"auto", "simply supported", "simple", "ss", "pinned", "pinned edges", "fixed", "clamped"}:
+        return "transformation"
     return "auto"
 
 
@@ -1571,10 +1715,30 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
     _apply_weighted_edge_load(load_case, _line_node_weights(y1_nodes, 0), np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
 
 
-def _add_cylinder_end_moments(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
+def _add_generated_end_moments(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
     moment = float(moment_nm or 0.0)
     if abs(moment) <= 0.0:
         return
+    if generated_geometry.get("plot_type") == "flat":
+        shell_node_ids = sorted({node_id for shell in generated_geometry.get("shells", []) for node_id in shell.get("node_ids", [])})
+        nodes = [model.mesh.get_node(int(node_id)) for node_id in shell_node_ids]
+        nodes = [node for node in nodes if node is not None]
+        if not nodes:
+            return
+        xs = [float(node.x) for node in nodes]
+        xmin = min(xs)
+        xmax = max(xs)
+        tol = max((xmax - xmin) * 1.0e-9, 1.0e-9)
+        left = [node for node in nodes if abs(float(node.x) - xmin) <= tol]
+        right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
+        if not left or not right:
+            return
+        for node in left:
+            load_case.add_nodal_load(int(node.id), moments=np.array([0.0, moment / len(left), 0.0], dtype=float))
+        for node in right:
+            load_case.add_nodal_load(int(node.id), moments=np.array([0.0, -moment / len(right), 0.0], dtype=float))
+        return
+
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
     top_ring = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
     if not bottom_ring or not top_ring:
@@ -1677,8 +1841,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     effective_elastic_modulus = float(material_properties.get("E_pa", config.elastic_modulus_pa)) if material_properties else config.elastic_modulus_pa
     effective_yield_stress = float(material_properties.get("sigma_yield", config.yield_stress_pa)) if material_properties else config.yield_stress_pa
     include_imported_loads = _include_imported_loads(config)
+    effective_pressure = _effective_pressure_pa(config)
     backend_config = _full_backend.AnyStructureFEMConfig(
-        pressure_pa=abs(float(config.pressure_pa)) if include_imported_loads else 0.0,
+        pressure_pa=abs(float(effective_pressure)),
         pressure_sign=_pressure_sign(config),
         load_scale=float(config.load_scale),
         num_buckling_modes=int(config.num_buckling_modes),
@@ -1696,6 +1861,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     ]
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
+    if (not config.custom_load_bc_enabled) and geometry.get("geometry") != "cylinder":
+        diagnostics.append("Applied flat-panel edge supports from line properties, defaulting to simply supported edges when unspecified.")
     if include_imported_loads and config.top_bottom_moment_nm:
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
     if include_imported_loads and abs(float(config.axial_force_n or 0.0)) > 0.0:
@@ -1718,6 +1885,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             diagnostics.append("Custom loads are added to the imported/generated pressure, axial force and end moment inputs.")
         else:
             diagnostics.append("Custom loads replace imported/generated pressure, axial force and end moment inputs.")
+        if abs(float(config.custom_pressure_pa or 0.0)) > 0.0:
+            diagnostics.append("Applied custom manual pressure: " + str(round(float(config.custom_pressure_pa), 3)) + " Pa.")
         if config.custom_use_nullspace_projection:
             diagnostics.append("Custom boundary condition is rigid-body nullspace projection with automatic generalized load balancing.")
     if material_properties:
@@ -1732,15 +1901,16 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     try:
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         _apply_material_curve_to_model(model, material_curve, material_properties)
-        if include_imported_loads:
+        if abs(float(effective_pressure)) > 0.0:
             load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
-            _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
-            _add_cylinder_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         else:
-            load_case = _full_backend.LoadCase("custom_fem_loads")
+            load_case = _full_backend.LoadCase("custom_fem_loads" if config.custom_load_bc_enabled else "anystructure_symmetric_load")
+        if include_imported_loads:
+            _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
+            _add_generated_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         _add_custom_edge_loads(model, load_case, generated_geometry, config)
         load_resultant = _backend_load_case_resultant(model, load_case)
-        displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode=_constraint_mode(config))
+        displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode=_constraint_mode(config, geometry))
     except Exception as exc:
         return LightweightFEMResult(
             status="production_failed",
@@ -1878,10 +2048,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     if geometry.get("geometry") == "cylinder" and config.include_end_lids and _add_cylinder_buckling_gauge(model, generated_geometry):
         diagnostics.append("Applied buckling-only rigid-body gauge constraints to the lid center nodes.")
     buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes))
-    if not buckling_result.modes and include_imported_loads and geometry.get("geometry") == "cylinder" and abs(float(config.pressure_pa)) > 0.0:
+    if not buckling_result.modes and geometry.get("geometry") == "cylinder" and abs(float(effective_pressure)) > 0.0:
         pressure_states = _cylinder_pressure_prestress_states(
             model,
-            float(config.pressure_pa) * float(config.load_scale),
+            float(effective_pressure) * float(config.load_scale),
             _positive(geometry.get("radius_m", generated_geometry.get("radius_m", 1.0)), 1.0),
         )
         if pressure_states:
@@ -1942,7 +2112,7 @@ def _run_flat_panel(geometry: dict, config: LightweightFEMConfig) -> Lightweight
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     width = _positive(geometry.get("width_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
-    pressure = abs(float(config.pressure_pa) * float(config.load_scale)) if _include_imported_loads(config) else 0.0
+    pressure = abs(float(_effective_pressure_pa(config)) * float(config.load_scale))
     short_span = min(length, width)
 
     pressure_bending = 0.125 * pressure * short_span**2 / max(thickness**2, 1.0e-12)
@@ -1984,7 +2154,7 @@ def _run_cylinder(geometry: dict, config: LightweightFEMConfig) -> LightweightFE
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
-    pressure = abs(float(config.pressure_pa) * float(config.load_scale)) if _include_imported_loads(config) else 0.0
+    pressure = abs(float(_effective_pressure_pa(config)) * float(config.load_scale))
 
     hoop = pressure * radius / thickness
     axial = hoop / 2.0

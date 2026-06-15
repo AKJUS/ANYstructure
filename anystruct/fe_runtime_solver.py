@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+import argparse
 import queue
 import math
 import os
@@ -89,6 +90,7 @@ class RuntimeFEMOptions:
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
     custom_use_nullspace_projection: bool = False
+    custom_pressure_pa: float = 0.0
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
     plate_edge_y0_support: str = "free"
@@ -159,6 +161,39 @@ def _mm_or_m_to_m(value: Any, default: float = 0.0) -> float:
     return number / 1000.0 if number > 1.0 else number
 
 
+def _length_input_to_m(value: Any, default: float = 0.0) -> float:
+    """Return a structural length in metres from saved-object or GUI-style values."""
+
+    number = _safe_float(value, default)
+    if number <= 0.0:
+        return default
+    return number / 1000.0 if number > 100.0 else number
+
+
+def _flat_lg_from_objects(plate: Any, stiffener: Any, girder: Any, spacing: float) -> float:
+    for obj in (girder, stiffener, plate):
+        if obj is None:
+            continue
+        value = _read_attr_or_call(obj, "get_girder_lg", "get_lg", "get_LG", "girder_lg", "lg", "LG", default=None)
+        lg = _length_input_to_m(value, 0.0)
+        if lg > 1.0e-9:
+            return lg
+    return max(4.0 * spacing, 0.8)
+
+
+def _flat_lp_from_structure(all_obj: Any, span: float, spacing: float, has_girder: bool) -> float:
+    for obj in (all_obj,):
+        if obj is None:
+            continue
+        value = _read_attr_or_call(obj, "panel_length_Lp", "_panel_length_Lp", "panel_length", "lp", "Lp", default=None)
+        lp = _length_input_to_m(value, 0.0)
+        if lp > 1.0e-9:
+            return lp
+    if has_girder:
+        return max(2.0 * span, 2.0 * spacing, 0.8)
+    return max(span, spacing, 0.8)
+
+
 def _member_section(member: Any) -> dict[str, float] | None:
     if member is None:
         return None
@@ -209,6 +244,16 @@ def _member_section(member: Any) -> dict[str, float] | None:
         "shear_factor_z": 5.0 / 6.0,
         "label": "FB" + str(round(height * 1000.0)) + "x" + str(round(thickness * 1000.0)),
     }
+
+
+def _plate_edge_supports_from_line_properties(plate: Any) -> tuple[str, str, str, str]:
+    raw = _read_attr_or_call(plate, "get_puls_up_boundary", "_puls_up_boundary", "puls_up_boundary", default=None)
+    if isinstance(raw, (list, tuple)) and raw:
+        raw = raw[0]
+    text = str(raw or "").strip().upper().replace(" ", "")
+    if len(text) < 4 or any(letter not in {"S", "C"} for letter in text[:4]):
+        return ("simply supported", "simply supported", "simply supported", "simply supported")
+    return tuple("fixed" if letter == "C" else "simply supported" for letter in text[:4])  # type: ignore[return-value]
 
 
 def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
@@ -265,15 +310,27 @@ def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
     plate = getattr(all_obj, "Plate", None)
     stiffener = getattr(all_obj, "Stiffener", None)
     girder = getattr(all_obj, "Girder", None)
+    span = _safe_float(_read_attr_or_call(plate, "get_span", "span"), 1.0)
+    spacing = _safe_float(_read_attr_or_call(plate, "get_s", default=None), 1.0)
+    has_girder = girder is not None
+    length = _flat_lp_from_structure(all_obj, span, spacing, has_girder)
+    width = _flat_lg_from_objects(plate, stiffener, girder, spacing) if has_girder else spacing
+    girder_spacing = span if has_girder else _safe_float(_read_attr_or_call(girder, "get_s", "spacing", "s", default=None), 0.0)
     return {
         "geometry": "flat panel",
-        "length_m": _safe_float(_read_attr_or_call(plate, "get_span", "span"), 1.0),
-        "width_m": _safe_float(_read_attr_or_call(plate, "get_s", default=None), 1.0),
+        "length_m": length,
+        "width_m": width,
         "thickness_m": _safe_float(_read_attr_or_call(plate, "get_pl_thk", default=None), 0.0),
         "has_stiffener": stiffener is not None,
-        "has_girder": girder is not None,
-        "stiffener_spacing_m": _safe_float(_read_attr_or_call(plate, "get_s", default=None), 0.0),
-        "girder_spacing_m": _safe_float(_read_attr_or_call(girder, "get_s", "spacing", "s", default=None), 0.0),
+        "has_girder": has_girder,
+        "stiffener_spacing_m": spacing,
+        "girder_spacing_m": girder_spacing,
+        "stiffener_span_m": span,
+        "girder_length_m": width if has_girder else 0.0,
+        "panel_length_m": length,
+        "stiffener_section": _member_section(stiffener),
+        "girder_section": _member_section(girder),
+        "plate_edge_supports": _plate_edge_supports_from_line_properties(plate),
     }
 
 
@@ -311,6 +368,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
 
     geometry = runtime_geometry_summary(snapshot)
     diagnostics = list(snapshot.diagnostics)
+    effective_pressure = float(options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
+    effective_pressure += float(options.custom_pressure_pa if options.custom_load_bc_enabled else 0.0)
     solver_config = fe_solver.LightweightFEMConfig(
         mesh_fidelity=options.mesh_fidelity,
         pressure_pa=options.pressure_pa,
@@ -347,6 +406,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         nonlinear_layers=options.nonlinear_layers,
         custom_loads_add_to_imported=options.custom_loads_add_to_imported,
         custom_use_nullspace_projection=options.custom_use_nullspace_projection,
+        custom_pressure_pa=options.custom_pressure_pa,
         custom_load_bc_enabled=options.custom_load_bc_enabled,
         plate_edge_x0_support=options.plate_edge_x0_support,
         plate_edge_x1_support=options.plate_edge_x1_support,
@@ -376,7 +436,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         **geometry,
         "line": snapshot.line_name,
         "mesh_fidelity": options.mesh_fidelity,
-        "pressure_pa": float(options.pressure_pa) * float(options.load_scale),
+        "pressure_pa": effective_pressure * float(options.load_scale),
+        "imported_pressure_pa": float(options.pressure_pa),
         "include_stiffeners": bool(options.include_stiffeners),
         "include_girders": bool(options.include_girders),
         "include_end_lids": bool(options.include_end_lids),
@@ -411,6 +472,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "custom_load_bc_enabled": bool(options.custom_load_bc_enabled),
         "custom_loads_add_to_imported": bool(options.custom_loads_add_to_imported),
         "custom_use_nullspace_projection": bool(options.custom_use_nullspace_projection),
+        "custom_pressure_pa": float(options.custom_pressure_pa),
         "plate_edge_x0_support": str(options.plate_edge_x0_support),
         "plate_edge_x1_support": str(options.plate_edge_x1_support),
         "plate_edge_y0_support": str(options.plate_edge_y0_support),
@@ -506,6 +568,39 @@ def _set_3d_axes_limits(axis: Any, x: list[list[float]], y: list[list[float]], z
         pass
 
 
+def _plot_member_lines(axis: Any, visualization: dict[str, Any], scale: float) -> None:
+    role_style = {
+        "stiffener": ("#1f2937", 1.7),
+        "girder": ("#7f1d1d", 2.2),
+    }
+    for line in visualization.get("member_lines") or ():
+        points = list(line.get("points") or ())
+        displaced = list(line.get("displaced_points") or ())
+        if len(points) < 2:
+            continue
+        plot_points = []
+        for index, point in enumerate(points[:2]):
+            try:
+                base = np.asarray(point, dtype=float)
+                moved = np.asarray(displaced[index], dtype=float) if index < len(displaced) else base
+            except Exception:
+                continue
+            plot_points.append(base + (moved - base) * float(scale))
+        if len(plot_points) != 2:
+            continue
+        role = str(line.get("role", "member")).lower()
+        color, width = role_style.get(role, ("#475569", 1.4))
+        axis.plot(
+            [plot_points[0][0], plot_points[1][0]],
+            [plot_points[0][1], plot_points[1][1]],
+            [plot_points[0][2], plot_points[1][2]],
+            color=color,
+            linewidth=width,
+            alpha=0.95,
+            solid_capstyle="round",
+        )
+
+
 def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, Any]]:
     if result is None:
         return []
@@ -584,6 +679,7 @@ def _plot_visualization_surface(
         axis.set_xlabel("x [m]")
         axis.set_ylabel("y [m]")
         axis.set_zlabel("height [m]")
+        _plot_member_lines(axis, visualization, scale)
         _set_3d_axes_limits(axis, x, y, axial)
         try:
             axis.view_init(elev=18.0, azim=-45.0)
@@ -608,6 +704,7 @@ def _plot_visualization_surface(
         axis.set_xlabel("length [m]")
         axis.set_ylabel("width [m]")
         axis.set_zlabel("w x" + str(round(scale, 1)))
+        _plot_member_lines(axis, visualization, scale)
         _set_3d_axes_limits(axis, x, y, z)
 
     axis.set_title(title)
@@ -640,37 +737,69 @@ def create_runtime_fem_result_figure(
         result_ax.set_axis_off()
     else:
         _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale)
-        result_ax.set_title("Buckling modes")
         result_ax.set_axis_off()
-        summary_lines = [
-            "status: " + result.status.replace("_", " "),
-            "solver: " + str(geometry.get("solver", "")),
-            "max disp [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
-        ]
-        for label, value in result.stress_percentiles:
-            summary_lines.append(label + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
-        result_ax.text(0.02, 0.98, "\n".join(summary_lines), transform=result_ax.transAxes,
-                       ha="left", va="top", fontsize=9)
-        if result.buckling_factors:
-            rows = [
-                [str(index), str(round(factor, 4))]
-                for index, factor in enumerate(result.buckling_factors, start=1)
+
+        if str(display_mode).startswith("mode:"):
+            result_ax.set_title("Buckling modes")
+            summary_lines = [
+                "status: " + result.status.replace("_", " "),
+                "solver: " + str(geometry.get("solver", "")),
+                "max disp [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
             ]
+            for label, value in result.stress_percentiles:
+                summary_lines.append(label + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
+            result_ax.text(0.02, 0.98, "\n".join(summary_lines), transform=result_ax.transAxes,
+                           ha="left", va="top", fontsize=9)
+            if result.buckling_factors:
+                rows = [
+                    [str(index), str(round(factor, 4))]
+                    for index, factor in enumerate(result.buckling_factors, start=1)
+                ]
+            else:
+                rows = [["-", "No positive modes"]]
+            table = result_ax.table(
+                cellText=rows,
+                colLabels=["Mode", "Load factor"],
+                cellLoc="center",
+                colLoc="center",
+                bbox=[0.02, 0.08, 0.76, 0.58],
+            )
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            for index in range(1, len(rows) + 1):
+                if display_mode == "mode:" + rows[index - 1][0]:
+                    for col in range(2):
+                        table[(index, col)].set_facecolor("#dbeafe")
         else:
-            rows = [["-", "No positive modes"]]
-        table = result_ax.table(
-            cellText=rows,
-            colLabels=["Mode", "Load factor"],
-            cellLoc="center",
-            colLoc="center",
-            bbox=[0.02, 0.08, 0.76, 0.58],
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        for index in range(1, len(rows) + 1):
-            if display_mode == "mode:" + rows[index - 1][0]:
-                for col in range(2):
-                    table[(index, col)].set_facecolor("#dbeafe")
+            result_ax.set_title("Static analysis result")
+            force = tuple((geometry.get("load_resultant") or {}).get("force_n") or ())
+            applied_pressure = _safe_float(geometry.get("pressure_pa"))
+            summary_lines = [
+                "Loaded static response",
+                "status: " + result.status.replace("_", " "),
+                "solver: " + str(geometry.get("solver", "")),
+                "pressure [Pa]: " + str(round(applied_pressure, 3)),
+                "load scale: " + str(round(_safe_float(geometry.get("load_scale"), 1.0), 4)),
+                "max displacement [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
+            ]
+            for label, value in result.stress_percentiles:
+                summary_lines.append(label + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
+            if force:
+                summary_lines.append("resultant force [N]: " + ", ".join(str(round(_safe_float(value), 2)) for value in force))
+            summary_lines.extend([
+                "",
+                "Mode shapes are available from the Display selector.",
+                "They are not the default loaded static result.",
+            ])
+            result_ax.text(
+                0.03,
+                0.96,
+                "\n".join(summary_lines),
+                transform=result_ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+            )
     figure.tight_layout()
     return figure
 
@@ -810,6 +939,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
     if summary.get("custom_load_bc_enabled"):
         lines.append("Custom loads add to imported/generated loads: " + str(bool(summary.get("custom_loads_add_to_imported"))))
         lines.append("Custom nullspace boundary: " + str(bool(summary.get("custom_use_nullspace_projection"))))
+        lines.append("Custom pressure [Pa]: " + str(round(_safe_float(summary.get("custom_pressure_pa")), 3)))
         if str(summary.get("geometry", "")).lower().startswith("cylinder"):
             lines.extend(
                 [
@@ -1027,9 +1157,9 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "boundary_condition": {
         "title": "Boundary Condition",
         "purpose": "Defines the generated global support assumptions.",
-        "use": "Flat panels can be free, simply supported, pinned or clamped. Cylinders use rigid-body anchors unless clamped/free is selected or rigid lids are active.",
+        "use": "Flat automatic mode always gives pressure-loaded plating physical edge supports: line-property edge supports are used when available, otherwise all four edges default to simply supported. Cylinders keep the existing rigid-body anchor/lid behaviour unless custom mode is used.",
         "output": "Affects stiffness, displacement, stress recovery and buckling factors.",
-        "caution": "Boundary conditions are often the largest modelling assumption. Check whether the generated support matches the intended physical restraint.",
+        "caution": "Nullspace projection is only a numerical gauge, not the plate bending support. For manual flat-plate support studies, use custom load/BC mode.",
     },
     "symmetry_mode": {
         "title": "Symmetry",
@@ -1216,16 +1346,23 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "custom_load_bc_enabled": {
         "title": "Custom Load/BC Mode",
         "purpose": "Switches from automatic generated boundary/load assumptions to user-defined supports and edge loads.",
-        "use": "When enabled, plate side supports or cylinder end supports are taken only from the custom fields below. By default the pressure, axial force and end moment inputs are not used; tick the additive-load option if the custom edge loads should be added to those imported/generated loads.",
+        "use": "When enabled, plate side supports or cylinder end supports are taken only from the custom fields below. By default the imported pressure, axial force and end moment inputs are not used; enter manual pressure and edge loads here instead. Tick the additive-load option if the custom loads should be added to those imported/generated loads.",
         "output": "The run summary prints the custom support choices and edge loads. Diagnostics show that custom mode is active.",
         "caution": "This mode can easily create free-free or over-constrained models. Check the nullspace projection status and load resultant after each run.",
     },
     "custom_loads_add_to_imported": {
         "title": "Add To Imported Loads",
         "purpose": "Controls whether custom edge loads replace or supplement the pressure and other generated load inputs.",
-        "use": "Unchecked means custom loads are the complete load case. Checked means pressure, axial force and top/bottom moment are applied first, then the custom edge loads are added.",
+        "use": "Unchecked means manual pressure and custom edge loads are the complete load case. Checked means imported/generated pressure, axial force and top/bottom moment are applied first, then manual pressure and custom edge loads are added.",
         "output": "Changes load resultant, stress recovery and buckling prestress.",
         "caution": "Use this deliberately. Leaving it unchecked is safest when studying a clean custom load path.",
+    },
+    "custom_pressure_pa": {
+        "title": "Manual Pressure",
+        "purpose": "Pressure value used inside custom load/BC mode.",
+        "use": "When custom mode is active and additive loads are unchecked, this pressure replaces the imported pressure from the active line. When additive loads are checked, it is added to the imported/generated pressure.",
+        "output": "Affects shell pressure loads, displacement, stress recovery and buckling prestress.",
+        "caution": "Manual mode assumes the user has evaluated whether pressure, edge loads and supports form the intended load case.",
     },
     "custom_use_nullspace_projection": {
         "title": "Nullspace Boundary",
@@ -1281,7 +1418,10 @@ class RuntimeFEMWindow:
         self.window.minsize(980, 640)
         self.window.resizable(True, True)
         if not use_parent_as_window:
-            self.window.transient(parent)
+            try:
+                self.window.group(parent)
+            except Exception:
+                pass
         try:
             self.window.attributes("-toolwindow", False)
         except Exception:
@@ -1324,6 +1464,7 @@ class RuntimeFEMWindow:
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
         self.custom_use_nullspace_projection = tk.BooleanVar(value=False)
+        self.custom_pressure_pa = tk.DoubleVar(value=0.0)
         self.plate_edge_x0_support = tk.StringVar(value="free")
         self.plate_edge_x1_support = tk.StringVar(value="free")
         self.plate_edge_y0_support = tk.StringVar(value="free")
@@ -1356,6 +1497,31 @@ class RuntimeFEMWindow:
             pass
 
         self._build()
+        self._show_as_normal_maximizable_window()
+
+    def _show_as_normal_maximizable_window(self) -> None:
+        """Keep the solver as a normal window with maximize controls available."""
+
+        try:
+            self.window.update_idletasks()
+        except Exception:
+            pass
+        try:
+            self.window.state("zoomed")
+            return
+        except Exception:
+            pass
+        try:
+            self.window.attributes("-zoomed", True)
+            return
+        except Exception:
+            pass
+        try:
+            screen_width = max(int(self.window.winfo_screenwidth()), 1100)
+            screen_height = max(int(self.window.winfo_screenheight()), 760)
+            self.window.geometry(str(screen_width - 80) + "x" + str(screen_height - 100) + "+20+20")
+        except Exception:
+            pass
 
     def _info_button(self, parent: Any, key: str) -> ttk.Button:
         return ttk.Button(parent, text="i", width=2, command=lambda info_key=key: self._show_solver_info(info_key))
@@ -1628,18 +1794,19 @@ class RuntimeFEMWindow:
         self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
         self._add_check_row(custom, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads", self.custom_loads_add_to_imported)
         self._add_check_row(custom, 2, "custom_use_nullspace_projection", "Use nullspace projection as boundary", self.custom_use_nullspace_projection)
-        self._add_option_row(custom, 3, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
-        self._add_option_row(custom, 4, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_option_row(custom, 5, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 6, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 7, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 8, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 3, "custom_pressure_pa", "Manual pressure [Pa]", self.custom_pressure_pa)
+        self._add_option_row(custom, 4, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
+        self._add_option_row(custom, 5, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom, 6, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 7, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 8, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 9, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         custom.columnconfigure(3, weight=1)
 
         preview = ttk.LabelFrame(right_panel, text="3D section view")
@@ -1928,6 +2095,7 @@ class RuntimeFEMWindow:
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
             custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
             custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get()),
+            custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0),
             plate_edge_x0_support=str(self.plate_edge_x0_support.get()),
             plate_edge_x1_support=str(self.plate_edge_x1_support.get()),
             plate_edge_y0_support=str(self.plate_edge_y0_support.get()),
@@ -1997,23 +2165,59 @@ def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:
 
 
 class _ExamplePlate:
+    girder_lg = 10.0
+
     def get_structure_type(self):
         return "Flat plate, stiffened with girder"
 
     def get_span(self):
-        return 2.8
+        return 3.5
 
     def get_s(self):
-        return 0.72
+        return 0.75
 
     def get_pl_thk(self):
-        return 0.012
+        return 0.018
+
+    def get_puls_up_boundary(self):
+        return "SSSS"
+
+
+class _ExampleTMember:
+    stiffener_type = "T"
+
+    def __init__(self, spacing: float, web_h: float, web_t: float, flange_w: float, flange_t: float):
+        self.spacing = spacing
+        self.hw = web_h
+        self.tw = web_t
+        self.b = flange_w
+        self.tf = flange_t
+        self.girder_lg = 10.0
+
+    def get_s(self):
+        return self.spacing
+
+    def get_web_h(self):
+        return self.hw
+
+    def get_web_thk(self):
+        return self.tw
+
+    def get_fl_w(self):
+        return self.b
+
+    def get_fl_thk(self):
+        return self.tf
+
+    def get_stiffener_type(self):
+        return self.stiffener_type
 
 
 class _ExampleAllStructure:
     Plate = _ExamplePlate()
-    Stiffener = object()
-    Girder = object()
+    Stiffener = _ExampleTMember(spacing=0.75, web_h=0.400, web_t=0.012, flange_w=0.250, flange_t=0.012)
+    Girder = _ExampleTMember(spacing=3.5, web_h=0.800, web_t=0.020, flange_w=0.200, flange_t=0.030)
+    _panel_length_Lp = 10.0
 
 
 class _ExampleShell:
@@ -2066,19 +2270,21 @@ class _ExampleTkVariable:
 
 class _ExampleRuntimeApp:
     _general_color = "#f0f0f0"
-    _fem_default_top_bottom_moment_nm = 30_000_000.0
     _active_line = "line_example"
     _line_is_active = True
     _line_dict = {"line_example": [1, 2]}
-    _line_to_struc = {"line_example": [_ExampleAllStructure(), None, None, object(), None, _ExampleCylinder()]}
     _simplified_calculation_mode = True
 
-    def __init__(self):
+    def __init__(self, example: str = "girder_panel"):
+        self.example = "cylinder" if str(example).lower() == "cylinder" else "girder_panel"
+        cylinder = _ExampleCylinder() if self.example == "cylinder" else None
+        self._fem_default_top_bottom_moment_nm = 30_000_000.0 if self.example == "cylinder" else 0.0
+        self._line_to_struc = {"line_example": [_ExampleAllStructure(), None, None, object(), None, cylinder]}
         self._new_prop_3d_opposite_side = _ExampleTkVariable(False)
         self._new_shell_ring_frame_length_between_girders = _ExampleTkVariable(4.0)
         self._new_shell_dist_rings = _ExampleTkVariable(2.0)
-        self._new_panel_length_Lp = _ExampleTkVariable(0.0)
-        self._new_girder_length_LG = _ExampleTkVariable(8.0)
+        self._new_panel_length_Lp = _ExampleTkVariable(10_000.0)
+        self._new_girder_length_LG = _ExampleTkVariable(10_000.0)
 
     def __getattr__(self, name: str) -> Any:
         try:
@@ -2096,18 +2302,28 @@ class _ExampleRuntimeApp:
         return attr
 
     def get_highest_pressure(self, line):
-        return {"normal": 100_000.0 if line == self._active_line else 0.0}
+        if line != self._active_line:
+            return {"normal": 0.0}
+        return {"normal": 100_000.0 if self.example == "cylinder" else 459_639.0}
 
 
-def example_runtime_app() -> _ExampleRuntimeApp:
+def example_runtime_app(example: str = "girder_panel") -> _ExampleRuntimeApp:
     """Return a tiny active-line app fixture for running this module directly."""
 
-    return _ExampleRuntimeApp()
+    return _ExampleRuntimeApp(example)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the standalone experimental ANYstructure FEM window.")
+    parser.add_argument(
+        "--example",
+        choices=("girder_panel", "cylinder"),
+        default="girder_panel",
+        help="Standalone example to open. Default is the flat stiffened girder panel.",
+    )
+    args = parser.parse_args()
     root = tk.Tk()
-    my_app = RuntimeFEMWindow(root, example_runtime_app(), use_parent_as_window=True)
+    my_app = RuntimeFEMWindow(root, example_runtime_app(args.example), use_parent_as_window=True)
     my_app.window.protocol("WM_DELETE_WINDOW", root.destroy)
     my_app.window.focus_force()
     root.mainloop()
