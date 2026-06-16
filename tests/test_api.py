@@ -128,7 +128,7 @@ def test_flat_structure_api_selects_all_buckling_methods():
     assert semi["panel family"] == "S3"
     assert semi["available"] is True
     assert semi["valid prediction"] == 1
-    assert semi["buckling UF"] == pytest.approx(0.7962660701476253)
+    assert semi["buckling UF"] == pytest.approx(0.7962763046223863)
     assert semi["CSR"] == [1, 1, 1, 1]
     assert semi["CSR color"] == "green"
     assert semi["CSR requirement"]["within_csr_proportions"] is True

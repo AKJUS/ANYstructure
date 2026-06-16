@@ -12,6 +12,7 @@ package is intentionally split by responsibility:
 - ``matrix_assembly``: explicit K/M/F assembly APIs
 - ``buckling``: geometric stiffness and linear eigenvalue buckling helpers
 - ``nonlinear``: load stepping with tangent-stability limit-point detection
+- ``dynamics``: linear Newmark transient response with pressure patches
 - ``anystructure_fem_mode``: full generated-geometry FEM mode workflow
 - ``assembly``: constraint transformation, nullspace solve and solver routines
 - ``mesh_gen``: limited ANYstructure-oriented mesh generation
@@ -34,6 +35,8 @@ Architecture invariants
   buckling work.
 - Linear buckling solves use ``K phi = lambda KG phi`` with positive ``KG`` for
   destabilizing reference compression.
+- Linear transient dynamics uses separable K/M/F assembly and the same
+  constraint transformation as static analysis.
 - Nonlinear stability checks stop near the first tangent-stiffness limit point;
   full post-buckling continuation is out of scope.
 """
@@ -61,8 +64,36 @@ from .cylinder_benchmarks import (
 )
 from .buckling import BucklingMode, BucklingResult, solve_eigenvalue_buckling
 from .nonlinear import NonlinearLimitPointResult, NonlinearLoadStep, solve_nonlinear_load_stepping
-from .material_curves import DNVC208MaterialCurve, curve_from_properties
+from .dynamics import (
+    PressurePatch,
+    TransientConfig,
+    TransientResult,
+    assemble_pressure_patch_load_vector,
+    solve_transient_newmark,
+)
+from .material_curves import (
+    DNVC208MaterialCurve,
+    FiberSectionPlasticityConfig,
+    curve_from_properties,
+    dnv_c208_steel_curve,
+)
+from .imperfections import (
+    CompositeImperfection,
+    EigenmodeImperfection,
+    ImperfectionCalibrationResult,
+    ImperfectionField,
+    StandardImperfection,
+    apply_imperfection,
+    calibrate_imperfection_amplitude,
+    imperfection_from_buckling_mode,
+    standard_flange_twist,
+    standard_member_bow,
+    standard_plate_mode,
+)
 from .nonlinear_static import (
+    DisplacementControl,
+    NonlinearLoadProgram,
+    NonlinearLoadStage,
     NonlinearStaticResult,
     NonlinearStaticStep,
     solve_static_nonlinear,
@@ -97,6 +128,7 @@ from .mesh_gen import (
     generate_beam_mesh,
     generate_simple_panel_mesh,
     generate_stiffened_panel_mesh,
+    verify_mesh_quality,
 )
 from .results import (
     DisplacementResult,
@@ -180,9 +212,31 @@ __all__ = [
     "NonlinearLimitPointResult",
     "NonlinearLoadStep",
     "solve_nonlinear_load_stepping",
+    # Linear transient dynamics / slamming v1
+    "PressurePatch",
+    "TransientConfig",
+    "TransientResult",
+    "assemble_pressure_patch_load_vector",
+    "solve_transient_newmark",
     # Incremental geometric/material nonlinear statics
     "DNVC208MaterialCurve",
+    "FiberSectionPlasticityConfig",
     "curve_from_properties",
+    "dnv_c208_steel_curve",
+    "CompositeImperfection",
+    "EigenmodeImperfection",
+    "ImperfectionCalibrationResult",
+    "ImperfectionField",
+    "StandardImperfection",
+    "apply_imperfection",
+    "calibrate_imperfection_amplitude",
+    "imperfection_from_buckling_mode",
+    "standard_flange_twist",
+    "standard_member_bow",
+    "standard_plate_mode",
+    "DisplacementControl",
+    "NonlinearLoadProgram",
+    "NonlinearLoadStage",
     "NonlinearStaticResult",
     "NonlinearStaticStep",
     "solve_static_nonlinear",
@@ -212,6 +266,7 @@ __all__ = [
     "generate_beam_mesh",
     "generate_simple_panel_mesh",
     "generate_stiffened_panel_mesh",
+    "verify_mesh_quality",
     # Results
     "DisplacementResult",
     "FEResult",
