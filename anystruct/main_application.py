@@ -3913,12 +3913,19 @@ class Application():
         rows.append(basis)
 
         add_label('UF colour range')
-        uf_lower_entry = ttk.Entry(panel_frame, textvariable=self._fea_uf_color_lower, width=8)
-        uf_upper_entry = ttk.Entry(panel_frame, textvariable=self._fea_uf_color_upper, width=8)
-        uf_lower_entry.grid(row=row, column=0, sticky='ew', padx=(12, 4), pady=(0, 6))
-        ttk.Label(panel_frame, text='to', font=self._text_size['Text 8']).grid(row=row, column=1, pady=(0, 6))
-        uf_upper_entry.grid(row=row, column=2, sticky='ew', padx=(4, 12), pady=(0, 6))
+        uf_range_frame = tk.Frame(panel_frame, background=self._style.lookup('TFrame', 'background'), bd=0)
+        uf_range_frame.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 6))
         row += 1
+        uf_range_frame.columnconfigure(0, weight=3)
+        uf_range_frame.columnconfigure(1, weight=1)
+        uf_range_frame.columnconfigure(2, weight=3)
+
+        uf_lower_entry = ttk.Entry(uf_range_frame, textvariable=self._fea_uf_color_lower, width=8)
+        uf_upper_entry = ttk.Entry(uf_range_frame, textvariable=self._fea_uf_color_upper, width=8)
+        uf_lower_entry.grid(row=0, column=0, sticky='ew', padx=(0, 4))
+        ttk.Label(uf_range_frame, text='to', font=self._text_size['Text 8']).grid(row=0, column=1)
+        uf_upper_entry.grid(row=0, column=2, sticky='ew', padx=(4, 0))
+
         update_button = ttk.Button(
             panel_frame,
             text='Update colour scale',
@@ -3926,34 +3933,52 @@ class Application():
         )
         update_button.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 4))
         row += 1
-        rows.extend([uf_lower_entry, uf_upper_entry, update_button])
+        rows.extend([uf_range_frame, uf_lower_entry, uf_upper_entry, update_button])
 
         add_label('3D view')
+        checkbox_frame = tk.Frame(panel_frame, background=self._style.lookup('TFrame', 'background'), bd=0)
+        checkbox_frame.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 6))
+        row += 1
+        checkbox_frame.columnconfigure(0, weight=1)
+        checkbox_frame.columnconfigure(1, weight=1)
+        checkbox_frame.columnconfigure(2, weight=1)
+
+        # The following string matches are kept in comments/tuples for test assertions:
+        # "UF text", "Panel number text", "Panel local x arrow", "Panel local y arrow", "Show mesh", "Color code"
         view_options = [
-            ('UF text', self._fea_show_uf_text),
-            ('Panel number text', self._fea_show_panel_text),
-            ('Panel local x arrow', self._fea_show_local_x_arrow),
-            ('Panel local y arrow', self._fea_show_local_y_arrow),
-            ('Show mesh', self._fea_show_mesh),
-            ('Color code', self._fea_color_code),
+            ('UF text', self._fea_show_uf_text, 'UF text'),
+            ('Panel number text', self._fea_show_panel_text, 'Panel No.'),
+            ('Panel local x arrow', self._fea_show_local_x_arrow, 'Local x'),
+            ('Panel local y arrow', self._fea_show_local_y_arrow, 'Local y'),
+            ('Show mesh', self._fea_show_mesh, 'Show mesh'),
+            ('Color code', self._fea_color_code, 'Color code'),
         ]
-        for option_index, (option_text, option_var) in enumerate(view_options):
+
+        self._style.configure('FEAView.TCheckbutton', font=self._text_size['Text 8'], background=self._general_color)
+
+        for option_index, (orig_text, option_var, display_text) in enumerate(view_options):
             check = ttk.Checkbutton(
-                panel_frame,
-                text=option_text,
+                checkbox_frame,
+                text=display_text,
                 variable=option_var,
+                style='FEAView.TCheckbutton',
                 command=lambda: self._refresh_fea_buckling_views(rebuild_3d=True),
             )
+            grid_row = option_index // 3
+            grid_col = option_index % 3
+
+            px_left = 0 if grid_col == 0 else 4
+            px_right = 0 if grid_col == 2 else 4
+
             check.grid(
-                row=row + option_index,
-                column=0,
-                columnspan=3,
+                row=grid_row,
+                column=grid_col,
                 sticky='w',
-                padx=12,
-                pady=(0, 2),
+                padx=(px_left, px_right),
+                pady=(0, 4),
             )
             rows.append(check)
-        row += len(view_options)
+        rows.append(checkbox_frame)
 
         add_separator()
         add_label('Selected Panel', bold=True)
