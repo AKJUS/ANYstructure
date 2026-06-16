@@ -1389,6 +1389,131 @@ def test_anystructure_contains_vendored_full_fe_solver_backend():
 
     assert backend.AnyStructureFEMConfig.__name__ == "AnyStructureFEMConfig"
     assert callable(backend.run_anystructure_fem_mode)
+    assert callable(backend.solve_transient_newmark)
+    assert backend.PressurePatch.__name__ == "PressurePatch"
+    assert callable(backend.apply_imperfection)
+    assert backend.StandardImperfection.__name__ == "StandardImperfection"
+
+
+def test_production_solver_runs_slamming_transient_and_stress_free_imperfection():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "flat panel",
+            "length_m": 0.6,
+            "width_m": 0.3,
+            "thickness_m": 0.01,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=100.0,
+            mesh_fidelity="coarse",
+            num_buckling_modes=1,
+            imperfection_enabled=True,
+            imperfection_amplitude_m=0.001,
+            imperfection_wave_a=1,
+            imperfection_wave_b=1,
+            slamming_enabled=True,
+            slamming_pressure_pa=1000.0,
+            slamming_duration_s=0.001,
+            slamming_total_time_s=0.002,
+            slamming_dt_s=0.001,
+        ),
+    )
+
+    prestress = result.prestress_summary
+
+    assert result.status == "ok"
+    assert prestress["imperfection_status"] == "applied"
+    assert prestress["imperfection_kind"] == "plate half-wave"
+    assert prestress["imperfection_max_offset_m"] == pytest.approx(0.001)
+    assert prestress["slamming_status"] == "completed"
+    assert prestress["slamming_selected_shells"] == pytest.approx(result.mesh_info["shells"])
+    assert prestress["slamming_peak_displacement_m"] > 0.0
+    assert any("Transient slamming response completed" in item for item in result.diagnostics)
+
+
+def test_runtime_result_print_and_gui_source_include_slamming_and_imperfection_inputs():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={
+            "geometry": "flat panel",
+            "line": "line1",
+            "mesh_fidelity": "coarse",
+            "shell_element_order": "S4",
+            "boundary_condition": "auto",
+            "symmetry_mode": "none",
+            "analysis_type": "linear eigenvalue",
+            "buckling_analysis_type": "linear eigenvalue",
+            "solver_type": "direct",
+            "pressure_pa": 0.0,
+            "pressure_direction": "external",
+            "axial_force_n": 0.0,
+            "enforced_displacement_m": 0.0,
+            "mesh_size_m": 0.0,
+            "top_bottom_moment_nm": 0.0,
+            "include_stiffeners": True,
+            "include_girders": True,
+            "include_end_lids": False,
+            "member_orientation": "auto",
+            "stiffener_eccentricity_m": 0.0,
+            "girder_eccentricity_m": 0.0,
+            "material_model": "linear elastic",
+            "steel_grade": "S355",
+            "steel_thickness_class": "auto",
+            "elastic_modulus_pa": 210.0e9,
+            "poisson_ratio": 0.3,
+            "yield_stress_pa": 355.0e6,
+            "stress_percentile": 95.0,
+            "nonlinear_max_load_factor": 3.0,
+            "nonlinear_steps": 12,
+            "nonlinear_layers": 5,
+            "nonlinear_max_iterations": 25,
+            "deformation_scale": 0.0,
+            "custom_load_bc_enabled": False,
+            "num_buckling_modes": 1,
+            "max_displacement_m": 0.0,
+            "imperfection_enabled": True,
+            "imperfection_shape": "standard plate/cylinder",
+            "imperfection_amplitude_m": 0.001,
+            "imperfection_wave_a": 1,
+            "imperfection_wave_b": 2,
+            "slamming_enabled": True,
+            "slamming_pressure_pa": 1000.0,
+            "slamming_duration_s": 0.001,
+            "slamming_total_time_s": 0.002,
+            "slamming_dt_s": 0.001,
+            "slamming_patch_center_a_m": 0.0,
+            "slamming_patch_center_b_m": 0.0,
+            "slamming_patch_size_a_m": 0.0,
+            "slamming_patch_size_b_m": 0.0,
+            "slamming_include_static_load": False,
+            "prestress_summary": {
+                "imperfection_status": "applied",
+                "imperfection_kind": "plate half-wave",
+                "imperfection_amplitude_m": 0.001,
+                "imperfection_max_offset_m": 0.001,
+                "imperfection_waves_a": 1,
+                "imperfection_waves_b": 2,
+                "slamming_status": "completed",
+                "slamming_selected_shells": 16,
+                "slamming_peak_displacement_m": 0.0002,
+                "slamming_peak_von_mises_pa": 2.5e6,
+            },
+        },
+    )
+
+    text = fe_runtime_solver.format_runtime_fem_result(result)
+    source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_runtime_solver.py").read_text(encoding="utf-8")
+
+    assert "Geometric imperfection input:" in text
+    assert "Transient slamming input:" in text
+    assert "Applied geometric imperfection:" in text
+    assert "Transient slamming response:" in text
+    assert "self.slamming_enabled = tk.BooleanVar(value=False)" in source
+    assert "self.imperfection_enabled = tk.BooleanVar(value=False)" in source
+    assert "Transient slamming" in source
+    assert "Imperfections" in source
 
 
 def test_runtime_fem_module_has_ready_to_run_main_example():

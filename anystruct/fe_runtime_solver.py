@@ -109,6 +109,21 @@ class RuntimeFEMOptions:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
+    slamming_enabled: bool = False
+    slamming_pressure_pa: float = 0.0
+    slamming_duration_s: float = 0.01
+    slamming_total_time_s: float = 0.05
+    slamming_dt_s: float = 0.0005
+    slamming_patch_center_a_m: float = 0.0
+    slamming_patch_center_b_m: float = 0.0
+    slamming_patch_size_a_m: float = 0.0
+    slamming_patch_size_b_m: float = 0.0
+    slamming_include_static_load: bool = False
+    imperfection_enabled: bool = False
+    imperfection_shape: str = "standard plate/cylinder"
+    imperfection_amplitude_m: float = 0.0
+    imperfection_wave_a: int = 1
+    imperfection_wave_b: int = 1
 
 
 @dataclass(frozen=True)
@@ -434,6 +449,21 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         plate_edge_y1_load_n_per_m=options.plate_edge_y1_load_n_per_m,
         cylinder_lower_edge_load_n_per_m=options.cylinder_lower_edge_load_n_per_m,
         cylinder_upper_edge_load_n_per_m=options.cylinder_upper_edge_load_n_per_m,
+        slamming_enabled=options.slamming_enabled,
+        slamming_pressure_pa=options.slamming_pressure_pa,
+        slamming_duration_s=options.slamming_duration_s,
+        slamming_total_time_s=options.slamming_total_time_s,
+        slamming_dt_s=options.slamming_dt_s,
+        slamming_patch_center_a_m=options.slamming_patch_center_a_m,
+        slamming_patch_center_b_m=options.slamming_patch_center_b_m,
+        slamming_patch_size_a_m=options.slamming_patch_size_a_m,
+        slamming_patch_size_b_m=options.slamming_patch_size_b_m,
+        slamming_include_static_load=options.slamming_include_static_load,
+        imperfection_enabled=options.imperfection_enabled,
+        imperfection_shape=options.imperfection_shape,
+        imperfection_amplitude_m=options.imperfection_amplitude_m,
+        imperfection_wave_a=options.imperfection_wave_a,
+        imperfection_wave_b=options.imperfection_wave_b,
     )
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config)
@@ -499,6 +529,21 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "plate_edge_y1_load_n_per_m": float(options.plate_edge_y1_load_n_per_m),
         "cylinder_lower_edge_load_n_per_m": float(options.cylinder_lower_edge_load_n_per_m),
         "cylinder_upper_edge_load_n_per_m": float(options.cylinder_upper_edge_load_n_per_m),
+        "slamming_enabled": bool(options.slamming_enabled),
+        "slamming_pressure_pa": float(options.slamming_pressure_pa),
+        "slamming_duration_s": float(options.slamming_duration_s),
+        "slamming_total_time_s": float(options.slamming_total_time_s),
+        "slamming_dt_s": float(options.slamming_dt_s),
+        "slamming_patch_center_a_m": float(options.slamming_patch_center_a_m),
+        "slamming_patch_center_b_m": float(options.slamming_patch_center_b_m),
+        "slamming_patch_size_a_m": float(options.slamming_patch_size_a_m),
+        "slamming_patch_size_b_m": float(options.slamming_patch_size_b_m),
+        "slamming_include_static_load": bool(options.slamming_include_static_load),
+        "imperfection_enabled": bool(options.imperfection_enabled),
+        "imperfection_shape": str(options.imperfection_shape),
+        "imperfection_amplitude_m": float(options.imperfection_amplitude_m),
+        "imperfection_wave_a": int(options.imperfection_wave_a),
+        "imperfection_wave_b": int(options.imperfection_wave_b),
         "solver": solver_result.solver_name,
         "mesh_info": dict(solver_result.mesh_info),
         "max_displacement_m": solver_result.displacement_max_m,
@@ -929,6 +974,37 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     ),
                 ]
             )
+    if summary.get("imperfection_enabled"):
+        lines.extend(
+            [
+                "",
+                "Geometric imperfection input:",
+                " - shape: " + str(summary.get("imperfection_shape", "")),
+                " - amplitude [mm]: "
+                + ("standard default" if _safe_float(summary.get("imperfection_amplitude_m"), 0.0) <= 0.0 else str(round(1000.0 * _safe_float(summary.get("imperfection_amplitude_m")), 4))),
+                " - waves A/B: " + str(_safe_int(summary.get("imperfection_wave_a"), 1)) + " / " + str(_safe_int(summary.get("imperfection_wave_b"), 1)),
+            ]
+        )
+    if summary.get("slamming_enabled"):
+        lines.extend(
+            [
+                "",
+                "Transient slamming input:",
+                " - pressure [Pa]: " + str(round(_safe_float(summary.get("slamming_pressure_pa")), 3)),
+                " - duration / total time [s]: "
+                + str(round(_safe_float(summary.get("slamming_duration_s")), 6))
+                + " / "
+                + str(round(_safe_float(summary.get("slamming_total_time_s")), 6)),
+                " - dt [s]: " + str(round(_safe_float(summary.get("slamming_dt_s")), 8)),
+                " - patch centre A/B [m]: "
+                + str(round(_safe_float(summary.get("slamming_patch_center_a_m")), 4))
+                + " / "
+                + str(round(_safe_float(summary.get("slamming_patch_center_b_m")), 4)),
+                " - patch size A/B [m]: "
+                + ("whole shell" if _safe_float(summary.get("slamming_patch_size_a_m"), 0.0) <= 0.0 or _safe_float(summary.get("slamming_patch_size_b_m"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("slamming_patch_size_a_m")), 4)) + " / " + str(round(_safe_float(summary.get("slamming_patch_size_b_m")), 4))),
+                " - include static load in transient: " + str(bool(summary.get("slamming_include_static_load"))),
+            ]
+        )
     if result.buckling_factors:
         lines.append("Critical load factor: " + str(round(result.buckling_factors[0], 4)))
     mesh_info = summary.get("mesh_info") or {}
@@ -979,6 +1055,21 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "nonlinear_static_layers",
             "nonlinear_static_max_plastic_strain",
         }
+        imperfection_keys = {
+            "imperfection_status",
+            "imperfection_kind",
+            "imperfection_amplitude_m",
+            "imperfection_max_offset_m",
+            "imperfection_waves_a",
+            "imperfection_waves_b",
+        }
+        slamming_keys = {
+            "slamming_status",
+            "slamming_pressure_pa",
+            "slamming_selected_shells",
+            "slamming_peak_displacement_m",
+            "slamming_peak_von_mises_pa",
+        }
         special_keys = {
             "nonlinear_status",
             "nonlinear_limit_factor",
@@ -991,6 +1082,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "rigid_body_load_imbalance_norm",
             *material_keys,
             *nonlinear_static_keys,
+            *imperfection_keys,
+            *slamming_keys,
         }
         if prestress.get("material_model"):
             lines.extend(["", "DNV-RP-C208 material curve:"])
@@ -1015,6 +1108,23 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(" - interpretation: all requested proportional load was reached; this is not necessarily a collapse load.")
             elif nonlinear_static_status == "stopped_at_limit":
                 lines.append(" - interpretation: the adaptive Newton solve stopped at the last stable converged load increment.")
+        imperfection_status = str(prestress.get("imperfection_status", "") or "")
+        if imperfection_status:
+            lines.extend(["", "Applied geometric imperfection:"])
+            lines.append(" - status: " + imperfection_status)
+            lines.append(" - kind: " + str(prestress.get("imperfection_kind", "")))
+            lines.append(" - input amplitude [mm]: " + str(round(1000.0 * _safe_float(prestress.get("imperfection_amplitude_m")), 4)))
+            lines.append(" - max offset [mm]: " + str(round(1000.0 * _safe_float(prestress.get("imperfection_max_offset_m")), 4)))
+            lines.append(" - waves A/B: " + str(_safe_int(prestress.get("imperfection_waves_a"), 0)) + " / " + str(_safe_int(prestress.get("imperfection_waves_b"), 0)))
+            lines.append(" - meaning: the coordinates were offset before solving, so zero displacement in the imperfect model is stress free.")
+        slamming_status = str(prestress.get("slamming_status", "") or "")
+        if slamming_status:
+            lines.extend(["", "Transient slamming response:"])
+            lines.append(" - status: " + slamming_status)
+            lines.append(" - selected shell elements: " + str(_safe_int(prestress.get("slamming_selected_shells"), 0)))
+            lines.append(" - peak displacement [mm]: " + str(round(1000.0 * _safe_float(prestress.get("slamming_peak_displacement_m")), 4)))
+            lines.append(" - peak von Mises [MPa]: " + str(round(_safe_float(prestress.get("slamming_peak_von_mises_pa")) / 1.0e6, 3)))
+            lines.append(" - meaning: this is a linear Newmark response to the prescribed pressure pulse; it is reported separately from the static buckling prestress.")
         for key, value in prestress.items():
             if key in special_keys:
                 continue
@@ -1068,6 +1178,62 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Affects displacements, stresses, recovered prestress and buckling load factors.",
         "caution": "When analysing imported FEA result stresses, avoid double counting pressure unless pressure is intentionally part of the buckling load case.",
     },
+    "slamming_enabled": {
+        "title": "Transient Slamming",
+        "purpose": "Runs the synced ANYintelligent linear transient pressure-patch solver for a slamming pulse.",
+        "use": "When enabled, a prescribed shell-normal pressure pulse is applied to the selected shell patch and advanced with Newmark average acceleration. This is a separate transient response calculation after the normal static solve.",
+        "output": "Adds slamming status, selected shell count, peak transient displacement and peak transient von Mises stress to the result print.",
+        "caution": "This is prescribed structural response only: no fluid-structure interaction, added mass, water entry, cavitation or pressure feedback is included.",
+    },
+    "slamming_pressure_pa": {
+        "title": "Slamming Pressure",
+        "purpose": "Peak pressure magnitude for the transient slamming pulse.",
+        "use": "The pressure sign follows the selected pressure direction. The pulse starts at t = 0 and remains constant until the slamming duration.",
+        "output": "Controls the transient impulse, peak displacement and transient stress response.",
+        "caution": "Do not also include the same pressure as a static pressure unless that is the intended load history.",
+    },
+    "slamming_duration_s": {
+        "title": "Slamming Duration",
+        "purpose": "Length of the constant pressure pulse in seconds.",
+        "use": "The transient load is active from t = 0 to this time, then returns to zero.",
+        "output": "Controls impulse and dynamic amplification.",
+        "caution": "Use a time step small enough to resolve the pulse duration.",
+    },
+    "slamming_total_time_s": {
+        "title": "Slamming Total Time",
+        "purpose": "Total transient analysis time.",
+        "use": "The solver saves the response until this time, including the free vibration after the pulse has ended.",
+        "output": "Controls how much of the transient response is searched for peak displacement and stress.",
+        "caution": "Long runs with small dt increase runtime.",
+    },
+    "slamming_dt_s": {
+        "title": "Slamming Time Step",
+        "purpose": "Fixed Newmark time step.",
+        "use": "The transient solver reuses the effective stiffness factorization when possible, but the number of steps still scales with total_time / dt.",
+        "output": "Affects transient accuracy and runtime.",
+        "caution": "The Newmark method is stable for the default parameters, but a coarse time step can miss the pressure pulse and peak response.",
+    },
+    "slamming_patch_center": {
+        "title": "Slamming Patch Centre",
+        "purpose": "Patch centre coordinates used to select shell elements by centroid.",
+        "use": "For flat panels, A is x and B is y. For cylinders, A is axial z and B is circumferential arc length measured from the positive X direction. Zero uses the model centre for A and the positive X seam for B.",
+        "output": "Changes which shell elements receive the transient slamming pulse.",
+        "caution": "Selection is centroid based. If exact patch membership is required, verify selected shell count and plot resolution.",
+    },
+    "slamming_patch_size": {
+        "title": "Slamming Patch Size",
+        "purpose": "Patch dimensions used for centroid-based shell selection.",
+        "use": "For flat panels, A/B are x/y dimensions. For cylinders, A is axial length and B is circumferential arc length. If either value is zero, all shell elements are loaded.",
+        "output": "Changes the loaded area, impulse and transient response.",
+        "caution": "Very small patches may select no element on a coarse mesh; the wrapper then falls back to loading all shells to avoid a silent zero-load run.",
+    },
+    "slamming_include_static_load": {
+        "title": "Slamming Base Load",
+        "purpose": "Adds the current static load vector as a constant base load in the transient slamming run.",
+        "use": "Leave off to study the slamming pulse alone. Enable when the transient pressure is intentionally superposed on the static load case.",
+        "output": "Changes transient displacement, stress and impulse resultants.",
+        "caution": "This can double count pressure if the static pressure already represents the same slamming event.",
+    },
     "load_scale": {
         "title": "Load Scale",
         "purpose": "Multiplier on pressure and generated design loads.",
@@ -1102,6 +1268,34 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "use": "The end ring nodes are tied to free reference nodes. The lid adds local diaphragm behaviour without shell elements, pressure loads or lid stress recovery.",
         "output": "Shown as rigid lids in mesh diagnostics and affects cylinder end deformation.",
         "caution": "At least one global motion remains free before buckling gauge constraints are added, avoiding artificial axial membrane locking.",
+    },
+    "imperfection_enabled": {
+        "title": "Geometric Imperfection",
+        "purpose": "Applies a stress-free initial geometry offset before the static/nonlinear solve.",
+        "use": "Flat panels use a sinusoidal plate half-wave over the shell region. Cylinders use a radial out-of-roundness field. An amplitude of zero uses the standard default scale.",
+        "output": "Changes static stress recovery, nonlinear response and buckling factors because the reference geometry is imperfect.",
+        "caution": "This is a geometric imperfection, not a residual-stress field. Verify the selected shape and amplitude before using nonlinear capacity results.",
+    },
+    "imperfection_shape": {
+        "title": "Imperfection Shape",
+        "purpose": "Chooses the standard imperfection family applied to the generated shell model.",
+        "use": "The current runtime option maps flat panels to plate half-wave imperfections and cylinders to radial out-of-roundness. Future solver work can add eigenmode-scaled imperfections.",
+        "output": "Affects the offset field applied to nodes before the solve.",
+        "caution": "Member-only bows are not yet separately exposed in this runtime GUI; the shape is intended as a panel/cylinder equivalent imperfection.",
+    },
+    "imperfection_amplitude_m": {
+        "title": "Imperfection Amplitude",
+        "purpose": "Maximum geometric imperfection amplitude in metres.",
+        "use": "Enter a positive value to force the amplitude. Enter zero to use the standard default in the wrapper: s/200 for flat plate mode or spacing/200 for cylinder radial mode.",
+        "output": "Reported in the result print together with the actual maximum applied nodal offset.",
+        "caution": "Capacity can be sensitive to this value. Use code/rule tolerance values or calibrated amplitudes for final assessments.",
+    },
+    "imperfection_waves": {
+        "title": "Imperfection Waves",
+        "purpose": "Number of half waves in the generated imperfection field.",
+        "use": "For flat panels, A/B are x/y half-wave counts. For cylinders, A is circumferential waves and B is axial half waves.",
+        "output": "Changes the shape of the imperfect reference geometry.",
+        "caution": "Use wave counts consistent with the expected buckling mode or rule requirement.",
     },
     "num_buckling_modes": {
         "title": "Buckling Modes",
@@ -1433,6 +1627,21 @@ class RuntimeFEMWindow:
         self.plate_edge_y1_load_n_per_m = tk.DoubleVar(value=0.0)
         self.cylinder_lower_edge_load_n_per_m = tk.DoubleVar(value=0.0)
         self.cylinder_upper_edge_load_n_per_m = tk.DoubleVar(value=0.0)
+        self.slamming_enabled = tk.BooleanVar(value=False)
+        self.slamming_pressure_pa = tk.DoubleVar(value=0.0)
+        self.slamming_duration_s = tk.DoubleVar(value=0.01)
+        self.slamming_total_time_s = tk.DoubleVar(value=0.05)
+        self.slamming_dt_s = tk.DoubleVar(value=0.0005)
+        self.slamming_patch_center_a_m = tk.DoubleVar(value=0.0)
+        self.slamming_patch_center_b_m = tk.DoubleVar(value=0.0)
+        self.slamming_patch_size_a_m = tk.DoubleVar(value=0.0)
+        self.slamming_patch_size_b_m = tk.DoubleVar(value=0.0)
+        self.slamming_include_static_load = tk.BooleanVar(value=False)
+        self.imperfection_enabled = tk.BooleanVar(value=False)
+        self.imperfection_shape = tk.StringVar(value="standard plate/cylinder")
+        self.imperfection_amplitude_m = tk.DoubleVar(value=0.0)
+        self.imperfection_wave_a = tk.IntVar(value=1)
+        self.imperfection_wave_b = tk.IntVar(value=1)
         self.display_choice = tk.StringVar(value="Static displacement/stress")
         self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
         self.current_result: RuntimeFEMRunResult | None = None
@@ -1749,6 +1958,38 @@ class RuntimeFEMWindow:
         self._add_entry_row(material, 5, "poisson_ratio", "Poisson", self.poisson_ratio)
         self._add_entry_row(material, 6, "yield_stress_mpa", "Yield [MPa]", self.yield_stress_mpa)
         self._add_entry_row(material, 7, "nonlinear_layers", "NL layers", self.nonlinear_layers, width=8)
+
+        imperfections = ttk.LabelFrame(future_inputs, text="Imperfections")
+        imperfections.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(imperfections)
+        self._add_check_row(imperfections, 0, "imperfection_enabled", "Use geometric imperfection", self.imperfection_enabled)
+        self._add_option_row(
+            imperfections,
+            1,
+            "imperfection_shape",
+            "Shape",
+            self.imperfection_shape,
+            ("standard plate/cylinder", "none"),
+        )
+        self._add_entry_row(imperfections, 2, "imperfection_amplitude_m", "Amplitude [m]", self.imperfection_amplitude_m)
+        self._add_entry_row(imperfections, 3, "imperfection_waves", "Waves A / B", self.imperfection_wave_a, width=8)
+        ttk.Entry(imperfections, textvariable=self.imperfection_wave_b, width=8).grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        imperfections.columnconfigure(3, weight=1)
+
+        slamming = ttk.LabelFrame(future_inputs, text="Transient slamming")
+        slamming.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(slamming)
+        self._add_check_row(slamming, 0, "slamming_enabled", "Run slamming transient", self.slamming_enabled)
+        self._add_check_row(slamming, 1, "slamming_include_static_load", "Include static load in transient", self.slamming_include_static_load)
+        self._add_entry_row(slamming, 2, "slamming_pressure_pa", "Pressure [Pa]", self.slamming_pressure_pa)
+        self._add_entry_row(slamming, 3, "slamming_duration_s", "Duration [s]", self.slamming_duration_s)
+        self._add_entry_row(slamming, 4, "slamming_total_time_s", "Total time [s]", self.slamming_total_time_s)
+        self._add_entry_row(slamming, 5, "slamming_dt_s", "dt [s]", self.slamming_dt_s)
+        self._add_entry_row(slamming, 6, "slamming_patch_center", "Patch centre A/B [m]", self.slamming_patch_center_a_m)
+        ttk.Entry(slamming, textvariable=self.slamming_patch_center_b_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(slamming, 7, "slamming_patch_size", "Patch size A/B [m]", self.slamming_patch_size_a_m)
+        ttk.Entry(slamming, textvariable=self.slamming_patch_size_b_m, width=12).grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        slamming.columnconfigure(3, weight=1)
 
         custom = ttk.LabelFrame(future_inputs, text="Custom loads and boundary conditions")
         custom.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -2573,6 +2814,21 @@ class RuntimeFEMWindow:
             plate_edge_y1_load_n_per_m=_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0),
             cylinder_lower_edge_load_n_per_m=_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0),
             cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0),
+            slamming_enabled=bool(self.slamming_enabled.get()),
+            slamming_pressure_pa=max(_safe_float(self.slamming_pressure_pa.get(), 0.0), 0.0),
+            slamming_duration_s=max(_safe_float(self.slamming_duration_s.get(), 0.01), 0.0),
+            slamming_total_time_s=max(_safe_float(self.slamming_total_time_s.get(), 0.05), 0.0),
+            slamming_dt_s=max(_safe_float(self.slamming_dt_s.get(), 0.0005), 1.0e-9),
+            slamming_patch_center_a_m=_safe_float(self.slamming_patch_center_a_m.get(), 0.0),
+            slamming_patch_center_b_m=_safe_float(self.slamming_patch_center_b_m.get(), 0.0),
+            slamming_patch_size_a_m=max(_safe_float(self.slamming_patch_size_a_m.get(), 0.0), 0.0),
+            slamming_patch_size_b_m=max(_safe_float(self.slamming_patch_size_b_m.get(), 0.0), 0.0),
+            slamming_include_static_load=bool(self.slamming_include_static_load.get()),
+            imperfection_enabled=bool(self.imperfection_enabled.get()),
+            imperfection_shape=str(self.imperfection_shape.get()),
+            imperfection_amplitude_m=max(_safe_float(self.imperfection_amplitude_m.get(), 0.0), 0.0),
+            imperfection_wave_a=max(_safe_int(self.imperfection_wave_a.get(), 1), 1),
+            imperfection_wave_b=max(_safe_int(self.imperfection_wave_b.get(), 1), 1),
         )
 
     def run(self) -> None:

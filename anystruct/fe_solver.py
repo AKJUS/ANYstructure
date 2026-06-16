@@ -21,6 +21,7 @@ try:
     from anystruct.fe_solver_backend.material_curves import curve_from_properties as _backend_curve_from_properties
     from anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
     from anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
+    from anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
     try:
@@ -31,6 +32,7 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.material_curves import curve_from_properties as _backend_curve_from_properties
         from ANYstructure.anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
         from ANYstructure.anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
+        from ANYstructure.anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
         _full_backend = None
@@ -40,6 +42,7 @@ except ModuleNotFoundError:
         _backend_curve_from_properties = None
         _backend_solve_nonlinear_limit = None
         _backend_solve_static_nonlinear = None
+        _backend_solve_transient_newmark = None
         _backend_load_case_resultant = None
 
 
@@ -96,6 +99,21 @@ class LightweightFEMConfig:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
+    slamming_enabled: bool = False
+    slamming_pressure_pa: float = 0.0
+    slamming_duration_s: float = 0.01
+    slamming_total_time_s: float = 0.05
+    slamming_dt_s: float = 0.0005
+    slamming_patch_center_a_m: float = 0.0
+    slamming_patch_center_b_m: float = 0.0
+    slamming_patch_size_a_m: float = 0.0
+    slamming_patch_size_b_m: float = 0.0
+    slamming_include_static_load: bool = False
+    imperfection_enabled: bool = False
+    imperfection_shape: str = "standard plate/cylinder"
+    imperfection_amplitude_m: float = 0.0
+    imperfection_wave_a: int = 1
+    imperfection_wave_b: int = 1
 
 
 @dataclass(frozen=True)
@@ -1636,6 +1654,227 @@ def _apply_material_curve_to_model(model, curve: object | None, properties: dict
         material.yield_stress = float(properties.get("sigma_yield", material.yield_stress))
 
 
+def _shell_element_ids(model) -> tuple[int, ...]:
+    ids: list[int] = []
+    for element_id, element in getattr(model.mesh, "elements", {}).items():
+        if hasattr(element, "thickness") and hasattr(element, "node_ids"):
+            ids.append(int(element_id))
+    return tuple(ids)
+
+
+def _shell_node_ids(model) -> tuple[int, ...]:
+    node_ids: set[int] = set()
+    for element_id in _shell_element_ids(model):
+        element = model.mesh.get_element(element_id)
+        if element is not None:
+            node_ids.update(int(node_id) for node_id in getattr(element, "node_ids", []))
+    return tuple(sorted(node_ids))
+
+
+def _build_runtime_imperfection(model, generated_geometry: dict, geometry: dict, config: LightweightFEMConfig):
+    """Create a stress-free imperfection object for the synced backend."""
+
+    if not config.imperfection_enabled or _full_backend is None:
+        return None, {}
+    shape = _normalized_choice(config.imperfection_shape, "standard plate/cylinder")
+    if shape in {"none", "off", "disabled"}:
+        return None, {}
+    shell_ids = _shell_element_ids(model)
+    if not shell_ids:
+        return None, {"status": "no shell elements"}
+
+    amplitude = float(config.imperfection_amplitude_m or 0.0)
+    amplitude_value = amplitude if amplitude > 0.0 else None
+    wave_a = _positive_int(config.imperfection_wave_a, 1)
+    wave_b = _positive_int(config.imperfection_wave_b, 1)
+
+    if generated_geometry.get("plot_type") != "cylinder":
+        imperfection = _full_backend.StandardImperfection(
+            kind="plate_mode",
+            node_ids=shell_ids,
+            amplitude=amplitude_value,
+            direction=(0.0, 0.0, 1.0),
+            axes=(0, 1),
+            waves=(wave_a, wave_b),
+            name="runtime_plate_half_wave",
+        )
+        metadata = {
+            "kind": "plate half-wave",
+            "amplitude_m": amplitude if amplitude > 0.0 else 0.0,
+            "amplitude_source": "user" if amplitude > 0.0 else "standard s/200 default",
+            "waves_a": wave_a,
+            "waves_b": wave_b,
+        }
+        return imperfection, metadata
+
+    node_ids = _shell_node_ids(model)
+    coords_by_node = {}
+    for node_id in node_ids:
+        node = model.mesh.get_node(int(node_id))
+        if node is not None:
+            coords_by_node[int(node_id)] = np.asarray(node.coords(), dtype=float)
+    if not coords_by_node:
+        return None, {"status": "no shell nodes"}
+    values = np.asarray(list(coords_by_node.values()), dtype=float)
+    z_min = float(np.min(values[:, 2]))
+    z_span = max(float(np.max(values[:, 2]) - z_min), 1.0e-12)
+    radius = _positive(generated_geometry.get("radius_m", geometry.get("radius_m", 0.0)), 0.0)
+    if amplitude <= 0.0:
+        spacing = _positive(geometry.get("stiffener_spacing_m", 0.0), 0.0)
+        if spacing <= 0.0 and radius > 0.0:
+            spacing = 2.0 * math.pi * radius / max(len(set(round(math.atan2(coord[1], coord[0]), 12) for coord in coords_by_node.values())), 1)
+        amplitude = max(spacing, z_span) / 200.0 if max(spacing, z_span) > 0.0 else 0.0
+    offsets = {}
+    for node_id, coord in coords_by_node.items():
+        radial = np.array([coord[0], coord[1], 0.0], dtype=float)
+        norm = float(np.linalg.norm(radial))
+        if norm <= 1.0e-12:
+            continue
+        radial /= norm
+        theta = math.atan2(float(coord[1]), float(coord[0]))
+        axial_pos = (float(coord[2]) - z_min) / z_span
+        shape_value = math.sin(wave_b * math.pi * axial_pos) * math.cos(wave_a * theta)
+        offsets[node_id] = amplitude * shape_value * radial
+    imperfection = _full_backend.ImperfectionField(
+        offsets,
+        name="runtime_cylinder_radial_imperfection",
+        metadata={"kind": "cylinder radial", "waves": (wave_a, wave_b), "amplitude": amplitude},
+    )
+    metadata = {
+        "kind": "cylinder radial",
+        "amplitude_m": amplitude,
+        "amplitude_source": "user" if float(config.imperfection_amplitude_m or 0.0) > 0.0 else "standard spacing/200 default",
+        "waves_a": wave_a,
+        "waves_b": wave_b,
+    }
+    return imperfection, metadata
+
+
+def _apply_runtime_imperfection(model, generated_geometry: dict, geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
+    if _full_backend is None or not hasattr(_full_backend, "apply_imperfection"):
+        return {}
+    imperfection, metadata = _build_runtime_imperfection(model, generated_geometry, geometry, config)
+    if imperfection is None:
+        return dict(metadata)
+    _full_backend.apply_imperfection(model, imperfection, copy_model=False)
+    records = getattr(model, "imperfection_metadata", []) or []
+    if records:
+        metadata["max_offset_m"] = float(records[-1].get("max_offset", 0.0) or 0.0)
+    metadata["status"] = "applied"
+    return metadata
+
+
+def _element_centroid(model, element_id: int) -> np.ndarray | None:
+    element = model.mesh.get_element(int(element_id))
+    if element is None or not hasattr(element, "get_node_coordinates"):
+        return None
+    try:
+        return np.mean(np.asarray(element.get_node_coordinates(model.mesh), dtype=float), axis=0)
+    except Exception:
+        return None
+
+
+def _slamming_patch_element_ids(model, generated_geometry: dict, geometry: dict, config: LightweightFEMConfig) -> tuple[int, ...]:
+    shell_ids = _shell_element_ids(model)
+    if not shell_ids:
+        return ()
+    size_a = float(config.slamming_patch_size_a_m or 0.0)
+    size_b = float(config.slamming_patch_size_b_m or 0.0)
+    if size_a <= 0.0 or size_b <= 0.0:
+        return shell_ids
+
+    selected: list[int] = []
+    if generated_geometry.get("plot_type") == "cylinder":
+        radius = _positive(generated_geometry.get("radius_m", geometry.get("radius_m", 0.0)), 0.0)
+        length = _positive(geometry.get("length_m", 0.0), 0.0)
+        circumference = 2.0 * math.pi * radius if radius > 0.0 else 0.0
+        center_z = float(config.slamming_patch_center_a_m or 0.0)
+        if center_z <= 0.0 and length > 0.0:
+            center_z = 0.5 * length
+        center_arc = float(config.slamming_patch_center_b_m or 0.0)
+        if center_arc < 0.0 and circumference > 0.0:
+            center_arc = center_arc % circumference
+
+        for element_id in shell_ids:
+            centroid = _element_centroid(model, element_id)
+            if centroid is None:
+                continue
+            z = float(centroid[2])
+            theta = math.atan2(float(centroid[1]), float(centroid[0]))
+            arc = (theta % (2.0 * math.pi)) * radius if radius > 0.0 else 0.0
+            if circumference > 0.0:
+                arc_delta = abs((arc - center_arc + 0.5 * circumference) % circumference - 0.5 * circumference)
+            else:
+                arc_delta = 0.0
+            if abs(z - center_z) <= 0.5 * size_a + 1.0e-12 and arc_delta <= 0.5 * size_b + 1.0e-12:
+                selected.append(int(element_id))
+        return tuple(selected) or shell_ids
+
+    nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
+    xs = [coord[0] for coord in nodes.values()]
+    ys = [coord[1] for coord in nodes.values()]
+    default_x = 0.5 * (min(xs) + max(xs)) if xs else 0.0
+    default_y = 0.5 * (min(ys) + max(ys)) if ys else 0.0
+    center_x = float(config.slamming_patch_center_a_m or default_x)
+    center_y = float(config.slamming_patch_center_b_m or default_y)
+    for element_id in shell_ids:
+        centroid = _element_centroid(model, element_id)
+        if centroid is None:
+            continue
+        if abs(float(centroid[0]) - center_x) <= 0.5 * size_a + 1.0e-12 and abs(float(centroid[1]) - center_y) <= 0.5 * size_b + 1.0e-12:
+            selected.append(int(element_id))
+    return tuple(selected) or shell_ids
+
+
+def _run_slamming_transient(model, load_case, generated_geometry: dict, geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
+    if not config.slamming_enabled:
+        return {}
+    if _full_backend is None or _backend_solve_transient_newmark is None:
+        return {"status": "unavailable"}
+    pressure = abs(float(config.slamming_pressure_pa or 0.0))
+    duration = max(float(config.slamming_duration_s or 0.0), 0.0)
+    total_time = max(float(config.slamming_total_time_s or 0.0), duration)
+    dt = max(float(config.slamming_dt_s or 0.0), 1.0e-9)
+    if pressure <= 0.0 or duration <= 0.0 or total_time <= 0.0:
+        return {"status": "skipped", "reason": "slamming pressure, duration and total time must be positive"}
+    patch_ids = _slamming_patch_element_ids(model, generated_geometry, geometry, config)
+    if not patch_ids:
+        return {"status": "skipped", "reason": "no shell elements selected"}
+    patch = _full_backend.PressurePatch.rectangular_pulse(
+        name="runtime_slamming_patch",
+        pressure=_pressure_sign(config) * pressure,
+        start_time=0.0,
+        end_time=duration,
+        element_ids=patch_ids,
+    )
+    transient_config = _full_backend.TransientConfig(
+        dt=dt,
+        t_end=total_time,
+        save_every=max(int(math.ceil(max(total_time / dt, 1.0) / 120.0)), 1),
+        output_elements=patch_ids,
+        include_stress_history=False,
+    )
+    base_load_case = load_case if config.slamming_include_static_load else None
+    transient = _backend_solve_transient_newmark(
+        model,
+        transient_config,
+        pressure_patches=[patch],
+        base_load_case=base_load_case,
+    )
+    return {
+        "status": str(transient.status),
+        "pressure_pa": pressure,
+        "duration_s": duration,
+        "total_time_s": total_time,
+        "dt_s": dt,
+        "selected_shells": float(len(patch_ids)),
+        "peak_displacement_m": float(transient.peak_displacement),
+        "peak_von_mises_pa": float(transient.peak_von_mises_stress),
+        "force_impulse_n_s": tuple(float(value) for value in np.asarray(transient.force_impulse, dtype=float).reshape(3)),
+        "include_static_load": bool(config.slamming_include_static_load),
+    }
+
+
 def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | str]:
     nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
     grid = generated_geometry.get("plot_grid") or []
@@ -1944,10 +2183,25 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             + str(material_properties.get("thickness_class", ""))
             + " for nonlinear static shell plasticity."
         )
+    if config.imperfection_enabled:
+        diagnostics.append("Geometric imperfection input is enabled; offsets are applied as stress-free reference geometry.")
+    if config.slamming_enabled:
+        diagnostics.append("Transient slamming pressure input is enabled; it is solved as a separate linear Newmark pressure-patch response.")
 
     try:
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         _apply_material_curve_to_model(model, material_curve, material_properties)
+        imperfection_info = _apply_runtime_imperfection(model, generated_geometry, geometry, config)
+        if imperfection_info.get("status") == "applied":
+            diagnostics.append(
+                "Applied "
+                + str(imperfection_info.get("kind", "geometric"))
+                + " imperfection, max offset "
+                + str(round(float(imperfection_info.get("max_offset_m", 0.0)) * 1000.0, 4))
+                + " mm."
+            )
+        elif imperfection_info:
+            diagnostics.append("Imperfection input was not applied: " + str(imperfection_info.get("reason", imperfection_info.get("status", "unknown"))))
         if abs(float(effective_pressure)) > 0.0:
             load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
         else:
@@ -1983,6 +2237,34 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         )
 
     prestress_states, prestress_summary = _full_backend.recover_prestress_from_static_result(model, displacements)
+    if imperfection_info:
+        prestress_summary["imperfection_status"] = str(imperfection_info.get("status", ""))
+        prestress_summary["imperfection_kind"] = str(imperfection_info.get("kind", ""))
+        prestress_summary["imperfection_amplitude_m"] = float(imperfection_info.get("amplitude_m", 0.0) or 0.0)
+        prestress_summary["imperfection_max_offset_m"] = float(imperfection_info.get("max_offset_m", 0.0) or 0.0)
+        prestress_summary["imperfection_waves_a"] = float(imperfection_info.get("waves_a", 0.0) or 0.0)
+        prestress_summary["imperfection_waves_b"] = float(imperfection_info.get("waves_b", 0.0) or 0.0)
+    if config.slamming_enabled:
+        try:
+            slamming_summary = _run_slamming_transient(model, load_case, generated_geometry, geometry, config)
+            if slamming_summary:
+                prestress_summary["slamming_status"] = str(slamming_summary.get("status", ""))
+                prestress_summary["slamming_pressure_pa"] = float(slamming_summary.get("pressure_pa", 0.0) or 0.0)
+                prestress_summary["slamming_selected_shells"] = float(slamming_summary.get("selected_shells", 0.0) or 0.0)
+                prestress_summary["slamming_peak_displacement_m"] = float(slamming_summary.get("peak_displacement_m", 0.0) or 0.0)
+                prestress_summary["slamming_peak_von_mises_pa"] = float(slamming_summary.get("peak_von_mises_pa", 0.0) or 0.0)
+                diagnostics.append(
+                    "Transient slamming response "
+                    + str(slamming_summary.get("status", "unknown"))
+                    + "; selected shells "
+                    + str(int(float(slamming_summary.get("selected_shells", 0.0) or 0.0)))
+                    + ", peak displacement "
+                    + str(round(float(slamming_summary.get("peak_displacement_m", 0.0) or 0.0) * 1000.0, 4))
+                    + " mm."
+                )
+        except Exception as exc:
+            prestress_summary["slamming_status"] = "failed"
+            diagnostics.append("Transient slamming solve failed: " + str(exc))
     prestress_summary["constraint_method"] = str(solver_info.get("constraint_method", ""))
     prestress_summary["constraint_mode"] = str(solver_info.get("constraint_mode", ""))
     nullspace_info = solver_info.get("nullspace_info") or {}

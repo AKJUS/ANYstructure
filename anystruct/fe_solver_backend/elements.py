@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .jit_compiler import njit
+from .material_curves import FiberSectionPlasticityConfig
 from .plasticity import lobatto_layers, plane_stress_elastic_matrix, plane_stress_return_map
 
 if TYPE_CHECKING:
@@ -878,10 +879,11 @@ class ShellElement(Element):
                 nu,
                 curve,
             )
-            trial_state = {"plastic_strain": ep_new, "alpha": alpha_new}
+            trial_state = {"plastic_strain": ep_new, "alpha": alpha_new, "layer_strain": layer_strain.copy()}
 
             sigma = sigma.reshape(n_gp, num_layers, 3)
             C_tan = C_tan.reshape(n_gp, num_layers, 3, 3)
+            trial_state["layer_stress"] = sigma.reshape(n_gp * num_layers, 3).copy()
 
             # Through-thickness resultants and integrated tangent moduli.
             N_res = np.einsum("l,gli->gi", w_layers, sigma)
@@ -1112,6 +1114,7 @@ class BeamElement(Element):
         self._ky = self.cross_section.get("shear_factor_y", 5.0 / 6.0)
         self._kz = self.cross_section.get("shear_factor_z", 5.0 / 6.0)
         self._orientation = _section_orientation(self.cross_section)
+        self._fiber_plasticity = self.cross_section.get("fiber_plasticity")
         # Optional exact stress-recovery data; estimated from A and I if absent.
         self._c_y = self.cross_section.get("c_y")
         self._c_z = self.cross_section.get("c_z")
@@ -1311,6 +1314,178 @@ class BeamElement(Element):
 
         return T.T @ K_geo @ T
 
+    def _fiber_plasticity_config(self, material: "Material") -> Optional[FiberSectionPlasticityConfig]:
+        config = self._fiber_plasticity
+        if config is None:
+            return None
+        if isinstance(config, dict):
+            config = FiberSectionPlasticityConfig(**config)
+        elif config is True:
+            config = FiberSectionPlasticityConfig()
+        elif not isinstance(config, FiberSectionPlasticityConfig):
+            raise TypeError("cross_section['fiber_plasticity'] must be a FiberSectionPlasticityConfig, dict or True")
+        curve = config.material_curve or getattr(material, "hardening_curve", None)
+        if curve is None:
+            return None
+        if config.material_curve is curve:
+            return config
+        return FiberSectionPlasticityConfig(config.num_y, config.num_z, curve)
+
+    def _fiber_section_grid(self, config: FiberSectionPlasticityConfig) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        key = ("fiber_grid", int(config.num_y), int(config.num_z), float(self._A), float(self._Iy), float(self._Iz))
+        cache = getattr(self, "_fiber_grid_cache", None)
+        if cache is not None and cache.get("key") == key:
+            return cache["y"], cache["z"], cache["weights"]
+
+        raw_y = np.linspace(-1.0, 1.0, int(config.num_y)) if config.num_y > 1 else np.zeros(1)
+        raw_z = np.linspace(-1.0, 1.0, int(config.num_z)) if config.num_z > 1 else np.zeros(1)
+        yy, zz = np.meshgrid(raw_y, raw_z, indexing="ij")
+        y = yy.reshape(-1)
+        z = zz.reshape(-1)
+        weights = np.full(y.size, float(self._A) / max(y.size, 1), dtype=float)
+
+        denom_y = float(np.sum(weights * y * y))
+        denom_z = float(np.sum(weights * z * z))
+        if denom_y > _SMALL and self._Iz > 0.0:
+            y *= np.sqrt(float(self._Iz) / denom_y)
+        else:
+            y *= 0.0
+        if denom_z > _SMALL and self._Iy > 0.0:
+            z *= np.sqrt(float(self._Iy) / denom_z)
+        else:
+            z *= 0.0
+
+        self._fiber_grid_cache = {"key": key, "y": y, "z": z, "weights": weights}
+        return y, z, weights
+
+    @staticmethod
+    def _uniaxial_return_map(
+        strain: np.ndarray,
+        state: Optional[Any],
+        E: float,
+        curve: Any,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        strain = np.asarray(strain, dtype=float).reshape(-1)
+        n = strain.size
+        if isinstance(state, dict) and np.asarray(state.get("plastic_strain", [])).size == n:
+            plastic_old = np.asarray(state["plastic_strain"], dtype=float).reshape(-1)
+            alpha_old = np.asarray(state.get("alpha", np.zeros(n)), dtype=float).reshape(-1)
+        else:
+            plastic_old = np.zeros(n, dtype=float)
+            alpha_old = np.zeros(n, dtype=float)
+
+        trial = E * (strain - plastic_old)
+        abs_trial = np.abs(trial)
+        flow_old = curve.flow_stress(alpha_old)
+        yielding = abs_trial > flow_old + 1.0e-9 * np.maximum(flow_old, 1.0)
+
+        stress = trial.copy()
+        tangent = np.full(n, E, dtype=float)
+        plastic_new = plastic_old.copy()
+        alpha_new = alpha_old.copy()
+        if not np.any(yielding):
+            return stress, tangent, plastic_new, alpha_new
+
+        indices = np.where(yielding)[0]
+        for idx in indices:
+            sign = 1.0 if trial[idx] >= 0.0 else -1.0
+            dgamma = 0.0
+            H = float(curve.hardening_modulus(np.array([alpha_old[idx]]))[0])
+            for _ in range(30):
+                alpha_trial = alpha_old[idx] + dgamma
+                sy = float(curve.flow_stress(np.array([alpha_trial]))[0])
+                H = float(curve.hardening_modulus(np.array([alpha_trial]))[0])
+                residual = abs_trial[idx] - E * dgamma - sy
+                if abs(residual) <= 1.0e-8 * max(sy, 1.0):
+                    break
+                dgamma = max(0.0, dgamma + residual / max(E + H, _SMALL))
+            stress[idx] = sign * max(abs_trial[idx] - E * dgamma, 0.0)
+            plastic_new[idx] = plastic_old[idx] + sign * dgamma
+            alpha_new[idx] = alpha_old[idx] + dgamma
+            tangent[idx] = E * H / max(E + H, _SMALL)
+        return stress, tangent, plastic_new, alpha_new
+
+    def _compute_fiber_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Optional[Any],
+        config: FiberSectionPlasticityConfig,
+        tangent: bool,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
+        coords = self.get_node_coordinates(mesh)
+        L, T = self._beam_frame_and_transform(coords)
+        u_loc = T @ np.asarray(u_elem, dtype=float)
+        E = material.elastic_modulus
+        G = material.shear_modulus
+        y, z, weights = self._fiber_section_grid(config)
+
+        du = u_loc[6] - u_loc[0]
+        dv = u_loc[7] - u_loc[1]
+        dw = u_loc[8] - u_loc[2]
+        eps0 = du / L + (dv**2 + dw**2) / (2.0 * L**2)
+        kappa_y = (u_loc[10] - u_loc[4]) / L
+        kappa_z = (u_loc[11] - u_loc[5]) / L
+        fiber_strain = eps0 + z * kappa_y + y * kappa_z
+        stress, Et, plastic_new, alpha_new = self._uniaxial_return_map(
+            fiber_strain, state, E, config.material_curve
+        )
+
+        B = np.zeros((fiber_strain.size, 12), dtype=float)
+        B[:, 0] = -1.0 / L
+        B[:, 6] = 1.0 / L
+        B[:, 1] = -dv / L**2
+        B[:, 7] = dv / L**2
+        B[:, 2] = -dw / L**2
+        B[:, 8] = dw / L**2
+        B[:, 4] = -z / L
+        B[:, 10] = z / L
+        B[:, 5] = -y / L
+        B[:, 11] = y / L
+
+        F_loc = L * np.einsum("i,i,ij->j", weights, stress, B)
+        K_loc = None
+        if tangent:
+            K_loc = L * np.einsum("i,i,ij,ik->jk", weights, Et, B, B)
+
+        N_force = float(np.sum(weights * stress))
+        if tangent:
+            string = N_force / L
+            for a, b in ((1, 7), (2, 8)):
+                K_loc[a, a] += string
+                K_loc[b, b] += string
+                K_loc[a, b] -= string
+                K_loc[b, a] -= string
+
+        B_shear_y = np.zeros(12, dtype=float)
+        B_shear_y[1], B_shear_y[7] = -1.0 / L, 1.0 / L
+        B_shear_y[5], B_shear_y[11] = -0.5, -0.5
+        B_shear_z = np.zeros(12, dtype=float)
+        B_shear_z[2], B_shear_z[8] = -1.0 / L, 1.0 / L
+        B_shear_z[4], B_shear_z[10] = 0.5, 0.5
+        B_torsion = np.zeros(12, dtype=float)
+        B_torsion[3], B_torsion[9] = -1.0 / L, 1.0 / L
+        K_aux = L * (
+            G * self._A * self._ky * np.outer(B_shear_y, B_shear_y)
+            + G * self._A * self._kz * np.outer(B_shear_z, B_shear_z)
+            + G * self._J * np.outer(B_torsion, B_torsion)
+        )
+        F_loc += K_aux @ u_loc
+        if tangent:
+            K_loc += K_aux
+
+        trial_state = {
+            "plastic_strain": plastic_new,
+            "alpha": alpha_new,
+            "fiber_strain": fiber_strain.copy(),
+            "fiber_stress": stress.copy(),
+            "axial_force": N_force,
+        }
+        if not tangent:
+            return T.T @ F_loc, None, trial_state
+        return T.T @ F_loc, T.T @ K_loc @ T, trial_state
+
     def compute_nonlinear_response(
         self,
         mesh: "FEMesh",
@@ -1328,9 +1503,16 @@ class BeamElement(Element):
 
         which gives the P-delta string effect consistently (internal force
         and tangent from the same potential).  Bending, shear and torsion
-        remain linear elastic; material plasticity for beams is not part of
-        this formulation.
+        remain linear elastic unless ``cross_section["fiber_plasticity"]`` is
+        provided, in which case axial/bending response is integrated over a
+        uniaxial fiber section using the material hardening curve.
         """
+        fiber_config = self._fiber_plasticity_config(material)
+        if fiber_config is not None:
+            return self._compute_fiber_nonlinear_response(
+                mesh, material, u_elem, state, fiber_config, tangent
+            )
+
         cache = getattr(self, "_nl_cache", None)
         if cache is None:
             coords = self.get_node_coordinates(mesh)
@@ -1397,20 +1579,10 @@ class BeamElement(Element):
         u1, v1, w1, rx1, ry1, rz1 = end_a
         u2, v2, w2, rx2, ry2, rz2 = end_b
         sigma_axial = E * (u2 - u1) / L
-
-        phi_w = 12.0 * E * self._Iy / max(G * self._A * self._kz * L**2, _SMALL)
-        phi_v = 12.0 * E * self._Iz / max(G * self._A * self._ky * L**2, _SMALL)
-
-        coeff_y = E * self._Iy / (L * (1.0 + phi_w))
-        M1_y = coeff_y * (-6.0 * (w2 - w1) / L - (4.0 + phi_w) * ry1 - (2.0 - phi_w) * ry2)
-        M2_y = coeff_y * (6.0 * (w2 - w1) / L + (2.0 - phi_w) * ry1 + (4.0 + phi_w) * ry2)
-        M_y = max(abs(M1_y), abs(M2_y))
-
-        coeff_z = E * self._Iz / (L * (1.0 + phi_v))
-        M1_z = coeff_z * (6.0 * (v2 - v1) / L - (4.0 + phi_v) * rz1 - (2.0 - phi_v) * rz2)
-        M2_z = coeff_z * (-6.0 * (v2 - v1) / L + (2.0 - phi_v) * rz1 + (4.0 + phi_v) * rz2)
-        M_z = max(abs(M1_z), abs(M2_z))
-
+        kappa_z = (rz2 - rz1) / L
+        kappa_y = (ry2 - ry1) / L
+        M_z = E * self._Iz * kappa_z
+        M_y = E * self._Iy * kappa_y
         c_y, c_z = self._fiber_distances()
         sigma_bending_y = M_y * c_z / max(self._Iy, _SMALL)
         sigma_bending_z = M_z * c_y / max(self._Iz, _SMALL)
