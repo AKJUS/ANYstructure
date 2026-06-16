@@ -42,6 +42,7 @@ class MeshConfig:
     stiffener_material: str = "steel"
 
     use_8node_shells: bool = False
+    align_mesh_to_stiffeners: bool = False
 
 
 @dataclass
@@ -268,7 +269,13 @@ class InterpolatedBeamShellMPCElement:
     def compute_geometric_stiffness_matrix(self, mesh: "FEMesh", material: "Material", state: Any = None) -> np.ndarray:
         return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
 
-    def compute_stresses(self, mesh: "FEMesh", displacements: np.ndarray, material: "Material") -> Dict[str, np.ndarray]:
+    def compute_stresses(
+        self,
+        mesh: "FEMesh",
+        displacements: np.ndarray,
+        material: "Material",
+        return_global: bool = False,
+    ) -> Dict[str, np.ndarray]:
         return {}
 
     def get_mpc_constraints(self, mesh: "FEMesh") -> List[Dict[str, Any]]:
@@ -369,7 +376,13 @@ class RigidLidMPCElement:
     def compute_geometric_stiffness_matrix(self, mesh: "FEMesh", material: "Material", state: Any = None) -> np.ndarray:
         return np.zeros((0, 0), dtype=float)
 
-    def compute_stresses(self, mesh: "FEMesh", displacements: np.ndarray, material: "Material") -> Dict[str, np.ndarray]:
+    def compute_stresses(
+        self,
+        mesh: "FEMesh",
+        displacements: np.ndarray,
+        material: "Material",
+        return_global: bool = False,
+    ) -> Dict[str, np.ndarray]:
         return {}
 
     @staticmethod
@@ -485,6 +498,7 @@ def generate_stiffened_panel_mesh(panel: PanelGeometry, config: Optional[MeshCon
     return model
 
 
+
 def _generate_shell_mesh(
     panel: PanelGeometry,
     config: MeshConfig,
@@ -498,25 +512,59 @@ def _generate_shell_mesh(
     W = panel.width
     t = panel.plate_thickness
 
+    if config.align_mesh_to_stiffeners:
+        num_stiffeners = max(int(panel.num_stiffeners), 1)
+        spacing = panel.stiffener_spacing if panel.stiffener_spacing > 0.0 else panel.width / (num_stiffeners + 1)
+        y_stiffeners = [(s + 1) * spacing for s in range(num_stiffeners)]
+        key_ys = [0.0] + y_stiffeners + [W]
+        n_segments = len(key_ys) - 1
+
+        if ny <= n_segments:
+            segment_divs = [1] * n_segments
+            ny = n_segments
+        else:
+            segment_divs = [1] * n_segments
+            remaining = ny - n_segments
+            widths = np.array([key_ys[k+1] - key_ys[k] for k in range(n_segments)], dtype=float)
+            shares = widths / np.sum(widths) * remaining
+            floored = np.floor(shares).astype(int)
+            segment_divs = [divs + f for divs, f in zip(segment_divs, floored)]
+            remaining -= np.sum(floored)
+            fractional = shares - floored
+            for idx in np.argsort(fractional)[::-1][:remaining]:
+                segment_divs[idx] += 1
+            ny = sum(segment_divs)
+
+        y_grid = []
+        for k in range(n_segments):
+            y0_seg = key_ys[k]
+            y1_seg = key_ys[k+1]
+            divs = segment_divs[k]
+            for d in range(divs):
+                y_grid.append(y0_seg + d * (y1_seg - y0_seg) / divs)
+        y_grid.append(W)
+    else:
+        y_grid = [j * W / ny for j in range(ny + 1)]
+
     if config.use_8node_shells:
         node_id = 1
         corner_nodes: Dict[Tuple[int, int], int] = {}
         for i in range(nx + 1):
             for j in range(ny + 1):
                 corner_nodes[(i, j)] = node_id
-                nodes[node_id] = (i * L / nx, j * W / ny, 0.0)
+                nodes[node_id] = (i * L / nx, y_grid[j], 0.0)
                 node_id += 1
         h_mid_nodes: Dict[Tuple[int, int], int] = {}
         for i in range(nx):
             for j in range(ny + 1):
                 h_mid_nodes[(i, j)] = node_id
-                nodes[node_id] = ((i + 0.5) * L / nx, j * W / ny, 0.0)
+                nodes[node_id] = ((i + 0.5) * L / nx, y_grid[j], 0.0)
                 node_id += 1
         v_mid_nodes: Dict[Tuple[int, int], int] = {}
         for i in range(nx + 1):
             for j in range(ny):
                 v_mid_nodes[(i, j)] = node_id
-                nodes[node_id] = (i * L / nx, (j + 0.5) * W / ny, 0.0)
+                nodes[node_id] = (i * L / nx, 0.5 * (y_grid[j] + y_grid[j + 1]), 0.0)
                 node_id += 1
         elem_id = 1
         for i in range(nx):
@@ -541,7 +589,7 @@ def _generate_shell_mesh(
         for i in range(nx + 1):
             for j in range(ny + 1):
                 node_grid[(i, j)] = node_id
-                nodes[node_id] = (i * L / nx, j * W / ny, 0.0)
+                nodes[node_id] = (i * L / nx, y_grid[j], 0.0)
                 node_id += 1
         elem_id = 1
         for i in range(nx):
@@ -655,6 +703,46 @@ def _locate_shell_element_at_xy(
 ) -> Optional[Tuple[List[int], np.ndarray, np.ndarray]]:
     """Find the shell element containing an x/y point and return node ids, weights and shell point."""
     tol = max(float(tolerance), 1.0e-10)
+
+    # Fast O(1) grid lookup path for regular rectangular grids
+    try:
+        xs = sorted(list(set(round(coords[0] / tol) * tol for coords in shell_nodes.values())))
+        ys = sorted(list(set(round(coords[1] / tol) * tol for coords in shell_nodes.values())))
+        xs_arr = np.array(xs, dtype=float)
+        ys_arr = np.array(ys, dtype=float)
+        nx = len(xs_arr) - 1
+        ny = len(ys_arr) - 1
+
+        if nx > 0 and ny > 0 and len(shell_elements) == nx * ny:
+            i = np.searchsorted(xs_arr, x) - 1
+            j = np.searchsorted(ys_arr, y) - 1
+            i = max(0, min(i, nx - 1))
+            j = max(0, min(j, ny - 1))
+
+            candidate_id = 1 + i * ny + j
+            if candidate_id in shell_elements:
+                node_ids, _thickness = shell_elements[candidate_id]
+                corner_ids = node_ids[:4]
+                corner_coords = np.asarray([shell_nodes[nid] for nid in corner_ids], dtype=float)
+                xmin, xmax = float(np.min(corner_coords[:, 0])), float(np.max(corner_coords[:, 0]))
+                ymin, ymax = float(np.min(corner_coords[:, 1])), float(np.max(corner_coords[:, 1]))
+
+                if xmin - tol <= x <= xmax + tol and ymin - tol <= y <= ymax + tol:
+                    dx = xmax - xmin
+                    dy = ymax - ymin
+                    if dx > tol and dy > tol:
+                        xi = 2.0 * (x - xmin) / dx - 1.0
+                        eta = 2.0 * (y - ymin) / dy - 1.0
+                        xi = float(np.clip(xi, -1.0, 1.0))
+                        eta = float(np.clip(eta, -1.0, 1.0))
+                        weights = _shape_functions_8node(xi, eta) if len(node_ids) == 8 else _shape_functions_4node(xi, eta)
+                        shell_coords = np.asarray([shell_nodes[nid] for nid in node_ids], dtype=float)
+                        shell_point = weights @ shell_coords
+                        return list(node_ids), weights, shell_point
+    except Exception:
+        pass
+
+    # Fallback to sequential search
     for node_ids, _thickness in shell_elements.values():
         corner_ids = node_ids[:4]
         corner_coords = np.asarray([shell_nodes[nid] for nid in corner_ids], dtype=float)
@@ -827,3 +915,72 @@ def generate_beam_mesh(
         model.add_element(i + 1, BeamElement(i + 1, [i + 1, i + 2], material_name="steel", cross_section=cross_section))
     model.add_boundary_condition(FixedSupport("Fixed_1", [1]))
     return model
+
+
+def verify_mesh_quality(model: "FEModel") -> Dict[str, Any]:
+    """Analyze and verify mesh quality metrics (aspect ratio, warping)."""
+    from .elements import ShellElement
+
+    aspect_ratios = []
+    warps = []
+    shell_count = 0
+
+    for elem in model.mesh.elements.values():
+        if not isinstance(elem, ShellElement):
+            continue
+        shell_count += 1
+        coords = elem.get_node_coordinates(model.mesh)
+        corner_coords = coords[:4]
+        
+        e1 = corner_coords[1] - corner_coords[0]
+        e2 = corner_coords[2] - corner_coords[1]
+        e3 = corner_coords[3] - corner_coords[2]
+        e4 = corner_coords[0] - corner_coords[3]
+        
+        l1 = float(np.linalg.norm(e1))
+        l2 = float(np.linalg.norm(e2))
+        l3 = float(np.linalg.norm(e3))
+        l4 = float(np.linalg.norm(e4))
+        
+        lengths = [l1, l2, l3, l4]
+        max_l = max(lengths)
+        min_l = min(lengths)
+        
+        ar = max_l / max(min_l, 1.0e-15)
+        aspect_ratios.append(ar)
+        
+        # Calculate warp
+        n_raw = np.cross(e1, corner_coords[2] - corner_coords[0])
+        n_norm = np.linalg.norm(n_raw)
+        if n_norm > 1.0e-15:
+            n = n_raw / n_norm
+            d = abs(float(np.dot(corner_coords[3] - corner_coords[0], n)))
+            avg_l = sum(lengths) / 4.0
+            warp = d / max(avg_l, 1.0e-15)
+        else:
+            warp = 0.0
+        warps.append(warp)
+
+    warnings = []
+    max_ar = float(np.max(aspect_ratios)) if aspect_ratios else 1.0
+    mean_ar = float(np.mean(aspect_ratios)) if aspect_ratios else 1.0
+    max_warp = float(np.max(warps)) if warps else 0.0
+
+    if max_ar > 5.0:
+        warnings.append(
+            f"High aspect ratio detected (max AR = {max_ar:.2f}). "
+            "Highly stretched elements can reduce solver accuracy. Consider refining the mesh divisions."
+        )
+    if max_warp > 0.05:
+        warnings.append(
+            f"Significant element warp detected (max warp = {max_warp:.4f}). "
+            "Warped shell elements can lose accuracy. Ensure plate geometries are flat or sufficiently refined."
+        )
+
+    return {
+        "num_shell_elements": shell_count,
+        "max_aspect_ratio": max_ar,
+        "mean_aspect_ratio": mean_ar,
+        "max_warp": max_warp,
+        "warnings": warnings,
+    }

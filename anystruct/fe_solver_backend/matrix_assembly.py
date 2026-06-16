@@ -76,6 +76,39 @@ def _triplets_to_csr(rows: list, cols: list, data: list, total_dofs: int) -> spa
     return coo.tocsr()
 
 
+def _get_cached_sparsity_pattern(mesh: "FEMesh", matrix_type: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Retrieve or build the cached row and column indices for global matrix COO assembly."""
+    if not hasattr(mesh, "_sparsity_cache"):
+        mesh._sparsity_cache = {}
+
+    current_elem_ids = list(mesh.elements.keys())
+
+    if matrix_type in mesh._sparsity_cache:
+        cached = mesh._sparsity_cache[matrix_type]
+        if cached["elem_ids"] == current_elem_ids:
+            return cached["rows"], cached["cols"]
+
+    rows_list = []
+    cols_list = []
+    for _, element in mesh.elements.items():
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
+            continue
+        n_local = dof_mapping.size
+        rows_list.append(np.repeat(dof_mapping, n_local))
+        cols_list.append(np.tile(dof_mapping, n_local))
+
+    rows_concat = np.concatenate(rows_list) if rows_list else np.empty(0, dtype=np.intp)
+    cols_concat = np.concatenate(cols_list) if cols_list else np.empty(0, dtype=np.intp)
+
+    mesh._sparsity_cache[matrix_type] = {
+        "rows": rows_concat,
+        "cols": cols_concat,
+        "elem_ids": current_elem_ids,
+    }
+    return rows_concat, cols_concat
+
+
 def _assemble_element_matrix(
     model: "FEModel",
     matrix_type: str,
@@ -83,12 +116,13 @@ def _assemble_element_matrix(
 ) -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
-    rows: list = []
-    cols: list = []
-    data: list = []
     info = _base_info(model, matrix_type)
     start_time = time.time()
 
+    # Retrieve or build cached sparsity pattern
+    rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, matrix_type)
+
+    data_list = []
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
@@ -104,13 +138,23 @@ def _assemble_element_matrix(
             element_matrix,
             int(dof_mapping.size),
         )
-        _scatter_element_matrix(element_matrix, dof_mapping, rows, cols, data)
+        data_list.append(np.asarray(element_matrix, dtype=float).ravel())
 
         info["element_times"][int(elem_id)] = time.time() - elem_start
         info["num_elements"] += 1
 
     info["assembly_time"] = time.time() - start_time
-    return _triplets_to_csr(rows, cols, data, total_dofs), info
+    
+    if not data_list:
+        return sparse.csr_matrix((total_dofs, total_dofs), dtype=float), info
+        
+    data_concat = np.concatenate(data_list)
+    coo = sparse.coo_matrix(
+        (data_concat, (rows_concat, cols_concat)),
+        shape=(total_dofs, total_dofs),
+        dtype=float,
+    )
+    return coo.tocsr(), info
 
 
 def assemble_stiffness_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
@@ -160,12 +204,13 @@ def assemble_geometric_stiffness_matrix(
     """
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
-    rows = []
-    cols = []
-    data = []
     info = _base_info(model, "geometric_stiffness")
     start_time = time.time()
 
+    # Retrieve or build cached sparsity pattern
+    rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, "geometric_stiffness")
+
+    data_list = []
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
@@ -186,14 +231,24 @@ def assemble_geometric_stiffness_matrix(
             element_matrix,
             int(dof_mapping.size),
         )
-        _scatter_element_matrix(element_matrix, dof_mapping, rows, cols, data)
+        data_list.append(np.asarray(element_matrix, dtype=float).ravel())
 
         info["element_times"][int(elem_id)] = time.time() - elem_start
         info["num_elements"] += 1
 
     info["assembly_time"] = time.time() - start_time
     info["state_source"] = "none" if element_states is None else type(element_states).__name__
-    return _triplets_to_csr(rows, cols, data, total_dofs), info
+    
+    if not data_list:
+        return sparse.csr_matrix((total_dofs, total_dofs), dtype=float), info
+        
+    data_concat = np.concatenate(data_list)
+    coo = sparse.coo_matrix(
+        (data_concat, (rows_concat, cols_concat)),
+        shape=(total_dofs, total_dofs),
+        dtype=float,
+    )
+    return coo.tocsr(), info
 
 
 def assemble_load_vector(model: "FEModel", load_case: Optional["LoadCase"] = None) -> Tuple[np.ndarray, Dict[str, Any]]:

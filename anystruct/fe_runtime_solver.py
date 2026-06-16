@@ -35,6 +35,12 @@ try:
 except ModuleNotFoundError:
     from ANYstructure.anystruct import fe_solver
 
+try:
+    from anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, _interpolate_thickness_color
+except ModuleNotFoundError:
+    from ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, _interpolate_thickness_color
+
+
 
 @dataclass(frozen=True)
 class RuntimeFEMLineSnapshot:
@@ -223,6 +229,10 @@ def _member_section(member: Any) -> dict[str, float] | None:
             "J": max(iy + iz, 1.0e-12),
             "shear_factor_y": 5.0 / 6.0,
             "shear_factor_z": 5.0 / 6.0,
+            "web_height": height,
+            "web_thickness": thickness,
+            "flange_width": flange_width,
+            "flange_thickness": flange_thickness,
             "label": "T" + str(round(height * 1000.0)) + "x" + str(round(thickness * 1000.0))
             + "+" + str(round(flange_width * 1000.0)) + "x" + str(round(flange_thickness * 1000.0)),
         }
@@ -242,6 +252,10 @@ def _member_section(member: Any) -> dict[str, float] | None:
         "J": max(iy + iz, 1.0e-12),
         "shear_factor_y": 5.0 / 6.0,
         "shear_factor_z": 5.0 / 6.0,
+        "web_height": height,
+        "web_thickness": thickness,
+        "flange_width": 0.0,
+        "flange_thickness": 0.0,
         "label": "FB" + str(round(height * 1000.0)) + "x" + str(round(thickness * 1000.0)),
     }
 
@@ -635,6 +649,8 @@ def _plot_visualization_surface(
     result: RuntimeFEMRunResult,
     display_mode: str = "static",
     deformation_scale: float | None = None,
+    show_plate: bool = True,
+    show_members: bool = True,
 ) -> None:
     visualization, title, is_mode = _selected_visualization(result, display_mode)
     scalar_values = _plot_grid_values(visualization.get("stress_pa"))
@@ -665,21 +681,23 @@ def _plot_visualization_surface(
              for col_index in range(len(theta[row_index]))]
             for row_index in range(len(theta))
         ]
-        axis.plot_surface(
-            np.asarray(x),
-            np.asarray(y),
-            np.asarray(axial),
-            facecolors=np.asarray(facecolors),
-            rstride=1,
-            cstride=1,
-            linewidth=0.15,
-            antialiased=True,
-            shade=False,
-        )
+        if show_plate:
+            axis.plot_surface(
+                np.asarray(x),
+                np.asarray(y),
+                np.asarray(axial),
+                facecolors=np.asarray(facecolors),
+                rstride=1,
+                cstride=1,
+                linewidth=0.15,
+                antialiased=True,
+                shade=False,
+            )
         axis.set_xlabel("x [m]")
         axis.set_ylabel("y [m]")
         axis.set_zlabel("height [m]")
-        _plot_member_lines(axis, visualization, scale)
+        if show_members:
+            _plot_member_lines(axis, visualization, scale)
         _set_3d_axes_limits(axis, x, y, axial)
         try:
             axis.view_init(elev=18.0, azim=-45.0)
@@ -690,21 +708,23 @@ def _plot_visualization_surface(
         y = _plot_grid_values(visualization.get("y_m"))
         w = _plot_grid_values(visualization.get("w_m"))
         z = [[value * scale for value in row] for row in w]
-        axis.plot_surface(
-            np.asarray(x),
-            np.asarray(y),
-            np.asarray(z),
-            facecolors=np.asarray(facecolors),
-            rstride=1,
-            cstride=1,
-            linewidth=0.15,
-            antialiased=True,
-            shade=False,
-        )
+        if show_plate:
+            axis.plot_surface(
+                np.asarray(x),
+                np.asarray(y),
+                np.asarray(z),
+                facecolors=np.asarray(facecolors),
+                rstride=1,
+                cstride=1,
+                linewidth=0.15,
+                antialiased=True,
+                shade=False,
+            )
         axis.set_xlabel("length [m]")
         axis.set_ylabel("width [m]")
         axis.set_zlabel("w x" + str(round(scale, 1)))
-        _plot_member_lines(axis, visualization, scale)
+        if show_members:
+            _plot_member_lines(axis, visualization, scale)
         _set_3d_axes_limits(axis, x, y, z)
 
     axis.set_title(title)
@@ -718,12 +738,13 @@ def create_runtime_fem_result_figure(
     result: RuntimeFEMRunResult | None = None,
     display_mode: str = "static",
     deformation_scale: float | None = None,
+    show_plate: bool = True,
+    show_members: bool = True,
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
     figure = Figure(figsize=(8.0, 4.1), dpi=100)
-    geometry_ax = figure.add_subplot(121, projection="3d")
-    result_ax = figure.add_subplot(122)
+    geometry_ax = figure.add_subplot(111, projection="3d")
     geometry = runtime_geometry_summary(snapshot) if result is None else result.summary
 
     if result is None or not result.visualization:
@@ -732,74 +753,9 @@ def create_runtime_fem_result_figure(
         geometry_ax.set_xlabel("length [m]")
         geometry_ax.set_ylabel("width/radius [m]")
         geometry_ax.set_zlabel("displacement")
-        result_ax.text(0.5, 0.55, "No FEM run yet", ha="center", va="center", fontsize=12)
-        result_ax.text(0.5, 0.42, "Results will appear here after Run FEM.", ha="center", va="center", fontsize=9)
-        result_ax.set_axis_off()
     else:
-        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale)
-        result_ax.set_axis_off()
+        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale, show_plate=show_plate, show_members=show_members)
 
-        if str(display_mode).startswith("mode:"):
-            result_ax.set_title("Buckling modes")
-            summary_lines = [
-                "status: " + result.status.replace("_", " "),
-                "solver: " + str(geometry.get("solver", "")),
-                "max disp [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
-            ]
-            for label, value in result.stress_percentiles:
-                summary_lines.append(label + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
-            result_ax.text(0.02, 0.98, "\n".join(summary_lines), transform=result_ax.transAxes,
-                           ha="left", va="top", fontsize=9)
-            if result.buckling_factors:
-                rows = [
-                    [str(index), str(round(factor, 4))]
-                    for index, factor in enumerate(result.buckling_factors, start=1)
-                ]
-            else:
-                rows = [["-", "No positive modes"]]
-            table = result_ax.table(
-                cellText=rows,
-                colLabels=["Mode", "Load factor"],
-                cellLoc="center",
-                colLoc="center",
-                bbox=[0.02, 0.08, 0.76, 0.58],
-            )
-            table.auto_set_font_size(False)
-            table.set_fontsize(9)
-            for index in range(1, len(rows) + 1):
-                if display_mode == "mode:" + rows[index - 1][0]:
-                    for col in range(2):
-                        table[(index, col)].set_facecolor("#dbeafe")
-        else:
-            result_ax.set_title("Static analysis result")
-            force = tuple((geometry.get("load_resultant") or {}).get("force_n") or ())
-            applied_pressure = _safe_float(geometry.get("pressure_pa"))
-            summary_lines = [
-                "Loaded static response",
-                "status: " + result.status.replace("_", " "),
-                "solver: " + str(geometry.get("solver", "")),
-                "pressure [Pa]: " + str(round(applied_pressure, 3)),
-                "load scale: " + str(round(_safe_float(geometry.get("load_scale"), 1.0), 4)),
-                "max displacement [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
-            ]
-            for label, value in result.stress_percentiles:
-                summary_lines.append(label + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
-            if force:
-                summary_lines.append("resultant force [N]: " + ", ".join(str(round(_safe_float(value), 2)) for value in force))
-            summary_lines.extend([
-                "",
-                "Mode shapes are available from the Display selector.",
-                "They are not the default loaded static result.",
-            ])
-            result_ax.text(
-                0.03,
-                0.96,
-                "\n".join(summary_lines),
-                transform=result_ax.transAxes,
-                ha="left",
-                va="top",
-                fontsize=9,
-            )
     figure.tight_layout()
     return figure
 
@@ -1489,6 +1445,12 @@ class RuntimeFEMWindow:
         self.display_selector = None
         self.run_button = None
         self.progress_bar = None
+        self.result_canvas = None
+        self.use_interactive_3d = tk.BooleanVar(value=True)
+        self.show_plate_vis = tk.BooleanVar(value=True)
+        self.show_members_vis = tk.BooleanVar(value=True)
+        self.upper_result_frame = None
+        self.upper_result_text = None
         self.solver_thread = None
         self.solver_queue = queue.Queue()
         try:
@@ -1809,9 +1771,13 @@ class RuntimeFEMWindow:
         ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         custom.columnconfigure(3, weight=1)
 
-        preview = ttk.LabelFrame(right_panel, text="3D section view")
-        preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        self._show_preview_figure(create_runtime_fem_geometry_preview_figure(self.snapshot, self.app), preview)
+        self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
+        self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.upper_result_text = tk.Text(self.upper_result_frame, wrap=tk.WORD, height=10)
+        self.upper_result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
+        scrollbar = ttk.Scrollbar(self.upper_result_frame, orient=tk.VERTICAL, command=self.upper_result_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
+        self.upper_result_text.configure(yscrollcommand=scrollbar.set)
 
         result_frame = ttk.LabelFrame(right_panel, text="Run visualization")
         result_frame.pack(fill=tk.BOTH, expand=True)
@@ -1832,7 +1798,30 @@ class RuntimeFEMWindow:
         )
         self.display_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.display_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
-        self._show_figure(create_runtime_fem_result_figure(self.snapshot), plot_holder)
+        self.interactive_3d_checkbox = ttk.Checkbutton(
+            selector_bar,
+            text="Interactive 3D",
+            variable=self.use_interactive_3d,
+            command=self._refresh_figure,
+        )
+        self.interactive_3d_checkbox.pack(side=tk.RIGHT, padx=6)
+        
+        self.plate_vis_checkbox = ttk.Checkbutton(
+            selector_bar,
+            text="Show plate",
+            variable=self.show_plate_vis,
+            command=self._refresh_figure,
+        )
+        self.plate_vis_checkbox.pack(side=tk.RIGHT, padx=6)
+        
+        self.members_vis_checkbox = ttk.Checkbutton(
+            selector_bar,
+            text="Show members",
+            variable=self.show_members_vis,
+            command=self._refresh_figure,
+        )
+        self.members_vis_checkbox.pack(side=tk.RIGHT, padx=6)
+        self._refresh_figure()
         self._write_status("Ready. ANYstructure production FE mesh solver is available.")
 
     def _show_figure(self, figure: Figure, parent: Any | None = None) -> None:
@@ -2028,18 +2017,494 @@ class RuntimeFEMWindow:
         if self.display_selector is not None:
             self.display_selector.configure(values=tuple(labels))
 
+    def _get_shell_normal(self, p: np.ndarray, is_cylinder: bool) -> np.ndarray:
+        if is_cylinder:
+            r = np.array([p[0], p[1], 0.0], dtype=float)
+            norm_r = np.linalg.norm(r)
+            if norm_r > 1.0e-9:
+                return r / norm_r
+            return np.array([1.0, 0.0, 0.0], dtype=float)
+        else:
+            return np.array([0.0, 0.0, 1.0], dtype=float)
+
+    def _populate_canvas_with_geometry(self, canvas: Tkinter3DCanvas) -> None:
+        geometry = runtime_geometry_summary(self.snapshot)
+        show_plate_var = getattr(self, "show_plate_vis", None)
+        show_plate = show_plate_var.get() if show_plate_var is not None else True
+        show_members_var = getattr(self, "show_members_vis", None)
+        show_members = show_members_var.get() if show_members_var is not None else True
+
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+            if show_plate:
+                canvas.add_cylinder(
+                    radius=radius,
+                    height=length,
+                    center=Point3D(0.0, 0.0, 0.0),
+                    color="#d8e2ea",
+                    outline="#708090",
+                    segments=32,
+                    height_segments=12,
+                    capped=False,
+                    opacity=0.6,
+                    show_backfaces=True,
+                    show_thickness_legend=False
+                )
+            if show_members and geometry.get("has_stiffener"):
+                stf_spacing = _safe_float(geometry.get("stiffener_spacing_m"))
+                if stf_spacing > 0.0:
+                    num_longs = int(2.0 * math.pi * radius / stf_spacing)
+                    stf_sec = geometry.get("stiffener_section") or {}
+                    hw = _safe_float(stf_sec.get("web_height") or stf_sec.get("web_h") or 0.1)
+                    tw = _safe_float(stf_sec.get("web_thickness") or stf_sec.get("web_t") or 0.01)
+                    b = _safe_float(stf_sec.get("flange_width") or stf_sec.get("flange_w") or 0.0)
+                    tf = _safe_float(stf_sec.get("flange_thickness") or stf_sec.get("flange_t") or 0.0)
+                    for i in range(num_longs):
+                        angle = 2.0 * math.pi * i / num_longs
+                        canvas.add_longitudinal_stiffener(
+                            radius=radius,
+                            height=length,
+                            angle=angle,
+                            web_height=hw,
+                            web_thickness=tw,
+                            flange_width=b,
+                            flange_thickness=tf,
+                            color="#a0a0ff",
+                            outline="#404080",
+                            segments=4,
+                            height_segments=8,
+                            inside=True,
+                            z_offset=0.0,
+                        )
+            if show_members and geometry.get("has_girder"):
+                gir_spacing = _safe_float(geometry.get("girder_spacing_m"))
+                gir_sec = geometry.get("girder_section") or {}
+                ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.12)
+                gtw = _safe_float(gir_sec.get("web_thickness") or gir_sec.get("web_t") or 0.02)
+                gb = _safe_float(gir_sec.get("flange_width") or gir_sec.get("flange_w") or 0.08)
+                gtf = _safe_float(gir_sec.get("flange_thickness") or gir_sec.get("flange_t") or 0.015)
+                if gir_spacing > 0.0:
+                    num_girders = int(length / gir_spacing) + 1
+                    for i in range(num_girders):
+                        z_pos = -0.5 * length + i * gir_spacing
+                        if abs(z_pos) <= 0.5 * length + 1.0e-3:
+                            canvas.add_ring_stiffener(
+                                radius=radius,
+                                z_position=z_pos,
+                                web_height=ghw,
+                                web_thickness=gtw,
+                                flange_width=gb,
+                                flange_thickness=gtf,
+                                color="#ffa0a0",
+                                outline="#804040",
+                                segments=32,
+                                inside=True,
+                            )
+        else:
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+            width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
+            if show_plate:
+                canvas.add_polygon(
+                    [
+                        Point3D(0.0, 0.0, 0.0),
+                        Point3D(length, 0.0, 0.0),
+                        Point3D(length, width, 0.0),
+                        Point3D(0.0, width, 0.0)
+                    ],
+                    color="#d1d5db",
+                    outline="#64748b",
+                    layer=5
+                )
+            if show_members and geometry.get("has_stiffener"):
+                spacing = _safe_float(geometry.get("stiffener_spacing_m"))
+                stf_sec = geometry.get("stiffener_section") or {}
+                hw = _safe_float(stf_sec.get("web_height") or stf_sec.get("web_h") or 0.1)
+                b = _safe_float(stf_sec.get("flange_width") or stf_sec.get("flange_w") or 0.0)
+                if spacing > 0.0:
+                    num_stiffeners = int(width / spacing) + 1
+                    valid_indices = []
+                    for i in range(num_stiffeners):
+                        y_pos = i * spacing
+                        if y_pos <= width + 1.0e-3:
+                            valid_indices.append((i, y_pos))
+                    for idx, (i, y_pos) in enumerate(valid_indices):
+                        spans = [(0.0, 0.5 * length), (0.5 * length, length)]
+                        for stf_start, stf_end in spans:
+                            canvas.add_polygon(
+                                [
+                                    Point3D(stf_start, y_pos, 0.0),
+                                    Point3D(stf_end, y_pos, 0.0),
+                                    Point3D(stf_end, y_pos, hw),
+                                    Point3D(stf_start, y_pos, hw)
+                                ],
+                                color="#94a3b8",
+                                outline="#1f2937",
+                                width=2,
+                                layer=12
+                            )
+                            if b > 0.0:
+                                canvas.add_polygon(
+                                    [
+                                        Point3D(stf_start, y_pos - 0.5 * b, hw),
+                                        Point3D(stf_end, y_pos - 0.5 * b, hw),
+                                        Point3D(stf_end, y_pos + 0.5 * b, hw),
+                                        Point3D(stf_start, y_pos + 0.5 * b, hw)
+                                    ],
+                                    color="#334155",
+                                    outline="#111827",
+                                    width=2,
+                                    layer=13
+                                )
+            if show_members and geometry.get("has_girder"):
+                gir_sec = geometry.get("girder_section") or {}
+                ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.15)
+                gb = _safe_float(gir_sec.get("flange_width") or gir_sec.get("flange_w") or 0.08)
+                x_mid = 0.5 * length
+                canvas.add_polygon(
+                    [
+                        Point3D(x_mid, 0.0, 0.0),
+                        Point3D(x_mid, width, 0.0),
+                        Point3D(x_mid, width, ghw),
+                        Point3D(x_mid, 0.0, ghw)
+                    ],
+                    color="#fca5a5",
+                    outline="#991b1b",
+                    width=2,
+                    layer=12
+                )
+                if gb > 0.0:
+                    canvas.add_polygon(
+                        [
+                            Point3D(x_mid - 0.5 * gb, 0.0, ghw),
+                            Point3D(x_mid - 0.5 * gb, width, ghw),
+                            Point3D(x_mid + 0.5 * gb, width, ghw),
+                            Point3D(x_mid + 0.5 * gb, 0.0, ghw)
+                        ],
+                        color="#b91c1c",
+                        outline="#7f1d1d",
+                        width=2,
+                        layer=13
+                    )
+        canvas.after_idle(canvas.fit_to_scene)
+
+    def _populate_canvas_with_results(self, canvas: Tkinter3DCanvas) -> None:
+        result = self.current_result
+        geometry = result.summary
+        display_mode = self._selected_display_mode()
+        deformation_scale = max(_safe_float(self.deformation_scale.get(), 0.0), 0.0)
+        
+        visualization, title, is_mode = _selected_visualization(result, display_mode)
+        
+        scalar_values = _plot_grid_values(visualization.get("stress_pa"))
+        if is_mode:
+            color_grid = scalar_values
+            colorbar_label = str(visualization.get("scalar_label") or "mode amplitude")
+        elif visualization.get("scalar_kind") == "raw":
+            color_grid = scalar_values
+            colorbar_label = str(visualization.get("scalar_label") or "value")
+        else:
+            color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
+            colorbar_label = "stress [MPa]"
+            
+        all_vals = _all_grid_values(color_grid)
+        if all_vals:
+            vmin = min(all_vals)
+            vmax = max(all_vals)
+        else:
+            vmin, vmax = 0.0, 1.0
+            
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+            
+        scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
+        
+        if visualization.get("type") == "cylinder":
+            axial = _plot_grid_values(visualization.get("axial_m"))
+            theta = _plot_grid_values(visualization.get("theta_rad"))
+            radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
+            radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
+            x = [
+                [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
+                 for col_index in range(len(theta[row_index]))]
+                for row_index in range(len(theta))
+            ]
+            y = [
+                [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
+                 for col_index in range(len(theta[row_index]))]
+                for row_index in range(len(theta))
+            ]
+            z = axial
+        else:
+            x = _plot_grid_values(visualization.get("x_m"))
+            y = _plot_grid_values(visualization.get("y_m"))
+            w = _plot_grid_values(visualization.get("w_m"))
+            z = [[value * scale for value in row] for row in w]
+            
+        show_plate_var = getattr(self, "show_plate_vis", None)
+        show_plate = show_plate_var.get() if show_plate_var is not None else True
+        if show_plate:
+            R = len(x)
+            C = len(x[0]) if R > 0 else 0
+            for i in range(R - 1):
+                for j in range(C - 1):
+                    p1 = Point3D(x[i][j], y[i][j], z[i][j])
+                    p2 = Point3D(x[i+1][j], y[i+1][j], z[i+1][j])
+                    p3 = Point3D(x[i+1][j+1], y[i+1][j+1], z[i+1][j+1])
+                    p4 = Point3D(x[i][j+1], y[i][j+1], z[i][j+1])
+                    
+                    avg_val = 0.25 * (color_grid[i][j] + color_grid[i+1][j] + color_grid[i+1][j+1] + color_grid[i][j+1])
+                    color = _interpolate_thickness_color(avg_val, vmin, vmax)
+                    canvas.add_polygon([p1, p2, p3, p4], color=color, outline="#64748b", layer=5)
+                    
+        show_members_var = getattr(self, "show_members_vis", None)
+        show_members = show_members_var.get() if show_members_var is not None else True
+        if show_members:
+            for line in visualization.get("member_lines") or ():
+                points = list(line.get("points") or ())
+                displaced = list(line.get("displaced_points") or ())
+                if len(points) < 2 or len(displaced) < 2:
+                    continue
+                    
+                pts = []
+                for idx in range(2):
+                    base = np.asarray(points[idx], dtype=float)
+                    moved = np.asarray(displaced[idx], dtype=float)
+                    pts.append(base + (moved - base) * float(scale))
+                    
+                pA = pts[0]
+                pB = pts[1]
+                vec_AB = pB - pA
+                len_AB = np.linalg.norm(vec_AB)
+                if len_AB < 1.0e-9:
+                    continue
+                u = vec_AB / len_AB
+                
+                nA = self._get_shell_normal(pA, self.snapshot.is_cylinder)
+                nB = self._get_shell_normal(pB, self.snapshot.is_cylinder)
+                
+                e = line.get("eccentricity", 0.0)
+                if abs(e) > 1.0e-9:
+                    web_sign = np.sign(e)
+                else:
+                    web_sign = -1.0 if self.snapshot.is_cylinder else 1.0
+                    
+                wA = web_sign * nA
+                wB = web_sign * nB
+                
+                hw = line.get("web_height", 0.1)
+                b_f = line.get("flange_width", 0.0)
+                
+                s_stops = [0.0, 1.0]
+                centroids = [0.5]
+                
+                for k in range(1):
+                    z_start = s_stops[k] * hw
+                    z_end = s_stops[k+1] * hw
+                    
+                    pAk = pA + z_start * wA
+                    pAk1 = pA + z_end * wA
+                    pBk = pB + z_start * wB
+                    pBk1 = pB + z_end * wB
+                    
+                    q1 = Point3D(pAk[0], pAk[1], pAk[2])
+                    q2 = Point3D(pBk[0], pBk[1], pBk[2])
+                    q3 = Point3D(pBk1[0], pBk1[1], pBk1[2])
+                    q4 = Point3D(pAk1[0], pAk1[1], pAk1[2])
+                    
+                    if is_mode:
+                        baseA = np.asarray(points[0])
+                        dispA = np.asarray(displaced[0]) - baseA
+                        baseB = np.asarray(points[1])
+                        dispB = np.asarray(displaced[1]) - baseB
+                        val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
+                    else:
+                        s_val = centroids[k]
+                        sig_axial = line.get("axial_stress", 0.0)
+                        sig_bend_y = line.get("bending_stress_y", 0.0)
+                        sig_x = sig_axial + (2.0 * s_val - 1.0) * sig_bend_y
+                        
+                        tau_y = line.get("shear_stress_y", 0.0)
+                        tau_z = line.get("shear_stress_z", 0.0)
+                        tau_t = line.get("torsional_stress", 0.0)
+                        
+                        val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
+                        
+                    color = _interpolate_thickness_color(val, vmin, vmax)
+                    canvas.add_polygon([q1, q2, q3, q4], color=color, outline="#000000", width=2, layer=12)
+                    
+                if b_f > 0.0:
+                    pA_top = pA + hw * wA
+                    pB_top = pB + hw * wB
+                    
+                    v_flange_A = np.cross(u, wA)
+                    v_flange_B = np.cross(u, wB)
+                    
+                    fA1 = pA_top - 0.5 * b_f * v_flange_A
+                    fA2 = pA_top + 0.5 * b_f * v_flange_A
+                    fB1 = pB_top - 0.5 * b_f * v_flange_B
+                    fB2 = pB_top + 0.5 * b_f * v_flange_B
+                    
+                    qf1 = Point3D(fA1[0], fA1[1], fA1[2])
+                    qf2 = Point3D(fB1[0], fB1[1], fB1[2])
+                    qf3 = Point3D(fB2[0], fB2[1], fB2[2])
+                    qf4 = Point3D(fA2[0], fA2[1], fA2[2])
+                    
+                    if is_mode:
+                        baseA = np.asarray(points[0])
+                        dispA = np.asarray(displaced[0]) - baseA
+                        baseB = np.asarray(points[1])
+                        dispB = np.asarray(displaced[1]) - baseB
+                        val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
+                    else:
+                        sig_axial = line.get("axial_stress", 0.0)
+                        sig_bend_y = line.get("bending_stress_y", 0.0)
+                        sig_x = sig_axial + sig_bend_y
+                        
+                        tau_y = line.get("shear_stress_y", 0.0)
+                        tau_z = line.get("shear_stress_z", 0.0)
+                        tau_t = line.get("torsional_stress", 0.0)
+                        
+                        val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
+                        
+                    color = _interpolate_thickness_color(val, vmin, vmax)
+                    canvas.add_polygon([qf1, qf2, qf3, qf4], color=color, outline="#000000", width=2, layer=13)
+                    
+        canvas.set_thickness_legend(
+            values=all_vals,
+            unit=colorbar_label,
+            title=title
+        )
+        canvas.after_idle(canvas.fit_to_scene)
+
+    def _update_result_text(self) -> None:
+        if self.upper_result_text is None:
+            return
+        self.upper_result_text.config(state=tk.NORMAL)
+        self.upper_result_text.delete("1.0", tk.END)
+        
+        if self.current_result is None:
+            self.upper_result_text.insert(tk.END, "No solver results available yet. Run FEM to calculate results.")
+            self.upper_result_text.config(state=tk.DISABLED)
+            return
+            
+        result = self.current_result
+        geometry = result.summary
+        display_mode = self._selected_display_mode()
+        
+        lines = []
+        if str(display_mode).startswith("mode:"):
+            lines.extend([
+                "--- BUCKLING MODES ANALYSIS ---",
+                "Status: " + result.status.replace("_", " "),
+                "Solver: " + str(geometry.get("solver", "")),
+                "Max displacement [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
+            ])
+            for label, value in result.stress_percentiles:
+                lines.append(label.upper() + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
+            lines.append("")
+            lines.append("Mode\tLoad factor")
+            lines.append("----\t-----------")
+            
+            active_mode_str = display_mode.split(":", 1)[1]
+            active_idx = -1
+            try:
+                active_idx = int(active_mode_str)
+            except ValueError:
+                pass
+                
+            if result.buckling_factors:
+                for idx, factor in enumerate(result.buckling_factors, start=1):
+                    prefix = "--> " if idx == active_idx else "    "
+                    lines.append(f"{prefix}{idx}\t{round(factor, 4)}")
+            else:
+                lines.append("No positive buckling modes found.")
+        else:
+            force = tuple((geometry.get("load_resultant") or {}).get("force_n") or ())
+            applied_pressure = _safe_float(geometry.get("pressure_pa"))
+            lines.extend([
+                "--- STATIC RESPONSE ANALYSIS ---",
+                "Status: " + result.status.replace("_", " "),
+                "Solver: " + str(geometry.get("solver", "")),
+                "Pressure [Pa]: " + str(round(applied_pressure, 3)),
+                "Load scale: " + str(round(_safe_float(geometry.get("load_scale"), 1.0), 4)),
+                "Max displacement [mm]: " + str(round(1000.0 * _safe_float(geometry.get("max_displacement_m")), 4)),
+            ])
+            for label, value in result.stress_percentiles:
+                lines.append(label.upper() + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
+            if force:
+                lines.append("Resultant force [N]: " + ", ".join(str(round(_safe_float(v), 2)) for v in force))
+                
+            lines.extend([
+                "",
+                "Buckling mode shapes are available from the Display selector.",
+            ])
+            
+        self.upper_result_text.insert(tk.END, "\n".join(lines))
+        self.upper_result_text.config(state=tk.DISABLED)
+
     def _refresh_figure(self) -> None:
+        self._update_result_text()
         if self.figure_parent is None:
             return
-        self._show_figure(
-            create_runtime_fem_result_figure(
-                self.snapshot,
-                self.current_result,
-                self._selected_display_mode(),
-                max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
-            ),
-            self.figure_parent,
-        )
+            
+        if hasattr(self, "preview_canvas") and self.preview_canvas is not None:
+            try:
+                self.preview_canvas.get_tk_widget().destroy()
+            except Exception:
+                pass
+            self.preview_canvas = None
+
+        if self.use_interactive_3d.get():
+            if self.figure_canvas is not None:
+                try:
+                    self.figure_canvas.get_tk_widget().destroy()
+                except Exception:
+                    pass
+                self.figure_canvas = None
+            if self.figure_toolbar is not None:
+                try:
+                    self.figure_toolbar.destroy()
+                except Exception:
+                    pass
+                self.figure_toolbar = None
+            if self.figure_toolbar_frame is not None:
+                try:
+                    self.figure_toolbar_frame.destroy()
+                except Exception:
+                    pass
+                self.figure_toolbar_frame = None
+                
+            if self.result_canvas is None:
+                self.result_canvas = Tkinter3DCanvas(self.figure_parent, bg="white")
+                self.result_canvas.pack(fill=tk.BOTH, expand=True)
+                
+            self.result_canvas.clear()
+            self.result_canvas.clear_thickness_legend()
+            
+            if self.current_result is None:
+                self._populate_canvas_with_geometry(self.result_canvas)
+            else:
+                self._populate_canvas_with_results(self.result_canvas)
+        else:
+            if self.result_canvas is not None:
+                try:
+                    self.result_canvas.destroy()
+                except Exception:
+                    pass
+                self.result_canvas = None
+                
+            self._show_figure(
+                create_runtime_fem_result_figure(
+                    self.snapshot,
+                    self.current_result,
+                    self._selected_display_mode(),
+                    max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
+                    show_plate=self.show_plate_vis.get(),
+                    show_members=self.show_members_vis.get(),
+                ),
+                self.figure_parent,
+            )
 
     def _write_status(self, text: str) -> None:
         if self.result_text is None:

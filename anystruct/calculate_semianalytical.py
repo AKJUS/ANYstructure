@@ -20,9 +20,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 import numpy as np
+
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    def njit(func=None, **kwargs):
+        if func is not None:
+            return func
+        return lambda wrapped: wrapped
 
 
 EPS = 1.0e-12
@@ -198,6 +208,9 @@ class S3SolverConfig:
     min_load_step: float = 1.0e-4
     load_step_cutback: float = 0.5
     max_load_step_cutbacks: int = 12
+    use_accelerated_s3_continuation: bool = False
+    continuation_refinement_tolerance: float = 1.0e-5
+    continuation_refinement_max_iterations: int = 10
     newton_max_iterations: int = 40
     newton_tolerance: float = 1.0e-7
     min_aspect_ratio: float = 0.15
@@ -306,6 +319,7 @@ class MembraneField:
     coupling: np.ndarray
     imperfection_offset: np.ndarray
     energy_matrix: np.ndarray
+    energy_coupling: np.ndarray
     sigma_x_grid: np.ndarray
     sigma_y_grid: np.ndarray
     tau_grid: np.ndarray
@@ -842,30 +856,36 @@ def _anystructure_corrosion_addition_mm(
     return max(float(default_mm), 0.0)
 
 
-def _anystructure_csr_dimension_mm(value: float) -> float:
-    value = float(value)
-    return value * 1000.0 if abs(value) < 50.0 else value
+
+def _csr_dimension_mm(value: float | None) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return None
+    if abs(parsed) < EPS:
+        return 0.0
+    return parsed * 1000.0 if abs(parsed) < 10.0 else parsed
 
 
 def _anystructure_csr_panel_input(panel: S3PanelInput | U3PanelInput) -> S3PanelInput | U3PanelInput:
-    """Return panel dimensions in mm for CSR proportion checks in ANYstructure."""
+    """Return a CSR-check panel with ANYstructure metre-like dimensions in mm."""
 
     if isinstance(panel, S3PanelInput):
         return replace(
             panel,
-            stiffener_spacing=_anystructure_csr_dimension_mm(panel.stiffener_spacing),
-            plate_thickness=_anystructure_csr_dimension_mm(panel.plate_thickness),
-            stiffener_height=_anystructure_csr_dimension_mm(panel.stiffener_height),
-            web_thickness=_anystructure_csr_dimension_mm(panel.web_thickness),
-            flange_width=_anystructure_csr_dimension_mm(panel.flange_width),
-            flange_thickness=_anystructure_csr_dimension_mm(panel.flange_thickness),
+            length=_csr_dimension_mm(panel.length),
+            stiffener_spacing=_csr_dimension_mm(panel.stiffener_spacing),
+            plate_thickness=_csr_dimension_mm(panel.plate_thickness),
+            stiffener_height=_csr_dimension_mm(panel.stiffener_height),
+            web_thickness=_csr_dimension_mm(panel.web_thickness),
+            flange_width=_csr_dimension_mm(panel.flange_width),
+            flange_thickness=_csr_dimension_mm(panel.flange_thickness),
         )
     return replace(
         panel,
-        width=_anystructure_csr_dimension_mm(panel.width),
-        plate_thickness=_anystructure_csr_dimension_mm(panel.plate_thickness),
+        length=_csr_dimension_mm(panel.length),
+        width=_csr_dimension_mm(panel.width),
+        plate_thickness=_csr_dimension_mm(panel.plate_thickness),
     )
-
 
 def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
     if sigma_x1 * sigma_x2 >= 0:
@@ -2367,6 +2387,7 @@ def build_membrane_field(
         elastic_modulus,
         poisson_ratio,
     )
+    energy_coupling = np.einsum("hl,lij->hij", energy_matrix, coupling)
 
     imperfection_array = np.asarray(imperfection, dtype=float)
     if imperfection_array.shape != (count,):
@@ -2413,6 +2434,7 @@ def build_membrane_field(
         coupling=coupling,
         imperfection_offset=imperfection_offset,
         energy_matrix=energy_matrix,
+        energy_coupling=energy_coupling,
         sigma_x_grid=sigma_x_grid,
         sigma_y_grid=sigma_y_grid,
         tau_grid=tau_grid,
@@ -2422,10 +2444,148 @@ def build_membrane_field(
     )
 
 
+@njit(cache=True)
+def _membrane_amplitudes_kernel(
+    coupling: np.ndarray,
+    imperfection_offset: np.ndarray,
+    total_deflection: np.ndarray,
+) -> np.ndarray:
+    harmonics = coupling.shape[0]
+    modes = total_deflection.shape[0]
+    result = np.empty(harmonics, dtype=np.float64)
+    for harmonic in range(harmonics):
+        value = 0.0
+        for i in range(modes):
+            qi = total_deflection[i]
+            for j in range(modes):
+                value += coupling[harmonic, i, j] * qi * total_deflection[j]
+        result[harmonic] = value - imperfection_offset[harmonic]
+    return result
+
+
+@njit(cache=True)
+def _membrane_force_kernel(
+    energy_coupling: np.ndarray,
+    total_deflection: np.ndarray,
+    amplitudes: np.ndarray,
+) -> np.ndarray:
+    harmonics = energy_coupling.shape[0]
+    modes = total_deflection.shape[0]
+    result = np.zeros(modes, dtype=np.float64)
+    for i in range(modes):
+        value = 0.0
+        for harmonic in range(harmonics):
+            weighted = amplitudes[harmonic]
+            for j in range(modes):
+                value += weighted * energy_coupling[harmonic, i, j] * total_deflection[j]
+        result[i] = 2.0 * value
+    return result
+
+
+@njit(cache=True)
+def _membrane_tangent_kernel(
+    coupling: np.ndarray,
+    imperfection_offset: np.ndarray,
+    energy_matrix: np.ndarray,
+    energy_coupling: np.ndarray,
+    total_deflection: np.ndarray,
+    amplitudes: np.ndarray,
+) -> np.ndarray:
+    harmonics = coupling.shape[0]
+    modes = total_deflection.shape[0]
+    gradients = np.zeros((harmonics, modes), dtype=np.float64)
+    for harmonic in range(harmonics):
+        for i in range(modes):
+            value = 0.0
+            for j in range(modes):
+                value += coupling[harmonic, i, j] * total_deflection[j]
+            gradients[harmonic, i] = value
+
+    weighted_gradients = np.zeros((harmonics, modes), dtype=np.float64)
+    for harmonic in range(harmonics):
+        for i in range(modes):
+            value = 0.0
+            for other in range(harmonics):
+                value += energy_matrix[harmonic, other] * gradients[other, i]
+            weighted_gradients[harmonic, i] = value
+
+    tangent = np.zeros((modes, modes), dtype=np.float64)
+    for i in range(modes):
+        for j in range(modes):
+            value = 0.0
+            for harmonic in range(harmonics):
+                value += gradients[harmonic, i] * weighted_gradients[harmonic, j]
+            tangent[i, j] = 4.0 * value
+
+    for i in range(modes):
+        for j in range(modes):
+            value = 0.0
+            for harmonic in range(harmonics):
+                value += amplitudes[harmonic] * energy_coupling[harmonic, i, j]
+            tangent[i, j] += 2.0 * value
+    return tangent
+
+
+@njit(cache=True)
+def _membrane_stress_components_kernel(
+    sigma_x_grid: np.ndarray,
+    sigma_y_grid: np.ndarray,
+    tau_grid: np.ndarray,
+    amplitudes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    points = sigma_x_grid.shape[0]
+    harmonics = amplitudes.shape[0]
+    sigma_x = np.zeros(points, dtype=np.float64)
+    sigma_y = np.zeros(points, dtype=np.float64)
+    tau = np.zeros(points, dtype=np.float64)
+    for point in range(points):
+        sx = 0.0
+        sy = 0.0
+        txy = 0.0
+        for harmonic in range(harmonics):
+            amplitude = amplitudes[harmonic]
+            sx += sigma_x_grid[point, harmonic] * amplitude
+            sy += sigma_y_grid[point, harmonic] * amplitude
+            txy += tau_grid[point, harmonic] * amplitude
+        sigma_x[point] = sx
+        sigma_y[point] = sy
+        tau[point] = txy
+    return sigma_x, sigma_y, tau
+
+
+@njit(cache=True)
+def _max_von_mises_ratio_kernel(
+    sigma_x: np.ndarray,
+    sigma_y: np.ndarray,
+    tau: np.ndarray,
+    yield_stress: float,
+) -> float:
+    max_vm = 0.0
+    for index in range(sigma_x.shape[0]):
+        vm_sq = (
+            sigma_x[index] * sigma_x[index]
+            - sigma_x[index] * sigma_y[index]
+            + sigma_y[index] * sigma_y[index]
+            + 3.0 * tau[index] * tau[index]
+        )
+        if vm_sq < 0.0:
+            vm_sq = 0.0
+        vm = math.sqrt(vm_sq)
+        if vm > max_vm:
+            max_vm = vm
+    return max_vm / max(yield_stress, EPS)
+
+
 def _membrane_amplitudes(field: MembraneField, total_deflection: np.ndarray) -> np.ndarray:
-    return (
-        np.einsum("hij,i,j->h", field.coupling, total_deflection, total_deflection)
-        - field.imperfection_offset
+    if not NUMBA_AVAILABLE:
+        return (
+            np.einsum("hij,i,j->h", field.coupling, total_deflection, total_deflection)
+            - field.imperfection_offset
+        )
+    return _membrane_amplitudes_kernel(
+        field.coupling,
+        field.imperfection_offset,
+        total_deflection,
     )
 
 
@@ -2434,8 +2594,10 @@ def _membrane_force(
     total_deflection: np.ndarray,
     amplitudes: np.ndarray,
 ) -> np.ndarray:
-    weighted = field.energy_matrix @ amplitudes
-    return 2.0 * np.einsum("h,hij,j->i", weighted, field.coupling, total_deflection)
+    if not NUMBA_AVAILABLE:
+        weighted = field.energy_matrix @ amplitudes
+        return 2.0 * np.einsum("h,hij,j->i", weighted, field.coupling, total_deflection)
+    return _membrane_force_kernel(field.energy_coupling, total_deflection, amplitudes)
 
 
 def _membrane_tangent(
@@ -2443,10 +2605,19 @@ def _membrane_tangent(
     total_deflection: np.ndarray,
     amplitudes: np.ndarray,
 ) -> np.ndarray:
-    gradients = np.einsum("hij,j->hi", field.coupling, total_deflection)
-    weighted = field.energy_matrix @ amplitudes
-    return 4.0 * gradients.T @ (field.energy_matrix @ gradients) + 2.0 * np.einsum(
-        "h,hij->ij", weighted, field.coupling
+    if not NUMBA_AVAILABLE:
+        gradients = np.einsum("hij,j->hi", field.coupling, total_deflection)
+        weighted = field.energy_matrix @ amplitudes
+        return 4.0 * gradients.T @ (field.energy_matrix @ gradients) + 2.0 * np.einsum(
+            "h,hij->ij", weighted, field.coupling
+        )
+    return _membrane_tangent_kernel(
+        field.coupling,
+        field.imperfection_offset,
+        field.energy_matrix,
+        field.energy_coupling,
+        total_deflection,
+        amplitudes,
     )
 
 
@@ -2456,11 +2627,32 @@ def _membrane_stress_components(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return compression-positive second-order stresses at the field grid."""
 
-    return (
-        field.sigma_x_grid @ amplitudes,
-        field.sigma_y_grid @ amplitudes,
-        field.tau_grid @ amplitudes,
+    if not NUMBA_AVAILABLE:
+        return (
+            field.sigma_x_grid @ amplitudes,
+            field.sigma_y_grid @ amplitudes,
+            field.tau_grid @ amplitudes,
+        )
+    return _membrane_stress_components_kernel(
+        field.sigma_x_grid,
+        field.sigma_y_grid,
+        field.tau_grid,
+        amplitudes,
     )
+
+
+def _max_von_mises_ratio(
+    sigma_x: np.ndarray,
+    sigma_y: np.ndarray,
+    tau: np.ndarray,
+    yield_stress: float,
+) -> float:
+    if not NUMBA_AVAILABLE:
+        von_mises = np.sqrt(
+            np.maximum(sigma_x**2 - sigma_x * sigma_y + sigma_y**2 + 3.0 * tau**2, 0.0)
+        )
+        return float(np.max(von_mises)) / max(yield_stress, EPS)
+    return _max_von_mises_ratio_kernel(sigma_x, sigma_y, tau, yield_stress)
 
 
 def _assign_family_imperfections(
@@ -3955,26 +4147,114 @@ def _limit_newton_delta(
     return limited
 
 
-def solve_equilibrium_amplitudes(
+@njit(cache=True)
+def _solve_equilibrium_membrane_kernel(
+    linear: np.ndarray,
+    geometric: np.ndarray,
+    coupling: np.ndarray,
+    imperfection_offset: np.ndarray,
+    energy_matrix: np.ndarray,
+    energy_coupling: np.ndarray,
+    pressure: np.ndarray,
+    imperfection: np.ndarray,
+    max_delta_base: np.ndarray,
+    previous_amplitudes: np.ndarray,
+    load_factor: float,
+    newton_max_iterations: int,
+    newton_tolerance: float,
+) -> tuple[np.ndarray, bool, int]:
+    mode_count = previous_amplitudes.shape[0]
+    harmonic_count = coupling.shape[0]
+    q = previous_amplitudes.copy()
+    force = pressure + load_factor * (geometric @ imperfection)
+    tangent_linear = linear - load_factor * geometric
+    if np.max(np.abs(force)) <= EPS and np.max(np.abs(q)) <= EPS:
+        return np.zeros(mode_count, dtype=np.float64), True, 0
+
+    for iteration in range(1, newton_max_iterations + 1):
+        total_deflection = q + imperfection
+
+        membrane_amplitudes = np.empty(harmonic_count, dtype=np.float64)
+        for harmonic in range(harmonic_count):
+            value = 0.0
+            for i in range(mode_count):
+                qi = total_deflection[i]
+                for j in range(mode_count):
+                    value += coupling[harmonic, i, j] * qi * total_deflection[j]
+            membrane_amplitudes[harmonic] = value - imperfection_offset[harmonic]
+
+        nonlinear_response = np.zeros(mode_count, dtype=np.float64)
+        for i in range(mode_count):
+            value = 0.0
+            for harmonic in range(harmonic_count):
+                weighted = membrane_amplitudes[harmonic]
+                for j in range(mode_count):
+                    value += weighted * energy_coupling[harmonic, i, j] * total_deflection[j]
+            nonlinear_response[i] = 2.0 * value
+
+        linear_response = tangent_linear @ q
+        residual = linear_response + nonlinear_response - force
+        residual_norm = np.max(np.abs(residual))
+        scale = max(
+            np.max(np.abs(force)),
+            np.max(np.abs(linear_response)),
+            np.max(np.abs(nonlinear_response)),
+            1.0,
+        )
+        if residual_norm <= newton_tolerance * scale:
+            return q, True, iteration
+
+        gradients = np.zeros((harmonic_count, mode_count), dtype=np.float64)
+        for harmonic in range(harmonic_count):
+            for i in range(mode_count):
+                value = 0.0
+                for j in range(mode_count):
+                    value += coupling[harmonic, i, j] * total_deflection[j]
+                gradients[harmonic, i] = value
+
+        weighted_gradients = np.zeros((harmonic_count, mode_count), dtype=np.float64)
+        for harmonic in range(harmonic_count):
+            for i in range(mode_count):
+                value = 0.0
+                for other in range(harmonic_count):
+                    value += energy_matrix[harmonic, other] * gradients[other, i]
+                weighted_gradients[harmonic, i] = value
+
+        tangent = tangent_linear.copy()
+        for i in range(mode_count):
+            for j in range(mode_count):
+                value = 0.0
+                for harmonic in range(harmonic_count):
+                    value += gradients[harmonic, i] * weighted_gradients[harmonic, j]
+                tangent[i, j] += 4.0 * value
+
+        for i in range(mode_count):
+            for j in range(mode_count):
+                value = 0.0
+                for harmonic in range(harmonic_count):
+                    value += membrane_amplitudes[harmonic] * energy_coupling[harmonic, i, j]
+                tangent[i, j] += 2.0 * value
+
+        delta = np.linalg.solve(tangent, -residual)
+        for i in range(mode_count):
+            max_delta = max(max_delta_base[i], 0.5 * abs(q[i]))
+            if abs(delta[i]) > max_delta:
+                delta[i] = math.copysign(max_delta, delta[i])
+            q[i] += delta[i]
+            if not math.isfinite(q[i]):
+                return previous_amplitudes.copy(), False, iteration
+
+    return q, False, newton_max_iterations
+
+
+def _solve_equilibrium_amplitudes_python(
     panel: S3PanelInput | U3PanelInput,
     modes: Sequence[RitzMode],
     load_factor: float,
     previous_amplitudes: Sequence[float],
     config: S3SolverConfig,
-    runtime: RitzRuntime | None = None,
+    runtime: RitzRuntime,
 ) -> tuple[list[float], bool, int]:
-    """Solve the coupled reduced Ritz continuation equilibrium.
-
-    Normal resultants keep diagonal geometric terms in this basis.  Panel shear
-    contributes off-diagonal geometric coupling between opposite-parity modes,
-    so the load-path residual and Newton tangent are assembled as vectors and
-    matrices instead of solving each amplitude independently.
-    """
-
-    if not modes:
-        return [], True, 0
-
-    runtime = runtime or _build_ritz_runtime(panel, modes, config)
     q = np.asarray(previous_amplitudes, dtype=float)
     if q.shape != (len(modes),):
         q = np.zeros(len(modes), dtype=float)
@@ -4001,10 +4281,11 @@ def solve_equilibrium_amplitudes(
             )
         else:
             nonlinear_response = nonlinear * q**3
-        residual = tangent_linear @ q + nonlinear_response - force
+        linear_response = tangent_linear @ q
+        residual = linear_response + nonlinear_response - force
         scale = max(
             float(np.max(np.abs(force))),
-            float(np.max(np.abs(tangent_linear @ q))),
+            float(np.max(np.abs(linear_response))),
             float(np.max(np.abs(nonlinear_response))),
             1.0,
         )
@@ -4030,6 +4311,59 @@ def solve_equilibrium_amplitudes(
             return list(previous_amplitudes), False, iteration
 
     return q.tolist(), False, config.newton_max_iterations
+
+
+def solve_equilibrium_amplitudes(
+    panel: S3PanelInput | U3PanelInput,
+    modes: Sequence[RitzMode],
+    load_factor: float,
+    previous_amplitudes: Sequence[float],
+    config: S3SolverConfig,
+    runtime: RitzRuntime | None = None,
+) -> tuple[list[float], bool, int]:
+    """Solve the coupled reduced Ritz continuation equilibrium.
+
+    Normal resultants keep diagonal geometric terms in this basis.  Panel shear
+    contributes off-diagonal geometric coupling between opposite-parity modes,
+    so the load-path residual and Newton tangent are assembled as vectors and
+    matrices instead of solving each amplitude independently.
+    """
+
+    if not modes:
+        return [], True, 0
+
+    runtime = runtime or _build_ritz_runtime(panel, modes, config)
+    if NUMBA_AVAILABLE and runtime.membrane is not None:
+        q = np.asarray(previous_amplitudes, dtype=float)
+        if q.shape != (len(modes),):
+            q = np.zeros(len(modes), dtype=float)
+        try:
+            solved, converged, iterations = _solve_equilibrium_membrane_kernel(
+                runtime.linear,
+                runtime.geometric,
+                runtime.membrane.coupling,
+                runtime.membrane.imperfection_offset,
+                runtime.membrane.energy_matrix,
+                runtime.membrane.energy_coupling,
+                runtime.pressure,
+                runtime.imperfection,
+                runtime.max_delta,
+                q,
+                load_factor,
+                config.newton_max_iterations,
+                config.newton_tolerance,
+            )
+            return solved.tolist(), bool(converged), int(iterations)
+        except Exception:
+            pass
+    return _solve_equilibrium_amplitudes_python(
+        panel,
+        modes,
+        load_factor,
+        previous_amplitudes,
+        config,
+        runtime,
+    )
 
 
 def _mode_amplitude_summary(
@@ -4373,10 +4707,7 @@ def _plate_yield_ratio(
         + sigma_y2
     )
     tau = load_factor * panel.shear_stress + tau2
-    von_mises = np.sqrt(
-        np.maximum(sigma_x**2 - sigma_x * sigma_y + sigma_y**2 + 3.0 * tau**2, 0.0)
-    )
-    return float(np.max(von_mises)) / max(panel.yield_stress_plate, EPS)
+    return _max_von_mises_ratio(sigma_x, sigma_y, tau, panel.yield_stress_plate)
 
 
 def _u3_plate_yield_ratio(
@@ -4425,10 +4756,7 @@ def _u3_plate_yield_ratio(
         + sigma_y2
     )
     tau = load_factor * panel.shear_stress + tau2
-    von_mises = np.sqrt(
-        np.maximum(sigma_x**2 - sigma_x * sigma_y + sigma_y**2 + 3.0 * tau**2, 0.0)
-    )
-    return float(np.max(von_mises)) / max(panel.yield_stress_plate, EPS)
+    return _max_von_mises_ratio(sigma_x, sigma_y, tau, panel.yield_stress_plate)
 
 
 def u3_yield_utilization(
@@ -4756,6 +5084,9 @@ def _continuation_summary(
         "configured_min_step": config.min_load_step,
         "configured_cutback": config.load_step_cutback,
         "configured_max_cutbacks": config.max_load_step_cutbacks,
+        "accelerated": config.use_accelerated_s3_continuation,
+        "refinement_tolerance": config.continuation_refinement_tolerance,
+        "refinement_max_iterations": config.continuation_refinement_max_iterations,
     }
 
 
@@ -5193,6 +5524,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
     accepted_steps = 0
     rejected_steps = 0
     cutbacks = 0
+    refinement_steps = 0
     min_accepted_step: float | None = None
     max_accepted_step: float | None = None
     current_step = min(
@@ -5239,6 +5571,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
                     current_step,
                     config,
                 )
+                continuation["refinement_steps"] = refinement_steps
                 continuation["attempted_load_factor"] = load_factor
                 continuation["attempted_step"] = attempted_step
                 continuation["next_cutback_step"] = next_step
@@ -5265,6 +5598,12 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             cutbacks += 1
             continue
 
+        lower_load = previous_load
+        lower_yield = previous_yield
+        lower_amplitudes = amplitudes
+        lower_modes = modes
+        lower_runtime = runtime
+        lower_coupling = local_global_coupling
         amplitudes = trial_amplitudes
         accepted_steps += 1
         min_accepted_step = (
@@ -5294,18 +5633,106 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             runtime,
         )
         if final_yield["max"] >= s3_major_yield_limit:
+            high_load = load_factor
+            high_yield = final_yield
+            high_amplitudes = amplitudes
+            high_modes = modes
+            high_runtime = runtime
+            high_coupling = local_global_coupling
+            if config.use_accelerated_s3_continuation:
+                tolerance = max(config.continuation_refinement_tolerance, EPS)
+                for _ in range(max(config.continuation_refinement_max_iterations, 0)):
+                    bracket = max(high_load - lower_load, 0.0)
+                    if bracket <= tolerance * max(1.0, high_load):
+                        break
+                    denominator = high_yield["max"] - lower_yield
+                    if abs(denominator) > EPS:
+                        refined_load = lower_load + (
+                            (s3_major_yield_limit - lower_yield)
+                            * (high_load - lower_load)
+                            / denominator
+                        )
+                        lower_bound = lower_load + 0.20 * (high_load - lower_load)
+                        upper_bound = lower_load + 0.80 * (high_load - lower_load)
+                        refined_load = min(max(refined_load, lower_bound), upper_bound)
+                    else:
+                        refined_load = 0.5 * (lower_load + high_load)
+                    refined_coupling = local_global_stiffness_scale(
+                        panel,
+                        lower_modes,
+                        lower_amplitudes,
+                        refined_load,
+                        config,
+                    )
+                    refined_modes = lower_modes
+                    refined_runtime = lower_runtime
+                    if refined_coupling["scale"] < 1.0:
+                        refined_modes = build_ritz_modes(
+                            panel,
+                            section,
+                            config,
+                            global_stiffness_scale=refined_coupling["scale"],
+                        )
+                        refined_runtime = _build_ritz_runtime(panel, refined_modes, config)
+                    refined_amplitudes, refined_converged, refined_iterations = (
+                        solve_equilibrium_amplitudes(
+                            panel,
+                            refined_modes,
+                            refined_load,
+                            lower_amplitudes,
+                            config,
+                            refined_runtime,
+                        )
+                    )
+                    max_iterations = max(max_iterations, refined_iterations)
+                    if not refined_converged:
+                        rejected_steps += 1
+                        break
+                    refinement_steps += 1
+                    refined_yield = yield_utilization(
+                        panel,
+                        section,
+                        stiffener_section,
+                        refined_modes,
+                        refined_amplitudes,
+                        refined_load,
+                        config,
+                        ultimate_yield_global_factor,
+                        refined_runtime,
+                    )
+                    if refined_yield["max"] >= s3_major_yield_limit:
+                        high_load = refined_load
+                        high_yield = refined_yield
+                        high_amplitudes = refined_amplitudes
+                        high_modes = refined_modes
+                        high_runtime = refined_runtime
+                        high_coupling = refined_coupling
+                    else:
+                        lower_load = refined_load
+                        lower_yield = refined_yield["max"]
+                        lower_amplitudes = refined_amplitudes
+                        lower_modes = refined_modes
+                        lower_runtime = refined_runtime
+                        lower_coupling = refined_coupling
+                amplitudes = high_amplitudes
+                modes = high_modes
+                runtime = high_runtime
+                final_yield = high_yield
+                local_global_coupling = high_coupling
+                previous_load = high_load
+            else:
+                previous_load = load_factor
             yield_capacity_factor = _interpolate_capacity(
+                lower_load,
+                lower_yield,
                 previous_load,
-                previous_yield,
-                load_factor,
                 final_yield["max"],
                 s3_major_yield_limit,
             )
-            previous_load = load_factor
             break
         previous_load = load_factor
         previous_yield = final_yield["max"]
-        if previous_load >= 2.0:
+        if config.use_accelerated_s3_continuation or previous_load >= 2.0:
             current_step = min(current_step * config.load_step_growth, config.max_load_step)
 
     continuation = _continuation_summary(
@@ -5318,6 +5745,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         current_step,
         config,
     )
+    continuation["refinement_steps"] = refinement_steps
 
     ultimate_capacity_factor = yield_capacity_factor
     if ultimate_capacity_factor is None:

@@ -424,6 +424,10 @@ def _beam_section(thickness: float, reference: float, depth_factor: float) -> di
         "J": max(iy + iz, 1.0e-10),
         "shear_factor_y": 5.0 / 6.0,
         "shear_factor_z": 5.0 / 6.0,
+        "web_height": depth,
+        "web_thickness": thickness,
+        "flange_width": 0.0,
+        "flange_thickness": 0.0,
     }
 
 
@@ -447,6 +451,10 @@ def _section_or_default(section: object, thickness: float, reference: float, dep
                 "J": max(j, 1.0e-12),
                 "shear_factor_y": float(section.get("shear_factor_y", 5.0 / 6.0)),
                 "shear_factor_z": float(section.get("shear_factor_z", 5.0 / 6.0)),
+                "web_height": float(section.get("web_height") or section.get("web_h") or 0.1),
+                "web_thickness": float(section.get("web_thickness") or section.get("web_thk") or 0.01),
+                "flange_width": float(section.get("flange_width") or section.get("flange_w") or 0.0),
+                "flange_thickness": float(section.get("flange_thickness") or section.get("flange_thk") or 0.0),
             }
             if section.get("label"):
                 result["label"] = str(section.get("label"))
@@ -860,6 +868,9 @@ def _custom_cylinder_supports(lower_ring: list[int], upper_ring: list[int], conf
 
 
 def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
+    orientation = config.member_orientation
+    if _normalized_choice(orientation) == "auto":
+        orientation = "global z"
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     width = _positive(geometry.get("width_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
@@ -937,7 +948,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             width,
             0.08,
             config.stiffener_eccentricity_m,
-            config.member_orientation,
+            orientation,
         )
         for row in range(rows - 1):
             beams.append(
@@ -958,7 +969,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             length,
             0.10,
             config.girder_eccentricity_m,
-            config.member_orientation,
+            orientation,
         )
         for col in range(cols - 1):
             beams.append(
@@ -1017,6 +1028,9 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
 
 
 def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
+    orientation = config.member_orientation
+    if _normalized_choice(orientation) == "auto":
+        orientation = "radial"
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
@@ -1110,13 +1124,13 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             radius,
             0.08,
             config.stiffener_eccentricity_m,
-            config.member_orientation,
+            orientation,
         )
         count = stiffener_count if stiffener_count > 0 else min(8, cols)
         for offset in range(count):
             col = int(round(offset * cols / count)) % cols
             section = dict(base_section)
-            if _normalized_choice(config.member_orientation) == "radial":
+            if _normalized_choice(orientation) == "radial":
                 theta = 2.0 * math.pi * col / cols
                 section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
             for row in range(axial_div):
@@ -1137,13 +1151,13 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             radius,
             0.12,
             config.girder_eccentricity_m,
-            config.member_orientation,
+            orientation,
         )
         ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
         for row in ring_rows:
             for col in range(cols):
                 section = dict(base_section)
-                if _normalized_choice(config.member_orientation) == "radial":
+                if _normalized_choice(orientation) == "radial":
                     theta = 2.0 * math.pi * (col + 0.5) / cols
                     section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
                 beams.append(
@@ -1308,13 +1322,46 @@ def _visualization_member_lines(generated_geometry: dict, model, displacements: 
             displaced.append(tuple(float(value) for value in base + translation))
         if len(points) != 2:
             continue
+
+        beam_stresses = {}
+        c_y = 0.0
+        c_z = 0.0
+        element_id = beam.get("id")
+        if element_id is not None:
+            try:
+                element = model.mesh.get_element(int(element_id))
+                if element is not None:
+                    mat_name = getattr(element, "material_name", "default")
+                    material = model.materials.get(mat_name, model.materials.get("default"))
+                    beam_stresses = element.compute_stresses(model.mesh, displacements, material)
+                    c_y, c_z = element._fiber_distances()
+            except Exception:
+                pass
+
         lines.append(
             {
+                "id": int(beam.get("id", 0)),
                 "role": str(beam.get("role", "member")),
                 "node_ids": tuple(node_ids[:2]),
                 "points": tuple(points),
                 "displaced_points": tuple(displaced),
                 "section_label": str((beam.get("section") or {}).get("label", "")),
+                # Include cross section dimensions
+                "web_height": float((beam.get("section") or {}).get("web_height") or 0.1),
+                "web_thickness": float((beam.get("section") or {}).get("web_thickness") or 0.01),
+                "flange_width": float((beam.get("section") or {}).get("flange_width") or 0.0),
+                "flange_thickness": float((beam.get("section") or {}).get("flange_thickness") or 0.0),
+                "c_y": float(c_y),
+                "c_z": float(c_z),
+                "eccentricity": float((beam.get("section") or {}).get("eccentricity_m") or 0.0),
+                # Include stress component results
+                "axial_stress": float(beam_stresses.get("axial_stress", 0.0)),
+                "bending_stress_y": float(beam_stresses.get("bending_stress_y", 0.0)),
+                "bending_stress_z": float(beam_stresses.get("bending_stress_z", 0.0)),
+                "shear_stress_y": float(beam_stresses.get("shear_stress_y", 0.0)),
+                "shear_stress_z": float(beam_stresses.get("shear_stress_z", 0.0)),
+                "torsional_stress": float(beam_stresses.get("torsional_stress", 0.0)),
+                "von_mises": float(beam_stresses.get("von_mises", 0.0)),
             }
         )
     return tuple(lines)
@@ -1875,7 +1922,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         diagnostics.append("Cyclic symmetry requested; generated runtime geometry is a full 360-degree model, so no sector coupling was added.")
     elif _normalized_choice(config.symmetry_mode) not in {"none", "off"}:
         diagnostics.append("Applied generated global symmetry boundary conditions.")
-    if _normalized_choice(config.member_orientation) == "radial":
+    if _normalized_choice(config.member_orientation) == "radial" or (_normalized_choice(config.member_orientation) == "auto" and geometry.get("geometry") == "cylinder"):
         diagnostics.append("Applied radial member section orientation for cylinder beams where applicable.")
     if abs(float(config.stiffener_eccentricity_m or 0.0)) > 0.0 or abs(float(config.girder_eccentricity_m or 0.0)) > 0.0:
         diagnostics.append("Applied eccentric beam-shell MPC offsets for generated member beams.")

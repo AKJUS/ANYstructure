@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy import sparse
 from scipy.sparse.linalg import spsolve
 
 from .assembly import build_constraint_transformation
@@ -109,10 +110,12 @@ def _assemble_nonlinear_system(
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
     F_int = np.zeros(total_dofs, dtype=float)
-    rows: list = []
-    cols: list = []
     data: list = []
     trial_states: Dict[int, Any] = {}
+
+    if tangent:
+        from .matrix_assembly import _get_cached_sparsity_pattern
+        rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, "tangent_stiffness")
 
     for elem_id, element in mesh.elements.items():
         material = model.get_material(element.material_name)
@@ -125,11 +128,22 @@ def _assemble_nonlinear_system(
         )
         np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
         if tangent and k_elem is not None:
-            _scatter_element_matrix(np.asarray(k_elem, dtype=float), dof_mapping, rows, cols, data)
+            data.append(np.asarray(k_elem, dtype=float).ravel())
         if trial_state is not None:
             trial_states[elem_id] = trial_state
 
-    K_T = _triplets_to_csr(rows, cols, data, total_dofs) if tangent else None
+    if tangent:
+        if not data:
+            K_T = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+        else:
+            K_T = sparse.coo_matrix(
+                (np.concatenate(data), (rows_concat, cols_concat)),
+                shape=(total_dofs, total_dofs),
+                dtype=float,
+            ).tocsr()
+    else:
+        K_T = None
+        
     return F_int, K_T, trial_states
 
 

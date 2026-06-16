@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .jit_compiler import njit
 from .plasticity import lobatto_layers, plane_stress_elastic_matrix, plane_stress_return_map
 
 if TYPE_CHECKING:
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
 _SMALL = 1.0e-12
 
 
+@njit
 def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Cross product of two 3-vectors without np.cross dispatch overhead."""
     return np.array(
@@ -77,10 +79,10 @@ def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
             a[2] * b[0] - a[0] * b[2],
             a[0] * b[1] - a[1] * b[0],
         ],
-        dtype=float,
     )
 
 
+@njit
 def _inv2(matrix: np.ndarray) -> Tuple[np.ndarray, float]:
     """Inverse and determinant of a 2x2 matrix without LAPACK overhead."""
     det = matrix[0, 0] * matrix[1, 1] - matrix[0, 1] * matrix[1, 0]
@@ -88,7 +90,6 @@ def _inv2(matrix: np.ndarray) -> Tuple[np.ndarray, float]:
         raise np.linalg.LinAlgError("singular 2x2 matrix")
     inv = np.array(
         [[matrix[1, 1], -matrix[0, 1]], [-matrix[1, 0], matrix[0, 0]]],
-        dtype=float,
     ) / det
     return inv, float(det)
 
@@ -202,8 +203,12 @@ class Element(ABC):
         return K @ u_elem, (K if tangent else None), state
 
     def compute_stresses(
-        self, mesh: "FEMesh", displacements: np.ndarray, material: "Material"
-    ) -> Dict[str, np.ndarray]:
+        self,
+        mesh: "FEMesh",
+        displacements: np.ndarray,
+        material: "Material",
+        return_global: bool = False,
+    ) -> Dict[str, Any]:
         return {}
 
     def get_dof_mapping(self, mesh: "FEMesh") -> List[int]:
@@ -236,6 +241,69 @@ class Element(ABC):
             "node_ids": self.node_ids,
             "material_name": self.material_name,
         }
+
+
+@njit
+def _jit_compute_4node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    N = np.array(
+        [
+            0.25 * (1.0 - xi) * (1.0 - eta),
+            0.25 * (1.0 + xi) * (1.0 - eta),
+            0.25 * (1.0 + xi) * (1.0 + eta),
+            0.25 * (1.0 - xi) * (1.0 + eta),
+        ],
+    )
+    dN_dxi = np.array(
+        [
+            -0.25 * (1.0 - eta),
+            0.25 * (1.0 - eta),
+            0.25 * (1.0 + eta),
+            -0.25 * (1.0 + eta),
+        ],
+    )
+    dN_deta = np.array(
+        [
+            -0.25 * (1.0 - xi),
+            -0.25 * (1.0 + xi),
+            0.25 * (1.0 + xi),
+            0.25 * (1.0 - xi),
+        ],
+    )
+    return N, dN_dxi, dN_deta
+
+
+@njit
+def _jit_compute_8node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    N = np.zeros(8, dtype=float)
+    N[0] = -0.25 * (1.0 - xi) * (1.0 - eta) * (1.0 + xi + eta)
+    N[1] = -0.25 * (1.0 + xi) * (1.0 - eta) * (1.0 - xi + eta)
+    N[2] = -0.25 * (1.0 + xi) * (1.0 + eta) * (1.0 - xi - eta)
+    N[3] = -0.25 * (1.0 - xi) * (1.0 + eta) * (1.0 + xi - eta)
+    N[4] = 0.5 * (1.0 - xi**2) * (1.0 - eta)
+    N[5] = 0.5 * (1.0 + xi) * (1.0 - eta**2)
+    N[6] = 0.5 * (1.0 - xi**2) * (1.0 + eta)
+    N[7] = 0.5 * (1.0 - xi) * (1.0 - eta**2)
+
+    dN_dxi = np.zeros(8, dtype=float)
+    dN_dxi[0] = 0.25 * (1.0 - eta) * (1.0 + xi + eta) - 0.25 * (1.0 - xi) * (1.0 - eta)
+    dN_dxi[1] = -0.25 * (1.0 - eta) * (1.0 - xi + eta) + 0.25 * (1.0 + xi) * (1.0 - eta)
+    dN_dxi[2] = -0.25 * (1.0 + eta) * (1.0 - xi - eta) + 0.25 * (1.0 + xi) * (1.0 + eta)
+    dN_dxi[3] = 0.25 * (1.0 + eta) * (1.0 + xi - eta) - 0.25 * (1.0 - xi) * (1.0 + eta)
+    dN_dxi[4] = -xi * (1.0 - eta)
+    dN_dxi[5] = 0.5 * (1.0 - eta**2)
+    dN_dxi[6] = -xi * (1.0 + eta)
+    dN_dxi[7] = -0.5 * (1.0 - eta**2)
+
+    dN_deta = np.zeros(8, dtype=float)
+    dN_deta[0] = 0.25 * (1.0 - xi) * (1.0 + xi + eta) - 0.25 * (1.0 - xi) * (1.0 - eta)
+    dN_deta[1] = 0.25 * (1.0 + xi) * (1.0 - xi + eta) - 0.25 * (1.0 + xi) * (1.0 - eta)
+    dN_deta[2] = -0.25 * (1.0 + xi) * (1.0 - xi - eta) + 0.25 * (1.0 + xi) * (1.0 + eta)
+    dN_deta[3] = -0.25 * (1.0 - xi) * (1.0 + xi - eta) + 0.25 * (1.0 - xi) * (1.0 + eta)
+    dN_deta[4] = -0.5 * (1.0 - xi**2)
+    dN_deta[5] = -eta * (1.0 + xi)
+    dN_deta[6] = 0.5 * (1.0 - xi**2)
+    dN_deta[7] = -eta * (1.0 - xi)
+    return N, dN_dxi, dN_deta
 
 
 class ShellElement(Element):
@@ -284,9 +352,11 @@ class ShellElement(Element):
         node_ids: List[int],
         material_name: str = "default",
         thickness: float = 0.01,
+        drilling_stabilization: float = 1.0e-3,
     ):
         super().__init__(element_id, node_ids, material_name)
         self.thickness = float(thickness)
+        self.drilling_stabilization = float(drilling_stabilization)
         self._is_8node = len(node_ids) == 8
         self._is_4node = len(node_ids) == 4
         if not (self._is_4node or self._is_8node):
@@ -331,66 +401,10 @@ class ShellElement(Element):
         return self._compute_8node_shape_functions(xi, eta)
 
     def _compute_4node_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        N = np.array(
-            [
-                0.25 * (1.0 - xi) * (1.0 - eta),
-                0.25 * (1.0 + xi) * (1.0 - eta),
-                0.25 * (1.0 + xi) * (1.0 + eta),
-                0.25 * (1.0 - xi) * (1.0 + eta),
-            ],
-            dtype=float,
-        )
-        dN_dxi = np.array(
-            [
-                -0.25 * (1.0 - eta),
-                0.25 * (1.0 - eta),
-                0.25 * (1.0 + eta),
-                -0.25 * (1.0 + eta),
-            ],
-            dtype=float,
-        )
-        dN_deta = np.array(
-            [
-                -0.25 * (1.0 - xi),
-                -0.25 * (1.0 + xi),
-                0.25 * (1.0 + xi),
-                0.25 * (1.0 - xi),
-            ],
-            dtype=float,
-        )
-        return N, dN_dxi, dN_deta
+        return _jit_compute_4node_shape_functions(xi, eta)
 
     def _compute_8node_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        N = np.zeros(8, dtype=float)
-        N[0] = -0.25 * (1.0 - xi) * (1.0 - eta) * (1.0 + xi + eta)
-        N[1] = -0.25 * (1.0 + xi) * (1.0 - eta) * (1.0 - xi + eta)
-        N[2] = -0.25 * (1.0 + xi) * (1.0 + eta) * (1.0 - xi - eta)
-        N[3] = -0.25 * (1.0 - xi) * (1.0 + eta) * (1.0 + xi - eta)
-        N[4] = 0.5 * (1.0 - xi**2) * (1.0 - eta)
-        N[5] = 0.5 * (1.0 + xi) * (1.0 - eta**2)
-        N[6] = 0.5 * (1.0 - xi**2) * (1.0 + eta)
-        N[7] = 0.5 * (1.0 - xi) * (1.0 - eta**2)
-
-        dN_dxi = np.zeros(8, dtype=float)
-        dN_dxi[0] = 0.25 * (1.0 - eta) * (1.0 + xi + eta) - 0.25 * (1.0 - xi) * (1.0 - eta)
-        dN_dxi[1] = -0.25 * (1.0 - eta) * (1.0 - xi + eta) + 0.25 * (1.0 + xi) * (1.0 - eta)
-        dN_dxi[2] = -0.25 * (1.0 + eta) * (1.0 - xi - eta) + 0.25 * (1.0 + xi) * (1.0 + eta)
-        dN_dxi[3] = 0.25 * (1.0 + eta) * (1.0 + xi - eta) - 0.25 * (1.0 - xi) * (1.0 + eta)
-        dN_dxi[4] = -xi * (1.0 - eta)
-        dN_dxi[5] = 0.5 * (1.0 - eta**2)
-        dN_dxi[6] = -xi * (1.0 + eta)
-        dN_dxi[7] = -0.5 * (1.0 - eta**2)
-
-        dN_deta = np.zeros(8, dtype=float)
-        dN_deta[0] = 0.25 * (1.0 - xi) * (1.0 + xi + eta) - 0.25 * (1.0 - xi) * (1.0 - eta)
-        dN_deta[1] = 0.25 * (1.0 + xi) * (1.0 - xi + eta) - 0.25 * (1.0 + xi) * (1.0 - eta)
-        dN_deta[2] = -0.25 * (1.0 + xi) * (1.0 - xi - eta) + 0.25 * (1.0 + xi) * (1.0 + eta)
-        dN_deta[3] = -0.25 * (1.0 - xi) * (1.0 + xi - eta) + 0.25 * (1.0 - xi) * (1.0 + eta)
-        dN_deta[4] = -0.5 * (1.0 - xi**2)
-        dN_deta[5] = -eta * (1.0 + xi)
-        dN_deta[6] = 0.5 * (1.0 - xi**2)
-        dN_deta[7] = -eta * (1.0 - xi)
-        return N, dN_dxi, dN_deta
+        return _jit_compute_8node_shape_functions(xi, eta)
 
     def compute_jacobian(self, coords: np.ndarray, dN_dxi: np.ndarray, dN_deta: np.ndarray) -> np.ndarray:
         return np.array([coords.T @ dN_dxi, coords.T @ dN_deta], dtype=float)
@@ -602,7 +616,7 @@ class ShellElement(Element):
             B_d = self._build_drilling_b_matrix(N, dN_dx, dN_dy)
             K_local = (B_m.T @ D_membrane @ B_m + B_b.T @ D_bending @ B_b) * det_j * weight
 
-            drilling_stiffness = D_membrane[0, 0] * 1.0e-6
+            drilling_stiffness = G * h * getattr(self, "drilling_stabilization", 1.0e-3)
             K_local += (B_d.T @ (drilling_stiffness * np.eye(1)) @ B_d) * det_j * weight
             K += T.T @ K_local @ T
 
@@ -812,7 +826,7 @@ class ShellElement(Element):
         curve = getattr(material, "hardening_curve", None)
         C_el = plane_stress_elastic_matrix(E, nu)
         D_shear = G_mod * (5.0 / 6.0) * h * np.eye(2, dtype=float)
-        drilling_stiffness = C_el[0, 0] * h * 1.0e-6
+        drilling_stiffness = G_mod * h * getattr(self, "drilling_stabilization", 1.0e-3)
 
         n_gp = len(cache["gp"])
         z_layers, w_layers = lobatto_layers(num_layers, h)
@@ -913,7 +927,11 @@ class ShellElement(Element):
         return T0.T @ F_loc, T0.T @ K_loc @ T0, trial_state
 
     def compute_stresses(
-        self, mesh: "FEMesh", displacements: np.ndarray, material: "Material"
+        self,
+        mesh: "FEMesh",
+        displacements: np.ndarray,
+        material: "Material",
+        return_global: bool = False,
     ) -> Dict[str, np.ndarray]:
         coords = self.get_node_coordinates(mesh)
         u_elem_global = self._get_element_displacements(mesh, displacements)
@@ -942,6 +960,34 @@ class ShellElement(Element):
             "shear_yz": np.zeros(num_ip),
             "von_mises": np.zeros(num_ip),
         }
+        if return_global:
+            stresses.update({
+                "local_xx_top": np.zeros(num_ip),
+                "local_yy_top": np.zeros(num_ip),
+                "local_zz_top": np.zeros(num_ip),
+                "local_xy_top": np.zeros(num_ip),
+                "local_yz_top": np.zeros(num_ip),
+                "local_xz_top": np.zeros(num_ip),
+                "local_xx_bot": np.zeros(num_ip),
+                "local_yy_bot": np.zeros(num_ip),
+                "local_zz_bot": np.zeros(num_ip),
+                "local_xy_bot": np.zeros(num_ip),
+                "local_yz_bot": np.zeros(num_ip),
+                "local_xz_bot": np.zeros(num_ip),
+                "global_xx_top": np.zeros(num_ip),
+                "global_yy_top": np.zeros(num_ip),
+                "global_zz_top": np.zeros(num_ip),
+                "global_xy_top": np.zeros(num_ip),
+                "global_yz_top": np.zeros(num_ip),
+                "global_xz_top": np.zeros(num_ip),
+                "global_xx_bot": np.zeros(num_ip),
+                "global_yy_bot": np.zeros(num_ip),
+                "global_zz_bot": np.zeros(num_ip),
+                "global_xy_bot": np.zeros(num_ip),
+                "global_yz_bot": np.zeros(num_ip),
+                "global_xz_bot": np.zeros(num_ip),
+            })
+
         mitc_planar = None
         mitc_samples = None
         mitc_u_local = None
@@ -978,12 +1024,70 @@ class ShellElement(Element):
             stresses["shear_xz"][idx] = tau_s[0]
             stresses["shear_yz"][idx] = tau_s[1]
 
-            sigma_x = sigma_m[0] + sigma_b[0]
-            sigma_y = sigma_m[1] + sigma_b[1]
-            tau_xy = sigma_m[2] + sigma_b[2]
-            stresses["von_mises"][idx] = np.sqrt(
-                sigma_x**2 + sigma_y**2 - sigma_x * sigma_y + 3.0 * (tau_xy**2 + tau_s[0] ** 2 + tau_s[1] ** 2)
+            # Top surface (z = +h/2)
+            sigma_x_top = sigma_m[0] + sigma_b[0]
+            sigma_y_top = sigma_m[1] + sigma_b[1]
+            tau_xy_top = sigma_m[2] + sigma_b[2]
+            vm_top = np.sqrt(
+                sigma_x_top**2 + sigma_y_top**2 - sigma_x_top * sigma_y_top + 3.0 * (tau_xy_top**2 + tau_s[0]**2 + tau_s[1]**2)
             )
+
+            # Bottom surface (z = -h/2)
+            sigma_x_bot = sigma_m[0] - sigma_b[0]
+            sigma_y_bot = sigma_m[1] - sigma_b[1]
+            tau_xy_bot = sigma_m[2] - sigma_b[2]
+            vm_bot = np.sqrt(
+                sigma_x_bot**2 + sigma_y_bot**2 - sigma_x_bot * sigma_y_bot + 3.0 * (tau_xy_bot**2 + tau_s[0]**2 + tau_s[1]**2)
+            )
+
+            stresses["von_mises"][idx] = max(vm_top, vm_bot)
+
+            if return_global:
+                # Top local stress tensor
+                sigma_loc_top = np.array([
+                    [sigma_x_top, tau_xy_top, tau_s[0]],
+                    [tau_xy_top, sigma_y_top, tau_s[1]],
+                    [tau_s[0], tau_s[1], 0.0]
+                ], dtype=float)
+                sigma_glob_top = R @ sigma_loc_top @ R.T
+
+                # Bottom local stress tensor
+                sigma_loc_bot = np.array([
+                    [sigma_x_bot, tau_xy_bot, tau_s[0]],
+                    [tau_xy_bot, sigma_y_bot, tau_s[1]],
+                    [tau_s[0], tau_s[1], 0.0]
+                ], dtype=float)
+                sigma_glob_bot = R @ sigma_loc_bot @ R.T
+
+                # Store local components
+                stresses["local_xx_top"][idx] = sigma_x_top
+                stresses["local_yy_top"][idx] = sigma_y_top
+                stresses["local_zz_top"][idx] = 0.0
+                stresses["local_xy_top"][idx] = tau_xy_top
+                stresses["local_xz_top"][idx] = tau_s[0]
+                stresses["local_yz_top"][idx] = tau_s[1]
+
+                stresses["local_xx_bot"][idx] = sigma_x_bot
+                stresses["local_yy_bot"][idx] = sigma_y_bot
+                stresses["local_zz_bot"][idx] = 0.0
+                stresses["local_xy_bot"][idx] = tau_xy_bot
+                stresses["local_xz_bot"][idx] = tau_s[0]
+                stresses["local_yz_bot"][idx] = tau_s[1]
+
+                # Store global components
+                stresses["global_xx_top"][idx] = sigma_glob_top[0, 0]
+                stresses["global_yy_top"][idx] = sigma_glob_top[1, 1]
+                stresses["global_zz_top"][idx] = sigma_glob_top[2, 2]
+                stresses["global_xy_top"][idx] = sigma_glob_top[0, 1]
+                stresses["global_xz_top"][idx] = sigma_glob_top[0, 2]
+                stresses["global_yz_top"][idx] = sigma_glob_top[1, 2]
+
+                stresses["global_xx_bot"][idx] = sigma_glob_bot[0, 0]
+                stresses["global_yy_bot"][idx] = sigma_glob_bot[1, 1]
+                stresses["global_zz_bot"][idx] = sigma_glob_bot[2, 2]
+                stresses["global_xy_bot"][idx] = sigma_glob_bot[0, 1]
+                stresses["global_xz_bot"][idx] = sigma_glob_bot[0, 2]
+                stresses["global_yz_bot"][idx] = sigma_glob_bot[1, 2]
         return stresses
 
 
@@ -1274,7 +1378,13 @@ class BeamElement(Element):
         """Local DOF vectors of the two geometric end nodes."""
         return u_local[0:6], u_local[6:12]
 
-    def compute_stresses(self, mesh: "FEMesh", displacements: np.ndarray, material: "Material") -> Dict[str, Any]:
+    def compute_stresses(
+        self,
+        mesh: "FEMesh",
+        displacements: np.ndarray,
+        material: "Material",
+        return_global: bool = False,
+    ) -> Dict[str, Any]:
         coords = self.get_node_coordinates(mesh)
         try:
             L, T = self._beam_frame_and_transform(coords)
@@ -1287,10 +1397,20 @@ class BeamElement(Element):
         u1, v1, w1, rx1, ry1, rz1 = end_a
         u2, v2, w2, rx2, ry2, rz2 = end_b
         sigma_axial = E * (u2 - u1) / L
-        kappa_z = (rz2 - rz1) / L
-        kappa_y = (ry2 - ry1) / L
-        M_z = E * self._Iz * kappa_z
-        M_y = E * self._Iy * kappa_y
+
+        phi_w = 12.0 * E * self._Iy / max(G * self._A * self._kz * L**2, _SMALL)
+        phi_v = 12.0 * E * self._Iz / max(G * self._A * self._ky * L**2, _SMALL)
+
+        coeff_y = E * self._Iy / (L * (1.0 + phi_w))
+        M1_y = coeff_y * (-6.0 * (w2 - w1) / L - (4.0 + phi_w) * ry1 - (2.0 - phi_w) * ry2)
+        M2_y = coeff_y * (6.0 * (w2 - w1) / L + (2.0 - phi_w) * ry1 + (4.0 + phi_w) * ry2)
+        M_y = max(abs(M1_y), abs(M2_y))
+
+        coeff_z = E * self._Iz / (L * (1.0 + phi_v))
+        M1_z = coeff_z * (6.0 * (v2 - v1) / L - (4.0 + phi_v) * rz1 - (2.0 - phi_v) * rz2)
+        M2_z = coeff_z * (-6.0 * (v2 - v1) / L + (2.0 - phi_v) * rz1 + (4.0 + phi_v) * rz2)
+        M_z = max(abs(M1_z), abs(M2_z))
+
         c_y, c_z = self._fiber_distances()
         sigma_bending_y = M_y * c_z / max(self._Iy, _SMALL)
         sigma_bending_z = M_z * c_y / max(self._Iz, _SMALL)

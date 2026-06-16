@@ -37,7 +37,7 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import bicgstab, gmres, minres, spsolve
 
-from .matrix_assembly import _scatter_element_matrix, _triplets_to_csr
+from .matrix_assembly import _scatter_element_matrix, _triplets_to_csr, _get_cached_sparsity_pattern
 
 if TYPE_CHECKING:
     from .boundary import LoadCase
@@ -60,11 +60,7 @@ def assemble_system(
     total_dofs = dof_manager.total_dofs
 
     F_global = np.zeros(total_dofs, dtype=float)
-    k_rows: List[np.ndarray] = []
-    k_cols: List[np.ndarray] = []
     k_data: List[np.ndarray] = []
-    m_rows: List[np.ndarray] = []
-    m_cols: List[np.ndarray] = []
     m_data: List[np.ndarray] = []
 
     assembly_info: Dict[str, Any] = {
@@ -77,6 +73,10 @@ def assemble_system(
     }
     start_time = time.time()
 
+    k_rows, k_cols = _get_cached_sparsity_pattern(mesh, "stiffness")
+    if include_mass:
+        m_rows, m_cols = _get_cached_sparsity_pattern(mesh, "mass")
+
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
@@ -85,11 +85,11 @@ def assemble_system(
             continue
 
         K_elem = np.asarray(element.compute_stiffness_matrix(mesh, material), dtype=float)
-        _scatter_element_matrix(K_elem, dof_mapping, k_rows, k_cols, k_data)
+        k_data.append(K_elem.ravel())
 
         if include_mass:
             M_elem = np.asarray(element.compute_mass_matrix(mesh, material), dtype=float)
-            _scatter_element_matrix(M_elem, dof_mapping, m_rows, m_cols, m_data)
+            m_data.append(M_elem.ravel())
 
         assembly_info["element_times"][elem_id] = time.time() - elem_start
         assembly_info["num_elements"] += 1
@@ -98,17 +98,33 @@ def assemble_system(
         F_global = load_case.get_load_vector(mesh, dof_manager, model.get_material)
 
     assembly_info["assembly_time"] = time.time() - start_time
+    
+    if not k_data:
+        K_global = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+    else:
+        K_global = sparse.coo_matrix(
+            (np.concatenate(k_data), (k_rows, k_cols)),
+            shape=(total_dofs, total_dofs),
+            dtype=float,
+        ).tocsr()
+
     if include_mass:
-        assembly_info["mass_matrix"] = _triplets_to_csr(m_rows, m_cols, m_data, total_dofs)
-    return _triplets_to_csr(k_rows, k_cols, k_data, total_dofs), F_global, assembly_info
+        if not m_data:
+            assembly_info["mass_matrix"] = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+        else:
+            assembly_info["mass_matrix"] = sparse.coo_matrix(
+                (np.concatenate(m_data), (m_rows, m_cols)),
+                shape=(total_dofs, total_dofs),
+                dtype=float,
+            ).tocsr()
+            
+    return K_global, F_global, assembly_info
 
 
 def assemble_mass_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
     """Assemble the global mass matrix without mixing it into stiffness."""
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
-    m_rows: List[np.ndarray] = []
-    m_cols: List[np.ndarray] = []
     m_data: List[np.ndarray] = []
     info: Dict[str, Any] = {
         "num_elements": 0,
@@ -119,6 +135,8 @@ def assemble_mass_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str,
     }
     start_time = time.time()
 
+    m_rows, m_cols = _get_cached_sparsity_pattern(mesh, "mass")
+
     for elem_id, element in mesh.elements.items():
         elem_start = time.time()
         material = model.get_material(element.material_name)
@@ -127,13 +145,23 @@ def assemble_mass_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str,
             continue
 
         M_elem = np.asarray(element.compute_mass_matrix(mesh, material), dtype=float)
-        _scatter_element_matrix(M_elem, dof_mapping, m_rows, m_cols, m_data)
+        m_data.append(M_elem.ravel())
 
         info["element_times"][elem_id] = time.time() - elem_start
         info["num_elements"] += 1
 
     info["assembly_time"] = time.time() - start_time
-    return _triplets_to_csr(m_rows, m_cols, m_data, total_dofs), info
+    
+    if not m_data:
+        M_global = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+    else:
+        M_global = sparse.coo_matrix(
+            (np.concatenate(m_data), (m_rows, m_cols)),
+            shape=(total_dofs, total_dofs),
+            dtype=float,
+        ).tocsr()
+        
+    return M_global, info
 
 
 def _constraint_value_map(model: "FEModel") -> Dict[int, float]:
@@ -198,6 +226,48 @@ def build_constraint_transformation(
     independent_dofs = np.array([dof for dof in range(total_dofs) if dof not in dependent_dofs], dtype=int)
     independent_index = {int(dof): i for i, dof in enumerate(independent_dofs)}
 
+    # Topological sort of slave_constraints to resolve cascading dependencies
+    visited = {}  # 0 = unvisited, 1 = visiting, 2 = visited
+    topo_order = []
+
+    def visit(node: int):
+        state = visited.get(node, 0)
+        if state == 1:
+            raise ValueError(f"Circular MPC dependency detected containing DOF {node}")
+        if state == 2:
+            return
+        
+        visited[node] = 1
+        if node in slave_constraints:
+            for master in slave_constraints[node]["masters"]:
+                if master in slave_constraints:
+                    visit(master)
+        visited[node] = 2
+        topo_order.append(node)
+
+    for slave in slave_constraints:
+        if visited.get(slave, 0) == 0:
+            visit(slave)
+
+    # Process and resolve master-slave dependencies recursively in topological order
+    for slave in topo_order:
+        constraint = slave_constraints[slave]
+        resolved_masters: Dict[int, float] = {}
+        resolved_value = constraint["value"]
+
+        for master, coefficient in constraint["masters"].items():
+            if master in slave_constraints:
+                sub_masters = slave_constraints[master]["resolved_masters"]
+                sub_value = slave_constraints[master]["resolved_value"]
+                resolved_value += coefficient * sub_value
+                for sub_m, sub_coeff in sub_masters.items():
+                    resolved_masters[sub_m] = resolved_masters.get(sub_m, 0.0) + coefficient * sub_coeff
+            else:
+                resolved_masters[master] = resolved_masters.get(master, 0.0) + coefficient
+
+        constraint["resolved_masters"] = resolved_masters
+        constraint["resolved_value"] = resolved_value
+
     rows: List[int] = []
     cols: List[int] = []
     data: List[float] = []
@@ -212,15 +282,10 @@ def build_constraint_transformation(
         data.append(1.0)
 
     for slave, constraint in slave_constraints.items():
-        value = constraint["value"]
-        for master, coefficient in constraint["masters"].items():
+        value = constraint["resolved_value"]
+        for master, coefficient in constraint["resolved_masters"].items():
             if master in fixed_values:
                 value += coefficient * fixed_values[master]
-            elif master in slave_dofs:
-                raise ValueError(
-                    f"Nested MPC dependency detected: slave DOF {slave} depends on slave master DOF {master}. "
-                    "Only one-level beam-shell constraints are currently supported."
-                )
             else:
                 try:
                     col = independent_index[master]
@@ -476,7 +541,7 @@ def solve_linear(
     mode = (constraint_mode or "auto").strip().lower()
     if mode not in {"auto", "transformation", "nullspace"}:
         raise ValueError(f"Unknown constraint_mode '{constraint_mode}'. Use auto, transformation or nullspace.")
-    use_nullspace = mode == "nullspace" or (mode == "auto" and Q.shape[1] > 0)
+    use_nullspace = mode == "nullspace" or (mode == "auto" and int(constraint_info["num_fixed_dofs"]) == 0 and Q.shape[1] > 0)
 
     solver_info: Dict[str, Any] = {
         "assembly": assembly_info,
@@ -607,7 +672,9 @@ def compute_reactions(model: "FEModel", displacements: np.ndarray, load_case: "L
     return reactions
 
 
-def compute_stresses(model: "FEModel", displacements: np.ndarray) -> Dict[int, Dict[str, np.ndarray]]:
+def compute_stresses(
+    model: "FEModel", displacements: np.ndarray, return_global: bool = False
+) -> Dict[int, Dict[str, np.ndarray]]:
     """Compute stresses for all elements."""
     mesh = model.mesh
     stresses: Dict[int, Dict[str, np.ndarray]] = {}
@@ -618,7 +685,9 @@ def compute_stresses(model: "FEModel", displacements: np.ndarray) -> Dict[int, D
         if dof_mapping.size == 0 or int(dof_mapping.max()) >= displacements.size:
             continue
         try:
-            stresses[elem_id] = element.compute_stresses(mesh, displacements[dof_mapping], material)
+            stresses[elem_id] = element.compute_stresses(
+                mesh, displacements[dof_mapping], material, return_global=return_global
+            )
         except (IndexError, ValueError):
             continue
     return stresses

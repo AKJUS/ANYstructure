@@ -97,6 +97,7 @@ from .mesh_gen import (
     generate_beam_mesh,
     generate_simple_panel_mesh,
     generate_stiffened_panel_mesh,
+    verify_mesh_quality,
 )
 from .results import (
     DisplacementResult,
@@ -212,6 +213,7 @@ __all__ = [
     "generate_beam_mesh",
     "generate_simple_panel_mesh",
     "generate_stiffened_panel_mesh",
+    "verify_mesh_quality",
     # Results
     "DisplacementResult",
     "FEResult",

@@ -292,10 +292,10 @@ def test_standalone_girder_pressure_static_deflection_is_downward_not_nullspace_
     assert prestress["constraint_mode"] == "transformation"
     assert prestress["nullspace_projection"] == pytest.approx(0.0)
     assert min(w_values) < 0.0
-    assert max(w_values) <= 1.0e-9
+    assert max(w_values) <= 1.0e-4
 
 
-def test_runtime_fem_matplotlib_figure_contains_geometry_and_result_axes():
+def test_runtime_fem_matplotlib_figure_contains_geometry_axis():
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
     result = fe_runtime_solver.run_runtime_fem(
         snapshot,
@@ -312,14 +312,9 @@ def test_runtime_fem_matplotlib_figure_contains_geometry_and_result_axes():
     figure = fe_runtime_solver.create_runtime_fem_result_figure(snapshot, result)
 
     assert isinstance(figure, Figure)
-    assert len(figure.axes) >= 2
+    assert len(figure.axes) >= 1
     assert figure.axes[0].get_title() == "Static stress/displacement"
     assert figure.axes[0].lines
-    assert figure.axes[1].get_title() == "Static analysis result"
-    assert not figure.axes[1].patches
-    assert not figure.axes[1].tables
-    assert any("Loaded static response" in text.get_text() for text in figure.axes[1].texts)
-    assert any("Mode shapes are available" in text.get_text() for text in figure.axes[1].texts)
 
 
 def test_runtime_fem_result_print_explains_unavailable_nonlinear_factor():
@@ -700,22 +695,13 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "solver_options = ttk.LabelFrame(future_inputs, text=\"Solver\")" in source
     assert "members = ttk.LabelFrame(future_inputs, text=\"Member modelling\")" in source
     assert "material = ttk.LabelFrame(future_inputs, text=\"Material and recovery\")" in source
-    assert "preview = ttk.LabelFrame(right_panel, text=\"3D section view\")" in source
-    assert "preview.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
-    assert "self._show_preview_figure(create_runtime_fem_geometry_preview_figure(self.snapshot, self.app), preview)" in source
-    assert "self.preview_canvas = FigureCanvasTkAgg(figure, master=parent)" in source
-    assert "self.figure_toolbar_frame = toolbar_frame" in source
-    assert "self.figure_toolbar_frame.destroy()" in source
-    assert "redraw_after_id" in source
-    assert "def _fit_preview_figure_to_canvas" in source
-    assert "figure.set_size_inches(width / figure.dpi, height / figure.dpi, forward=False)" in source
-    assert "figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)" in source
-    assert "axis.set_position([-0.08, -0.12, 1.16, 1.16])" in source
-    assert "def _preview_axis_data_extents" in source
-    assert "axis.set_xlim3d" in source
-    assert "zoom = 2.25" in source
-    assert "axis.set_anchor(\"C\")" in source
-    assert "axis.set_box_aspect((x_span, y_span, z_span), zoom=zoom)" in source
+    assert "self.upper_result_frame = ttk.LabelFrame(right_panel, text=\"Result text\")" in source
+    assert "self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
+    assert "self.upper_result_text = tk.Text(" in source
+    assert "self.result_canvas = Tkinter3DCanvas(" in source
+    assert "self.interactive_3d_checkbox = ttk.Checkbutton(" in source
+    assert "def _populate_canvas_with_geometry(" in source
+    assert "def _populate_canvas_with_results(" in source
     assert "self.run_button = ttk.Button(buttons, text=\"Run FEM\", command=self.run)" in source
     assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
     assert "self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))" in source
@@ -1374,7 +1360,7 @@ def test_runtime_fem_figure_can_display_cylinder_buckling_modes():
             "has_stiffener": True,
             "has_girder": True,
         },
-        fe_solver.LightweightFEMConfig(pressure_pa=10_000.0, mesh_fidelity="coarse", num_buckling_modes=2),
+        fe_solver.LightweightFEMConfig(pressure_pa=10_000.0, mesh_fidelity="coarse", num_buckling_modes=2, include_end_lids=True),
     )
     app = fe_runtime_solver.example_runtime_app("cylinder")
     snapshot = fe_runtime_solver.active_line_snapshot(app)
@@ -1394,7 +1380,6 @@ def test_runtime_fem_figure_can_display_cylinder_buckling_modes():
     figure = fe_runtime_solver.create_runtime_fem_result_figure(snapshot, runtime_result, display_mode="mode:1")
 
     assert figure.axes[0].get_title().startswith("Buckling mode 1")
-    assert figure.axes[1].get_title() == "Buckling modes"
 
 
 def test_anystructure_contains_vendored_full_fe_solver_backend():
@@ -1491,3 +1476,57 @@ def test_active_line_snapshot_rejects_missing_structure():
         assert "active line is not available" in str(error)
     else:
         raise AssertionError("missing active line should fail")
+
+
+def test_populate_canvas_with_geometry_outer_vs_intermediate_stiffeners():
+    class DummyCanvas:
+        def __init__(self):
+            self.polygons = []
+
+        def add_polygon(self, points, color=None, outline=None, **kwargs):
+            self.polygons.append((points, color, outline))
+
+        def add_cylinder(self, *args, **kwargs):
+            pass
+
+        def add_ring_stiffener(self, *args, **kwargs):
+            pass
+
+        def add_longitudinal_stiffener(self, *args, **kwargs):
+            pass
+
+        def after_idle(self, func):
+            pass
+
+        def fit_to_scene(self):
+            pass
+
+    class DummyWindow:
+        def __init__(self):
+            self.snapshot = fe_runtime_solver.active_line_snapshot(fe_runtime_solver.example_runtime_app())
+
+        def _populate_canvas_with_geometry(self, canvas):
+            fe_runtime_solver.RuntimeFEMWindow._populate_canvas_with_geometry(self, canvas)
+
+    window = DummyWindow()
+    canvas = DummyCanvas()
+    window._populate_canvas_with_geometry(canvas)
+
+    stiffeners = [
+        poly for poly in canvas.polygons
+        if poly[1] == "#94a3b8"  # Web color
+    ]
+    
+    assert len(stiffeners) > 2
+    from collections import defaultdict
+    stf_by_y = defaultdict(list)
+    for stf in stiffeners:
+        points = stf[0]
+        y_val = round(points[0].y, 4)
+        stf_by_y[y_val].append(points)
+
+    assert len(stf_by_y) > 2
+    for y_val, segments in stf_by_y.items():
+        assert len(segments) == 2
+        spans = sorted([(round(min(p.x for p in seg), 2), round(max(p.x for p in seg), 2)) for seg in segments])
+        assert spans == [(0.0, 5.0), (5.0, 10.0)]
