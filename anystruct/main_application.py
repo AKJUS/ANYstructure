@@ -2790,7 +2790,7 @@ class Application():
     def _draw_fea_stress_interpretation_canvas(self, canvas, panel):
         canvas.delete('all')
         method = self._fea_stress_reduction_method.get()
-        width, height = 285, 120
+        width, height = 285, 140
         canvas.configure(width=width, height=height)
         bg = self._style.lookup('TFrame', 'background') or 'white'
         canvas.configure(background=bg)
