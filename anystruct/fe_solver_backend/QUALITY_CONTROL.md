@@ -1,5 +1,13 @@
 # FE Solver Quality Control Report
 
+## Evidence Status
+
+This document is historical unless it is paired with a current generated report
+from `python scripts/run_fe_verification.py`.  Treat the pass/fail counts below
+as prior QC evidence, not as a live production-ready claim.  Current evidence is
+expected to come from the local verification JSON/Markdown report, the frozen
+FE baseline comparison, and the pytest/QC command outputs recorded there.
+
 ## Overview
 
 This document provides a comprehensive quality control (QC) verification of the beam-shell FE solver. The QC suite includes analytical verification tests, convergence studies, patch tests, boundary condition verification, and performance tests.

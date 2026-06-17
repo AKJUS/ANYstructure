@@ -114,6 +114,18 @@ class LightweightFEMConfig:
     imperfection_amplitude_m: float = 0.0
     imperfection_wave_a: int = 1
     imperfection_wave_b: int = 1
+    runtime_solver: str = "stepwise"
+    allow_unbalanced_free_free: bool = False
+    buckling_shift_load_factor: float = 0.0
+    buckling_min_load_factor: float = 0.0
+    buckling_max_load_factor: float = 0.0
+    buckling_repeated_tolerance: float = 1.0e-3
+    buckling_allow_dense_fallback: bool = False
+    recovery_history_mode: str = "full"
+    recovery_threads: int = 0
+    memory_limit_mb: float = 0.0
+    capacity_buckling_mode_number: int = 1
+    capacity_mesh_min_elements_per_half_wave: int = 4
 
 
 @dataclass(frozen=True)
@@ -1566,6 +1578,67 @@ def _constraint_mode(config: LightweightFEMConfig, geometry: dict | None = None)
     return "auto"
 
 
+def _allow_unbalanced_free_free(config: LightweightFEMConfig, geometry: dict | None = None) -> bool:
+    if bool(config.allow_unbalanced_free_free):
+        return True
+    return _constraint_mode(config, geometry) == "nullspace"
+
+
+def _buckling_load_factor_range(config: LightweightFEMConfig) -> tuple[float | None, float | None] | None:
+    lower = float(config.buckling_min_load_factor or 0.0)
+    upper = float(config.buckling_max_load_factor or 0.0)
+    if lower <= 0.0 and upper <= 0.0:
+        return None
+    return (lower if lower > 0.0 else None, upper if upper > 0.0 else None)
+
+
+def _buckling_solver_kwargs(config: LightweightFEMConfig) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "repeated_tolerance": max(float(config.buckling_repeated_tolerance or 1.0e-3), 0.0),
+        "allow_dense_fallback": bool(config.buckling_allow_dense_fallback),
+    }
+    shift = float(config.buckling_shift_load_factor or 0.0)
+    if shift > 0.0:
+        kwargs["shift_load_factor"] = shift
+    load_range = _buckling_load_factor_range(config)
+    if load_range is not None:
+        kwargs["load_factor_range"] = load_range
+    return kwargs
+
+
+def _wants_capacity_workflow(config: LightweightFEMConfig) -> bool:
+    choice = _normalized_choice(config.runtime_solver, "stepwise")
+    return choice in {
+        "anyintelligent capacity workflow",
+        "capacity workflow",
+        "nonlinear capacity workflow",
+        "structured capacity workflow",
+    }
+
+
+def _recovery_config(config: LightweightFEMConfig):
+    if _full_backend is None or not hasattr(_full_backend, "RecoveryConfig"):
+        return None
+    mode = _normalized_choice(config.recovery_history_mode, "full")
+    if mode not in {"full", "selected", "envelope"}:
+        mode = "full"
+    return _full_backend.RecoveryConfig(history_mode=mode, store_full_histories=(mode == "full"))
+
+
+def _resource_config(config: LightweightFEMConfig):
+    if _full_backend is None or not hasattr(_full_backend, "ResourceConfig"):
+        return None
+    recovery_threads = int(config.recovery_threads or 0)
+    memory_limit_mb = float(config.memory_limit_mb or 0.0)
+    if recovery_threads <= 0 and memory_limit_mb <= 0.0:
+        return None
+    return _full_backend.ResourceConfig(
+        recovery_threads=recovery_threads if recovery_threads > 0 else None,
+        memory_limit_bytes=int(memory_limit_mb * 1024.0 * 1024.0) if memory_limit_mb > 0.0 else None,
+        deterministic=True,
+    )
+
+
 def _wants_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
     return _normalized_choice(config.analysis_type, "linear eigenvalue") not in {
         "linear",
@@ -1853,6 +1926,8 @@ def _run_slamming_transient(model, load_case, generated_geometry: dict, geometry
         save_every=max(int(math.ceil(max(total_time / dt, 1.0) / 120.0)), 1),
         output_elements=patch_ids,
         include_stress_history=False,
+        recovery=_recovery_config(config),
+        resource_config=_resource_config(config),
     )
     base_load_case = load_case if config.slamming_include_static_load else None
     transient = _backend_solve_transient_newmark(
@@ -2175,6 +2250,13 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             diagnostics.append("Applied custom manual pressure: " + str(round(float(config.custom_pressure_pa), 3)) + " Pa.")
         if config.custom_use_nullspace_projection:
             diagnostics.append("Custom boundary condition is rigid-body nullspace projection with automatic generalized load balancing.")
+    if _allow_unbalanced_free_free(config, geometry):
+        diagnostics.append("Unbalanced free-free/nullspace static loads are explicitly allowed and will be carried as generalized balancing reactions.")
+    if _wants_capacity_workflow(config):
+        diagnostics.append("Using ANYintelligent structured nonlinear capacity workflow after the reference static solve.")
+    buckling_range = _buckling_load_factor_range(config)
+    if float(config.buckling_shift_load_factor or 0.0) > 0.0 or buckling_range is not None or bool(config.buckling_allow_dense_fallback):
+        diagnostics.append("Buckling validity controls are active: shift/range filtering and dense fallback are passed to the backend.")
     if material_properties:
         diagnostics.append(
             "Using DNV-RP-C208 material curve "
@@ -2191,7 +2273,12 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     try:
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         _apply_material_curve_to_model(model, material_curve, material_properties)
-        imperfection_info = _apply_runtime_imperfection(model, generated_geometry, geometry, config)
+        imperfection_info = {}
+        if not _wants_capacity_workflow(config):
+            imperfection_info = _apply_runtime_imperfection(model, generated_geometry, geometry, config)
+        elif config.imperfection_enabled:
+            imperfection_info = {"status": "deferred", "kind": "capacity workflow imperfection"}
+            diagnostics.append("Geometric imperfection input is deferred to the capacity workflow nonlinear model.")
         if imperfection_info.get("status") == "applied":
             diagnostics.append(
                 "Applied "
@@ -2211,7 +2298,14 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             _add_generated_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         _add_custom_edge_loads(model, load_case, generated_geometry, config)
         load_resultant = _backend_load_case_resultant(model, load_case)
-        displacements, solver_info = _backend_solve_linear(model, load_case, solver_type=backend_config.solver_type, constraint_mode=_constraint_mode(config, geometry))
+        constraint_mode = _constraint_mode(config, geometry)
+        displacements, solver_info = _backend_solve_linear(
+            model,
+            load_case,
+            solver_type=backend_config.solver_type,
+            constraint_mode=constraint_mode,
+            allow_unbalanced_free_free=_allow_unbalanced_free_free(config, geometry),
+        )
     except Exception as exc:
         return LightweightFEMResult(
             status="production_failed",
@@ -2291,12 +2385,79 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         prestress_summary["hardening_K_pa"] = float(material_properties.get("K", 0.0))
         prestress_summary["hardening_n"] = float(material_properties.get("n", 0.0))
 
+    analysis_model = model
+    capacity_workflow_result = None
     nonlinear_result = None
     nonlinear_factor = None
     nonlinear_static_factor = None
     nonlinear_static_result = None
     plastic_strain_by_node: dict[int, float] = {}
-    if _wants_static_nonlinear_analysis(config):
+    if _wants_capacity_workflow(config):
+        if not hasattr(_full_backend, "run_nonlinear_capacity_workflow"):
+            diagnostics.append("ANYintelligent capacity workflow is unavailable in this backend.")
+        else:
+            try:
+                selected_imperfection = None
+                if config.imperfection_enabled:
+                    selected_imperfection, _imperfection_metadata = _build_runtime_imperfection(model, generated_geometry, geometry, config)
+                workflow_config = _full_backend.CapacityWorkflowConfig(
+                    num_buckling_modes=int(config.num_buckling_modes),
+                    buckling_mode_number=_positive_int(config.capacity_buckling_mode_number, 1),
+                    eigenmode_imperfection_amplitude=max(float(config.imperfection_amplitude_m or 0.0), 0.0) if config.imperfection_enabled else 0.0,
+                    nonlinear_num_steps=_positive_int(config.nonlinear_steps, 12),
+                    nonlinear_max_load_factor=max(float(config.nonlinear_max_load_factor), 1.0e-9),
+                    nonlinear_max_iterations=_positive_int(config.nonlinear_max_iterations, 25),
+                    nonlinear_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
+                    nonlinear_num_layers=_nonlinear_layer_count(config.nonlinear_layers),
+                    mesh_min_elements_per_half_wave=_positive_int(config.capacity_mesh_min_elements_per_half_wave, 4),
+                    copy_model=True,
+                )
+                capacity_workflow_result = _full_backend.run_nonlinear_capacity_workflow(
+                    model,
+                    load_case,
+                    imperfection=selected_imperfection,
+                    config=workflow_config,
+                )
+                nonlinear_static_result = capacity_workflow_result.nonlinear_result
+                nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
+                buckling_result_from_workflow = capacity_workflow_result.buckling_result
+                if getattr(buckling_result_from_workflow, "modes", None):
+                    prestress_states = capacity_workflow_result.prestress_states
+                if nonlinear_static_result.converged:
+                    analysis_model = capacity_workflow_result.imperfect_model
+                    displacements = np.asarray(nonlinear_static_result.displacements, dtype=float)
+                    prestress_states, recovered = _full_backend.recover_prestress_from_static_result(analysis_model, displacements)
+                    prestress_summary.update(recovered)
+                prestress_summary["capacity_workflow_status"] = str(capacity_workflow_result.status)
+                prestress_summary["capacity_workflow_capacity_factor"] = float(capacity_workflow_result.capacity_factor)
+                if capacity_workflow_result.critical_load_factor is not None:
+                    prestress_summary["capacity_workflow_critical_load_factor"] = float(capacity_workflow_result.critical_load_factor)
+                prestress_summary["capacity_workflow_mesh_status"] = str(capacity_workflow_result.mesh_adequacy.status)
+                prestress_summary["capacity_workflow_elements_per_half_wave"] = float(capacity_workflow_result.mesh_adequacy.elements_per_half_wave)
+                prestress_summary["nonlinear_static_status"] = str(nonlinear_static_result.status)
+                prestress_summary["nonlinear_static_load_factor"] = nonlinear_static_factor
+                prestress_summary["nonlinear_static_steps"] = float(len(nonlinear_static_result.steps))
+                prestress_summary["nonlinear_static_total_iterations"] = float((nonlinear_static_result.info or {}).get("total_newton_iterations", 0.0))
+                prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
+                if nonlinear_static_result.steps:
+                    prestress_summary["nonlinear_static_max_plastic_strain"] = float(
+                        max(step.max_equivalent_plastic_strain for step in nonlinear_static_result.steps)
+                    )
+                plastic_strain_by_node = _nodal_engineering_plastic_strain(analysis_model, nonlinear_static_result.element_states)
+                diagnostics.append(
+                    "ANYintelligent capacity workflow "
+                    + str(capacity_workflow_result.status)
+                    + "; mesh mode adequacy "
+                    + str(capacity_workflow_result.mesh_adequacy.status)
+                    + "."
+                )
+                for warning in getattr(capacity_workflow_result.mesh_adequacy, "warnings", ()) or ():
+                    diagnostics.append(str(warning))
+            except Exception as exc:
+                prestress_summary["capacity_workflow_status"] = "failed"
+                diagnostics.append("ANYintelligent capacity workflow failed: " + str(exc))
+
+    if _wants_static_nonlinear_analysis(config) and capacity_workflow_result is None:
         if _backend_solve_static_nonlinear is None:
             diagnostics.append("Incremental geometric/material nonlinear static solver is unavailable in this backend.")
         else:
@@ -2348,7 +2509,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             except Exception as exc:
                 diagnostics.append("Incremental nonlinear static solver failed: " + str(exc))
 
-    if _wants_tangent_stability_analysis(config):
+    if _wants_tangent_stability_analysis(config) and capacity_workflow_result is None:
         if _backend_solve_nonlinear_limit is None:
             diagnostics.append("Nonlinear load-step solver is unavailable in this backend.")
         else:
@@ -2376,7 +2537,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
                 diagnostics.append("Nonlinear load-step solver failed: " + str(exc))
     if geometry.get("geometry") == "cylinder" and config.include_end_lids and _add_cylinder_buckling_gauge(model, generated_geometry):
         diagnostics.append("Applied buckling-only rigid-body gauge constraints to the lid center nodes.")
-    buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes))
+    buckling_kwargs = _buckling_solver_kwargs(config)
+    if capacity_workflow_result is not None:
+        buckling_result = capacity_workflow_result.buckling_result
+    else:
+        buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes), **buckling_kwargs)
     if not buckling_result.modes and geometry.get("geometry") == "cylinder" and abs(float(effective_pressure)) > 0.0:
         pressure_states = _cylinder_pressure_prestress_states(
             model,
@@ -2384,7 +2549,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             _positive(geometry.get("radius_m", generated_geometry.get("radius_m", 1.0)), 1.0),
         )
         if pressure_states:
-            pressure_buckling_result = _backend_solve_buckling(model, pressure_states, num_modes=int(config.num_buckling_modes))
+            pressure_buckling_result = _backend_solve_buckling(model, pressure_states, num_modes=int(config.num_buckling_modes), **buckling_kwargs)
             if pressure_buckling_result.modes:
                 buckling_result = pressure_buckling_result
                 diagnostics.append("Buckling modes use equivalent external-pressure membrane prestress because the full mixed prestress returned no positive modes.")
@@ -2396,12 +2561,26 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         diagnostics.append("Buckling factors report the nonlinear limit-load estimate for the selected buckling mode.")
     else:
         buckling_factors = tuple(float(mode.load_factor) for mode in buckling_result.modes)
-    stress_stats = _stress_statistics_from_model(model, displacements, min(max(float(config.stress_percentile), 0.0), 100.0))
-    visualization = _visualization_from_full_result(generated_geometry, model, displacements)
+    prestress_summary["runtime_solver"] = _normalized_choice(config.runtime_solver, "stepwise")
+    prestress_summary["allow_unbalanced_free_free"] = 1.0 if _allow_unbalanced_free_free(config, geometry) else 0.0
+    prestress_summary["recovery_history_mode"] = _normalized_choice(config.recovery_history_mode, "full")
+    prestress_summary["recovery_threads"] = float(max(int(config.recovery_threads or 0), 0))
+    prestress_summary["memory_limit_mb"] = float(max(float(config.memory_limit_mb or 0.0), 0.0))
+    prestress_summary["buckling_solver_status"] = str(getattr(buckling_result, "solver_status", ""))
+    prestress_summary["buckling_modes_returned"] = float(len(getattr(buckling_result, "modes", []) or []))
+    prestress_summary["buckling_repeated_groups"] = float(((getattr(buckling_result, "diagnostics", {}) or {}).get("num_repeated_mode_groups", 0)) or 0)
+    prestress_summary["buckling_shift_load_factor"] = float(config.buckling_shift_load_factor or 0.0)
+    load_factor_range = _buckling_load_factor_range(config)
+    if load_factor_range is not None:
+        prestress_summary["buckling_min_load_factor"] = 0.0 if load_factor_range[0] is None else float(load_factor_range[0])
+        prestress_summary["buckling_max_load_factor"] = 0.0 if load_factor_range[1] is None else float(load_factor_range[1])
+    prestress_summary["buckling_allow_dense_fallback"] = 1.0 if bool(config.buckling_allow_dense_fallback) else 0.0
+    stress_stats = _stress_statistics_from_model(analysis_model, displacements, min(max(float(config.stress_percentile), 0.0), 100.0))
+    visualization = _visualization_from_full_result(generated_geometry, analysis_model, displacements)
     if plastic_strain_by_node:
         plastic_visualization = _visualization_from_full_result(
             generated_geometry,
-            model,
+            analysis_model,
             displacements,
             scalar_by_node=plastic_strain_by_node,
             scalar_label="equiv. engineering plastic strain [-]",
@@ -2420,7 +2599,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         status="ok",
         stress_max_pa=float(stress_stats["max"]),
         stress_p95_pa=float(stress_stats["percentile"]),
-        displacement_max_m=_max_translation(model, displacements),
+        displacement_max_m=_max_translation(analysis_model, displacements),
         buckling_factors=buckling_factors,
         diagnostics=tuple(diagnostics),
         mesh_info={

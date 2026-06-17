@@ -6,6 +6,13 @@ scalar modes, so the plastic multiplier is found by a scalar Newton iteration
 that runs simultaneously for every yielding integration point / thickness
 layer (numpy arrays, no Python-level point loops).
 
+When a tangent is requested for a nonlinear global solve, the public wrapper
+returns a consistent algorithmic tangent obtained by differentiating the same
+discrete stress update with central finite differences.  This is deliberately
+more expensive than the older continuum tangent, but it keeps the shell
+layered-plastic tangent consistent while a closed-form analytical algorithmic
+tangent is still pending.
+
 Conventions
 -----------
 Stress/strain vectors are [xx, yy, xy] with engineering shear strain.
@@ -119,6 +126,7 @@ def _jit_plane_stress_return_map(
     power_offset: float,
     max_iterations: int = 30,
     tolerance: float = 1.0e-10,
+    compute_tangent: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n_points = strain.shape[0]
     C = plane_stress_elastic_matrix(E, nu)
@@ -138,8 +146,9 @@ def _jit_plane_stress_return_map(
 
     yielding = f_trial > tolerance * np.maximum(sy_n**2, 1.0)
     C_ep = np.zeros((n_points, 3, 3))
-    for i in range(n_points):
-        C_ep[i] = C
+    if compute_tangent:
+        for i in range(n_points):
+            C_ep[i] = C
     new_plastic = plastic_strain.copy()
     new_alpha = alpha.copy()
 
@@ -212,6 +221,9 @@ def _jit_plane_stress_return_map(
     for idx, i in enumerate(yielding_indices):
         new_plastic[i] = p_strain_yielding[idx]
 
+    if not compute_tangent:
+        return sigma, C_ep, new_plastic, new_alpha
+
     # Continuum elastoplastic tangent: C_ep = C - (C m)(C m)^T / (m^T C m + 4/9 sy^2 H)
     _P_MATRIX_local = np.array(
         [[2.0, -1.0, 0.0], [-1.0, 2.0, 0.0], [0.0, 0.0, 6.0]],
@@ -248,6 +260,7 @@ def plane_stress_return_map(
     curve: "DNVC208MaterialCurve",
     max_iterations: int = 30,
     tolerance: float = 1.0e-10,
+    compute_tangent: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Map total strains to stresses, tangents and updated plastic state."""
     strain = np.asarray(strain, dtype=float)
@@ -257,11 +270,11 @@ def plane_stress_return_map(
     if curve is None:
         C = plane_stress_elastic_matrix(E, nu)
         n_points = strain.shape[0]
-        C_ep = np.broadcast_to(C, (n_points, 3, 3)).copy()
+        C_ep = np.broadcast_to(C, (n_points, 3, 3)).copy() if compute_tangent else np.zeros((n_points, 3, 3))
         sigma = (strain - plastic_strain) @ C.T
         return sigma, C_ep, plastic_strain.copy(), alpha.copy()
 
-    return _jit_plane_stress_return_map(
+    sigma, _continuum_tangent, new_plastic, new_alpha = _jit_plane_stress_return_map(
         strain,
         plastic_strain,
         alpha,
@@ -277,7 +290,79 @@ def plane_stress_return_map(
         float(curve._power_offset),
         max_iterations,
         tolerance,
+        False,
     )
+    if not compute_tangent:
+        return sigma, _continuum_tangent, new_plastic, new_alpha
+
+    C_alg = _finite_difference_algorithmic_tangent(
+        strain,
+        plastic_strain,
+        alpha,
+        E,
+        nu,
+        curve,
+        max_iterations=max_iterations,
+        tolerance=tolerance,
+    )
+    return sigma, C_alg, new_plastic, new_alpha
+
+
+def _finite_difference_algorithmic_tangent(
+    strain: np.ndarray,
+    plastic_strain: np.ndarray,
+    alpha: np.ndarray,
+    E: float,
+    nu: float,
+    curve: "DNVC208MaterialCurve",
+    max_iterations: int = 30,
+    tolerance: float = 1.0e-10,
+    step: float = 1.0e-7,
+) -> np.ndarray:
+    """Central-difference tangent of the exact discrete stress update."""
+    n_points = int(strain.shape[0])
+    tangent = np.zeros((n_points, 3, 3), dtype=float)
+    for col in range(3):
+        perturb = np.zeros_like(strain)
+        perturb[:, col] = step
+        sigma_plus, _, _, _ = _jit_plane_stress_return_map(
+            strain + perturb,
+            plastic_strain,
+            alpha,
+            E,
+            nu,
+            float(curve.sigma_prop),
+            float(curve.sigma_yield),
+            float(curve.sigma_yield_2),
+            float(curve.eps_p_y1),
+            float(curve.eps_p_y2),
+            float(curve.K),
+            float(curve.n),
+            float(curve._power_offset),
+            max_iterations,
+            tolerance,
+            False,
+        )
+        sigma_minus, _, _, _ = _jit_plane_stress_return_map(
+            strain - perturb,
+            plastic_strain,
+            alpha,
+            E,
+            nu,
+            float(curve.sigma_prop),
+            float(curve.sigma_yield),
+            float(curve.sigma_yield_2),
+            float(curve.eps_p_y1),
+            float(curve.eps_p_y2),
+            float(curve.K),
+            float(curve.n),
+            float(curve._power_offset),
+            max_iterations,
+            tolerance,
+            False,
+        )
+        tangent[:, :, col] = (sigma_plus - sigma_minus) / (2.0 * step)
+    return tangent
 
 
 _LOBATTO_RULES = {

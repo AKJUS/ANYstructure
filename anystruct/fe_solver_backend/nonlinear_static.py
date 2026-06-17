@@ -33,9 +33,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, 
 
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import spsolve
 
 from .assembly import build_constraint_transformation
+from .cases import make_result_case
+from .linalg import MatrixClass, factorize
 from .matrix_assembly import (
     _scatter_element_matrix,
     _triplets_to_csr,
@@ -417,7 +418,12 @@ def _solve_static_displacement_control(
             rhs = np.concatenate([residual, np.array([constraint], dtype=float)])
             try:
                 with np.errstate(all="ignore"):
-                    delta = np.asarray(spsolve(aug, rhs), dtype=float).reshape(-1)
+                    handle = factorize(
+                        aug,
+                        MatrixClass.SYMMETRIC_INDEFINITE,
+                        signature=f"nonlinear.displacement_control:{step_index}:{iteration}",
+                    )
+                    delta = np.asarray(handle.solve(rhs), dtype=float).reshape(-1)
             except Exception:
                 failure_reason = "singular_augmented_tangent"
                 break
@@ -469,6 +475,15 @@ def _solve_static_displacement_control(
     info["strain_summary"] = _nonlinear_state_summary(committed_states)
     info["total_newton_iterations"] = total_iterations
     info["solve_time"] = time.time() - start_time
+    info["result_case"] = make_result_case(
+        name="nonlinear_static_displacement_control",
+        analysis_type="nonlinear_static",
+        load_cases=tuple(stage.load_case for stage in load_program.stages) if load_program is not None else (),
+        assembly_info={"load": {"vector_type": "load_program" if load_program is not None else "load"}, **info},
+        solver_info={"convergence_info": {"status": status}},
+        recovery={"displacements": True, "element_states": True, "force_displacement_history": True},
+        settings={"control": "displacement", "num_steps": num_steps, "num_layers": num_layers},
+    ).to_dict()
     return NonlinearStaticResult(steps, status, u_final, float(lam), committed_states, info)
 
 
@@ -546,6 +561,15 @@ def solve_static_nonlinear(
 
     n_red = int(T.shape[1])
     if n_red == 0:
+        info["result_case"] = make_result_case(
+            name="nonlinear_static",
+            analysis_type="nonlinear_static",
+            load_cases=tuple(stage.load_case for stage in load_program.stages) if load_program is not None else (() if load_case is None else (load_case,)),
+            assembly_info={"stiffness": stiffness_info, "load": load_info},
+            solver_info={"convergence_info": {"status": "empty_reduced_system"}},
+            recovery={"displacements": True, "element_states": True},
+            settings={"control": control_name, "num_steps": num_steps, "num_layers": num_layers},
+        ).to_dict()
         return NonlinearStaticResult([], "empty_reduced_system", u0.copy(), 0.0, {}, info)
 
     q = np.zeros(n_red, dtype=float)
@@ -558,6 +582,10 @@ def solve_static_nonlinear(
     else:
         target_load_factor = float(max_load_factor)
 
+    control_name = str(control).lower()
+    if control_name not in {"force", "displacement"}:
+        raise ValueError("control must be 'force' or 'displacement'")
+
     def external_load_at(path_factor: float) -> Tuple[np.ndarray, Dict[str, float], Optional[str]]:
         if load_program is None:
             return F_const + float(path_factor) * F_prop, {"proportional": float(path_factor)}, None
@@ -566,10 +594,6 @@ def solve_static_nonlinear(
         for stage, vector in zip(load_program.stages, stage_vectors):
             F_ext += factors[stage.name] * vector
         return F_ext, factors, load_program.active_stage(path_factor)
-
-    control_name = str(control).lower()
-    if control_name not in {"force", "displacement"}:
-        raise ValueError("control must be 'force' or 'displacement'")
 
     if control_name == "displacement":
         if displacement_control is None:
@@ -621,7 +645,12 @@ def solve_static_nonlinear(
             K_red = (T.T @ K_T @ T).tocsr()
             try:
                 with np.errstate(all="ignore"):
-                    dq = np.asarray(spsolve(K_red, residual), dtype=float).reshape(-1)
+                    handle = factorize(
+                        K_red,
+                        MatrixClass.SYMMETRIC_INDEFINITE,
+                        signature=f"nonlinear.static_newton:{lam:.16g}:{iteration}",
+                    )
+                    dq = np.asarray(handle.solve(residual), dtype=float).reshape(-1)
             except Exception:
                 return False, q_start, committed_states, residual_norm, iteration
             if np.any(~np.isfinite(dq)):
@@ -744,4 +773,18 @@ def solve_static_nonlinear(
         info["load_program_stage_factors"] = load_program.stage_factors(lam)
     info["total_newton_iterations"] = total_iterations
     info["solve_time"] = time.time() - start_time
+    info["result_case"] = make_result_case(
+        name="nonlinear_static",
+        analysis_type="nonlinear_static",
+        load_cases=tuple(stage.load_case for stage in load_program.stages) if load_program is not None else (() if load_case is None else (load_case,)),
+        assembly_info={"stiffness": stiffness_info, "load": load_info},
+        solver_info={"convergence_info": {"status": status}},
+        recovery={"displacements": True, "element_states": True, "force_displacement_history": True},
+        settings={
+            "control": control_name,
+            "max_load_factor": max_load_factor,
+            "num_steps": num_steps,
+            "num_layers": num_layers,
+        },
+    ).to_dict()
     return NonlinearStaticResult(steps, status, u_final, float(lam), committed_states, info)

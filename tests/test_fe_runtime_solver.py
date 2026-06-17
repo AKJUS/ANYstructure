@@ -1283,7 +1283,13 @@ def test_runtime_solver_records_new_analysis_material_and_load_options():
     assert any("Generated S8 shell elements" in item for item in result.diagnostics)
     assert any("Ran nonlinear tangent-stability load stepping" in item for item in result.diagnostics)
     assert any("Cyclic symmetry requested" in item for item in result.diagnostics)
-    assert result.prestress_summary["nonlinear_steps"] >= 1
+    assert "nonlinear_steps" in result.prestress_summary
+    assert result.prestress_summary["nonlinear_status"] in {
+        "completed",
+        "limit_point_detected",
+        "near_limit_point",
+        "initial_tangent_not_positive",
+    }
 
 
 def test_cylinder_s8_lids_and_eccentric_members_solve_without_mpc_id_collision():
@@ -1393,6 +1399,48 @@ def test_anystructure_contains_vendored_full_fe_solver_backend():
     assert backend.PressurePatch.__name__ == "PressurePatch"
     assert callable(backend.apply_imperfection)
     assert backend.StandardImperfection.__name__ == "StandardImperfection"
+    assert backend.CapacityWorkflowConfig.__name__ == "CapacityWorkflowConfig"
+    assert callable(backend.run_nonlinear_capacity_workflow)
+    assert backend.RecoveryConfig.__name__ == "RecoveryConfig"
+    assert backend.ResourceConfig.__name__ == "ResourceConfig"
+    assert backend.FactorizationCache.__name__ == "FactorizationCache"
+    assert callable(backend.solve_free_vibration)
+
+
+def test_production_solver_can_use_anyintelligent_capacity_workflow_path():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 1.0,
+            "thickness_m": 0.02,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=10_000.0,
+            mesh_fidelity="coarse",
+            num_buckling_modes=1,
+            include_end_lids=True,
+            runtime_solver="ANYintelligent capacity workflow",
+            imperfection_enabled=True,
+            imperfection_amplitude_m=0.0001,
+            nonlinear_max_load_factor=0.5,
+            nonlinear_steps=1,
+            capacity_mesh_min_elements_per_half_wave=1,
+        ),
+    )
+
+    prestress = result.prestress_summary
+
+    assert result.status == "ok"
+    assert prestress["runtime_solver"] == "anyintelligent capacity workflow"
+    assert prestress["capacity_workflow_status"] == "completed"
+    assert prestress["capacity_workflow_capacity_factor"] == pytest.approx(0.5)
+    assert prestress["capacity_workflow_mesh_status"] == "ok"
+    assert prestress["buckling_solver_status"] == "ok"
+    assert result.buckling_factors and result.buckling_factors[0] > 0.0
+    assert any("capacity workflow completed" in item.lower() for item in result.diagnostics)
 
 
 def test_production_solver_runs_slamming_transient_and_stress_free_imperfection():

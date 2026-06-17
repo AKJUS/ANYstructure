@@ -178,7 +178,10 @@ def apply_imperfection(model: "FEModel", imperfection: Any, copy_model: bool = T
         node.x += float(offset[0])
         node.y += float(offset[1])
         node.z += float(offset[2])
-    _invalidate_element_caches(target)
+    if hasattr(target, "bump_revision"):
+        target.bump_revision("geometry")
+    else:
+        _invalidate_element_caches(target)
     if not hasattr(target, "imperfection_metadata"):
         target.imperfection_metadata = []
     target.imperfection_metadata.append(
@@ -366,4 +369,3 @@ def calibrate_imperfection_amplitude(
         history=tuple(history),
         result=best_result,
     )
-

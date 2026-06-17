@@ -124,6 +124,18 @@ class RuntimeFEMOptions:
     imperfection_amplitude_m: float = 0.0
     imperfection_wave_a: int = 1
     imperfection_wave_b: int = 1
+    runtime_solver: str = "stepwise"
+    allow_unbalanced_free_free: bool = False
+    buckling_shift_load_factor: float = 0.0
+    buckling_min_load_factor: float = 0.0
+    buckling_max_load_factor: float = 0.0
+    buckling_repeated_tolerance: float = 1.0e-3
+    buckling_allow_dense_fallback: bool = False
+    recovery_history_mode: str = "full"
+    recovery_threads: int = 0
+    memory_limit_mb: float = 0.0
+    capacity_buckling_mode_number: int = 1
+    capacity_mesh_min_elements_per_half_wave: int = 4
 
 
 @dataclass(frozen=True)
@@ -464,6 +476,18 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         imperfection_amplitude_m=options.imperfection_amplitude_m,
         imperfection_wave_a=options.imperfection_wave_a,
         imperfection_wave_b=options.imperfection_wave_b,
+        runtime_solver=options.runtime_solver,
+        allow_unbalanced_free_free=options.allow_unbalanced_free_free,
+        buckling_shift_load_factor=options.buckling_shift_load_factor,
+        buckling_min_load_factor=options.buckling_min_load_factor,
+        buckling_max_load_factor=options.buckling_max_load_factor,
+        buckling_repeated_tolerance=options.buckling_repeated_tolerance,
+        buckling_allow_dense_fallback=options.buckling_allow_dense_fallback,
+        recovery_history_mode=options.recovery_history_mode,
+        recovery_threads=options.recovery_threads,
+        memory_limit_mb=options.memory_limit_mb,
+        capacity_buckling_mode_number=options.capacity_buckling_mode_number,
+        capacity_mesh_min_elements_per_half_wave=options.capacity_mesh_min_elements_per_half_wave,
     )
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config)
@@ -544,6 +568,18 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "imperfection_amplitude_m": float(options.imperfection_amplitude_m),
         "imperfection_wave_a": int(options.imperfection_wave_a),
         "imperfection_wave_b": int(options.imperfection_wave_b),
+        "runtime_solver": str(options.runtime_solver),
+        "allow_unbalanced_free_free": bool(options.allow_unbalanced_free_free),
+        "buckling_shift_load_factor": float(options.buckling_shift_load_factor),
+        "buckling_min_load_factor": float(options.buckling_min_load_factor),
+        "buckling_max_load_factor": float(options.buckling_max_load_factor),
+        "buckling_repeated_tolerance": float(options.buckling_repeated_tolerance),
+        "buckling_allow_dense_fallback": bool(options.buckling_allow_dense_fallback),
+        "recovery_history_mode": str(options.recovery_history_mode),
+        "recovery_threads": int(options.recovery_threads),
+        "memory_limit_mb": float(options.memory_limit_mb),
+        "capacity_buckling_mode_number": int(options.capacity_buckling_mode_number),
+        "capacity_mesh_min_elements_per_half_wave": int(options.capacity_mesh_min_elements_per_half_wave),
         "solver": solver_result.solver_name,
         "mesh_info": dict(solver_result.mesh_info),
         "max_displacement_m": solver_result.displacement_max_m,
@@ -905,6 +941,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Symmetry: " + str(summary.get("symmetry_mode", "")),
         "Analysis type: " + str(summary.get("analysis_type", "")),
         "Buckling type: " + str(summary.get("buckling_analysis_type", "")),
+        "Runtime solver: " + str(summary.get("runtime_solver", "stepwise")),
         "Linear solver: " + str(summary.get("solver_type", "")),
         "Pressure [Pa]: " + str(round(_safe_float(summary.get("pressure_pa")), 3)),
         "Pressure direction: " + str(summary.get("pressure_direction", "")),
@@ -933,6 +970,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         + " / "
         + str(_safe_int(summary.get("nonlinear_max_iterations"), 0)),
         "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("deformation_scale")), 3))),
+        "Recovery history: " + str(summary.get("recovery_history_mode", "full")),
+        "Memory limit [MB]: " + ("none" if _safe_float(summary.get("memory_limit_mb"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("memory_limit_mb")), 1))),
         "Custom load/BC mode: " + str(bool(summary.get("custom_load_bc_enabled"))),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
         "Max displacement [mm]: " + str(round(1000.0 * _safe_float(summary.get("max_displacement_m")), 4)),
@@ -940,6 +979,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
     if summary.get("custom_load_bc_enabled"):
         lines.append("Custom loads add to imported/generated loads: " + str(bool(summary.get("custom_loads_add_to_imported"))))
         lines.append("Custom nullspace boundary: " + str(bool(summary.get("custom_use_nullspace_projection"))))
+        lines.append("Allow unbalanced free-free loads: " + str(bool(summary.get("allow_unbalanced_free_free"))))
         lines.append("Custom pressure [Pa]: " + str(round(_safe_float(summary.get("custom_pressure_pa")), 3)))
         if str(summary.get("geometry", "")).lower().startswith("cylinder"):
             lines.extend(
@@ -1003,6 +1043,28 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 " - patch size A/B [m]: "
                 + ("whole shell" if _safe_float(summary.get("slamming_patch_size_a_m"), 0.0) <= 0.0 or _safe_float(summary.get("slamming_patch_size_b_m"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("slamming_patch_size_a_m")), 4)) + " / " + str(round(_safe_float(summary.get("slamming_patch_size_b_m")), 4))),
                 " - include static load in transient: " + str(bool(summary.get("slamming_include_static_load"))),
+            ]
+        )
+    if (
+        str(summary.get("runtime_solver", "stepwise")).lower() != "stepwise"
+        or _safe_float(summary.get("buckling_shift_load_factor"), 0.0) > 0.0
+        or _safe_float(summary.get("buckling_min_load_factor"), 0.0) > 0.0
+        or _safe_float(summary.get("buckling_max_load_factor"), 0.0) > 0.0
+        or bool(summary.get("buckling_allow_dense_fallback"))
+    ):
+        lines.extend(
+            [
+                "",
+                "Solver validity controls:",
+                " - runtime path: " + str(summary.get("runtime_solver", "stepwise")),
+                " - buckling shift/range: "
+                + str(round(_safe_float(summary.get("buckling_shift_load_factor")), 4))
+                + " / "
+                + str(round(_safe_float(summary.get("buckling_min_load_factor")), 4))
+                + "-"
+                + str(round(_safe_float(summary.get("buckling_max_load_factor")), 4)),
+                " - repeated-mode tolerance: " + str(round(_safe_float(summary.get("buckling_repeated_tolerance"), 1.0e-3), 6)),
+                " - dense fallback: " + str(bool(summary.get("buckling_allow_dense_fallback"))),
             ]
         )
     if result.buckling_factors:
@@ -1070,6 +1132,25 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "slamming_peak_displacement_m",
             "slamming_peak_von_mises_pa",
         }
+        runtime_keys = {
+            "runtime_solver",
+            "allow_unbalanced_free_free",
+            "recovery_history_mode",
+            "recovery_threads",
+            "memory_limit_mb",
+            "buckling_solver_status",
+            "buckling_modes_returned",
+            "buckling_repeated_groups",
+            "buckling_shift_load_factor",
+            "buckling_min_load_factor",
+            "buckling_max_load_factor",
+            "buckling_allow_dense_fallback",
+            "capacity_workflow_status",
+            "capacity_workflow_capacity_factor",
+            "capacity_workflow_critical_load_factor",
+            "capacity_workflow_mesh_status",
+            "capacity_workflow_elements_per_half_wave",
+        }
         special_keys = {
             "nonlinear_status",
             "nonlinear_limit_factor",
@@ -1084,6 +1165,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             *nonlinear_static_keys,
             *imperfection_keys,
             *slamming_keys,
+            *runtime_keys,
         }
         if prestress.get("material_model"):
             lines.extend(["", "DNV-RP-C208 material curve:"])
@@ -1095,6 +1177,28 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             ))
             lines.append(" - eps_p_y1/eps_p_y2: " + str(prestress.get("eps_p_y1", "")) + " / " + str(prestress.get("eps_p_y2", "")))
             lines.append(" - K [MPa] / n: " + str(round(_safe_float(prestress.get("hardening_K_pa")) / 1.0e6, 3)) + " / " + str(prestress.get("hardening_n", "")))
+        runtime_solver = str(prestress.get("runtime_solver", summary.get("runtime_solver", "")) or "")
+        if runtime_solver:
+            lines.extend(["", "Runtime solver provenance:"])
+            lines.append(" - runtime path: " + runtime_solver)
+            lines.append(" - buckling status: " + str(prestress.get("buckling_solver_status", "")))
+            lines.append(" - modes returned: " + str(_safe_int(prestress.get("buckling_modes_returned"), 0)))
+            lines.append(" - repeated mode groups: " + str(_safe_int(prestress.get("buckling_repeated_groups"), 0)))
+            if _safe_float(prestress.get("allow_unbalanced_free_free"), 0.0) > 0.0:
+                lines.append(" - free-free load handling: explicit generalized balancing reactions allowed")
+            lines.append(" - recovery history: " + str(prestress.get("recovery_history_mode", summary.get("recovery_history_mode", "full"))))
+            if _safe_float(prestress.get("memory_limit_mb"), 0.0) > 0.0:
+                lines.append(" - memory limit [MB]: " + str(round(_safe_float(prestress.get("memory_limit_mb")), 1)))
+        capacity_status = str(prestress.get("capacity_workflow_status", "") or "")
+        if capacity_status:
+            lines.extend(["", "ANYintelligent capacity workflow:"])
+            lines.append(" - status: " + capacity_status.replace("_", " "))
+            lines.append(" - capacity factor: " + str(round(_safe_float(prestress.get("capacity_workflow_capacity_factor")), 4)))
+            critical = _safe_float(prestress.get("capacity_workflow_critical_load_factor"), 0.0)
+            lines.append(" - eigenvalue critical factor: " + ("not available" if critical <= 0.0 else str(round(critical, 4))))
+            lines.append(" - mode mesh adequacy: " + str(prestress.get("capacity_workflow_mesh_status", "")))
+            lines.append(" - active elements per estimated half-wave: " + str(round(_safe_float(prestress.get("capacity_workflow_elements_per_half_wave")), 3)))
+            lines.append(" - meaning: linear static prestress, eigenmode buckling, stress-free imperfection and nonlinear static capacity were run as one traceable workflow.")
         nonlinear_static_status = str(prestress.get("nonlinear_static_status", "") or "")
         if nonlinear_static_status:
             lines.extend(["", "Incremental nonlinear static solve:"])
@@ -1303,6 +1407,76 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "use": "The eigensolver returns the lowest positive modes available from the recovered prestress state.",
         "output": "Controls the number of mode entries in the display selector and load-factor table.",
         "caution": "More modes require more solver work and may include local modes that are not design governing.",
+    },
+    "runtime_solver": {
+        "title": "Runtime Solver",
+        "purpose": "Selects the high-level runtime path used after the FE model and loads are generated.",
+        "use": "Stepwise keeps the familiar ANYstructure sequence: linear static, prestress recovery, optional nonlinear solve and buckling. ANYintelligent capacity workflow runs the new traceable solver-wide sequence: linear static, eigenvalue buckling, stress-free imperfection and nonlinear static capacity in one workflow.",
+        "output": "The result print records the selected path, workflow status, capacity factor and mesh-mode adequacy when the capacity workflow is selected.",
+        "caution": "The capacity workflow is intentionally opt-in because it can be slower and applies a different capacity interpretation than the default static/eigenvalue result.",
+    },
+    "buckling_shift_load_factor": {
+        "title": "Buckling Shift",
+        "purpose": "Optional shift target for the sparse buckling eigensolver.",
+        "use": "A positive value asks the backend to search near that load factor. Zero uses the default lowest-positive-factor search.",
+        "output": "Affects which buckling modes are returned and is recorded in the solver provenance.",
+        "caution": "Use only when you understand the expected load-factor range; an unsuitable shift can hide lower modes.",
+    },
+    "buckling_load_factor_range": {
+        "title": "Buckling Range",
+        "purpose": "Optional accepted load-factor interval for buckling modes.",
+        "use": "Positive lower and/or upper values filter returned eigenmodes. Zero means open-ended.",
+        "output": "Controls which modes appear in the display selector and load-factor table.",
+        "caution": "Filtering is useful for numerical searches but can remove physically relevant low modes.",
+    },
+    "buckling_repeated_tolerance": {
+        "title": "Repeated Mode Tolerance",
+        "purpose": "Tolerance used to group nearly repeated buckling factors.",
+        "use": "The backend marks close eigenvalues as repeated-mode groups for validity diagnostics.",
+        "output": "The result print reports the number of repeated mode groups found.",
+        "caution": "Repeated modes are common in symmetric cylinders and panels; they are not automatically an error.",
+    },
+    "buckling_allow_dense_fallback": {
+        "title": "Dense Buckling Fallback",
+        "purpose": "Allows a dense eigenvalue fallback when the sparse buckling solve cannot return useful modes.",
+        "use": "Leave off for normal runs. Enable for small models when diagnosing sparse solver behaviour.",
+        "output": "May return modes for small reduced systems that sparse search did not resolve.",
+        "caution": "Dense fallback is not suitable for large models and may consume significant memory.",
+    },
+    "recovery_history_mode": {
+        "title": "Recovery History",
+        "purpose": "Controls how much transient/nonlinear history data the backend is allowed to retain.",
+        "use": "Full keeps all selected histories, selected limits recovery scope, and envelope stores peak/envelope style histories where supported.",
+        "output": "Recorded in result provenance and passed to transient slamming recovery policy.",
+        "caution": "This is mostly a memory-management control; static stress plots still recover the full current field needed for the display.",
+    },
+    "recovery_threads": {
+        "title": "Recovery Threads",
+        "purpose": "Optional thread count for backend result-recovery phases that support measured parallel recovery.",
+        "use": "Zero lets the backend choose the default serial path. Positive values request that many recovery workers.",
+        "output": "Can change recovery timing; result values should remain deterministic.",
+        "caution": "Small models may run slower with threads due to overhead.",
+    },
+    "memory_limit_mb": {
+        "title": "Memory Limit",
+        "purpose": "Optional soft memory limit for recovery/resource-policy checks.",
+        "use": "Zero disables the limit. Positive values are converted to bytes and passed to backend resource policy objects.",
+        "output": "If supported recovery would exceed the limit, the backend can reject the run before allocating large histories.",
+        "caution": "This is a guardrail, not a full process memory sandbox.",
+    },
+    "capacity_buckling_mode_number": {
+        "title": "Capacity Mode Number",
+        "purpose": "Selects which eigenmode seeds the capacity workflow imperfection.",
+        "use": "Mode 1 normally means the lowest positive buckling factor. Higher values can be used to study a known local/global mode.",
+        "output": "Affects the stress-free imperfection used by the ANYintelligent capacity workflow.",
+        "caution": "Choosing a non-governing mode can produce a non-conservative or misleading capacity estimate.",
+    },
+    "capacity_mesh_min_elements_per_half_wave": {
+        "title": "Mode Mesh Adequacy",
+        "purpose": "Minimum target number of active elements per estimated half-wave in the selected buckling mode.",
+        "use": "The capacity workflow estimates active half-waves and reports whether the mesh is coarse for the selected mode.",
+        "output": "Printed as mode mesh adequacy and active elements per estimated half-wave.",
+        "caution": "This is a coarse screening metric, not a replacement for mesh convergence.",
     },
     "boundary_condition": {
         "title": "Boundary Condition",
@@ -1521,6 +1695,13 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "The result print reports nullspace rank and relative rigid-body load imbalance.",
         "caution": "This is a mathematical free-body gauge, not a physical support. It is useful for understanding self-equilibrated loads and free-body behaviour.",
     },
+    "allow_unbalanced_free_free": {
+        "title": "Allow Free-Free Imbalance",
+        "purpose": "Explicitly allows the backend to solve a free-free or nullspace-gauged static problem even when loads are not self-equilibrated.",
+        "use": "When enabled, rigid-body generalized load components are not rejected; they are reported as balancing generalized reactions. Selecting the nullspace boundary also enables this behaviour because the user has explicitly chosen a mathematical free-body gauge.",
+        "output": "The result print reports relative rigid-body load imbalance and notes that generalized balancing reactions were allowed.",
+        "caution": "This does not create a physical support. For pressure-loaded flat plates, define real edge supports unless the goal is a deliberate free-body load-path study.",
+    },
     "plate_edge_supports": {
         "title": "Plate Edge Supports",
         "purpose": "Defines supports on the four generated plate sides x0, x1, y0 and y1.",
@@ -1642,6 +1823,18 @@ class RuntimeFEMWindow:
         self.imperfection_amplitude_m = tk.DoubleVar(value=0.0)
         self.imperfection_wave_a = tk.IntVar(value=1)
         self.imperfection_wave_b = tk.IntVar(value=1)
+        self.runtime_solver = tk.StringVar(value="stepwise")
+        self.allow_unbalanced_free_free = tk.BooleanVar(value=False)
+        self.buckling_shift_load_factor = tk.DoubleVar(value=0.0)
+        self.buckling_min_load_factor = tk.DoubleVar(value=0.0)
+        self.buckling_max_load_factor = tk.DoubleVar(value=0.0)
+        self.buckling_repeated_tolerance = tk.DoubleVar(value=1.0e-3)
+        self.buckling_allow_dense_fallback = tk.BooleanVar(value=False)
+        self.recovery_history_mode = tk.StringVar(value="full")
+        self.recovery_threads = tk.IntVar(value=0)
+        self.memory_limit_mb = tk.DoubleVar(value=0.0)
+        self.capacity_buckling_mode_number = tk.IntVar(value=1)
+        self.capacity_mesh_min_elements_per_half_wave = tk.IntVar(value=4)
         self.display_choice = tk.StringVar(value="Static displacement/stress")
         self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
         self.current_result: RuntimeFEMRunResult | None = None
@@ -1917,21 +2110,44 @@ class RuntimeFEMWindow:
         solver_options = ttk.LabelFrame(future_inputs, text="Solver")
         solver_options.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(solver_options)
-        self._add_option_row(solver_options, 0, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8"))
         self._add_option_row(
             solver_options,
-            1,
+            0,
+            "runtime_solver",
+            "Runtime path",
+            self.runtime_solver,
+            ("stepwise", "ANYintelligent capacity workflow"),
+        )
+        self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8"))
+        self._add_option_row(
+            solver_options,
+            2,
             "analysis_type",
             "Analysis",
             self.analysis_type,
             ("linear eigenvalue", "nonlinear stability", "geometric nonlinear static", "geom. + material nonlinear static"),
         )
-        self._add_option_row(solver_options, 2, "buckling_analysis_type", "Buckling", self.buckling_analysis_type, ("linear eigenvalue", "nonlinear limit"))
-        self._add_option_row(solver_options, 3, "solver_type", "Linear solver", self.solver_type, ("direct", "gmres", "minres", "bicgstab"))
-        self._add_entry_row(solver_options, 4, "nonlinear_max_load_factor", "NL max LF", self.nonlinear_max_load_factor)
-        self._add_entry_row(solver_options, 5, "nonlinear_steps", "NL steps", self.nonlinear_steps, width=8)
-        self._add_entry_row(solver_options, 6, "nonlinear_max_iterations", "NL iterations", self.nonlinear_max_iterations, width=8)
-        self._add_entry_row(solver_options, 7, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
+        self._add_option_row(solver_options, 3, "buckling_analysis_type", "Buckling", self.buckling_analysis_type, ("linear eigenvalue", "nonlinear limit"))
+        self._add_option_row(solver_options, 4, "solver_type", "Linear solver", self.solver_type, ("direct", "gmres", "minres", "bicgstab"))
+        self._add_entry_row(solver_options, 5, "nonlinear_max_load_factor", "NL max LF", self.nonlinear_max_load_factor)
+        self._add_entry_row(solver_options, 6, "nonlinear_steps", "NL steps", self.nonlinear_steps, width=8)
+        self._add_entry_row(solver_options, 7, "nonlinear_max_iterations", "NL iterations", self.nonlinear_max_iterations, width=8)
+        self._add_entry_row(solver_options, 8, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
+
+        buckling_validity = ttk.LabelFrame(future_inputs, text="Buckling validity and resources")
+        buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_option_grid(buckling_validity)
+        self._add_entry_row(buckling_validity, 0, "buckling_shift_load_factor", "Buckling shift LF", self.buckling_shift_load_factor, width=8)
+        self._add_entry_row(buckling_validity, 1, "buckling_load_factor_range", "Buckling LF min/max", self.buckling_min_load_factor, width=8)
+        ttk.Entry(buckling_validity, textvariable=self.buckling_max_load_factor, width=8).grid(row=1, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(buckling_validity, 2, "buckling_repeated_tolerance", "Repeated tol.", self.buckling_repeated_tolerance, width=8)
+        self._add_check_row(buckling_validity, 3, "buckling_allow_dense_fallback", "Allow dense buckling fallback", self.buckling_allow_dense_fallback)
+        self._add_option_row(buckling_validity, 4, "recovery_history_mode", "Recovery history", self.recovery_history_mode, ("full", "selected", "envelope"))
+        self._add_entry_row(buckling_validity, 5, "recovery_threads", "Recovery threads", self.recovery_threads, width=8)
+        self._add_entry_row(buckling_validity, 6, "memory_limit_mb", "Memory limit [MB]", self.memory_limit_mb, width=8)
+        self._add_entry_row(buckling_validity, 7, "capacity_buckling_mode_number", "Capacity mode no.", self.capacity_buckling_mode_number, width=8)
+        self._add_entry_row(buckling_validity, 8, "capacity_mesh_min_elements_per_half_wave", "Mode elems/half-wave", self.capacity_mesh_min_elements_per_half_wave, width=8)
+        buckling_validity.columnconfigure(3, weight=1)
 
         members = ttk.LabelFrame(future_inputs, text="Member modelling")
         members.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -1997,19 +2213,20 @@ class RuntimeFEMWindow:
         self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
         self._add_check_row(custom, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads", self.custom_loads_add_to_imported)
         self._add_check_row(custom, 2, "custom_use_nullspace_projection", "Use nullspace projection as boundary", self.custom_use_nullspace_projection)
-        self._add_entry_row(custom, 3, "custom_pressure_pa", "Manual pressure [Pa]", self.custom_pressure_pa)
-        self._add_option_row(custom, 4, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
-        self._add_option_row(custom, 5, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_option_row(custom, 6, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 7, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 8, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 9, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_check_row(custom, 3, "allow_unbalanced_free_free", "Allow unbalanced free-free loads", self.allow_unbalanced_free_free)
+        self._add_entry_row(custom, 4, "custom_pressure_pa", "Manual pressure [Pa]", self.custom_pressure_pa)
+        self._add_option_row(custom, 5, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
+        self._add_option_row(custom, 6, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom, 7, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 8, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 9, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 10, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         custom.columnconfigure(3, weight=1)
 
         self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
@@ -2829,6 +3046,18 @@ class RuntimeFEMWindow:
             imperfection_amplitude_m=max(_safe_float(self.imperfection_amplitude_m.get(), 0.0), 0.0),
             imperfection_wave_a=max(_safe_int(self.imperfection_wave_a.get(), 1), 1),
             imperfection_wave_b=max(_safe_int(self.imperfection_wave_b.get(), 1), 1),
+            runtime_solver=str(self.runtime_solver.get()),
+            allow_unbalanced_free_free=bool(self.allow_unbalanced_free_free.get()),
+            buckling_shift_load_factor=max(_safe_float(self.buckling_shift_load_factor.get(), 0.0), 0.0),
+            buckling_min_load_factor=max(_safe_float(self.buckling_min_load_factor.get(), 0.0), 0.0),
+            buckling_max_load_factor=max(_safe_float(self.buckling_max_load_factor.get(), 0.0), 0.0),
+            buckling_repeated_tolerance=max(_safe_float(self.buckling_repeated_tolerance.get(), 1.0e-3), 0.0),
+            buckling_allow_dense_fallback=bool(self.buckling_allow_dense_fallback.get()),
+            recovery_history_mode=str(self.recovery_history_mode.get()),
+            recovery_threads=max(_safe_int(self.recovery_threads.get(), 0), 0),
+            memory_limit_mb=max(_safe_float(self.memory_limit_mb.get(), 0.0), 0.0),
+            capacity_buckling_mode_number=max(_safe_int(self.capacity_buckling_mode_number.get(), 1), 1),
+            capacity_mesh_min_elements_per_half_wave=max(_safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
         )
 
     def run(self) -> None:
