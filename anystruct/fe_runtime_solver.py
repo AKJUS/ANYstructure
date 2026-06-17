@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 import argparse
+import json
 import queue
 import math
 import os
@@ -38,8 +39,8 @@ except ModuleNotFoundError:
 try:
     from anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, _interpolate_thickness_color
 except ModuleNotFoundError:
-    from ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, _interpolate_thickness_color
-
+    from ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, \
+        _interpolate_thickness_color
 
 
 @dataclass(frozen=True)
@@ -236,16 +237,17 @@ def _member_section(member: Any) -> dict[str, float] | None:
     thickness = _mm_or_m_to_m(_read_attr_or_call(member, "tw", "thickness", "web_thickness", default=None), 0.0)
     flange_width = _mm_or_m_to_m(_read_attr_or_call(member, "b", "bf", "flange_width", default=None), 0.0)
     flange_thickness = _mm_or_m_to_m(_read_attr_or_call(member, "tf", "flange_thickness", default=None), 0.0)
-    if stiffener_type in {"T", "TEE", "T-BAR"} and height > 0.0 and thickness > 0.0 and flange_width > 0.0 and flange_thickness > 0.0:
+    if stiffener_type in {"T", "TEE",
+                          "T-BAR"} and height > 0.0 and thickness > 0.0 and flange_width > 0.0 and flange_thickness > 0.0:
         web_area = height * thickness
         flange_area = flange_width * flange_thickness
         area = web_area + flange_area
         web_y = 0.5 * height
         flange_y = height + 0.5 * flange_thickness
         centroid = (web_area * web_y + flange_area * flange_y) / area
-        iy = thickness * height**3 / 12.0 + web_area * (web_y - centroid) ** 2
-        iy += flange_width * flange_thickness**3 / 12.0 + flange_area * (flange_y - centroid) ** 2
-        iz = height * thickness**3 / 12.0 + flange_thickness * flange_width**3 / 12.0
+        iy = thickness * height ** 3 / 12.0 + web_area * (web_y - centroid) ** 2
+        iy += flange_width * flange_thickness ** 3 / 12.0 + flange_area * (flange_y - centroid) ** 2
+        iz = height * thickness ** 3 / 12.0 + flange_thickness * flange_width ** 3 / 12.0
         return {
             "area": area,
             "Iy": max(iy, 1.0e-12),
@@ -258,7 +260,7 @@ def _member_section(member: Any) -> dict[str, float] | None:
             "flange_width": flange_width,
             "flange_thickness": flange_thickness,
             "label": "T" + str(round(height * 1000.0)) + "x" + str(round(thickness * 1000.0))
-            + "+" + str(round(flange_width * 1000.0)) + "x" + str(round(flange_thickness * 1000.0)),
+                     + "+" + str(round(flange_width * 1000.0)) + "x" + str(round(flange_thickness * 1000.0)),
         }
 
     if stiffener_type not in {"FB", "FLAT", "FLATBAR", "FLAT BAR"} and not (height > 0.0 and thickness > 0.0):
@@ -267,8 +269,8 @@ def _member_section(member: Any) -> dict[str, float] | None:
         return None
 
     area = height * thickness
-    iy = thickness * height**3 / 12.0
-    iz = height * thickness**3 / 12.0
+    iy = thickness * height ** 3 / 12.0
+    iz = height * thickness ** 3 / 12.0
     return {
         "area": area,
         "Iy": max(iy, 1.0e-12),
@@ -353,7 +355,8 @@ def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
     has_girder = girder is not None
     length = _flat_lp_from_structure(all_obj, span, spacing, has_girder)
     width = _flat_lg_from_objects(plate, stiffener, girder, spacing) if has_girder else spacing
-    girder_spacing = span if has_girder else _safe_float(_read_attr_or_call(girder, "get_s", "spacing", "s", default=None), 0.0)
+    girder_spacing = span if has_girder else _safe_float(
+        _read_attr_or_call(girder, "get_s", "spacing", "s", default=None), 0.0)
     return {
         "geometry": "flat panel",
         "length_m": length,
@@ -386,7 +389,8 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
         "has_stiffener": stiffener is not None,
         "has_girder": girder is not None,
         "stiffener_spacing_m": _safe_float(_read_attr_or_call(stiffener, "get_s", "spacing", "s", default=None), 0.0),
-        "ring_spacing_m": _safe_float(_read_attr_or_call(shell, "_dist_between_rings", "dist_between_rings", default=None), 0.0),
+        "ring_spacing_m": _safe_float(
+            _read_attr_or_call(shell, "_dist_between_rings", "dist_between_rings", default=None), 0.0),
         "girder_spacing_m": _safe_float(_read_attr_or_call(cyl_obj, "length_between_girders", default=None), 0.0),
         "stiffener_section": _member_section(stiffener),
         "girder_section": _member_section(girder),
@@ -401,12 +405,14 @@ def runtime_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]
     return _flat_geometry_summary(snapshot)
 
 
-def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions, status_callback=None) -> RuntimeFEMRunResult:
+def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions,
+                    status_callback=None) -> RuntimeFEMRunResult:
     """Run the ANYstructure-owned lightweight FEM solver."""
 
     geometry = runtime_geometry_summary(snapshot)
     diagnostics = list(snapshot.diagnostics)
-    effective_pressure = float(options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
+    effective_pressure = float(
+        options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
     effective_pressure += float(options.custom_pressure_pa if options.custom_load_bc_enabled else 0.0)
     solver_config = fe_solver.LightweightFEMConfig(
         mesh_fidelity=options.mesh_fidelity,
@@ -494,6 +500,24 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         solver_result = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
     diagnostics.extend(solver_result.diagnostics)
 
+    slamming_patches: list[dict[str, float]] = []
+    try:
+        raw_patches = json.loads(options.slamming_patches_json or "[]")
+        if isinstance(raw_patches, list):
+            for raw_patch in raw_patches:
+                if not isinstance(raw_patch, dict):
+                    continue
+                patch = {
+                    "min_a": _safe_float(raw_patch.get("min_a")),
+                    "max_a": _safe_float(raw_patch.get("max_a")),
+                    "min_b": _safe_float(raw_patch.get("min_b")),
+                    "max_b": _safe_float(raw_patch.get("max_b")),
+                }
+                if patch["max_a"] > patch["min_a"] and patch["max_b"] > patch["min_b"]:
+                    slamming_patches.append(patch)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        diagnostics.append("Invalid slamming patch definition in result summary: " + str(error))
+
     summary = {
         **geometry,
         "line": snapshot.line_name,
@@ -552,10 +576,13 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "slamming_duration_s": float(options.slamming_duration_s),
         "slamming_total_time_s": float(options.slamming_total_time_s),
         "slamming_dt_s": float(options.slamming_dt_s),
-        "slamming_patch_center_a_m": float(options.slamming_patch_center_a_m),
-        "slamming_patch_center_b_m": float(options.slamming_patch_center_b_m),
-        "slamming_patch_size_a_m": float(options.slamming_patch_size_a_m),
-        "slamming_patch_size_b_m": float(options.slamming_patch_size_b_m),
+        "slamming_patches_json": str(options.slamming_patches_json),
+        "slamming_patch_count": len(slamming_patches),
+        "slamming_patch_area_m2": sum(
+            max(0.0, patch["max_a"] - patch["min_a"])
+            * max(0.0, patch["max_b"] - patch["min_b"])
+            for patch in slamming_patches
+        ),
         "slamming_include_static_load": bool(options.slamming_include_static_load),
         "imperfection_enabled": bool(options.imperfection_enabled),
         "imperfection_shape": str(options.imperfection_shape),
@@ -621,10 +648,10 @@ def _visualization_displacement_extent(visualization: dict[str, Any]) -> float:
 
 
 def _displacement_plot_scale(
-    geometry: dict[str, Any],
-    result: RuntimeFEMRunResult | None,
-    visualization: dict[str, Any] | None = None,
-    override_scale: float | None = None,
+        geometry: dict[str, Any],
+        result: RuntimeFEMRunResult | None,
+        visualization: dict[str, Any] | None = None,
+        override_scale: float | None = None,
 ) -> float:
     if override_scale is not None and override_scale > 0.0:
         return float(override_scale)
@@ -658,12 +685,12 @@ def _set_3d_axes_limits(axis: Any, x: list[list[float]], y: list[list[float]], z
 
 
 def _plot_member_lines(
-    axis: Any,
-    visualization: dict[str, Any],
-    scale: float,
-    show_stiffeners: bool = True,
-    show_girders: bool = True,
-    member_alpha: float = 0.95,
+        axis: Any,
+        visualization: dict[str, Any],
+        scale: float,
+        show_stiffeners: bool = True,
+        show_girders: bool = True,
+        member_alpha: float = 0.95,
 ) -> None:
     role_style = {
         "stiffener": ("#1f2937", 1.7),
@@ -675,7 +702,7 @@ def _plot_member_lines(
             continue
         if role == "girder" and not show_girders:
             continue
-            
+
         points = list(line.get("points") or ())
         displaced = list(line.get("displaced_points") or ())
         if len(points) < 2:
@@ -708,15 +735,17 @@ def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, 
     return list((result.visualization or {}).get("buckling_modes") or [])
 
 
-def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, component: str = "von_mises_pa") -> tuple[dict[str, Any], str, bool]:
+def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, component: str = "von_mises_pa") -> tuple[
+    dict[str, Any], str, bool]:
     if display_mode == "plastic":
         visualization = dict(result.visualization or {})
         if visualization.get("plastic_strain"):
             visualization["stress_pa"] = visualization.get("plastic_strain")
-            visualization["scalar_label"] = visualization.get("plastic_strain_label") or "equiv. engineering plastic strain [-]"
+            visualization["scalar_label"] = visualization.get(
+                "plastic_strain_label") or "equiv. engineering plastic strain [-]"
             visualization["scalar_kind"] = "raw"
             return visualization, "Engineering plastic strain", False
-            
+
     def apply_component(vis: dict[str, Any], title: str) -> tuple[dict[str, Any], str]:
         fields = vis.get("fields", {})
         disps = vis.get("displacements", {})
@@ -743,25 +772,25 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 title = "Buckling mode " + str(mode_number) + "  LF=" + str(round(factor, 4))
                 vis, _ = apply_component(dict(mode.get("shape") or {}), title)
                 return vis, title, True
-                
+
     vis, title = apply_component(dict(result.visualization or {}), "Static stress/displacement")
     return vis, title, False
 
 
 def _plot_visualization_surface(
-    figure: Figure,
-    axis: Any,
-    geometry: dict[str, Any],
-    result: RuntimeFEMRunResult,
-    display_mode: str = "static",
-    deformation_scale: float | None = None,
-    show_plate: bool = True,
-    show_stiffeners: bool = True,
-    show_girders: bool = True,
-    plate_alpha: float = 1.0,
-    member_alpha: float = 0.95,
-    colormap: str = "jet",
-    component: str = "von_mises_pa",
+        figure: Figure,
+        axis: Any,
+        geometry: dict[str, Any],
+        result: RuntimeFEMRunResult,
+        display_mode: str = "static",
+        deformation_scale: float | None = None,
+        show_plate: bool = True,
+        show_stiffeners: bool = True,
+        show_girders: bool = True,
+        plate_alpha: float = 1.0,
+        member_alpha: float = 0.95,
+        colormap: str = "jet",
+        component: str = "von_mises_pa",
 ) -> None:
     visualization, title, is_mode = _selected_visualization(result, display_mode, component)
     scalar_values = _plot_grid_values(visualization.get("stress_pa"))
@@ -788,7 +817,7 @@ def _plot_visualization_surface(
         axial = _plot_grid_values(visualization.get("axial_m"))
         theta = _plot_grid_values(visualization.get("theta_rad"))
         radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
-        
+
         disps = visualization.get("displacements", {})
         dx_grid = _plot_grid_values(disps.get("disp_x", []))
         dy_grid = _plot_grid_values(disps.get("disp_y", []))
@@ -876,17 +905,17 @@ def _plot_visualization_surface(
 
 
 def create_runtime_fem_result_figure(
-    snapshot: RuntimeFEMLineSnapshot,
-    result: RuntimeFEMRunResult | None = None,
-    display_mode: str = "static",
-    deformation_scale: float | None = None,
-    show_plate: bool = True,
-    show_stiffeners: bool = True,
-    show_girders: bool = True,
-    plate_alpha: float = 1.0,
-    member_alpha: float = 0.95,
-    colormap: str = "jet",
-    component: str = "von_mises_pa",
+        snapshot: RuntimeFEMLineSnapshot,
+        result: RuntimeFEMRunResult | None = None,
+        display_mode: str = "static",
+        deformation_scale: float | None = None,
+        show_plate: bool = True,
+        show_stiffeners: bool = True,
+        show_girders: bool = True,
+        plate_alpha: float = 1.0,
+        member_alpha: float = 0.95,
+        colormap: str = "jet",
+        component: str = "von_mises_pa",
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
@@ -902,7 +931,7 @@ def create_runtime_fem_result_figure(
         geometry_ax.set_zlabel("displacement")
     else:
         _plot_visualization_surface(
-            figure, geometry_ax, geometry, result, display_mode, deformation_scale, 
+            figure, geometry_ax, geometry, result, display_mode, deformation_scale,
             show_plate=show_plate, show_stiffeners=show_stiffeners, show_girders=show_girders,
             plate_alpha=plate_alpha, member_alpha=member_alpha, colormap=colormap,
             component=component
@@ -977,7 +1006,8 @@ def create_runtime_fem_geometry_preview_figure(snapshot: RuntimeFEMLineSnapshot,
             axis.plot([0.0, length], [y_mid, y_mid], [0.0, web_height], color="#475569", linewidth=1.2)
         if geometry.get("has_girder"):
             x_mid = 0.5 * length
-            axis.plot([x_mid, x_mid], [0.0, width], [web_height * 1.35, web_height * 1.35], color="#7f1d1d", linewidth=2.0)
+            axis.plot([x_mid, x_mid], [0.0, width], [web_height * 1.35, web_height * 1.35], color="#7f1d1d",
+                      linewidth=2.0)
             axis.plot([x_mid, x_mid], [0.0, width], [0.0, web_height * 1.35], color="#991b1b", linewidth=1.2)
         axis.set_xlabel("L", fontsize=6)
         axis.set_ylabel("s", fontsize=6)
@@ -1027,7 +1057,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Stiffener eccentricity [m]: " + str(round(_safe_float(summary.get("stiffener_eccentricity_m")), 6)),
         "Girder eccentricity [m]: " + str(round(_safe_float(summary.get("girder_eccentricity_m")), 6)),
         "Material model: " + str(summary.get("material_model", "")),
-        "Steel grade/class: " + str(summary.get("steel_grade", "")) + " / " + str(summary.get("steel_thickness_class", "")),
+        "Steel grade/class: " + str(summary.get("steel_grade", "")) + " / " + str(
+            summary.get("steel_thickness_class", "")),
         "Material E [GPa]: " + str(round(_safe_float(summary.get("elastic_modulus_pa")) / 1.0e9, 3)),
         "Poisson ratio: " + str(round(_safe_float(summary.get("poisson_ratio")), 4)),
         "Yield stress [MPa]: " + str(round(_safe_float(summary.get("yield_stress_pa")) / 1.0e6, 3)),
@@ -1040,15 +1071,18 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         + str(_safe_int(summary.get("nonlinear_layers"), 0))
         + " / "
         + str(_safe_int(summary.get("nonlinear_max_iterations"), 0)),
-        "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("deformation_scale")), 3))),
+        "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(
+            round(_safe_float(summary.get("deformation_scale")), 3))),
         "Recovery history: " + str(summary.get("recovery_history_mode", "full")),
-        "Memory limit [MB]: " + ("none" if _safe_float(summary.get("memory_limit_mb"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("memory_limit_mb")), 1))),
+        "Memory limit [MB]: " + ("none" if _safe_float(summary.get("memory_limit_mb"), 0.0) <= 0.0 else str(
+            round(_safe_float(summary.get("memory_limit_mb")), 1))),
         "Custom load/BC mode: " + str(bool(summary.get("custom_load_bc_enabled"))),
         "Buckling modes: " + str(summary.get("num_buckling_modes", "")),
         "Max displacement [mm]: " + str(round(1000.0 * _safe_float(summary.get("max_displacement_m")), 4)),
     ]
     if summary.get("custom_load_bc_enabled"):
-        lines.append("Custom loads add to imported/generated loads: " + str(bool(summary.get("custom_loads_add_to_imported"))))
+        lines.append(
+            "Custom loads add to imported/generated loads: " + str(bool(summary.get("custom_loads_add_to_imported"))))
         lines.append("Custom nullspace boundary: " + str(bool(summary.get("custom_use_nullspace_projection"))))
         lines.append("Allow unbalanced free-free loads: " + str(bool(summary.get("allow_unbalanced_free_free"))))
         lines.append("Custom pressure [Pa]: " + str(round(_safe_float(summary.get("custom_pressure_pa")), 3)))
@@ -1071,7 +1105,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     "Plate edge supports x0/x1/y0/y1: "
                     + ", ".join(
                         str(summary.get(key, ""))
-                        for key in ("plate_edge_x0_support", "plate_edge_x1_support", "plate_edge_y0_support", "plate_edge_y1_support")
+                        for key in ("plate_edge_x0_support", "plate_edge_x1_support", "plate_edge_y0_support",
+                                    "plate_edge_y1_support")
                     ),
                     "Plate edge loads x0/x1/y0/y1 [N/m]: "
                     + ", ".join(
@@ -1092,8 +1127,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 "Geometric imperfection input:",
                 " - shape: " + str(summary.get("imperfection_shape", "")),
                 " - amplitude [mm]: "
-                + ("standard default" if _safe_float(summary.get("imperfection_amplitude_m"), 0.0) <= 0.0 else str(round(1000.0 * _safe_float(summary.get("imperfection_amplitude_m")), 4))),
-                " - waves A/B: " + str(_safe_int(summary.get("imperfection_wave_a"), 1)) + " / " + str(_safe_int(summary.get("imperfection_wave_b"), 1)),
+                + ("standard default" if _safe_float(summary.get("imperfection_amplitude_m"), 0.0) <= 0.0 else str(
+                    round(1000.0 * _safe_float(summary.get("imperfection_amplitude_m")), 4))),
+                " - waves A/B: " + str(_safe_int(summary.get("imperfection_wave_a"), 1)) + " / " + str(
+                    _safe_int(summary.get("imperfection_wave_b"), 1)),
             ]
         )
     if summary.get("slamming_enabled"):
@@ -1107,21 +1144,17 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 + " / "
                 + str(round(_safe_float(summary.get("slamming_total_time_s")), 6)),
                 " - dt [s]: " + str(round(_safe_float(summary.get("slamming_dt_s")), 8)),
-                " - patch centre A/B [m]: "
-                + str(round(_safe_float(summary.get("slamming_patch_center_a_m")), 4))
-                + " / "
-                + str(round(_safe_float(summary.get("slamming_patch_center_b_m")), 4)),
-                " - patch size A/B [m]: "
-                + ("whole shell" if _safe_float(summary.get("slamming_patch_size_a_m"), 0.0) <= 0.0 or _safe_float(summary.get("slamming_patch_size_b_m"), 0.0) <= 0.0 else str(round(_safe_float(summary.get("slamming_patch_size_a_m")), 4)) + " / " + str(round(_safe_float(summary.get("slamming_patch_size_b_m")), 4))),
+                " - selected patches: " + str(_safe_int(summary.get("slamming_patch_count"), 0)),
+                " - selected patch area [m²]: " + str(round(_safe_float(summary.get("slamming_patch_area_m2")), 4)),
                 " - include static load in transient: " + str(bool(summary.get("slamming_include_static_load"))),
             ]
         )
     if (
-        str(summary.get("runtime_solver", "stepwise")).lower() != "stepwise"
-        or _safe_float(summary.get("buckling_shift_load_factor"), 0.0) > 0.0
-        or _safe_float(summary.get("buckling_min_load_factor"), 0.0) > 0.0
-        or _safe_float(summary.get("buckling_max_load_factor"), 0.0) > 0.0
-        or bool(summary.get("buckling_allow_dense_fallback"))
+            str(summary.get("runtime_solver", "stepwise")).lower() != "stepwise"
+            or _safe_float(summary.get("buckling_shift_load_factor"), 0.0) > 0.0
+            or _safe_float(summary.get("buckling_min_load_factor"), 0.0) > 0.0
+            or _safe_float(summary.get("buckling_max_load_factor"), 0.0) > 0.0
+            or bool(summary.get("buckling_allow_dense_fallback"))
     ):
         lines.extend(
             [
@@ -1134,7 +1167,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 + str(round(_safe_float(summary.get("buckling_min_load_factor")), 4))
                 + "-"
                 + str(round(_safe_float(summary.get("buckling_max_load_factor")), 4)),
-                " - repeated-mode tolerance: " + str(round(_safe_float(summary.get("buckling_repeated_tolerance"), 1.0e-3), 6)),
+                " - repeated-mode tolerance: " + str(
+                    round(_safe_float(summary.get("buckling_repeated_tolerance"), 1.0e-3), 6)),
                 " - dense fallback: " + str(bool(summary.get("buckling_allow_dense_fallback"))),
             ]
         )
@@ -1163,8 +1197,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             if _safe_float(prestress.get("nullspace_projection"), 0.0) > 0.0:
                 lines.append(" - nullspace projection: used")
                 lines.append(" - remaining rigid-body modes: " + str(_safe_int(prestress.get("nullspace_rank"), 0)))
-                lines.append(" - relative load imbalance: " + str(round(_safe_float(prestress.get("relative_rigid_body_load_imbalance")), 6)))
-                lines.append(" - meaning: remaining rigid-body modes were projected out and any rigid-body load imbalance was carried as generalized balancing reactions.")
+                lines.append(" - relative load imbalance: " + str(
+                    round(_safe_float(prestress.get("relative_rigid_body_load_imbalance")), 6)))
+                lines.append(
+                    " - meaning: remaining rigid-body modes were projected out and any rigid-body load imbalance was carried as generalized balancing reactions.")
             else:
                 lines.append(" - nullspace projection: not used")
         lines.extend(["", "Recovered prestress / reference state:"])
@@ -1246,8 +1282,11 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 str(round(_safe_float(prestress.get(key)) / 1.0e6, 3))
                 for key in ("sigma_prop_pa", "sigma_yield_pa", "sigma_yield_2_pa")
             ))
-            lines.append(" - eps_p_y1/eps_p_y2: " + str(prestress.get("eps_p_y1", "")) + " / " + str(prestress.get("eps_p_y2", "")))
-            lines.append(" - K [MPa] / n: " + str(round(_safe_float(prestress.get("hardening_K_pa")) / 1.0e6, 3)) + " / " + str(prestress.get("hardening_n", "")))
+            lines.append(" - eps_p_y1/eps_p_y2: " + str(prestress.get("eps_p_y1", "")) + " / " + str(
+                prestress.get("eps_p_y2", "")))
+            lines.append(
+                " - K [MPa] / n: " + str(round(_safe_float(prestress.get("hardening_K_pa")) / 1.0e6, 3)) + " / " + str(
+                    prestress.get("hardening_n", "")))
         runtime_solver = str(prestress.get("runtime_solver", summary.get("runtime_solver", "")) or "")
         if runtime_solver:
             lines.extend(["", "Runtime solver provenance:"])
@@ -1257,49 +1296,66 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             lines.append(" - repeated mode groups: " + str(_safe_int(prestress.get("buckling_repeated_groups"), 0)))
             if _safe_float(prestress.get("allow_unbalanced_free_free"), 0.0) > 0.0:
                 lines.append(" - free-free load handling: explicit generalized balancing reactions allowed")
-            lines.append(" - recovery history: " + str(prestress.get("recovery_history_mode", summary.get("recovery_history_mode", "full"))))
+            lines.append(" - recovery history: " + str(
+                prestress.get("recovery_history_mode", summary.get("recovery_history_mode", "full"))))
             if _safe_float(prestress.get("memory_limit_mb"), 0.0) > 0.0:
                 lines.append(" - memory limit [MB]: " + str(round(_safe_float(prestress.get("memory_limit_mb")), 1)))
         capacity_status = str(prestress.get("capacity_workflow_status", "") or "")
         if capacity_status:
             lines.extend(["", "ANYintelligent capacity workflow:"])
             lines.append(" - status: " + capacity_status.replace("_", " "))
-            lines.append(" - capacity factor: " + str(round(_safe_float(prestress.get("capacity_workflow_capacity_factor")), 4)))
+            lines.append(
+                " - capacity factor: " + str(round(_safe_float(prestress.get("capacity_workflow_capacity_factor")), 4)))
             critical = _safe_float(prestress.get("capacity_workflow_critical_load_factor"), 0.0)
-            lines.append(" - eigenvalue critical factor: " + ("not available" if critical <= 0.0 else str(round(critical, 4))))
+            lines.append(
+                " - eigenvalue critical factor: " + ("not available" if critical <= 0.0 else str(round(critical, 4))))
             lines.append(" - mode mesh adequacy: " + str(prestress.get("capacity_workflow_mesh_status", "")))
-            lines.append(" - active elements per estimated half-wave: " + str(round(_safe_float(prestress.get("capacity_workflow_elements_per_half_wave")), 3)))
-            lines.append(" - meaning: linear static prestress, eigenmode buckling, stress-free imperfection and nonlinear static capacity were run as one traceable workflow.")
+            lines.append(" - active elements per estimated half-wave: " + str(
+                round(_safe_float(prestress.get("capacity_workflow_elements_per_half_wave")), 3)))
+            lines.append(
+                " - meaning: linear static prestress, eigenmode buckling, stress-free imperfection and nonlinear static capacity were run as one traceable workflow.")
         nonlinear_static_status = str(prestress.get("nonlinear_static_status", "") or "")
         if nonlinear_static_status:
             lines.extend(["", "Incremental nonlinear static solve:"])
             lines.append(" - status: " + nonlinear_static_status.replace("_", " "))
-            lines.append(" - last converged load factor: " + str(round(_safe_float(prestress.get("nonlinear_static_load_factor")), 4)))
+            lines.append(" - last converged load factor: " + str(
+                round(_safe_float(prestress.get("nonlinear_static_load_factor")), 4)))
             lines.append(" - completed steps: " + str(_safe_int(prestress.get("nonlinear_static_steps"), 0)))
-            lines.append(" - Newton iterations: " + str(_safe_int(prestress.get("nonlinear_static_total_iterations"), 0)))
+            lines.append(
+                " - Newton iterations: " + str(_safe_int(prestress.get("nonlinear_static_total_iterations"), 0)))
             lines.append(" - through-thickness layers: " + str(_safe_int(prestress.get("nonlinear_static_layers"), 0)))
-            lines.append(" - max equivalent plastic strain: " + str(round(_safe_float(prestress.get("nonlinear_static_max_plastic_strain")), 6)))
+            lines.append(" - max equivalent plastic strain: " + str(
+                round(_safe_float(prestress.get("nonlinear_static_max_plastic_strain")), 6)))
             if nonlinear_static_status == "completed":
-                lines.append(" - interpretation: all requested proportional load was reached; this is not necessarily a collapse load.")
+                lines.append(
+                    " - interpretation: all requested proportional load was reached; this is not necessarily a collapse load.")
             elif nonlinear_static_status == "stopped_at_limit":
-                lines.append(" - interpretation: the adaptive Newton solve stopped at the last stable converged load increment.")
+                lines.append(
+                    " - interpretation: the adaptive Newton solve stopped at the last stable converged load increment.")
         imperfection_status = str(prestress.get("imperfection_status", "") or "")
         if imperfection_status:
             lines.extend(["", "Applied geometric imperfection:"])
             lines.append(" - status: " + imperfection_status)
             lines.append(" - kind: " + str(prestress.get("imperfection_kind", "")))
-            lines.append(" - input amplitude [mm]: " + str(round(1000.0 * _safe_float(prestress.get("imperfection_amplitude_m")), 4)))
-            lines.append(" - max offset [mm]: " + str(round(1000.0 * _safe_float(prestress.get("imperfection_max_offset_m")), 4)))
-            lines.append(" - waves A/B: " + str(_safe_int(prestress.get("imperfection_waves_a"), 0)) + " / " + str(_safe_int(prestress.get("imperfection_waves_b"), 0)))
-            lines.append(" - meaning: the coordinates were offset before solving, so zero displacement in the imperfect model is stress free.")
+            lines.append(" - input amplitude [mm]: " + str(
+                round(1000.0 * _safe_float(prestress.get("imperfection_amplitude_m")), 4)))
+            lines.append(" - max offset [mm]: " + str(
+                round(1000.0 * _safe_float(prestress.get("imperfection_max_offset_m")), 4)))
+            lines.append(" - waves A/B: " + str(_safe_int(prestress.get("imperfection_waves_a"), 0)) + " / " + str(
+                _safe_int(prestress.get("imperfection_waves_b"), 0)))
+            lines.append(
+                " - meaning: the coordinates were offset before solving, so zero displacement in the imperfect model is stress free.")
         slamming_status = str(prestress.get("slamming_status", "") or "")
         if slamming_status:
             lines.extend(["", "Transient slamming response:"])
             lines.append(" - status: " + slamming_status)
             lines.append(" - selected shell elements: " + str(_safe_int(prestress.get("slamming_selected_shells"), 0)))
-            lines.append(" - peak displacement [mm]: " + str(round(1000.0 * _safe_float(prestress.get("slamming_peak_displacement_m")), 4)))
-            lines.append(" - peak von Mises [MPa]: " + str(round(_safe_float(prestress.get("slamming_peak_von_mises_pa")) / 1.0e6, 3)))
-            lines.append(" - meaning: this is a linear Newmark response to the prescribed pressure pulse; it is reported separately from the static buckling prestress.")
+            lines.append(" - peak displacement [mm]: " + str(
+                round(1000.0 * _safe_float(prestress.get("slamming_peak_displacement_m")), 4)))
+            lines.append(" - peak von Mises [MPa]: " + str(
+                round(_safe_float(prestress.get("slamming_peak_von_mises_pa")) / 1.0e6, 3)))
+            lines.append(
+                " - meaning: this is a linear Newmark response to the prescribed pressure pulse; it is reported separately from the static buckling prestress.")
         for key, value in prestress.items():
             if key in special_keys:
                 continue
@@ -1316,7 +1372,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             else:
                 lines.append(" - estimated nonlinear load factor: not available")
                 if nonlinear_status == "initial_tangent_not_positive":
-                    lines.append(" - explanation: the initial tangent stiffness was not positive for the selected prestress state.")
+                    lines.append(
+                        " - explanation: the initial tangent stiffness was not positive for the selected prestress state.")
                 elif steps == 0:
                     lines.append(" - explanation: the nonlinear check stopped before the first load increment.")
                 else:
@@ -1324,7 +1381,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
     load_resultant = summary.get("load_resultant") or {}
     if load_resultant:
         force = load_resultant.get("force_n", (0.0, 0.0, 0.0))
-        lines.extend(["", "Load resultant force [N]: " + ", ".join(str(round(_safe_float(component), 3)) for component in force)])
+        lines.extend(["", "Load resultant force [N]: " + ", ".join(
+            str(round(_safe_float(component), 3)) for component in force)])
     if result.diagnostics:
         lines.extend(["", "Diagnostics:"])
         lines.extend(" - " + item for item in result.diagnostics)
@@ -1804,11 +1862,6 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
 }
 
 
-import json
-
-
-
-
 class RuntimeFEMWindow:
     """Popup window for the experimental full-geometry FEM runtime solver."""
 
@@ -1838,7 +1891,8 @@ class RuntimeFEMWindow:
         self.mesh_size_m = tk.DoubleVar(value=0.0)
         self.load_scale = tk.DoubleVar(value=1.0)
         self.pressure_pa = tk.DoubleVar(value=self.snapshot.pressure_pa)
-        self.top_bottom_moment_nm = tk.DoubleVar(value=_safe_float(getattr(app, "_fem_default_top_bottom_moment_nm", 0.0)))
+        self.top_bottom_moment_nm = tk.DoubleVar(
+            value=_safe_float(getattr(app, "_fem_default_top_bottom_moment_nm", 0.0)))
         self.include_stiffeners = tk.BooleanVar(value=True)
         self.include_girders = tk.BooleanVar(value=True)
         self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
@@ -1989,13 +2043,13 @@ class RuntimeFEMWindow:
         return ttk.Button(parent, text="i", width=2, command=lambda info_key=key: self._show_solver_info(info_key))
 
     def _add_control_row(
-        self,
-        parent: Any,
-        row: int,
-        key: str,
-        label: str,
-        control: Any,
-        sticky: str = tk.EW,
+            self,
+            parent: Any,
+            row: int,
+            key: str,
+            label: str,
+            control: Any,
+            sticky: str = tk.EW,
     ) -> Any:
         self._info_button(parent, key).grid(row=row, column=0, sticky=tk.W, padx=(8, 4), pady=4)
         ttk.Label(parent, text=label).grid(row=row, column=1, sticky=tk.W, padx=(0, 8), pady=4)
@@ -2003,14 +2057,14 @@ class RuntimeFEMWindow:
         return control
 
     def _add_option_row(
-        self,
-        parent: Any,
-        row: int,
-        key: str,
-        label: str,
-        variable: tk.Variable,
-        values: tuple[str, ...],
-        width: int | None = None,
+            self,
+            parent: Any,
+            row: int,
+            key: str,
+            label: str,
+            variable: tk.Variable,
+            values: tuple[str, ...],
+            width: int | None = None,
     ) -> ttk.OptionMenu:
         control = ttk.OptionMenu(parent, variable, variable.get(), *values)
         if width is not None:
@@ -2021,13 +2075,13 @@ class RuntimeFEMWindow:
         return self._add_control_row(parent, row, key, label, control)
 
     def _add_entry_row(
-        self,
-        parent: Any,
-        row: int,
-        key: str,
-        label: str,
-        variable: tk.Variable,
-        width: int = 12,
+            self,
+            parent: Any,
+            row: int,
+            key: str,
+            label: str,
+            variable: tk.Variable,
+            width: int = 12,
     ) -> ttk.Entry:
         control = ttk.Entry(parent, textvariable=variable, width=width)
         return self._add_control_row(parent, row, key, label, control)
@@ -2088,10 +2142,10 @@ class RuntimeFEMWindow:
         text.tag_configure("section", font=("Segoe UI", 10, "bold"), foreground="#172033", spacing1=8, spacing3=2)
         text.tag_configure("body", lmargin1=10, lmargin2=10, spacing3=6)
         for title, field in (
-            ("Purpose", "purpose"),
-            ("How It Is Used", "use"),
-            ("Output Affected", "output"),
-            ("Cautions", "caution"),
+                ("Purpose", "purpose"),
+                ("How It Is Used", "use"),
+                ("Output Affected", "output"),
+                ("Cautions", "caution"),
         ):
             text.insert(tk.END, title + "\n", "section")
             text.insert(tk.END, str(info.get(field, "")) + "\n", "body")
@@ -2151,10 +2205,10 @@ class RuntimeFEMWindow:
         summary = ttk.LabelFrame(left_panel, text="Active line")
         summary.pack(fill=tk.X, pady=(0, 10))
         summary_text = (
-            "Line: " + self.snapshot.line_name
-            + "\nDomain: " + (self.snapshot.domain or "unknown")
-            + "\nGeometry: " + ("cylinder/panel" if self.snapshot.is_cylinder else "flat panel")
-            + "\nPressure [Pa]: " + str(round(self.snapshot.pressure_pa, 3))
+                "Line: " + self.snapshot.line_name
+                + "\nDomain: " + (self.snapshot.domain or "unknown")
+                + "\nGeometry: " + ("cylinder/panel" if self.snapshot.is_cylinder else "flat panel")
+                + "\nPressure [Pa]: " + str(round(self.snapshot.pressure_pa, 3))
         )
         ttk.Label(summary, text=summary_text, justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=8)
 
@@ -2164,7 +2218,8 @@ class RuntimeFEMWindow:
         mesh_loads = ttk.LabelFrame(options, text="Mesh and loads")
         mesh_loads.pack(fill=tk.X, padx=8, pady=(8, 6))
         self._configure_option_grid(mesh_loads)
-        self._add_option_row(mesh_loads, 0, "mesh_fidelity", "Mesh fidelity", self.mesh_fidelity, ("coarse", "medium", "fine", "very fine"))
+        self._add_option_row(mesh_loads, 0, "mesh_fidelity", "Mesh fidelity", self.mesh_fidelity,
+                             ("coarse", "medium", "fine", "very fine"))
         self._add_entry_row(mesh_loads, 1, "mesh_size_m", "Mesh size [m]", self.mesh_size_m)
         self._add_entry_row(mesh_loads, 2, "pressure_pa", "Pressure [Pa]", self.pressure_pa)
         self._add_entry_row(mesh_loads, 3, "load_scale", "Load scale", self.load_scale)
@@ -2200,10 +2255,10 @@ class RuntimeFEMWindow:
 
         tab_general = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_general, text="General")
-        
+
         tab_properties = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_properties, text="Properties")
-        
+
         tab_visualization = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_visualization, text="Visualization")
 
@@ -2213,11 +2268,15 @@ class RuntimeFEMWindow:
         constraints = ttk.LabelFrame(tab_general, text="Supports and load path")
         constraints.pack(fill=tk.X, padx=8, pady=(8, 6))
         self._configure_option_grid(constraints)
-        self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition, ("auto", "free", "simply supported", "pinned", "clamped"))
-        self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode, ("none", "x", "y", "z", "cyclic"))
-        self._add_option_row(constraints, 2, "pressure_direction", "Pressure dir.", self.pressure_direction, ("external", "internal"))
+        self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition,
+                             ("auto", "free", "simply supported", "pinned", "clamped"))
+        self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode,
+                             ("none", "x", "y", "z", "cyclic"))
+        self._add_option_row(constraints, 2, "pressure_direction", "Pressure dir.", self.pressure_direction,
+                             ("external", "internal"))
         self._add_entry_row(constraints, 3, "axial_force_n", "Axial force [N]", self.axial_force_n)
-        self._add_entry_row(constraints, 4, "enforced_displacement_m", "Enforced disp. [m]", self.enforced_displacement_m)
+        self._add_entry_row(constraints, 4, "enforced_displacement_m", "Enforced disp. [m]",
+                            self.enforced_displacement_m)
 
         solver_options = ttk.LabelFrame(tab_general, text="Solver")
         solver_options.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -2230,35 +2289,50 @@ class RuntimeFEMWindow:
             self.runtime_solver,
             ("stepwise", "static only", "nonlinear static", "ANYintelligent capacity workflow"),
         )
-        self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8", "S8R"))
+        self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order,
+                             ("S4", "S8", "S8R"))
         self._add_option_row(
             solver_options,
             2,
             "analysis_type",
             "Analysis",
             self.analysis_type,
-            ("linear eigenvalue", "nonlinear stability", "geometric nonlinear static", "geom. + material nonlinear static"),
+            ("linear eigenvalue", "nonlinear stability", "geometric nonlinear static",
+             "geom. + material nonlinear static"),
         )
-        self._add_option_row(solver_options, 3, "buckling_analysis_type", "Buckling", self.buckling_analysis_type, ("linear eigenvalue", "nonlinear limit"))
-        self._add_option_row(solver_options, 4, "solver_type", "Linear solver", self.solver_type, ("direct", "gmres", "minres", "bicgstab"))
+        self._add_option_row(solver_options, 3, "buckling_analysis_type", "Buckling", self.buckling_analysis_type,
+                             ("linear eigenvalue", "nonlinear limit"))
+        self._add_option_row(solver_options, 4, "solver_type", "Linear solver", self.solver_type,
+                             ("direct", "gmres", "minres", "bicgstab"))
         self._add_entry_row(solver_options, 5, "nonlinear_max_load_factor", "NL max LF", self.nonlinear_max_load_factor)
         self._add_entry_row(solver_options, 6, "nonlinear_steps", "NL steps", self.nonlinear_steps, width=8)
-        self._add_entry_row(solver_options, 7, "nonlinear_max_iterations", "NL iterations", self.nonlinear_max_iterations, width=8)
+        self._add_entry_row(solver_options, 7, "nonlinear_max_iterations", "NL iterations",
+                            self.nonlinear_max_iterations, width=8)
         self._add_entry_row(solver_options, 8, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
 
         buckling_validity = ttk.LabelFrame(tab_general, text="Buckling validity and resources")
         buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(buckling_validity)
-        self._add_entry_row(buckling_validity, 0, "buckling_shift_load_factor", "Buckling shift LF", self.buckling_shift_load_factor, width=8)
-        self._add_entry_row(buckling_validity, 1, "buckling_load_factor_range", "Buckling LF min/max", self.buckling_min_load_factor, width=8)
-        ttk.Entry(buckling_validity, textvariable=self.buckling_max_load_factor, width=8).grid(row=1, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(buckling_validity, 2, "buckling_repeated_tolerance", "Repeated tol.", self.buckling_repeated_tolerance, width=8)
-        self._add_check_row(buckling_validity, 3, "buckling_allow_dense_fallback", "Allow dense buckling fallback", self.buckling_allow_dense_fallback)
-        self._add_option_row(buckling_validity, 4, "recovery_history_mode", "Recovery history", self.recovery_history_mode, ("full", "selected", "envelope"))
-        self._add_entry_row(buckling_validity, 5, "recovery_threads", "Recovery threads", self.recovery_threads, width=8)
+        self._add_entry_row(buckling_validity, 0, "buckling_shift_load_factor", "Buckling shift LF",
+                            self.buckling_shift_load_factor, width=8)
+        self._add_entry_row(buckling_validity, 1, "buckling_load_factor_range", "Buckling LF min/max",
+                            self.buckling_min_load_factor, width=8)
+        ttk.Entry(buckling_validity, textvariable=self.buckling_max_load_factor, width=8).grid(row=1, column=3,
+                                                                                               sticky=tk.EW,
+                                                                                               padx=(0, 8), pady=4)
+        self._add_entry_row(buckling_validity, 2, "buckling_repeated_tolerance", "Repeated tol.",
+                            self.buckling_repeated_tolerance, width=8)
+        self._add_check_row(buckling_validity, 3, "buckling_allow_dense_fallback", "Allow dense buckling fallback",
+                            self.buckling_allow_dense_fallback)
+        self._add_option_row(buckling_validity, 4, "recovery_history_mode", "Recovery history",
+                             self.recovery_history_mode, ("full", "selected", "envelope"))
+        self._add_entry_row(buckling_validity, 5, "recovery_threads", "Recovery threads", self.recovery_threads,
+                            width=8)
         self._add_entry_row(buckling_validity, 6, "memory_limit_mb", "Memory limit [MB]", self.memory_limit_mb, width=8)
-        self._add_entry_row(buckling_validity, 7, "capacity_buckling_mode_number", "Capacity mode no.", self.capacity_buckling_mode_number, width=8)
-        self._add_entry_row(buckling_validity, 8, "capacity_mesh_min_elements_per_half_wave", "Mode elems/half-wave", self.capacity_mesh_min_elements_per_half_wave, width=8)
+        self._add_entry_row(buckling_validity, 7, "capacity_buckling_mode_number", "Capacity mode no.",
+                            self.capacity_buckling_mode_number, width=8)
+        self._add_entry_row(buckling_validity, 8, "capacity_mesh_min_elements_per_half_wave", "Mode elems/half-wave",
+                            self.capacity_mesh_min_elements_per_half_wave, width=8)
         buckling_validity.columnconfigure(3, weight=1)
 
         members = ttk.LabelFrame(tab_properties, text="Member modelling")
@@ -2266,14 +2340,17 @@ class RuntimeFEMWindow:
         self._configure_option_grid(members)
         self._add_entry_row(members, 0, "stiffener_eccentricity_m", "Stf. ecc. [m]", self.stiffener_eccentricity_m)
         self._add_entry_row(members, 1, "girder_eccentricity_m", "Girder ecc. [m]", self.girder_eccentricity_m)
-        self._add_option_row(members, 2, "member_orientation", "Member orient.", self.member_orientation, ("auto", "global Y", "global Z", "radial"))
+        self._add_option_row(members, 2, "member_orientation", "Member orient.", self.member_orientation,
+                             ("auto", "global Y", "global Z", "radial"))
 
         material = ttk.LabelFrame(tab_properties, text="Material and recovery")
         material.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(material)
         self._add_entry_row(material, 0, "stress_percentile", "Stress pct.", self.stress_percentile)
-        self._add_option_row(material, 1, "material_model", "Material", self.material_model, ("linear elastic", "DNV-RP-C208 steel"))
-        self._add_option_row(material, 2, "steel_grade", "Steel grade", self.steel_grade, ("S235", "S275", "S355", "S420", "S460"))
+        self._add_option_row(material, 1, "material_model", "Material", self.material_model,
+                             ("linear elastic", "DNV-RP-C208 steel"))
+        self._add_option_row(material, 2, "steel_grade", "Steel grade", self.steel_grade,
+                             ("S235", "S275", "S355", "S420", "S460"))
         self._add_option_row(
             material,
             3,
@@ -2290,7 +2367,8 @@ class RuntimeFEMWindow:
         imperfections = ttk.LabelFrame(tab_properties, text="Imperfections")
         imperfections.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(imperfections)
-        self._add_check_row(imperfections, 0, "imperfection_enabled", "Use geometric imperfection", self.imperfection_enabled)
+        self._add_check_row(imperfections, 0, "imperfection_enabled", "Use geometric imperfection",
+                            self.imperfection_enabled)
         self._add_option_row(
             imperfections,
             1,
@@ -2299,57 +2377,80 @@ class RuntimeFEMWindow:
             self.imperfection_shape,
             ("standard plate/cylinder", "none"),
         )
-        self._add_entry_row(imperfections, 2, "imperfection_amplitude_m", "Amplitude [m]", self.imperfection_amplitude_m)
+        self._add_entry_row(imperfections, 2, "imperfection_amplitude_m", "Amplitude [m]",
+                            self.imperfection_amplitude_m)
         self._add_entry_row(imperfections, 3, "imperfection_waves", "Waves A / B", self.imperfection_wave_a, width=8)
-        ttk.Entry(imperfections, textvariable=self.imperfection_wave_b, width=8).grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.Entry(imperfections, textvariable=self.imperfection_wave_b, width=8).grid(row=3, column=3, sticky=tk.EW,
+                                                                                      padx=(0, 8), pady=4)
         imperfections.columnconfigure(3, weight=1)
 
         slamming = ttk.LabelFrame(tab_advanced, text="Transient slamming")
         slamming.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(slamming)
         self._add_check_row(slamming, 0, "slamming_enabled", "Run slamming transient", self.slamming_enabled)
-        self._add_check_row(slamming, 1, "slamming_include_static_load", "Include static load in transient", self.slamming_include_static_load)
+        self._add_check_row(slamming, 1, "slamming_include_static_load", "Include static load in transient",
+                            self.slamming_include_static_load)
         self._add_entry_row(slamming, 2, "slamming_pressure_pa", "Pressure [Pa]", self.slamming_pressure_pa)
         self._add_entry_row(slamming, 3, "slamming_duration_s", "Duration [s]", self.slamming_duration_s)
         self._add_entry_row(slamming, 4, "slamming_total_time_s", "Total time [s]", self.slamming_total_time_s)
         self._add_entry_row(slamming, 5, "slamming_dt_s", "dt [s]", self.slamming_dt_s)
-        
+
         self.slamming_area_var = tk.StringVar(value="Patch Area: 0.00 m²")
         ttk.Label(slamming, textvariable=self.slamming_area_var).grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
 
-        ttk.Button(slamming, text="Select All", command=self._slamming_select_all).grid(row=6, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(slamming, text="Clear", command=self._slamming_clear_all).grid(row=6, column=2, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.Button(slamming, text="Select All", command=self._slamming_select_all).grid(row=6, column=1, sticky=tk.EW,
+                                                                                        padx=(0, 4), pady=4)
+        ttk.Button(slamming, text="Clear", command=self._slamming_clear_all).grid(row=6, column=2, sticky=tk.EW,
+                                                                                  padx=(0, 8), pady=4)
 
         self.slamming_split_coord_var = tk.DoubleVar(value=0.0)
         self._add_entry_row(slamming, 7, "slamming_split", "Split coord [m]", self.slamming_split_coord_var)
-        
+
         btn_frame = ttk.Frame(slamming)
         btn_frame.grid(row=7, column=2, columnspan=2, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.Button(btn_frame, text="Split A (Z/X)", command=lambda: self._slamming_split_field('a')).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(btn_frame, text="Split B (Arc/Y)", command=lambda: self._slamming_split_field('b')).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-        
+        ttk.Button(btn_frame, text="Split A (Z/X)", command=lambda: self._slamming_split_field('a')).pack(side=tk.LEFT,
+                                                                                                          expand=True,
+                                                                                                          fill=tk.X,
+                                                                                                          padx=(0, 2))
+        ttk.Button(btn_frame, text="Split B (Arc/Y)", command=lambda: self._slamming_split_field('b')).pack(
+            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
         slamming.columnconfigure(3, weight=1)
 
         custom = ttk.LabelFrame(tab_advanced, text="Custom loads and boundary conditions")
         custom.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(custom)
         self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
-        self._add_check_row(custom, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads", self.custom_loads_add_to_imported)
-        self._add_check_row(custom, 2, "custom_use_nullspace_projection", "Use nullspace projection as boundary", self.custom_use_nullspace_projection)
-        self._add_check_row(custom, 3, "allow_unbalanced_free_free", "Allow unbalanced free-free loads", self.allow_unbalanced_free_free)
+        self._add_check_row(custom, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads",
+                            self.custom_loads_add_to_imported)
+        self._add_check_row(custom, 2, "custom_use_nullspace_projection", "Use nullspace projection as boundary",
+                            self.custom_use_nullspace_projection)
+        self._add_check_row(custom, 3, "allow_unbalanced_free_free", "Allow unbalanced free-free loads",
+                            self.allow_unbalanced_free_free)
         self._add_entry_row(custom, 4, "custom_pressure_pa", "Manual pressure [Pa]", self.custom_pressure_pa)
-        self._add_option_row(custom, 5, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
-        self._add_option_row(custom, 6, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_option_row(custom, 7, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom, 5, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support,
+                             ("free", "simply supported", "fixed"))
+        self._add_option_row(custom, 6, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support,
+                             ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported",
+                       "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported",
+                       "fixed").grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom, 7, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support,
+                             ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free",
+                       "simply supported", "fixed").grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         self._add_entry_row(custom, 8, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW,
+                                                                                       padx=(0, 8), pady=4)
         self._add_entry_row(custom, 9, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 10, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW,
+                                                                                       padx=(0, 8), pady=4)
+        self._add_entry_row(custom, 10, "cylinder_edge_loads", "Cyl. lower / upper [N/m]",
+                            self.cylinder_lower_edge_load_n_per_m)
+        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3,
+                                                                                             sticky=tk.EW, padx=(0, 8),
+                                                                                             pady=4)
         custom.columnconfigure(3, weight=1)
 
         vis_group = ttk.LabelFrame(tab_visualization, text="Plot configuration")
@@ -2360,8 +2461,10 @@ class RuntimeFEMWindow:
         self._add_check_row(vis_group, 2, "show_girders", "Show girders/frames", self.show_girder_vis)
         self._add_entry_row(vis_group, 3, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
         self._add_entry_row(vis_group, 4, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
-        self._add_option_row(vis_group, 5, "colormap", "Colormap", self.colormap_vis, ("jet", "viridis", "plasma", "inferno", "coolwarm"))
-        ttk.Button(vis_group, text="Redraw base 3D", command=self._redraw_base_3d).grid(row=6, column=0, columnspan=2, sticky=tk.W, padx=8, pady=4)
+        self._add_option_row(vis_group, 5, "colormap", "Colormap", self.colormap_vis,
+                             ("jet", "viridis", "plasma", "inferno", "coolwarm"))
+        ttk.Button(vis_group, text="Redraw base 3D", command=self._redraw_base_3d).grid(row=6, column=0, columnspan=2,
+                                                                                        sticky=tk.W, padx=8, pady=4)
 
         self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
         self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -2390,7 +2493,7 @@ class RuntimeFEMWindow:
         )
         self.result_case_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.result_case_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
-        
+
         ttk.Label(selector_bar, text=" Component:").pack(side=tk.LEFT, padx=(6, 6))
         self.component_selector = ttk.Combobox(
             selector_bar,
@@ -2498,7 +2601,8 @@ class RuntimeFEMWindow:
                 pass
 
     @staticmethod
-    def _preview_axis_data_extents(axis: Any) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None:
+    def _preview_axis_data_extents(axis: Any) -> tuple[tuple[float, float], tuple[float, float], tuple[
+        float, float]] | None:
         xs: list[float] = []
         ys: list[float] = []
         zs: list[float] = []
@@ -2585,16 +2689,16 @@ class RuntimeFEMWindow:
         widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
         try:
             widget.after(120, lambda: (
-                self.preview_canvas is not None
-                and self._fit_preview_figure_to_canvas(figure, widget.winfo_width(), widget.winfo_height()) is None
-                and self.preview_canvas.draw_idle()
+                    self.preview_canvas is not None
+                    and self._fit_preview_figure_to_canvas(figure, widget.winfo_width(), widget.winfo_height()) is None
+                    and self.preview_canvas.draw_idle()
             ))
         except Exception:
             pass
 
     def _selected_display_mode(self) -> str:
         return self.result_case_labels.get(str(self.result_case_choice.get()), "static")
-        
+
     def _selected_component(self) -> str:
         return self.component_labels.get(str(self.component_choice.get()), "von_mises_pa")
 
@@ -2791,9 +2895,9 @@ class RuntimeFEMWindow:
         display_mode = self._selected_display_mode()
         deformation_scale = max(_safe_float(self.deformation_scale.get(), 0.0), 0.0)
         component = self._selected_component()
-        
+
         visualization, title, is_mode = _selected_visualization(result, display_mode, component)
-        
+
         scalar_values = _plot_grid_values(visualization.get("stress_pa"))
         if is_mode:
             color_grid = scalar_values
@@ -2804,38 +2908,40 @@ class RuntimeFEMWindow:
         else:
             color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
             colorbar_label = "stress [MPa]"
-            
+
         all_vals = _all_grid_values(color_grid)
         if all_vals:
             vmin = min(all_vals)
             vmax = max(all_vals)
         else:
             vmin, vmax = 0.0, 1.0
-            
+
         if vmax <= vmin:
             vmax = vmin + 1.0
-            
+
         scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
-        
+
         if visualization.get("type") == "cylinder":
             axial = _plot_grid_values(visualization.get("axial_m"))
             theta = _plot_grid_values(visualization.get("theta_rad"))
             radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
-            
+
             disps = visualization.get("displacements", {})
             dx_grid = _plot_grid_values(disps.get("disp_x", []))
             dy_grid = _plot_grid_values(disps.get("disp_y", []))
             dz_grid = _plot_grid_values(disps.get("disp_z", []))
-    
+
             if not dx_grid or not dy_grid or not dz_grid:
                 radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
                 x = [
-                    [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
+                    [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(
+                        theta[row_index][col_index])
                      for col_index in range(len(theta[row_index]))]
                     for row_index in range(len(theta))
                 ]
                 y = [
-                    [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
+                    [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(
+                        theta[row_index][col_index])
                      for col_index in range(len(theta[row_index]))]
                     for row_index in range(len(theta))
                 ]
@@ -2861,7 +2967,7 @@ class RuntimeFEMWindow:
             y = _plot_grid_values(visualization.get("y_m"))
             w = _plot_grid_values(visualization.get("w_m"))
             z = [[value * scale for value in row] for row in w]
-            
+
         show_plate_var = getattr(self, "show_plate_vis", None)
         show_plate = show_plate_var.get() if show_plate_var is not None else True
         if show_plate:
@@ -2870,14 +2976,16 @@ class RuntimeFEMWindow:
             for i in range(R - 1):
                 for j in range(C - 1):
                     p1 = Point3D(x[i][j], y[i][j], z[i][j])
-                    p2 = Point3D(x[i+1][j], y[i+1][j], z[i+1][j])
-                    p3 = Point3D(x[i+1][j+1], y[i+1][j+1], z[i+1][j+1])
-                    p4 = Point3D(x[i][j+1], y[i][j+1], z[i][j+1])
-                    
-                    avg_val = 0.25 * (color_grid[i][j] + color_grid[i+1][j] + color_grid[i+1][j+1] + color_grid[i][j+1])
+                    p2 = Point3D(x[i + 1][j], y[i + 1][j], z[i + 1][j])
+                    p3 = Point3D(x[i + 1][j + 1], y[i + 1][j + 1], z[i + 1][j + 1])
+                    p4 = Point3D(x[i][j + 1], y[i][j + 1], z[i][j + 1])
+
+                    avg_val = 0.25 * (
+                                color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
+                            j + 1])
                     color = _interpolate_thickness_color(avg_val, vmin, vmax)
                     canvas.add_polygon([p1, p2, p3, p4], color=color, outline="#64748b", layer=5)
-                    
+
         show_stiffeners_var = getattr(self, "show_stiffener_vis", None)
         show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
         show_girders_var = getattr(self, "show_girder_vis", None)
@@ -2889,18 +2997,18 @@ class RuntimeFEMWindow:
                 continue
             if role == "girder" and not show_girders:
                 continue
-                
+
             points = list(line.get("points") or ())
             displaced = list(line.get("displaced_points") or ())
             if len(points) < 2 or len(displaced) < 2:
                 continue
-                
+
             pts = []
             for idx in range(2):
                 base = np.asarray(points[idx], dtype=float)
                 moved = np.asarray(displaced[idx], dtype=float)
                 pts.append(base + (moved - base) * float(scale))
-                
+
             pA = pts[0]
             pB = pts[1]
             vec_AB = pB - pA
@@ -2908,39 +3016,39 @@ class RuntimeFEMWindow:
             if len_AB < 1.0e-9:
                 continue
             u = vec_AB / len_AB
-                
+
             nA = self._get_shell_normal(pA, self.snapshot.is_cylinder)
             nB = self._get_shell_normal(pB, self.snapshot.is_cylinder)
-                
+
             e = line.get("eccentricity", 0.0)
             if abs(e) > 1.0e-9:
                 web_sign = np.sign(e)
             else:
                 web_sign = -1.0 if self.snapshot.is_cylinder else 1.0
-                    
+
             wA = web_sign * nA
             wB = web_sign * nB
-                
+
             hw = line.get("web_height", 0.1)
             b_f = line.get("flange_width", 0.0)
-                
+
             s_stops = [0.0, 1.0]
             centroids = [0.5]
-                
+
             for k in range(1):
                 z_start = s_stops[k] * hw
-                z_end = s_stops[k+1] * hw
-                    
+                z_end = s_stops[k + 1] * hw
+
                 pAk = pA + z_start * wA
                 pAk1 = pA + z_end * wA
                 pBk = pB + z_start * wB
                 pBk1 = pB + z_end * wB
-                    
+
                 q1 = Point3D(pAk[0], pAk[1], pAk[2])
                 q2 = Point3D(pBk[0], pBk[1], pBk[2])
                 q3 = Point3D(pBk1[0], pBk1[1], pBk1[2])
                 q4 = Point3D(pAk1[0], pAk1[1], pAk1[2])
-                    
+
                 if is_mode:
                     baseA = np.asarray(points[0])
                     dispA = np.asarray(displaced[0]) - baseA
@@ -2952,33 +3060,33 @@ class RuntimeFEMWindow:
                     sig_axial = line.get("axial_stress", 0.0)
                     sig_bend_y = line.get("bending_stress_y", 0.0)
                     sig_x = sig_axial + (2.0 * s_val - 1.0) * sig_bend_y
-                        
+
                     tau_y = line.get("shear_stress_y", 0.0)
                     tau_z = line.get("shear_stress_z", 0.0)
                     tau_t = line.get("torsional_stress", 0.0)
-                        
-                    val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
-                        
+
+                    val = np.sqrt(sig_x ** 2 + 3.0 * (tau_y ** 2 + tau_z ** 2 + tau_t ** 2)) / 1.0e6
+
                 color = _interpolate_thickness_color(val, vmin, vmax)
                 canvas.add_polygon([q1, q2, q3, q4], color=color, outline="#000000", width=2, layer=12)
-                    
+
             if b_f > 0.0:
                 pA_top = pA + hw * wA
                 pB_top = pB + hw * wB
-                    
+
                 v_flange_A = np.cross(u, wA)
                 v_flange_B = np.cross(u, wB)
-                    
+
                 fA1 = pA_top - 0.5 * b_f * v_flange_A
                 fA2 = pA_top + 0.5 * b_f * v_flange_A
                 fB1 = pB_top - 0.5 * b_f * v_flange_B
                 fB2 = pB_top + 0.5 * b_f * v_flange_B
-                    
+
                 qf1 = Point3D(fA1[0], fA1[1], fA1[2])
                 qf2 = Point3D(fB1[0], fB1[1], fB1[2])
                 qf3 = Point3D(fB2[0], fB2[1], fB2[2])
                 qf4 = Point3D(fA2[0], fA2[1], fA2[2])
-                    
+
                 if is_mode:
                     baseA = np.asarray(points[0])
                     dispA = np.asarray(displaced[0]) - baseA
@@ -2989,16 +3097,16 @@ class RuntimeFEMWindow:
                     sig_axial = line.get("axial_stress", 0.0)
                     sig_bend_y = line.get("bending_stress_y", 0.0)
                     sig_x = sig_axial + sig_bend_y
-                        
+
                     tau_y = line.get("shear_stress_y", 0.0)
                     tau_z = line.get("shear_stress_z", 0.0)
                     tau_t = line.get("torsional_stress", 0.0)
-                        
-                    val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
-                        
+
+                    val = np.sqrt(sig_x ** 2 + 3.0 * (tau_y ** 2 + tau_z ** 2 + tau_t ** 2)) / 1.0e6
+
                 color = _interpolate_thickness_color(val, vmin, vmax)
                 canvas.add_polygon([qf1, qf2, qf3, qf4], color=color, outline="#000000", width=2, layer=13)
-                    
+
         canvas.set_thickness_legend(
             values=all_vals,
             unit=colorbar_label,
@@ -3011,16 +3119,16 @@ class RuntimeFEMWindow:
             return
         self.upper_result_text.config(state=tk.NORMAL)
         self.upper_result_text.delete("1.0", tk.END)
-        
+
         if self.current_result is None:
             self.upper_result_text.insert(tk.END, "No solver results available yet. Run FEM to calculate results.")
             self.upper_result_text.config(state=tk.DISABLED)
             return
-            
+
         result = self.current_result
         geometry = result.summary
         display_mode = self._selected_display_mode()
-        
+
         lines = []
         if str(display_mode).startswith("mode:"):
             lines.extend([
@@ -3034,14 +3142,14 @@ class RuntimeFEMWindow:
             lines.append("")
             lines.append("Mode\tLoad factor")
             lines.append("----\t-----------")
-            
+
             active_mode_str = display_mode.split(":", 1)[1]
             active_idx = -1
             try:
                 active_idx = int(active_mode_str)
             except ValueError:
                 pass
-                
+
             if result.buckling_factors:
                 for idx, factor in enumerate(result.buckling_factors, start=1):
                     prefix = "--> " if idx == active_idx else "    "
@@ -3063,12 +3171,12 @@ class RuntimeFEMWindow:
                 lines.append(label.upper() + " stress [MPa]: " + str(round(value / 1.0e6, 3)))
             if force:
                 lines.append("Resultant force [N]: " + ", ".join(str(round(_safe_float(v), 2)) for v in force))
-                
+
             lines.extend([
                 "",
                 "Buckling mode shapes are available from the Display selector.",
             ])
-            
+
         self.upper_result_text.insert(tk.END, "\n".join(lines))
         self.upper_result_text.config(state=tk.DISABLED)
 
@@ -3076,7 +3184,7 @@ class RuntimeFEMWindow:
         self._update_result_text()
         if self.figure_parent is None:
             return
-            
+
         if hasattr(self, "preview_canvas") and self.preview_canvas is not None:
             try:
                 self.preview_canvas.get_tk_widget().destroy()
@@ -3103,14 +3211,14 @@ class RuntimeFEMWindow:
                 except Exception:
                     pass
                 self.figure_toolbar_frame = None
-                
+
             if self.result_canvas is None:
                 self.result_canvas = Tkinter3DCanvas(self.figure_parent, bg="white")
                 self.result_canvas.pack(fill=tk.BOTH, expand=True)
-                
+
             self.result_canvas.clear()
             self.result_canvas.clear_thickness_legend()
-            
+
             if self.current_result is None:
                 self._populate_canvas_with_geometry(self.result_canvas)
             else:
@@ -3122,7 +3230,7 @@ class RuntimeFEMWindow:
                 except Exception:
                     pass
                 self.result_canvas = None
-                
+
             self._show_figure(
                 create_runtime_fem_result_figure(
                     self.snapshot,
@@ -3232,7 +3340,8 @@ class RuntimeFEMWindow:
             recovery_threads=max(_safe_int(self.recovery_threads.get(), 0), 0),
             memory_limit_mb=max(_safe_float(self.memory_limit_mb.get(), 0.0), 0.0),
             capacity_buckling_mode_number=max(_safe_int(self.capacity_buckling_mode_number.get(), 1), 1),
-            capacity_mesh_min_elements_per_half_wave=max(_safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
+            capacity_mesh_min_elements_per_half_wave=max(
+                _safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
         )
 
     def run(self) -> None:
@@ -3254,6 +3363,7 @@ class RuntimeFEMWindow:
                 if getattr(self, "_cancel_requested", False):
                     raise RuntimeError("Run stopped by user.")
                 self.solver_queue.put(msg)
+
             try:
                 self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb), None))
             except Exception as error:
@@ -3292,7 +3402,6 @@ class RuntimeFEMWindow:
         self._write_status(format_runtime_fem_result(result))
         self._refresh_figure()
 
-
     def _slamming_select_all(self) -> None:
         if not hasattr(self, "_slamming_patches"): return
         for f in self._slamming_patches: f["selected"] = True
@@ -3307,11 +3416,13 @@ class RuntimeFEMWindow:
 
     def _slamming_split_field(self, axis: str) -> None:
         if not hasattr(self, "_slamming_patches"): return
-        if not hasattr(self, "_slamming_selected_index") or self._slamming_selected_index < 0 or self._slamming_selected_index >= len(self._slamming_patches): return
-        
+        if not hasattr(self,
+                       "_slamming_selected_index") or self._slamming_selected_index < 0 or self._slamming_selected_index >= len(
+            self._slamming_patches): return
+
         coord = self.slamming_split_coord_var.get()
         field = self._slamming_patches[self._slamming_selected_index]
-        
+
         if axis == 'a':
             if coord <= field["min_a"] + 1e-6 or coord >= field["max_a"] - 1e-6: return
             new_field1 = dict(field)
@@ -3324,7 +3435,7 @@ class RuntimeFEMWindow:
             new_field1["max_b"] = coord
             new_field2 = dict(field)
             new_field2["min_b"] = coord
-            
+
         self._slamming_patches.pop(self._slamming_selected_index)
         self._slamming_patches.insert(self._slamming_selected_index, new_field2)
         self._slamming_patches.insert(self._slamming_selected_index, new_field1)
@@ -3343,7 +3454,7 @@ class RuntimeFEMWindow:
 
     def _generate_default_slamming_patches(self) -> None:
         geometry = runtime_geometry_summary(self.snapshot)
-        is_cylinder = geometry.get("plot_type") == "cylinder"
+        is_cylinder = str(geometry.get("geometry", "")).lower() == "cylinder"
         if is_cylinder:
             max_a = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
             min_a = -0.5 * max_a
@@ -3356,10 +3467,10 @@ class RuntimeFEMWindow:
             max_a = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
             min_b = 0.0
             max_b = max(float(geometry.get("width_m") or 1.0), 1.0e-6)
-            
+
         a_breaks = [min_a, max_a]
         b_breaks = [min_b, max_b]
-        
+
         if is_cylinder:
             if geometry.get("has_girder"):
                 gir_spacing = float(geometry.get("girder_spacing_m") or 0.0)
@@ -3384,16 +3495,16 @@ class RuntimeFEMWindow:
                             b_breaks.append(y)
                     if min_b not in b_breaks: b_breaks.insert(0, min_b)
                     if max_b not in b_breaks: b_breaks.append(max_b)
-                    
+
         a_breaks = sorted(list(set(a_breaks)))
         b_breaks = sorted(list(set(b_breaks)))
-        
+
         self._slamming_patches = []
-        for i in range(len(a_breaks)-1):
-            for j in range(len(b_breaks)-1):
+        for i in range(len(a_breaks) - 1):
+            for j in range(len(b_breaks) - 1):
                 self._slamming_patches.append({
-                    "min_a": a_breaks[i], "max_a": a_breaks[i+1],
-                    "min_b": b_breaks[j], "max_b": b_breaks[j+1],
+                    "min_a": a_breaks[i], "max_a": a_breaks[i + 1],
+                    "min_b": b_breaks[j], "max_b": b_breaks[j + 1],
                     "selected": False
                 })
         self._update_slamming_summary()
@@ -3402,6 +3513,7 @@ class RuntimeFEMWindow:
         self.current_result = None
         self._refresh_figure()
         self._write_status("Displaying base 3D model geometry.")
+
 
 def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:
     """Open the experimental runtime FEM popup for the app active line."""
