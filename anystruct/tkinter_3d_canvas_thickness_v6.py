@@ -315,6 +315,7 @@ class Tkinter3DCanvas(tk.Frame):
         self.bg = bg
         self.camera = Camera3D()
         self.objects: List[Dict[str, Any]] = []
+        self._explicit_opaque_cylinder_occluders: List[Dict[str, Any]] = []
 
         # Optional fixed 2D legend.  The 3D projection reserves space for it,
         # so the legend never covers the model.
@@ -650,6 +651,7 @@ class Tkinter3DCanvas(tk.Frame):
 
     def clear(self) -> None:
         self.objects.clear()
+        self._explicit_opaque_cylinder_occluders.clear()
         self._invalidate_geometry_cache()
         self._clear_canvas_only()
 
@@ -664,6 +666,7 @@ class Tkinter3DCanvas(tk.Frame):
 
         quality = "fast" if self._interactive_render else "full"
         primitives = self._get_world_primitives(quality)
+        opaque_cylinder_occluders = self._collect_opaque_cylinder_occluders()
 
         right, camera_up, forward = self.camera.basis()
         position = self.camera.position
@@ -705,6 +708,12 @@ class Tkinter3DCanvas(tk.Frame):
         render_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
 
         for primitive in primitives:
+            if self._primitive_hidden_by_opaque_cylinder(
+                    primitive,
+                    opaque_cylinder_occluders,
+                    position,
+            ):
+                continue
             if primitive.get("cull_backface", False):
                 normal = primitive["normal"]
                 center = primitive["center"]
@@ -753,10 +762,10 @@ class Tkinter3DCanvas(tk.Frame):
                 )
             )
 
-        depth_span = max(0.001, far - near)
-        # Apply a layer bias to resolve depth sorting of overlapping/coplanar elements
-        # (e.g. plate and stiffeners). Higher layers are drawn later (on top).
-        layer_epsilon = depth_span * 0.025
+        # Layer is only a near-coplanar tie-breaker.  The old far/near-based
+        # bias was large enough to draw internal members through an opaque shell.
+        scene_scale = max(float(self.camera.distance), 1.0)
+        layer_epsilon = max(1.0e-9, scene_scale * 1.0e-7)
         render_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
 
         interactive = self._interactive_render
@@ -1449,6 +1458,127 @@ class Tkinter3DCanvas(tk.Frame):
     # ------------------------------------------------------------------
     # Public scene API
     # ------------------------------------------------------------------
+
+    def set_opaque_cylinder_occluder(
+            self,
+            radius: float,
+            height: float,
+            center: Optional[Point3D] = None,
+    ) -> None:
+        # Register a non-rendered finite cylinder used for hidden-surface tests.
+        self._explicit_opaque_cylinder_occluders.append(
+            {
+                "radius": max(0.0, float(radius)),
+                "height": max(0.0, float(height)),
+                "center": center if center is not None else Point3D(0.0, 0.0, 0.0),
+            }
+        )
+
+    def _collect_opaque_cylinder_occluders(self) -> List[Dict[str, Any]]:
+        occluders = list(self._explicit_opaque_cylinder_occluders)
+        for obj in self.objects:
+            if obj.get("type") != "cylinder":
+                continue
+            opacity = max(0.0, min(1.0, float(obj.get("opacity", 1.0))))
+            show_backfaces = obj.get("show_backfaces")
+            if show_backfaces is None:
+                show_backfaces = opacity < 0.90
+            if opacity < 0.94 or bool(show_backfaces):
+                continue
+            occluders.append(
+                {
+                    "radius": max(0.0, float(obj.get("radius", 0.0))),
+                    "height": max(0.0, float(obj.get("height", 0.0))),
+                    "center": obj.get("center", Point3D(0.0, 0.0, 0.0)),
+                }
+            )
+        return occluders
+
+    @staticmethod
+    def _point_is_hidden_by_finite_cylinder(
+            camera_position: Point3D,
+            point: Point3D,
+            occluder: Dict[str, Any],
+    ) -> bool:
+        radius = max(0.0, float(occluder.get("radius", 0.0)))
+        height = max(0.0, float(occluder.get("height", 0.0)))
+        center = occluder.get("center", Point3D(0.0, 0.0, 0.0))
+        if radius <= _EPS or height <= _EPS:
+            return False
+
+        local_x = point.x - center.x
+        local_y = point.y - center.y
+        radial_distance = math.hypot(local_x, local_y)
+        z_bottom = center.z - 0.5 * height
+        z_top = center.z + 0.5 * height
+        radial_tolerance = max(radius * 1.0e-6, 1.0e-8)
+        z_tolerance = max(height * 1.0e-7, 1.0e-8)
+
+        if radial_distance >= radius - radial_tolerance:
+            return False
+        if point.z < z_bottom - z_tolerance or point.z > z_top + z_tolerance:
+            return False
+
+        origin_x = camera_position.x - center.x
+        origin_y = camera_position.y - center.y
+        direction_x = point.x - camera_position.x
+        direction_y = point.y - camera_position.y
+        direction_z = point.z - camera_position.z
+
+        coefficient_a = direction_x * direction_x + direction_y * direction_y
+        if coefficient_a <= _EPS:
+            return False
+        coefficient_b = 2.0 * (
+            origin_x * direction_x + origin_y * direction_y
+        )
+        coefficient_c = (
+            origin_x * origin_x
+            + origin_y * origin_y
+            - radius * radius
+        )
+        discriminant = coefficient_b * coefficient_b - 4.0 * coefficient_a * coefficient_c
+        if discriminant < 0.0:
+            return False
+
+        square_root = math.sqrt(max(0.0, discriminant))
+        denominator = 2.0 * coefficient_a
+        roots = sorted(
+            (
+                (-coefficient_b - square_root) / denominator,
+                (-coefficient_b + square_root) / denominator,
+            )
+        )
+        for parameter in roots:
+            if parameter <= 1.0e-8 or parameter >= 1.0 - 1.0e-6:
+                continue
+            intersection_z = camera_position.z + parameter * direction_z
+            if z_bottom - z_tolerance <= intersection_z <= z_top + z_tolerance:
+                return True
+        return False
+
+    def _primitive_hidden_by_opaque_cylinder(
+            self,
+            primitive: Dict[str, Any],
+            occluders: Sequence[Dict[str, Any]],
+            camera_position: Point3D,
+    ) -> bool:
+        # Member surfaces use layers 10-29. Shells, result plates and selection
+        # outlines are intentionally excluded from this hidden-surface filter.
+        layer = int(primitive.get("layer", 0))
+        if layer < 10 or layer >= 30 or not occluders:
+            return False
+
+        center = primitive.get("center")
+        if not isinstance(center, Point3D):
+            return False
+        return any(
+            self._point_is_hidden_by_finite_cylinder(
+                camera_position,
+                center,
+                occluder,
+            )
+            for occluder in occluders
+        )
 
     def add_line(
         self,

@@ -2158,7 +2158,11 @@ class RuntimeFEMWindow:
         self.slamming_dt_s = tk.DoubleVar(value=0.0005)
         self.slamming_patches_json = tk.StringVar(value="[]")
         self._slamming_patches: list[dict] = []
+        self._slamming_manual_cuts: list[dict[str, Any]] = []
         self._slamming_selected_index: int = -1
+        self._slamming_selection_active = False
+        self._slamming_click_origin: tuple[int, int] | None = None
+        self._slamming_selection_button = None
         self._generate_default_slamming_patches()
         self.slamming_include_static_load = tk.BooleanVar(value=False)
         self.imperfection_enabled = tk.BooleanVar(value=False)
@@ -2223,6 +2227,7 @@ class RuntimeFEMWindow:
         self._plot_refresh_after_id: str | None = None
         self._plot_trace_ids: list[tuple[tk.Variable, str]] = []
         self._force_fit_next_refresh = True
+        self._display_base_geometry = True
 
         self._build()
         self._bind_plot_configuration_traces()
@@ -2653,22 +2658,48 @@ class RuntimeFEMWindow:
         self.slamming_area_var = tk.StringVar(value="Patch Area: 0.00 m²")
         ttk.Label(slamming, textvariable=self.slamming_area_var).grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
 
-        ttk.Button(slamming, text="Select All", command=self._slamming_select_all).grid(row=6, column=1, sticky=tk.EW,
-                                                                                        padx=(0, 4), pady=4)
-        ttk.Button(slamming, text="Clear", command=self._slamming_clear_all).grid(row=6, column=2, sticky=tk.EW,
-                                                                                  padx=(0, 8), pady=4)
-
-        self.slamming_split_coord_var = tk.DoubleVar(value=0.0)
-        self._add_entry_row(slamming, 7, "slamming_split", "Split coord [m]", self.slamming_split_coord_var)
+        self._slamming_selection_button = ttk.Button(
+            slamming,
+            text="Start selection",
+            command=self._toggle_slamming_selection,
+        )
+        self._slamming_selection_button.grid(row=6, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(slamming, text="Select All", command=self._slamming_select_all).grid(
+            row=6, column=2, sticky=tk.EW, padx=(0, 4), pady=4
+        )
+        ttk.Button(slamming, text="Clear", command=self._slamming_clear_all).grid(
+            row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4
+        )
 
         btn_frame = ttk.Frame(slamming)
-        btn_frame.grid(row=7, column=2, columnspan=2, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.Button(btn_frame, text="Split A (Z/X)", command=lambda: self._slamming_split_field('a')).pack(side=tk.LEFT,
-                                                                                                          expand=True,
-                                                                                                          fill=tk.X,
-                                                                                                          padx=(0, 2))
-        ttk.Button(btn_frame, text="Split B (Arc/Y)", command=lambda: self._slamming_split_field('b')).pack(
-            side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        btn_frame.grid(
+            row=7,
+            column=0,
+            columnspan=4,
+            sticky=tk.EW,
+            padx=8,
+            pady=4,
+        )
+        ttk.Button(
+            btn_frame,
+            text="Split A (Z/X)",
+            command=lambda: self._slamming_split_field("a"),
+        ).pack(
+            side=tk.LEFT,
+            expand=True,
+            fill=tk.X,
+            padx=(0, 2),
+        )
+        ttk.Button(
+            btn_frame,
+            text="Split B (Arc/Y)",
+            command=lambda: self._slamming_split_field("b"),
+        ).pack(
+            side=tk.LEFT,
+            expand=True,
+            fill=tk.X,
+            padx=(2, 0),
+        )
 
         slamming.columnconfigure(3, weight=1)
 
@@ -2718,8 +2749,10 @@ class RuntimeFEMWindow:
         self._add_entry_row(vis_group, 4, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
         self._add_option_row(vis_group, 5, "colormap", "Colormap", self.colormap_vis,
                              ("jet", "viridis", "plasma", "inferno", "coolwarm"))
-        ttk.Button(vis_group, text="Redraw base 3D", command=self._redraw_base_3d).grid(row=6, column=0, columnspan=2,
-                                                                                        sticky=tk.W, padx=8, pady=4)
+        vis_actions = ttk.Frame(vis_group)
+        vis_actions.grid(row=6, column=0, columnspan=3, sticky=tk.W, padx=8, pady=4)
+        ttk.Button(vis_actions, text="Redraw base 3D", command=self._redraw_base_3d).pack(side=tk.LEFT)
+        ttk.Button(vis_actions, text="Show results", command=self._show_results).pack(side=tk.LEFT, padx=(6, 0))
 
         self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
         self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -3004,12 +3037,12 @@ class RuntimeFEMWindow:
                     height=length,
                     center=Point3D(0.0, 0.0, 0.0),
                     color="#d8e2ea",
-                    outline="#708090",
+                    outline="",
                     segments=32,
                     height_segments=12,
                     capped=False,
                     opacity=plate_alpha,
-                    show_backfaces=True,
+                    show_backfaces=plate_alpha < 0.94,
                     show_thickness_legend=False
                 )
             if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
@@ -3152,6 +3185,7 @@ class RuntimeFEMWindow:
                         layer=13,
                         stipple=member_stipple
                     )
+        self._draw_slamming_patch_outlines(canvas)
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
 
@@ -3166,6 +3200,18 @@ class RuntimeFEMWindow:
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
         _configure_tk_canvas_colormap(str(self.colormap_vis.get()))
+        if self.snapshot.is_cylinder and plate_alpha >= 0.94:
+            set_occluder = getattr(canvas, "set_opaque_cylinder_occluder", None)
+            if callable(set_occluder):
+                set_occluder(
+                    radius=max(
+                        _safe_float(geometry.get("radius_m"), 1.0),
+                        1.0e-9,
+                    ),
+                    height=max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9),
+                    center=Point3D(0.0, 0.0, 0.0),
+                )
+
 
         visualization, title, is_mode = _selected_visualization(result, display_mode, component)
 
@@ -3405,6 +3451,7 @@ class RuntimeFEMWindow:
                     stipple=member_stipple,
                 )
 
+        self._draw_slamming_patch_outlines(canvas)
         canvas.set_thickness_legend(
             values=all_vals,
             unit=colorbar_label,
@@ -3484,6 +3531,8 @@ class RuntimeFEMWindow:
         if self.figure_parent is None:
             return
 
+        show_base_geometry = self.current_result is None or self._display_base_geometry
+
         if hasattr(self, "preview_canvas") and self.preview_canvas is not None:
             try:
                 self.preview_canvas.get_tk_widget().destroy()
@@ -3515,13 +3564,21 @@ class RuntimeFEMWindow:
             if canvas_created:
                 self.result_canvas = Tkinter3DCanvas(self.figure_parent, bg="white")
                 self.result_canvas.pack(fill=tk.BOTH, expand=True)
+                self._bind_slamming_canvas_selection(self.result_canvas)
+
+            try:
+                self.result_canvas.canvas.configure(
+                    cursor="crosshair" if self._slamming_selection_active else ""
+                )
+            except Exception:
+                pass
 
             fit_view = bool(canvas_created or self._force_fit_next_refresh or not preserve_view)
             self._force_fit_next_refresh = False
             self.result_canvas.clear()
             self.result_canvas.clear_thickness_legend()
 
-            if self.current_result is None:
+            if show_base_geometry:
                 self._populate_canvas_with_geometry(self.result_canvas, fit_view=fit_view)
             else:
                 self._populate_canvas_with_results(self.result_canvas, fit_view=fit_view)
@@ -3537,7 +3594,7 @@ class RuntimeFEMWindow:
             self._show_figure(
                 create_runtime_fem_result_figure(
                     self.snapshot,
-                    self.current_result,
+                    None if show_base_geometry else self.current_result,
                     self._selected_display_mode(),
                     max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
                     show_plate=self.show_plate_vis.get(),
@@ -3701,10 +3758,405 @@ class RuntimeFEMWindow:
             return
 
         self.current_result = result
+        self._display_base_geometry = False
+        self._set_slamming_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
         self._set_display_modes(result)
         self._write_status(format_runtime_fem_result(result))
         self._refresh_figure()
+
+    def _set_slamming_selection_active(self, active: bool, refresh: bool = True) -> None:
+        self._slamming_selection_active = bool(active)
+        self._slamming_click_origin = None
+        if self._slamming_selection_button is not None:
+            self._slamming_selection_button.configure(
+                text="Finish selection" if self._slamming_selection_active else "Start selection"
+            )
+        if self.result_canvas is not None:
+            try:
+                self.result_canvas.canvas.configure(
+                    cursor="crosshair" if self._slamming_selection_active else ""
+                )
+            except Exception:
+                pass
+        if refresh:
+            self._refresh_figure(preserve_view=True)
+
+    def _toggle_slamming_selection(self) -> None:
+        start_selection = not self._slamming_selection_active
+        if start_selection:
+            self.use_interactive_3d.set(True)
+            self._display_base_geometry = True
+            self._force_fit_next_refresh = self.result_canvas is None
+            self._set_slamming_selection_active(True, refresh=False)
+            self._write_status(
+                "Slamming panel selection is active. Click a panel to select or clear it; drag to rotate the view."
+            )
+        else:
+            self._set_slamming_selection_active(False, refresh=False)
+            self._write_status("Slamming panel selection finished.")
+        self._refresh_figure(preserve_view=True)
+
+    def _bind_slamming_canvas_selection(self, canvas: Tkinter3DCanvas) -> None:
+        canvas.canvas.bind("<ButtonPress-1>", self._on_slamming_canvas_press, add="+")
+        canvas.canvas.bind("<ButtonRelease-1>", self._on_slamming_canvas_release, add="+")
+
+    def _on_slamming_canvas_press(self, event: Any) -> None:
+        if self._slamming_selection_active:
+            self._slamming_click_origin = (int(event.x), int(event.y))
+
+    def _on_slamming_canvas_release(self, event: Any) -> None:
+        origin = self._slamming_click_origin
+        self._slamming_click_origin = None
+        if not self._slamming_selection_active or origin is None or self.result_canvas is None:
+            return
+        if math.hypot(float(event.x) - origin[0], float(event.y) - origin[1]) > 5.0:
+            return
+
+        patch_index = self._pick_slamming_patch(self.result_canvas, float(event.x), float(event.y))
+        if patch_index is None:
+            self._write_status("Slamming selection: no panel was found at the clicked position.")
+            return
+
+        self._slamming_selected_index = patch_index
+        patch = self._slamming_patches[patch_index]
+        patch["selected"] = not bool(patch.get("selected", False))
+        self._update_slamming_summary()
+        state = "selected" if patch["selected"] else "cleared"
+        self._write_status(f"Slamming panel {patch_index + 1} {state}.")
+        self._refresh_figure(preserve_view=True)
+
+    @staticmethod
+    def _point_segment_distance_2d(
+            px: float,
+            py: float,
+            ax: float,
+            ay: float,
+            bx: float,
+            by: float,
+    ) -> float:
+        dx = bx - ax
+        dy = by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1.0e-12:
+            return math.hypot(px - ax, py - ay)
+        fraction = ((px - ax) * dx + (py - ay) * dy) / length_sq
+        fraction = min(max(fraction, 0.0), 1.0)
+        return math.hypot(px - (ax + fraction * dx), py - (ay + fraction * dy))
+
+    @classmethod
+    def _point_in_polygon_2d(cls, x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
+        if len(polygon) < 3:
+            return False
+        inside = False
+        previous = polygon[-1]
+        for current in polygon:
+            if cls._point_segment_distance_2d(x, y, previous[0], previous[1], current[0], current[1]) <= 4.0:
+                return True
+            x1, y1 = previous
+            x2, y2 = current
+            if (y1 > y) != (y2 > y):
+                crossing_x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+                if x < crossing_x:
+                    inside = not inside
+            previous = current
+        return inside
+
+    def _slamming_patch_boundary_points(
+            self,
+            patch: dict[str, Any],
+            surface_offset: float = 0.0,
+    ) -> list[Point3D]:
+        geometry = runtime_geometry_summary(self.snapshot)
+        min_a = _safe_float(patch.get("min_a"))
+        max_a = _safe_float(patch.get("max_a"))
+        min_b = _safe_float(patch.get("min_b"))
+        max_b = _safe_float(patch.get("max_b"))
+
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+            draw_radius = max(radius + surface_offset, 1.0e-9)
+            theta_0 = min_b / radius
+            theta_1 = max_b / radius
+            arc_steps = max(2, int(math.ceil(abs(theta_1 - theta_0) / (math.pi / 24.0))))
+            angles = [theta_0 + (theta_1 - theta_0) * index / arc_steps for index in range(arc_steps + 1)]
+            lower = [Point3D(draw_radius * math.cos(theta), draw_radius * math.sin(theta), min_a)
+                     for theta in angles]
+            upper = [Point3D(draw_radius * math.cos(theta), draw_radius * math.sin(theta), max_a)
+                     for theta in reversed(angles)]
+            return lower + upper
+
+        return [
+            Point3D(min_a, min_b, surface_offset),
+            Point3D(max_a, min_b, surface_offset),
+            Point3D(max_a, max_b, surface_offset),
+            Point3D(min_a, max_b, surface_offset),
+        ]
+
+    def _pick_slamming_patch(
+            self,
+            canvas: Tkinter3DCanvas,
+            screen_x: float,
+            screen_y: float,
+    ) -> int | None:
+        if not self._slamming_patches:
+            return None
+
+        try:
+            plot_width = max(1, int(canvas._plot_width()))
+        except Exception:
+            plot_width = max(1, int(canvas.width))
+        height = max(1, int(canvas.height))
+        right, camera_up, forward = canvas.camera.basis()
+        position = canvas.camera.position
+        scale = 1.0 / math.tan(canvas.camera.fov / 2.0)
+        aspect = plot_width / height
+        x_scale = scale / aspect
+        half_width = 0.5 * plot_width
+        half_height = 0.5 * height
+
+        best_index: int | None = None
+        best_depth = float("inf")
+        for index, patch in enumerate(self._slamming_patches):
+            projected: list[tuple[float, float]] = []
+            depths: list[float] = []
+            for point in self._slamming_patch_boundary_points(patch):
+                relative = point - position
+                depth = relative.dot(forward)
+                if depth <= canvas.camera.near or depth >= canvas.camera.far:
+                    projected = []
+                    break
+                camera_x = relative.dot(right)
+                camera_y = relative.dot(camera_up)
+                projected.append((
+                    (camera_x * x_scale / depth + 1.0) * half_width,
+                    (1.0 - camera_y * scale / depth) * half_height,
+                ))
+                depths.append(depth)
+            if projected and self._point_in_polygon_2d(screen_x, screen_y, projected):
+                mean_depth = sum(depths) / len(depths)
+                if mean_depth < best_depth:
+                    best_depth = mean_depth
+                    best_index = index
+        return best_index
+
+    def _slamming_outline_edge_points(
+            self,
+            varying_axis: str,
+            fixed_coordinate: float,
+            start_coordinate: float,
+            end_coordinate: float,
+            surface_offset: float,
+    ) -> list[Point3D]:
+        # Convert one boundary segment in patch coordinates to 3D points.
+        geometry = runtime_geometry_summary(self.snapshot)
+        start_coordinate = float(start_coordinate)
+        end_coordinate = float(end_coordinate)
+        fixed_coordinate = float(fixed_coordinate)
+
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+            draw_radius = max(radius + surface_offset, 1.0e-9)
+            if varying_axis == "a":
+                theta = fixed_coordinate / radius
+                return [
+                    Point3D(
+                        draw_radius * math.cos(theta),
+                        draw_radius * math.sin(theta),
+                        start_coordinate,
+                    ),
+                    Point3D(
+                        draw_radius * math.cos(theta),
+                        draw_radius * math.sin(theta),
+                        end_coordinate,
+                    ),
+                ]
+
+            theta_0 = start_coordinate / radius
+            theta_1 = end_coordinate / radius
+            arc_steps = max(
+                2,
+                int(math.ceil(abs(theta_1 - theta_0) / (math.pi / 36.0))),
+            )
+            return [
+                Point3D(
+                    draw_radius * math.cos(
+                        theta_0 + (theta_1 - theta_0) * index / arc_steps
+                    ),
+                    draw_radius * math.sin(
+                        theta_0 + (theta_1 - theta_0) * index / arc_steps
+                    ),
+                    fixed_coordinate,
+                )
+                for index in range(arc_steps + 1)
+            ]
+
+        if varying_axis == "a":
+            return [
+                Point3D(start_coordinate, fixed_coordinate, surface_offset),
+                Point3D(end_coordinate, fixed_coordinate, surface_offset),
+            ]
+        return [
+            Point3D(fixed_coordinate, start_coordinate, surface_offset),
+            Point3D(fixed_coordinate, end_coordinate, surface_offset),
+        ]
+
+    def _selected_slamming_boundary_edges(
+            self,
+    ) -> list[tuple[str, float, float, float]]:
+        # Return only the external boundary of the combined selected patch area.
+        selected_patches = [
+            patch
+            for patch in self._slamming_patches
+            if bool(patch.get("selected", False))
+        ]
+        if not selected_patches:
+            return []
+
+        tolerance_digits = 10
+
+        def clean(value: Any) -> float:
+            return round(_safe_float(value), tolerance_digits)
+
+        a_values = sorted(
+            {
+                clean(patch.get(key))
+                for patch in self._slamming_patches
+                for key in ("min_a", "max_a")
+            }
+        )
+        b_values = sorted(
+            {
+                clean(patch.get(key))
+                for patch in self._slamming_patches
+                for key in ("min_b", "max_b")
+            }
+        )
+        if len(a_values) < 2 or len(b_values) < 2:
+            return []
+
+        selected_cells: set[tuple[int, int]] = set()
+        for index_a in range(len(a_values) - 1):
+            mid_a = 0.5 * (a_values[index_a] + a_values[index_a + 1])
+            for index_b in range(len(b_values) - 1):
+                mid_b = 0.5 * (b_values[index_b] + b_values[index_b + 1])
+                for patch in selected_patches:
+                    if (
+                        _safe_float(patch.get("min_a")) - 1.0e-9
+                        <= mid_a
+                        <= _safe_float(patch.get("max_a")) + 1.0e-9
+                        and _safe_float(patch.get("min_b")) - 1.0e-9
+                        <= mid_b
+                        <= _safe_float(patch.get("max_b")) + 1.0e-9
+                    ):
+                        selected_cells.add((index_a, index_b))
+                        break
+
+        is_cylinder = bool(self.snapshot.is_cylinder)
+        number_b_cells = len(b_values) - 1
+        edges: list[tuple[str, float, float, float]] = []
+
+        for index_a, index_b in sorted(selected_cells):
+            a_0 = a_values[index_a]
+            a_1 = a_values[index_a + 1]
+            b_0 = b_values[index_b]
+            b_1 = b_values[index_b + 1]
+
+            below = (index_a - 1, index_b)
+            above = (index_a + 1, index_b)
+            left_b = (
+                index_a,
+                (index_b - 1) % number_b_cells
+                if is_cylinder
+                else index_b - 1,
+            )
+            right_b = (
+                index_a,
+                (index_b + 1) % number_b_cells
+                if is_cylinder
+                else index_b + 1,
+            )
+
+            if below not in selected_cells:
+                edges.append(("b", a_0, b_0, b_1))
+            if above not in selected_cells:
+                edges.append(("b", a_1, b_0, b_1))
+            if left_b not in selected_cells:
+                edges.append(("a", b_0, a_0, a_1))
+            if right_b not in selected_cells:
+                edges.append(("a", b_1, a_0, a_1))
+
+        return edges
+
+    def _draw_slamming_patch_outlines(self, canvas: Tkinter3DCanvas) -> None:
+        # Draw selectable panels, selected perimeter and user-created cuts.
+        if not self._slamming_patches:
+            return
+
+        geometry = runtime_geometry_summary(self.snapshot)
+        if self.snapshot.is_cylinder:
+            surface_offset = max(
+                _safe_float(geometry.get("radius_m"), 1.0) * 1.0e-3,
+                1.0e-5,
+            )
+        else:
+            surface_offset = (
+                max(
+                    _safe_float(geometry.get("length_m"), 1.0),
+                    _safe_float(geometry.get("width_m"), 1.0),
+                )
+                * 1.0e-5
+            )
+
+        if self._slamming_selection_active:
+            for patch in self._slamming_patches:
+                points = self._slamming_patch_boundary_points(
+                    patch,
+                    surface_offset=surface_offset,
+                )
+                if len(points) < 2:
+                    continue
+                for start, end in zip(points, points[1:] + points[:1]):
+                    canvas.add_line(
+                        start,
+                        end,
+                        color="#94a3b8",
+                        width=1,
+                    )
+
+        for varying_axis, fixed_coordinate, start_coordinate, end_coordinate in (
+                self._selected_slamming_boundary_edges()
+        ):
+            points = self._slamming_outline_edge_points(
+                varying_axis,
+                fixed_coordinate,
+                start_coordinate,
+                end_coordinate,
+                surface_offset,
+            )
+            for start, end in zip(points, points[1:]):
+                canvas.add_line(
+                    start,
+                    end,
+                    color="#dc2626",
+                    width=4,
+                )
+
+        for cut in getattr(self, "_slamming_manual_cuts", ()):
+            points = self._slamming_outline_edge_points(
+                str(cut.get("varying_axis", "a")),
+                _safe_float(cut.get("fixed_coordinate")),
+                _safe_float(cut.get("start_coordinate")),
+                _safe_float(cut.get("end_coordinate")),
+                surface_offset,
+            )
+            for start, end in zip(points, points[1:]):
+                canvas.add_line(
+                    start,
+                    end,
+                    color="#f59e0b",
+                    width=3,
+                )
 
     def _slamming_select_all(self) -> None:
         if not hasattr(self, "_slamming_patches"): return
@@ -3713,38 +4165,102 @@ class RuntimeFEMWindow:
         self._refresh_figure()
 
     def _slamming_clear_all(self) -> None:
-        if not hasattr(self, "_slamming_patches"): return
-        for f in self._slamming_patches: f["selected"] = False
+        # Remove the selection and restore the unsplit default panel layout.
+        self._slamming_manual_cuts.clear()
+        self._generate_default_slamming_patches()
+        self._slamming_selected_index = -1
+        self._display_base_geometry = True
+        self._force_fit_next_refresh = False
         self._update_slamming_summary()
-        self._refresh_figure()
+        self._write_status(
+            "Slamming selection and all manually created panel cuts were cleared."
+        )
+        self._refresh_figure(preserve_view=True)
 
     def _slamming_split_field(self, axis: str) -> None:
-        if not hasattr(self, "_slamming_patches"): return
-        if not hasattr(self,
-                       "_slamming_selected_index") or self._slamming_selected_index < 0 or self._slamming_selected_index >= len(
-            self._slamming_patches): return
+        # Split the active selected panel exactly at its local midpoint.
+        if not self._slamming_patches:
+            return
+        if (
+                self._slamming_selected_index < 0
+                or self._slamming_selected_index >= len(self._slamming_patches)
+        ):
+            self._write_status(
+                "Select a slamming panel before using Split A or Split B."
+            )
+            return
 
-        coord = self.slamming_split_coord_var.get()
         field = self._slamming_patches[self._slamming_selected_index]
+        if not bool(field.get("selected", False)):
+            self._write_status(
+                "The active panel is not selected. Select it before cutting."
+            )
+            return
 
-        if axis == 'a':
-            if coord <= field["min_a"] + 1e-6 or coord >= field["max_a"] - 1e-6: return
-            new_field1 = dict(field)
-            new_field1["max_a"] = coord
-            new_field2 = dict(field)
-            new_field2["min_a"] = coord
+        axis = str(axis).lower()
+        min_a = _safe_float(field.get("min_a"))
+        max_a = _safe_float(field.get("max_a"))
+        min_b = _safe_float(field.get("min_b"))
+        max_b = _safe_float(field.get("max_b"))
+
+        if axis == "a":
+            split_coordinate = 0.5 * (min_a + max_a)
+            first = dict(field)
+            first["max_a"] = split_coordinate
+            second = dict(field)
+            second["min_a"] = split_coordinate
+            cut = {
+                "varying_axis": "b",
+                "fixed_coordinate": split_coordinate,
+                "start_coordinate": min_b,
+                "end_coordinate": max_b,
+            }
+            direction_label = "A"
+        elif axis == "b":
+            split_coordinate = 0.5 * (min_b + max_b)
+            first = dict(field)
+            first["max_b"] = split_coordinate
+            second = dict(field)
+            second["min_b"] = split_coordinate
+            cut = {
+                "varying_axis": "a",
+                "fixed_coordinate": split_coordinate,
+                "start_coordinate": min_a,
+                "end_coordinate": max_a,
+            }
+            direction_label = "B"
         else:
-            if coord <= field["min_b"] + 1e-6 or coord >= field["max_b"] - 1e-6: return
-            new_field1 = dict(field)
-            new_field1["max_b"] = coord
-            new_field2 = dict(field)
-            new_field2["min_b"] = coord
+            raise ValueError(f"Unknown slamming split axis: {axis!r}")
 
-        self._slamming_patches.pop(self._slamming_selected_index)
-        self._slamming_patches.insert(self._slamming_selected_index, new_field2)
-        self._slamming_patches.insert(self._slamming_selected_index, new_field1)
+        cut_key = (
+            str(cut["varying_axis"]),
+            round(float(cut["fixed_coordinate"]), 10),
+            round(float(cut["start_coordinate"]), 10),
+            round(float(cut["end_coordinate"]), 10),
+        )
+        existing_keys = {
+            (
+                str(item.get("varying_axis", "")),
+                round(_safe_float(item.get("fixed_coordinate")), 10),
+                round(_safe_float(item.get("start_coordinate")), 10),
+                round(_safe_float(item.get("end_coordinate")), 10),
+            )
+            for item in getattr(self, "_slamming_manual_cuts", ())
+        }
+        if cut_key not in existing_keys:
+            self._slamming_manual_cuts.append(cut)
+
+        index = self._slamming_selected_index
+        self._slamming_patches[index:index + 1] = [first, second]
+        self._slamming_selected_index = index
+        self._display_base_geometry = True
+        self._force_fit_next_refresh = False
         self._update_slamming_summary()
-        self._refresh_figure()
+        self._write_status(
+            f"Selected slamming panel was split in local {direction_label} "
+            "at its midpoint. Press Clear to remove all cuts."
+        )
+        self._refresh_figure(preserve_view=True)
 
     def _update_slamming_summary(self) -> None:
         if not hasattr(self, "_slamming_patches"): return
@@ -3760,12 +4276,13 @@ class RuntimeFEMWindow:
         geometry = runtime_geometry_summary(self.snapshot)
         is_cylinder = str(geometry.get("geometry", "")).lower() == "cylinder"
         if is_cylinder:
-            max_a = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
-            min_a = -0.5 * max_a
-            max_a = 0.5 * max_a
+            length = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
+            min_a = -0.5 * length
+            max_a = 0.5 * length
             radius = max(float(geometry.get("radius_m") or 1.0), 1.0e-6)
+            circumference = 2.0 * math.pi * radius
             min_b = 0.0
-            max_b = 2.0 * math.pi * radius
+            max_b = circumference
         else:
             min_a = 0.0
             max_a = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
@@ -3777,47 +4294,65 @@ class RuntimeFEMWindow:
 
         if is_cylinder:
             if geometry.get("has_girder"):
-                gir_spacing = float(geometry.get("girder_spacing_m") or 0.0)
-                if gir_spacing > 0.0:
-                    a_breaks = []
-                    num = int((max_a - min_a) / gir_spacing) + 1
-                    for i in range(num):
-                        z = min_a + i * gir_spacing
-                        if min_a <= z <= max_a:
-                            a_breaks.append(z)
-                    if min_a not in a_breaks: a_breaks.insert(0, min_a)
-                    if max_a not in a_breaks: a_breaks.append(max_a)
-        else:
-            if geometry.get("has_stiffener"):
-                spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
-                if spacing > 0.0:
-                    b_breaks = []
-                    num = int((max_b - min_b) / spacing) + 1
-                    for i in range(num):
-                        y = min_b + i * spacing
-                        if min_b <= y <= max_b:
-                            b_breaks.append(y)
-                    if min_b not in b_breaks: b_breaks.insert(0, min_b)
-                    if max_b not in b_breaks: b_breaks.append(max_b)
+                girder_spacing = float(geometry.get("girder_spacing_m") or 0.0)
+                if girder_spacing > 0.0:
+                    axial_bays = max(1, int(round((max_a - min_a) / girder_spacing)))
+                    a_breaks = [
+                        min_a + (max_a - min_a) * index / axial_bays
+                        for index in range(axial_bays + 1)
+                    ]
 
-        a_breaks = sorted(list(set(a_breaks)))
-        b_breaks = sorted(list(set(b_breaks)))
+            stiffener_spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
+            if geometry.get("has_stiffener") and stiffener_spacing > 0.0:
+                circumferential_bays = max(1, int((max_b - min_b) / stiffener_spacing))
+            else:
+                circumferential_bays = 16
+            b_breaks = [
+                min_b + (max_b - min_b) * index / circumferential_bays
+                for index in range(circumferential_bays + 1)
+            ]
+        elif geometry.get("has_stiffener"):
+            spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
+            if spacing > 0.0:
+                b_breaks = [min_b]
+                count = int((max_b - min_b) / spacing) + 1
+                for index in range(count):
+                    coordinate = min_b + index * spacing
+                    if min_b < coordinate < max_b:
+                        b_breaks.append(coordinate)
+                b_breaks.append(max_b)
+
+        a_breaks = sorted(set(a_breaks))
+        b_breaks = sorted(set(b_breaks))
 
         self._slamming_patches = []
-        for i in range(len(a_breaks) - 1):
-            for j in range(len(b_breaks) - 1):
+        self._slamming_selected_index = -1
+        for index_a in range(len(a_breaks) - 1):
+            for index_b in range(len(b_breaks) - 1):
                 self._slamming_patches.append({
-                    "min_a": a_breaks[i], "max_a": a_breaks[i + 1],
-                    "min_b": b_breaks[j], "max_b": b_breaks[j + 1],
-                    "selected": False
+                    "min_a": a_breaks[index_a],
+                    "max_a": a_breaks[index_a + 1],
+                    "min_b": b_breaks[index_b],
+                    "max_b": b_breaks[index_b + 1],
+                    "selected": False,
                 })
         self._update_slamming_summary()
 
     def _redraw_base_3d(self) -> None:
-        self.current_result = None
+        self._display_base_geometry = True
         self._force_fit_next_refresh = True
         self._refresh_figure()
         self._write_status("Displaying base 3D model geometry.")
+
+    def _show_results(self) -> None:
+        if self.current_result is None:
+            messagebox.showinfo("FEM results", "No solver results are available yet. Run FEM first.")
+            return
+        self._display_base_geometry = False
+        self._set_slamming_selection_active(False, refresh=False)
+        self._force_fit_next_refresh = True
+        self._refresh_figure()
+        self._write_status("Displaying the latest FEM results.")
 
 
 def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:
