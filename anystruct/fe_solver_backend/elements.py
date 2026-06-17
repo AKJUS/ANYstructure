@@ -536,14 +536,16 @@ class ShellElement(Element):
     def __init__(
         self,
         element_id: int,
-        node_ids: List[int],
+        node_ids: list[int],
         material_name: str = "default",
         thickness: float = 0.01,
         drilling_stabilization: float = 1.0e-3,
+        reduced_integration: bool = False,
     ):
         super().__init__(element_id, node_ids, material_name)
         self.thickness = float(thickness)
         self.drilling_stabilization = float(drilling_stabilization)
+        self.reduced_integration = reduced_integration
         self._is_8node = len(node_ids) == 8
         self._is_4node = len(node_ids) == 4
         if not (self._is_4node or self._is_8node):
@@ -559,10 +561,14 @@ class ShellElement(Element):
 
     @property
     def gauss_points(self) -> np.ndarray:
+        if self._is_8node and self.reduced_integration:
+            return self.GAUSS_POINTS_2x2
         return self.GAUSS_POINTS_3x3 if self._is_8node else self.GAUSS_POINTS_2x2
 
     @property
     def gauss_weights(self) -> np.ndarray:
+        if self._is_8node and self.reduced_integration:
+            return self.GAUSS_WEIGHTS_2x2
         return self.GAUSS_WEIGHTS_3x3 if self._is_8node else self.GAUSS_WEIGHTS_2x2
 
     @property

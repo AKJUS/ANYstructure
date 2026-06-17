@@ -105,10 +105,7 @@ class LightweightFEMConfig:
     slamming_duration_s: float = 0.01
     slamming_total_time_s: float = 0.05
     slamming_dt_s: float = 0.0005
-    slamming_patch_center_a_m: float = 0.0
-    slamming_patch_center_b_m: float = 0.0
-    slamming_patch_size_a_m: float = 0.0
-    slamming_patch_size_b_m: float = 0.0
+    slamming_patches_json: str = "[]"
     slamming_include_static_load: bool = False
     imperfection_enabled: bool = False
     imperfection_shape: str = "standard plate/cylinder"
@@ -499,13 +496,19 @@ def _normalized_choice(value: object, default: str = "auto") -> str:
 
 
 def _wants_s8(config: LightweightFEMConfig) -> bool:
-    return _normalized_choice(config.shell_element_order, "s4") in {"s8", "8 node", "8 node shell", "quadratic"}
+    return _normalized_choice(config.shell_element_order, "s4") in {"s8", "s8r", "8 node", "8 node shell", "quadratic"}
 
 
 def _shell_order_from_geometry(generated_geometry: dict) -> str:
     for shell in generated_geometry.get("shells", []) or []:
         return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
     return "S4"
+
+
+def _shell_element_type(shell: dict[str, object]) -> str:
+    if "type" in shell:
+        return str(shell["type"])
+    return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
 
 
 def _node_lookup(nodes: list[dict[str, object]]) -> dict[int, np.ndarray]:
@@ -523,7 +526,7 @@ def _project_cylinder_midpoint(a: np.ndarray, b: np.ndarray, radius: float) -> n
     return midpoint
 
 
-def _upgrade_shells_to_s8(nodes: list[dict[str, object]], shells: list[dict[str, object]], radius: float = 0.0) -> None:
+def _upgrade_shells_to_s8(nodes: list[dict[str, object]], shells: list[dict[str, object]], radius: float = 0.0, element_type: str = "S8") -> None:
     """Convert generated 4-node quads to 8-node serendipity quads in place."""
     node_coords = _node_lookup(nodes)
     next_node_id = max(node_coords, default=0) + 1
@@ -548,6 +551,7 @@ def _upgrade_shells_to_s8(nodes: list[dict[str, object]], shells: list[dict[str,
         node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
         if len(node_ids) != 4:
             continue
+        shell["type"] = element_type
         n1, n2, n3, n4 = node_ids
         shell["node_ids"] = [
             n1,
@@ -1015,7 +1019,8 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             beam_id += 1
 
     if _wants_s8(config):
-        _upgrade_shells_to_s8(nodes, shells)
+        elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
+        _upgrade_shells_to_s8(nodes, shells, element_type=elem_type)
 
     couplings = _offset_beam_nodes_and_couplings(
         nodes,
@@ -1203,7 +1208,8 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 beam_id += 1
 
     if _wants_s8(config):
-        _upgrade_shells_to_s8(nodes, shells, radius=radius)
+        elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
+        _upgrade_shells_to_s8(nodes, shells, radius=radius, element_type=elem_type)
 
     def cylinder_normal(_node_id: int, coord: np.ndarray) -> np.ndarray:
         radial = np.asarray([coord[0], coord[1], 0.0], dtype=float)
@@ -1942,22 +1948,20 @@ def _slamming_patch_element_ids(model, generated_geometry: dict, geometry: dict,
     shell_ids = _shell_element_ids(model)
     if not shell_ids:
         return ()
-    size_a = float(config.slamming_patch_size_a_m or 0.0)
-    size_b = float(config.slamming_patch_size_b_m or 0.0)
-    if size_a <= 0.0 or size_b <= 0.0:
+    
+    try:
+        import json
+        patches = json.loads(config.slamming_patches_json) if config.slamming_patches_json else []
+    except Exception:
+        patches = []
+        
+    if not patches:
         return shell_ids
 
     selected: list[int] = []
     if generated_geometry.get("plot_type") == "cylinder":
         radius = _positive(generated_geometry.get("radius_m", geometry.get("radius_m", 0.0)), 0.0)
-        length = _positive(geometry.get("length_m", 0.0), 0.0)
         circumference = 2.0 * math.pi * radius if radius > 0.0 else 0.0
-        center_z = float(config.slamming_patch_center_a_m or 0.0)
-        if center_z <= 0.0 and length > 0.0:
-            center_z = 0.5 * length
-        center_arc = float(config.slamming_patch_center_b_m or 0.0)
-        if center_arc < 0.0 and circumference > 0.0:
-            center_arc = center_arc % circumference
 
         for element_id in shell_ids:
             centroid = _element_centroid(model, element_id)
@@ -1966,26 +1970,48 @@ def _slamming_patch_element_ids(model, generated_geometry: dict, geometry: dict,
             z = float(centroid[2])
             theta = math.atan2(float(centroid[1]), float(centroid[0]))
             arc = (theta % (2.0 * math.pi)) * radius if radius > 0.0 else 0.0
-            if circumference > 0.0:
-                arc_delta = abs((arc - center_arc + 0.5 * circumference) % circumference - 0.5 * circumference)
-            else:
-                arc_delta = 0.0
-            if abs(z - center_z) <= 0.5 * size_a + 1.0e-12 and arc_delta <= 0.5 * size_b + 1.0e-12:
+            
+            in_patch = False
+            for patch in patches:
+                min_a = float(patch.get("min_a", 0.0))
+                max_a = float(patch.get("max_a", 0.0))
+                min_b = float(patch.get("min_b", 0.0))
+                max_b = float(patch.get("max_b", 0.0))
+                
+                if circumference > 0.0:
+                    center_arc = 0.5 * (min_b + max_b)
+                    arc_delta = abs((arc - center_arc + 0.5 * circumference) % circumference - 0.5 * circumference)
+                    width_b = max_b - min_b
+                    inside_b = arc_delta <= 0.5 * width_b + 1.0e-12
+                else:
+                    inside_b = min_b - 1.0e-12 <= arc <= max_b + 1.0e-12
+                    
+                if min_a - 1.0e-12 <= z <= max_a + 1.0e-12 and inside_b:
+                    in_patch = True
+                    break
+            
+            if in_patch:
                 selected.append(int(element_id))
         return tuple(selected) or shell_ids
 
-    nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
-    xs = [coord[0] for coord in nodes.values()]
-    ys = [coord[1] for coord in nodes.values()]
-    default_x = 0.5 * (min(xs) + max(xs)) if xs else 0.0
-    default_y = 0.5 * (min(ys) + max(ys)) if ys else 0.0
-    center_x = float(config.slamming_patch_center_a_m or default_x)
-    center_y = float(config.slamming_patch_center_b_m or default_y)
     for element_id in shell_ids:
         centroid = _element_centroid(model, element_id)
         if centroid is None:
             continue
-        if abs(float(centroid[0]) - center_x) <= 0.5 * size_a + 1.0e-12 and abs(float(centroid[1]) - center_y) <= 0.5 * size_b + 1.0e-12:
+        cx = float(centroid[0])
+        cy = float(centroid[1])
+        
+        in_patch = False
+        for patch in patches:
+            min_a = float(patch.get("min_a", 0.0))
+            max_a = float(patch.get("max_a", 0.0))
+            min_b = float(patch.get("min_b", 0.0))
+            max_b = float(patch.get("max_b", 0.0))
+            if min_a - 1.0e-12 <= cx <= max_a + 1.0e-12 and min_b - 1.0e-12 <= cy <= max_b + 1.0e-12:
+                in_patch = True
+                break
+                
+        if in_patch:
             selected.append(int(element_id))
     return tuple(selected) or shell_ids
 
@@ -2269,13 +2295,8 @@ def _add_cylinder_buckling_gauge(model, generated_geometry: dict) -> bool:
         _full_backend.BoundaryCondition(
             "buckling_gauge_top_lid",
             [top_center],
-            {"ux": 0.0, "uy": 0.0},
-        )
-    )
-    return True
-
-
-def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> LightweightFEMResult:
+            {"ux": 0.0, "uy": 0.0},))
+def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_callback=None) -> LightweightFEMResult:
     """Run the vendored production FE mesh backend for generated ANYstructure geometry."""
 
     if _full_backend is None or _backend_solve_linear is None or _backend_solve_buckling is None or _backend_load_case_resultant is None:
@@ -2288,6 +2309,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
             solver_name="ANYstructure production FE mesh",
         )
 
+    if status_callback: status_callback("Building generated geometry...")
     generated_geometry = build_generated_geometry(geometry, config)
     material_curve, material_properties = _nonlinear_curve_payload(config, geometry)
     effective_elastic_modulus = float(material_properties.get("E_pa", config.elastic_modulus_pa)) if material_properties else config.elastic_modulus_pa
@@ -2322,7 +2344,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     if (not config.custom_load_bc_enabled) and abs(float(config.enforced_displacement_m or 0.0)) > 0.0:
         diagnostics.append("Applied prescribed displacement constraints from the enforced displacement input.")
     if _wants_s8(config):
-        diagnostics.append("Generated S8 shell elements with shared midside nodes.")
+        elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
+        _upgrade_shells_to_s8(nodes, shells, element_type=elem_type)
+        diagnostics.append(f"Generated {elem_type} shell elements with shared midside nodes.")
     if _normalized_choice(config.symmetry_mode) == "cyclic":
         diagnostics.append("Cyclic symmetry requested; generated runtime geometry is a full 360-degree model, so no sector coupling was added.")
     elif _normalized_choice(config.symmetry_mode) not in {"none", "off"}:
@@ -2362,6 +2386,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         diagnostics.append("Transient slamming pressure input is enabled; it is solved as a separate linear Newmark pressure-patch response.")
 
     try:
+        if status_callback: status_callback("Building FE model...")
         model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         _apply_material_curve_to_model(model, material_curve, material_properties)
         imperfection_info = {}
@@ -2390,6 +2415,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         _add_custom_edge_loads(model, load_case, generated_geometry, config)
         load_resultant = _backend_load_case_resultant(model, load_case)
         constraint_mode = _constraint_mode(config, geometry)
+        if status_callback: 
+            if _wants_static_nonlinear_analysis(config) or _wants_capacity_workflow(config):
+                status_callback("Solving reference linear static system...")
+            else:
+                status_callback("Solving linear static system...")
         displacements, solver_info = _backend_solve_linear(
             model,
             load_case,
@@ -2436,6 +2466,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         prestress_summary["imperfection_waves_a"] = float(imperfection_info.get("waves_a", 0.0) or 0.0)
         prestress_summary["imperfection_waves_b"] = float(imperfection_info.get("waves_b", 0.0) or 0.0)
     if config.slamming_enabled:
+        if status_callback: status_callback("Solving transient slamming dynamics...")
         try:
             slamming_summary = _run_slamming_transient(model, load_case, generated_geometry, geometry, config)
             if slamming_summary:
@@ -2490,6 +2521,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     nonlinear_static_result = None
     plastic_strain_by_node: dict[int, float] = {}
     if _wants_capacity_workflow(config):
+        if status_callback: status_callback("Solving nonlinear capacity workflow...")
         if not hasattr(_full_backend, "run_nonlinear_capacity_workflow"):
             diagnostics.append("ANYintelligent capacity workflow is unavailable in this backend.")
         else:
@@ -2555,6 +2587,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
                 diagnostics.append("ANYintelligent capacity workflow failed: " + str(exc))
 
     if _wants_static_nonlinear_analysis(config) and capacity_workflow_result is None:
+        if status_callback: status_callback("Solving nonlinear static system...")
         if _backend_solve_static_nonlinear is None:
             diagnostics.append("Incremental geometric/material nonlinear static solver is unavailable in this backend.")
         else:
@@ -2721,7 +2754,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     )
 
 
-def _run_flat_panel(geometry: dict, config: LightweightFEMConfig) -> LightweightFEMResult:
+def _run_flat_panel(geometry: dict, config: LightweightFEMConfig, status_callback=None) -> LightweightFEMResult:
+    if status_callback: status_callback("Running basic lightweight analytic FEM approximation...")
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     width = _positive(geometry.get("width_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
@@ -2763,7 +2797,8 @@ def _run_flat_panel(geometry: dict, config: LightweightFEMConfig) -> Lightweight
     )
 
 
-def _run_cylinder(geometry: dict, config: LightweightFEMConfig) -> LightweightFEMResult:
+def _run_cylinder(geometry: dict, config: LightweightFEMConfig, status_callback=None) -> LightweightFEMResult:
+    if status_callback: status_callback("Running basic cylinder analytic FEM approximation...")
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
@@ -2805,14 +2840,13 @@ def _run_cylinder(geometry: dict, config: LightweightFEMConfig) -> LightweightFE
         visualization=_cylinder_visualization(radius, length, displacement, von_mises, div, axial_div),
     )
 
-
-def run_lightweight_fem(geometry: dict, config: LightweightFEMConfig) -> LightweightFEMResult:
+def run_lightweight_fem(geometry: dict, config: LightweightFEMConfig, status_callback=None) -> LightweightFEMResult:
     """Run the local lightweight solver for the normalized ANYstructure geometry summary."""
 
+    if status_callback: status_callback("Running basic lightweight analytic FEM approximation...")
     if geometry.get("geometry") == "cylinder":
-        return _run_cylinder(geometry, config)
-    return _run_flat_panel(geometry, config)
-
+        return _run_cylinder(geometry, config, status_callback=status_callback)
+    return _run_flat_panel(geometry, config, status_callback=status_callback)
 
 def full_backend_available() -> bool:
     """Return whether the vendored ANYintelligent solver backend is available."""

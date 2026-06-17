@@ -114,10 +114,7 @@ class RuntimeFEMOptions:
     slamming_duration_s: float = 0.01
     slamming_total_time_s: float = 0.05
     slamming_dt_s: float = 0.0005
-    slamming_patch_center_a_m: float = 0.0
-    slamming_patch_center_b_m: float = 0.0
-    slamming_patch_size_a_m: float = 0.0
-    slamming_patch_size_b_m: float = 0.0
+    slamming_patches_json: str = ""
     slamming_include_static_load: bool = False
     imperfection_enabled: bool = False
     imperfection_shape: str = "standard plate/cylinder"
@@ -404,7 +401,7 @@ def runtime_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]
     return _flat_geometry_summary(snapshot)
 
 
-def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions) -> RuntimeFEMRunResult:
+def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions, status_callback=None) -> RuntimeFEMRunResult:
     """Run the ANYstructure-owned lightweight FEM solver."""
 
     geometry = runtime_geometry_summary(snapshot)
@@ -466,10 +463,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         slamming_duration_s=options.slamming_duration_s,
         slamming_total_time_s=options.slamming_total_time_s,
         slamming_dt_s=options.slamming_dt_s,
-        slamming_patch_center_a_m=options.slamming_patch_center_a_m,
-        slamming_patch_center_b_m=options.slamming_patch_center_b_m,
-        slamming_patch_size_a_m=options.slamming_patch_size_a_m,
-        slamming_patch_size_b_m=options.slamming_patch_size_b_m,
+        slamming_patches_json=options.slamming_patches_json,
         slamming_include_static_load=options.slamming_include_static_load,
         imperfection_enabled=options.imperfection_enabled,
         imperfection_shape=options.imperfection_shape,
@@ -490,14 +484,14 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         capacity_mesh_min_elements_per_half_wave=options.capacity_mesh_min_elements_per_half_wave,
     )
     if fe_solver.full_backend_available():
-        solver_result = fe_solver.run_production_fem(geometry, solver_config)
+        solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback)
         if solver_result.status in {"backend_unavailable", "invalid", "static_failed", "production_failed"}:
-            fallback = fe_solver.run_lightweight_fem(geometry, solver_config)
+            fallback = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
             diagnostics.extend(solver_result.diagnostics)
             diagnostics.append("Production FE mesh failed; using compact fallback result.")
             solver_result = fallback
     else:
-        solver_result = fe_solver.run_lightweight_fem(geometry, solver_config)
+        solver_result = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
     diagnostics.extend(solver_result.diagnostics)
 
     summary = {
@@ -611,10 +605,10 @@ def _all_grid_values(grid: list[list[float]]) -> list[float]:
     return [value for row in grid for value in row]
 
 
-def _surface_facecolors(values_grid: list[list[float]]):
+def _surface_facecolors(values_grid: list[list[float]], colormap: str = "jet"):
     values = _all_grid_values(values_grid) or [0.0]
     norm = mcolors.Normalize(vmin=min(values), vmax=max(values) if max(values) > min(values) else min(values) + 1.0)
-    cmap = colormaps["jet"]
+    cmap = colormaps.get(colormap, colormaps["jet"])
     return [[cmap(norm(value)) for value in row] for row in values_grid], norm, cmap
 
 
@@ -663,12 +657,25 @@ def _set_3d_axes_limits(axis: Any, x: list[list[float]], y: list[list[float]], z
         pass
 
 
-def _plot_member_lines(axis: Any, visualization: dict[str, Any], scale: float) -> None:
+def _plot_member_lines(
+    axis: Any,
+    visualization: dict[str, Any],
+    scale: float,
+    show_stiffeners: bool = True,
+    show_girders: bool = True,
+    member_alpha: float = 0.95,
+) -> None:
     role_style = {
         "stiffener": ("#1f2937", 1.7),
         "girder": ("#7f1d1d", 2.2),
     }
     for line in visualization.get("member_lines") or ():
+        role = str(line.get("role", "member")).lower()
+        if role == "stiffener" and not show_stiffeners:
+            continue
+        if role == "girder" and not show_girders:
+            continue
+            
         points = list(line.get("points") or ())
         displaced = list(line.get("displaced_points") or ())
         if len(points) < 2:
@@ -683,7 +690,6 @@ def _plot_member_lines(axis: Any, visualization: dict[str, Any], scale: float) -
             plot_points.append(base + (moved - base) * float(scale))
         if len(plot_points) != 2:
             continue
-        role = str(line.get("role", "member")).lower()
         color, width = role_style.get(role, ("#475569", 1.4))
         axis.plot(
             [plot_points[0][0], plot_points[1][0]],
@@ -691,7 +697,7 @@ def _plot_member_lines(axis: Any, visualization: dict[str, Any], scale: float) -
             [plot_points[0][2], plot_points[1][2]],
             color=color,
             linewidth=width,
-            alpha=0.95,
+            alpha=member_alpha,
             solid_capstyle="round",
         )
 
@@ -750,7 +756,11 @@ def _plot_visualization_surface(
     display_mode: str = "static",
     deformation_scale: float | None = None,
     show_plate: bool = True,
-    show_members: bool = True,
+    show_stiffeners: bool = True,
+    show_girders: bool = True,
+    plate_alpha: float = 1.0,
+    member_alpha: float = 0.95,
+    colormap: str = "jet",
     component: str = "von_mises_pa",
 ) -> None:
     visualization, title, is_mode = _selected_visualization(result, display_mode, component)
@@ -771,7 +781,7 @@ def _plot_visualization_surface(
         else:
             color_grid = scalar_values
             colorbar_label = str(visualization.get("scalar_label", component))
-    facecolors, norm, cmap = _surface_facecolors(color_grid)
+    facecolors, norm, cmap = _surface_facecolors(color_grid, colormap)
     scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
 
     if visualization.get("type") == "cylinder":
@@ -825,12 +835,12 @@ def _plot_visualization_surface(
                 linewidth=0.15,
                 antialiased=True,
                 shade=False,
+                alpha=plate_alpha,
             )
         axis.set_xlabel("x [m]")
         axis.set_ylabel("y [m]")
         axis.set_zlabel("height [m]")
-        if show_members:
-            _plot_member_lines(axis, visualization, scale)
+        _plot_member_lines(axis, visualization, scale, show_stiffeners, show_girders, member_alpha)
         _set_3d_axes_limits(axis, x, y, z)
         try:
             axis.view_init(elev=18.0, azim=-45.0)
@@ -856,8 +866,7 @@ def _plot_visualization_surface(
         axis.set_xlabel("length [m]")
         axis.set_ylabel("width [m]")
         axis.set_zlabel("w x" + str(round(scale, 1)))
-        if show_members:
-            _plot_member_lines(axis, visualization, scale)
+        _plot_member_lines(axis, visualization, scale, show_stiffeners, show_girders, member_alpha)
         _set_3d_axes_limits(axis, x, y, z)
 
     axis.set_title(title)
@@ -872,7 +881,11 @@ def create_runtime_fem_result_figure(
     display_mode: str = "static",
     deformation_scale: float | None = None,
     show_plate: bool = True,
-    show_members: bool = True,
+    show_stiffeners: bool = True,
+    show_girders: bool = True,
+    plate_alpha: float = 1.0,
+    member_alpha: float = 0.95,
+    colormap: str = "jet",
     component: str = "von_mises_pa",
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
@@ -888,7 +901,12 @@ def create_runtime_fem_result_figure(
         geometry_ax.set_ylabel("width/radius [m]")
         geometry_ax.set_zlabel("displacement")
     else:
-        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale, show_plate=show_plate, show_members=show_members, component=component)
+        _plot_visualization_surface(
+            figure, geometry_ax, geometry, result, display_mode, deformation_scale, 
+            show_plate=show_plate, show_stiffeners=show_stiffeners, show_girders=show_girders,
+            plate_alpha=plate_alpha, member_alpha=member_alpha, colormap=colormap,
+            component=component
+        )
 
     figure.tight_layout()
     return figure
@@ -1548,9 +1566,9 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "shell_element_order": {
         "title": "Shell Element",
         "purpose": "Selects 4-node or 8-node quadrilateral shell elements.",
-        "use": "S4 is faster. S8 adds shared midside nodes and uses higher-order shell interpolation in the core solver.",
-        "output": "Mesh diagnostics report the shell order. S8 usually increases node count and runtime.",
-        "caution": "S8 can improve curvature and bending representation, but it should be verified with mesh convergence.",
+        "use": "S4 is faster. S8 adds shared midside nodes and uses higher-order shell interpolation in the core solver. S8R is the reduced integration version of S8.",
+        "output": "Mesh diagnostics report the shell order. S8 usually increases node count and runtime. S8R significantly speeds up S8 by reducing integration points.",
+        "caution": "S8 can improve curvature and bending representation, but it should be verified with mesh convergence. S8R exhibits hourglass modes, so use with caution for unconstrained models.",
     },
     "analysis_type": {
         "title": "Analysis Type",
@@ -1786,6 +1804,11 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
 }
 
 
+import json
+
+
+
+
 class RuntimeFEMWindow:
     """Popup window for the experimental full-geometry FEM runtime solver."""
 
@@ -1866,10 +1889,10 @@ class RuntimeFEMWindow:
         self.slamming_duration_s = tk.DoubleVar(value=0.01)
         self.slamming_total_time_s = tk.DoubleVar(value=0.05)
         self.slamming_dt_s = tk.DoubleVar(value=0.0005)
-        self.slamming_patch_center_a_m = tk.DoubleVar(value=0.0)
-        self.slamming_patch_center_b_m = tk.DoubleVar(value=0.0)
-        self.slamming_patch_size_a_m = tk.DoubleVar(value=0.0)
-        self.slamming_patch_size_b_m = tk.DoubleVar(value=0.0)
+        self.slamming_patches_json = tk.StringVar(value="[]")
+        self._slamming_patches: list[dict] = []
+        self._slamming_selected_index: int = -1
+        self._generate_default_slamming_patches()
         self.slamming_include_static_load = tk.BooleanVar(value=False)
         self.imperfection_enabled = tk.BooleanVar(value=False)
         self.imperfection_shape = tk.StringVar(value="standard plate/cylinder")
@@ -1915,11 +1938,17 @@ class RuntimeFEMWindow:
         self.result_case_selector = None
         self.component_selector = None
         self.run_button = None
+        self.cancel_button = None
+        self._cancel_requested = False
         self.progress_bar = None
         self.result_canvas = None
         self.use_interactive_3d = tk.BooleanVar(value=True)
         self.show_plate_vis = tk.BooleanVar(value=True)
-        self.show_members_vis = tk.BooleanVar(value=True)
+        self.show_stiffener_vis = tk.BooleanVar(value=True)
+        self.show_girder_vis = tk.BooleanVar(value=True)
+        self.plate_alpha_vis = tk.StringVar(value="1.0")
+        self.member_alpha_vis = tk.StringVar(value="0.95")
+        self.colormap_vis = tk.StringVar(value="jet")
         self.upper_result_frame = None
         self.upper_result_text = None
         self.solver_thread = None
@@ -2154,6 +2183,8 @@ class RuntimeFEMWindow:
         buttons.pack(fill=tk.X, pady=(0, 10))
         self.run_button = ttk.Button(buttons, text="Run FEM", command=self.run)
         self.run_button.pack(side=tk.LEFT)
+        self.cancel_button = ttk.Button(buttons, text="Stop", command=self.cancel_run, state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.LEFT, padx=(4, 0))
         self.progress_bar = ttk.Progressbar(buttons, mode="indeterminate", length=140)
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
         ttk.Button(buttons, text="Close", command=self.window.destroy).pack(side=tk.RIGHT)
@@ -2164,10 +2195,22 @@ class RuntimeFEMWindow:
         self.result_text = tk.Text(status_frame, height=12, wrap=tk.WORD)
         self.result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        future_inputs = ttk.LabelFrame(mid_panel, text="Analysis options")
-        future_inputs.pack(fill=tk.BOTH, expand=True)
+        self.options_notebook = ttk.Notebook(mid_panel)
+        self.options_notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        constraints = ttk.LabelFrame(future_inputs, text="Supports and load path")
+        tab_general = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_general, text="General")
+        
+        tab_properties = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_properties, text="Properties")
+        
+        tab_visualization = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_visualization, text="Visualization")
+
+        tab_advanced = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_advanced, text="Advanced")
+
+        constraints = ttk.LabelFrame(tab_general, text="Supports and load path")
         constraints.pack(fill=tk.X, padx=8, pady=(8, 6))
         self._configure_option_grid(constraints)
         self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition, ("auto", "free", "simply supported", "pinned", "clamped"))
@@ -2176,7 +2219,7 @@ class RuntimeFEMWindow:
         self._add_entry_row(constraints, 3, "axial_force_n", "Axial force [N]", self.axial_force_n)
         self._add_entry_row(constraints, 4, "enforced_displacement_m", "Enforced disp. [m]", self.enforced_displacement_m)
 
-        solver_options = ttk.LabelFrame(future_inputs, text="Solver")
+        solver_options = ttk.LabelFrame(tab_general, text="Solver")
         solver_options.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(solver_options)
         self._add_option_row(
@@ -2187,7 +2230,7 @@ class RuntimeFEMWindow:
             self.runtime_solver,
             ("stepwise", "static only", "nonlinear static", "ANYintelligent capacity workflow"),
         )
-        self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8"))
+        self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8", "S8R"))
         self._add_option_row(
             solver_options,
             2,
@@ -2203,7 +2246,7 @@ class RuntimeFEMWindow:
         self._add_entry_row(solver_options, 7, "nonlinear_max_iterations", "NL iterations", self.nonlinear_max_iterations, width=8)
         self._add_entry_row(solver_options, 8, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
 
-        buckling_validity = ttk.LabelFrame(future_inputs, text="Buckling validity and resources")
+        buckling_validity = ttk.LabelFrame(tab_general, text="Buckling validity and resources")
         buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(buckling_validity)
         self._add_entry_row(buckling_validity, 0, "buckling_shift_load_factor", "Buckling shift LF", self.buckling_shift_load_factor, width=8)
@@ -2218,14 +2261,14 @@ class RuntimeFEMWindow:
         self._add_entry_row(buckling_validity, 8, "capacity_mesh_min_elements_per_half_wave", "Mode elems/half-wave", self.capacity_mesh_min_elements_per_half_wave, width=8)
         buckling_validity.columnconfigure(3, weight=1)
 
-        members = ttk.LabelFrame(future_inputs, text="Member modelling")
+        members = ttk.LabelFrame(tab_properties, text="Member modelling")
         members.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(members)
         self._add_entry_row(members, 0, "stiffener_eccentricity_m", "Stf. ecc. [m]", self.stiffener_eccentricity_m)
         self._add_entry_row(members, 1, "girder_eccentricity_m", "Girder ecc. [m]", self.girder_eccentricity_m)
         self._add_option_row(members, 2, "member_orientation", "Member orient.", self.member_orientation, ("auto", "global Y", "global Z", "radial"))
 
-        material = ttk.LabelFrame(future_inputs, text="Material and recovery")
+        material = ttk.LabelFrame(tab_properties, text="Material and recovery")
         material.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(material)
         self._add_entry_row(material, 0, "stress_percentile", "Stress pct.", self.stress_percentile)
@@ -2244,7 +2287,7 @@ class RuntimeFEMWindow:
         self._add_entry_row(material, 6, "yield_stress_mpa", "Yield [MPa]", self.yield_stress_mpa)
         self._add_entry_row(material, 7, "nonlinear_layers", "NL layers", self.nonlinear_layers, width=8)
 
-        imperfections = ttk.LabelFrame(future_inputs, text="Imperfections")
+        imperfections = ttk.LabelFrame(tab_properties, text="Imperfections")
         imperfections.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(imperfections)
         self._add_check_row(imperfections, 0, "imperfection_enabled", "Use geometric imperfection", self.imperfection_enabled)
@@ -2261,7 +2304,7 @@ class RuntimeFEMWindow:
         ttk.Entry(imperfections, textvariable=self.imperfection_wave_b, width=8).grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         imperfections.columnconfigure(3, weight=1)
 
-        slamming = ttk.LabelFrame(future_inputs, text="Transient slamming")
+        slamming = ttk.LabelFrame(tab_advanced, text="Transient slamming")
         slamming.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(slamming)
         self._add_check_row(slamming, 0, "slamming_enabled", "Run slamming transient", self.slamming_enabled)
@@ -2270,13 +2313,24 @@ class RuntimeFEMWindow:
         self._add_entry_row(slamming, 3, "slamming_duration_s", "Duration [s]", self.slamming_duration_s)
         self._add_entry_row(slamming, 4, "slamming_total_time_s", "Total time [s]", self.slamming_total_time_s)
         self._add_entry_row(slamming, 5, "slamming_dt_s", "dt [s]", self.slamming_dt_s)
-        self._add_entry_row(slamming, 6, "slamming_patch_center", "Patch centre A/B [m]", self.slamming_patch_center_a_m)
-        ttk.Entry(slamming, textvariable=self.slamming_patch_center_b_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(slamming, 7, "slamming_patch_size", "Patch size A/B [m]", self.slamming_patch_size_a_m)
-        ttk.Entry(slamming, textvariable=self.slamming_patch_size_b_m, width=12).grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        
+        self.slamming_area_var = tk.StringVar(value="Patch Area: 0.00 m²")
+        ttk.Label(slamming, textvariable=self.slamming_area_var).grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
+
+        ttk.Button(slamming, text="Select All", command=self._slamming_select_all).grid(row=6, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(slamming, text="Clear", command=self._slamming_clear_all).grid(row=6, column=2, sticky=tk.EW, padx=(0, 8), pady=4)
+
+        self.slamming_split_coord_var = tk.DoubleVar(value=0.0)
+        self._add_entry_row(slamming, 7, "slamming_split", "Split coord [m]", self.slamming_split_coord_var)
+        
+        btn_frame = ttk.Frame(slamming)
+        btn_frame.grid(row=7, column=2, columnspan=2, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.Button(btn_frame, text="Split A (Z/X)", command=lambda: self._slamming_split_field('a')).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        ttk.Button(btn_frame, text="Split B (Arc/Y)", command=lambda: self._slamming_split_field('b')).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        
         slamming.columnconfigure(3, weight=1)
 
-        custom = ttk.LabelFrame(future_inputs, text="Custom loads and boundary conditions")
+        custom = ttk.LabelFrame(tab_advanced, text="Custom loads and boundary conditions")
         custom.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(custom)
         self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
@@ -2297,6 +2351,17 @@ class RuntimeFEMWindow:
         self._add_entry_row(custom, 10, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
         ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         custom.columnconfigure(3, weight=1)
+
+        vis_group = ttk.LabelFrame(tab_visualization, text="Plot configuration")
+        vis_group.pack(fill=tk.X, padx=8, pady=(8, 8))
+        self._configure_option_grid(vis_group)
+        self._add_check_row(vis_group, 0, "show_plate", "Show plate surface", self.show_plate_vis)
+        self._add_check_row(vis_group, 1, "show_stiffeners", "Show stiffeners", self.show_stiffener_vis)
+        self._add_check_row(vis_group, 2, "show_girders", "Show girders/frames", self.show_girder_vis)
+        self._add_entry_row(vis_group, 3, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
+        self._add_entry_row(vis_group, 4, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
+        self._add_option_row(vis_group, 5, "colormap", "Colormap", self.colormap_vis, ("jet", "viridis", "plasma", "inferno", "coolwarm"))
+        ttk.Button(vis_group, text="Redraw base 3D", command=self._redraw_base_3d).grid(row=6, column=0, columnspan=2, sticky=tk.W, padx=8, pady=4)
 
         self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
         self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -2343,24 +2408,13 @@ class RuntimeFEMWindow:
             command=self._refresh_figure,
         )
         self.interactive_3d_checkbox.pack(side=tk.RIGHT, padx=6)
-        
-        self.plate_vis_checkbox = ttk.Checkbutton(
-            selector_bar,
-            text="Show plate",
-            variable=self.show_plate_vis,
-            command=self._refresh_figure,
-        )
-        self.plate_vis_checkbox.pack(side=tk.RIGHT, padx=6)
-        
-        self.members_vis_checkbox = ttk.Checkbutton(
-            selector_bar,
-            text="Show members",
-            variable=self.show_members_vis,
-            command=self._refresh_figure,
-        )
-        self.members_vis_checkbox.pack(side=tk.RIGHT, padx=6)
         self._refresh_figure()
         self._write_status("Ready. ANYstructure production FE mesh solver is available.")
+
+    def cancel_run(self) -> None:
+        self._cancel_requested = True
+        if self.cancel_button is not None:
+            self.cancel_button.configure(state=tk.DISABLED)
 
     def _show_figure(self, figure: Figure, parent: Any | None = None) -> None:
         if parent is None and self.figure_canvas is not None:
@@ -2572,8 +2626,10 @@ class RuntimeFEMWindow:
         geometry = runtime_geometry_summary(self.snapshot)
         show_plate_var = getattr(self, "show_plate_vis", None)
         show_plate = show_plate_var.get() if show_plate_var is not None else True
-        show_members_var = getattr(self, "show_members_vis", None)
-        show_members = show_members_var.get() if show_members_var is not None else True
+        show_stiffeners_var = getattr(self, "show_stiffener_vis", None)
+        show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
+        show_girders_var = getattr(self, "show_girder_vis", None)
+        show_girders = show_girders_var.get() if show_girders_var is not None else True
 
         if self.snapshot.is_cylinder:
             radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
@@ -2592,7 +2648,7 @@ class RuntimeFEMWindow:
                     show_backfaces=True,
                     show_thickness_legend=False
                 )
-            if show_members and geometry.get("has_stiffener"):
+            if show_stiffeners and geometry.get("has_stiffener"):
                 stf_spacing = _safe_float(geometry.get("stiffener_spacing_m"))
                 if stf_spacing > 0.0:
                     num_longs = int(2.0 * math.pi * radius / stf_spacing)
@@ -2618,7 +2674,7 @@ class RuntimeFEMWindow:
                             inside=True,
                             z_offset=0.0,
                         )
-            if show_members and geometry.get("has_girder"):
+            if show_girders and geometry.get("has_girder"):
                 gir_spacing = _safe_float(geometry.get("girder_spacing_m"))
                 gir_sec = geometry.get("girder_section") or {}
                 ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.12)
@@ -2657,7 +2713,7 @@ class RuntimeFEMWindow:
                     outline="#64748b",
                     layer=5
                 )
-            if show_members and geometry.get("has_stiffener"):
+            if show_stiffeners and geometry.get("has_stiffener"):
                 spacing = _safe_float(geometry.get("stiffener_spacing_m"))
                 stf_sec = geometry.get("stiffener_section") or {}
                 hw = _safe_float(stf_sec.get("web_height") or stf_sec.get("web_h") or 0.1)
@@ -2697,7 +2753,7 @@ class RuntimeFEMWindow:
                                     width=2,
                                     layer=13
                                 )
-            if show_members and geometry.get("has_girder"):
+            if show_girders and geometry.get("has_girder"):
                 gir_sec = geometry.get("girder_section") or {}
                 ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.15)
                 gb = _safe_float(gir_sec.get("flange_width") or gir_sec.get("flange_w") or 0.08)
@@ -2764,19 +2820,42 @@ class RuntimeFEMWindow:
         if visualization.get("type") == "cylinder":
             axial = _plot_grid_values(visualization.get("axial_m"))
             theta = _plot_grid_values(visualization.get("theta_rad"))
-            radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
             radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
-            x = [
-                [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
-                 for col_index in range(len(theta[row_index]))]
-                for row_index in range(len(theta))
-            ]
-            y = [
-                [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
-                 for col_index in range(len(theta[row_index]))]
-                for row_index in range(len(theta))
-            ]
-            z = axial
+            
+            disps = visualization.get("displacements", {})
+            dx_grid = _plot_grid_values(disps.get("disp_x", []))
+            dy_grid = _plot_grid_values(disps.get("disp_y", []))
+            dz_grid = _plot_grid_values(disps.get("disp_z", []))
+    
+            if not dx_grid or not dy_grid or not dz_grid:
+                radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
+                x = [
+                    [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
+                     for col_index in range(len(theta[row_index]))]
+                    for row_index in range(len(theta))
+                ]
+                y = [
+                    [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
+                     for col_index in range(len(theta[row_index]))]
+                    for row_index in range(len(theta))
+                ]
+                z = axial
+            else:
+                x = [
+                    [(radius * math.cos(theta[row_index][col_index]) + dx_grid[row_index][col_index] * scale)
+                     for col_index in range(len(theta[row_index]))]
+                    for row_index in range(len(theta))
+                ]
+                y = [
+                    [(radius * math.sin(theta[row_index][col_index]) + dy_grid[row_index][col_index] * scale)
+                     for col_index in range(len(theta[row_index]))]
+                    for row_index in range(len(theta))
+                ]
+                z = [
+                    [(axial[row_index][col_index] + dz_grid[row_index][col_index] * scale)
+                     for col_index in range(len(axial[row_index]))]
+                    for row_index in range(len(axial))
+                ]
         else:
             x = _plot_grid_values(visualization.get("x_m"))
             y = _plot_grid_values(visualization.get("y_m"))
@@ -2799,118 +2878,126 @@ class RuntimeFEMWindow:
                     color = _interpolate_thickness_color(avg_val, vmin, vmax)
                     canvas.add_polygon([p1, p2, p3, p4], color=color, outline="#64748b", layer=5)
                     
-        show_members_var = getattr(self, "show_members_vis", None)
-        show_members = show_members_var.get() if show_members_var is not None else True
-        if show_members:
-            for line in visualization.get("member_lines") or ():
-                points = list(line.get("points") or ())
-                displaced = list(line.get("displaced_points") or ())
-                if len(points) < 2 or len(displaced) < 2:
-                    continue
-                    
-                pts = []
-                for idx in range(2):
-                    base = np.asarray(points[idx], dtype=float)
-                    moved = np.asarray(displaced[idx], dtype=float)
-                    pts.append(base + (moved - base) * float(scale))
-                    
-                pA = pts[0]
-                pB = pts[1]
-                vec_AB = pB - pA
-                len_AB = np.linalg.norm(vec_AB)
-                if len_AB < 1.0e-9:
-                    continue
-                u = vec_AB / len_AB
+        show_stiffeners_var = getattr(self, "show_stiffener_vis", None)
+        show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
+        show_girders_var = getattr(self, "show_girder_vis", None)
+        show_girders = show_girders_var.get() if show_girders_var is not None else True
+
+        for line in visualization.get("member_lines") or ():
+            role = str(line.get("role", "member")).lower()
+            if role == "stiffener" and not show_stiffeners:
+                continue
+            if role == "girder" and not show_girders:
+                continue
                 
-                nA = self._get_shell_normal(pA, self.snapshot.is_cylinder)
-                nB = self._get_shell_normal(pB, self.snapshot.is_cylinder)
+            points = list(line.get("points") or ())
+            displaced = list(line.get("displaced_points") or ())
+            if len(points) < 2 or len(displaced) < 2:
+                continue
                 
-                e = line.get("eccentricity", 0.0)
-                if abs(e) > 1.0e-9:
-                    web_sign = np.sign(e)
+            pts = []
+            for idx in range(2):
+                base = np.asarray(points[idx], dtype=float)
+                moved = np.asarray(displaced[idx], dtype=float)
+                pts.append(base + (moved - base) * float(scale))
+                
+            pA = pts[0]
+            pB = pts[1]
+            vec_AB = pB - pA
+            len_AB = np.linalg.norm(vec_AB)
+            if len_AB < 1.0e-9:
+                continue
+            u = vec_AB / len_AB
+                
+            nA = self._get_shell_normal(pA, self.snapshot.is_cylinder)
+            nB = self._get_shell_normal(pB, self.snapshot.is_cylinder)
+                
+            e = line.get("eccentricity", 0.0)
+            if abs(e) > 1.0e-9:
+                web_sign = np.sign(e)
+            else:
+                web_sign = -1.0 if self.snapshot.is_cylinder else 1.0
+                    
+            wA = web_sign * nA
+            wB = web_sign * nB
+                
+            hw = line.get("web_height", 0.1)
+            b_f = line.get("flange_width", 0.0)
+                
+            s_stops = [0.0, 1.0]
+            centroids = [0.5]
+                
+            for k in range(1):
+                z_start = s_stops[k] * hw
+                z_end = s_stops[k+1] * hw
+                    
+                pAk = pA + z_start * wA
+                pAk1 = pA + z_end * wA
+                pBk = pB + z_start * wB
+                pBk1 = pB + z_end * wB
+                    
+                q1 = Point3D(pAk[0], pAk[1], pAk[2])
+                q2 = Point3D(pBk[0], pBk[1], pBk[2])
+                q3 = Point3D(pBk1[0], pBk1[1], pBk1[2])
+                q4 = Point3D(pAk1[0], pAk1[1], pAk1[2])
+                    
+                if is_mode:
+                    baseA = np.asarray(points[0])
+                    dispA = np.asarray(displaced[0]) - baseA
+                    baseB = np.asarray(points[1])
+                    dispB = np.asarray(displaced[1]) - baseB
+                    val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
                 else:
-                    web_sign = -1.0 if self.snapshot.is_cylinder else 1.0
-                    
-                wA = web_sign * nA
-                wB = web_sign * nB
-                
-                hw = line.get("web_height", 0.1)
-                b_f = line.get("flange_width", 0.0)
-                
-                s_stops = [0.0, 1.0]
-                centroids = [0.5]
-                
-                for k in range(1):
-                    z_start = s_stops[k] * hw
-                    z_end = s_stops[k+1] * hw
-                    
-                    pAk = pA + z_start * wA
-                    pAk1 = pA + z_end * wA
-                    pBk = pB + z_start * wB
-                    pBk1 = pB + z_end * wB
-                    
-                    q1 = Point3D(pAk[0], pAk[1], pAk[2])
-                    q2 = Point3D(pBk[0], pBk[1], pBk[2])
-                    q3 = Point3D(pBk1[0], pBk1[1], pBk1[2])
-                    q4 = Point3D(pAk1[0], pAk1[1], pAk1[2])
-                    
-                    if is_mode:
-                        baseA = np.asarray(points[0])
-                        dispA = np.asarray(displaced[0]) - baseA
-                        baseB = np.asarray(points[1])
-                        dispB = np.asarray(displaced[1]) - baseB
-                        val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
-                    else:
-                        s_val = centroids[k]
-                        sig_axial = line.get("axial_stress", 0.0)
-                        sig_bend_y = line.get("bending_stress_y", 0.0)
-                        sig_x = sig_axial + (2.0 * s_val - 1.0) * sig_bend_y
+                    s_val = centroids[k]
+                    sig_axial = line.get("axial_stress", 0.0)
+                    sig_bend_y = line.get("bending_stress_y", 0.0)
+                    sig_x = sig_axial + (2.0 * s_val - 1.0) * sig_bend_y
                         
-                        tau_y = line.get("shear_stress_y", 0.0)
-                        tau_z = line.get("shear_stress_z", 0.0)
-                        tau_t = line.get("torsional_stress", 0.0)
+                    tau_y = line.get("shear_stress_y", 0.0)
+                    tau_z = line.get("shear_stress_z", 0.0)
+                    tau_t = line.get("torsional_stress", 0.0)
                         
-                        val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
+                    val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
                         
-                    color = _interpolate_thickness_color(val, vmin, vmax)
-                    canvas.add_polygon([q1, q2, q3, q4], color=color, outline="#000000", width=2, layer=12)
+                color = _interpolate_thickness_color(val, vmin, vmax)
+                canvas.add_polygon([q1, q2, q3, q4], color=color, outline="#000000", width=2, layer=12)
                     
-                if b_f > 0.0:
-                    pA_top = pA + hw * wA
-                    pB_top = pB + hw * wB
+            if b_f > 0.0:
+                pA_top = pA + hw * wA
+                pB_top = pB + hw * wB
                     
-                    v_flange_A = np.cross(u, wA)
-                    v_flange_B = np.cross(u, wB)
+                v_flange_A = np.cross(u, wA)
+                v_flange_B = np.cross(u, wB)
                     
-                    fA1 = pA_top - 0.5 * b_f * v_flange_A
-                    fA2 = pA_top + 0.5 * b_f * v_flange_A
-                    fB1 = pB_top - 0.5 * b_f * v_flange_B
-                    fB2 = pB_top + 0.5 * b_f * v_flange_B
+                fA1 = pA_top - 0.5 * b_f * v_flange_A
+                fA2 = pA_top + 0.5 * b_f * v_flange_A
+                fB1 = pB_top - 0.5 * b_f * v_flange_B
+                fB2 = pB_top + 0.5 * b_f * v_flange_B
                     
-                    qf1 = Point3D(fA1[0], fA1[1], fA1[2])
-                    qf2 = Point3D(fB1[0], fB1[1], fB1[2])
-                    qf3 = Point3D(fB2[0], fB2[1], fB2[2])
-                    qf4 = Point3D(fA2[0], fA2[1], fA2[2])
+                qf1 = Point3D(fA1[0], fA1[1], fA1[2])
+                qf2 = Point3D(fB1[0], fB1[1], fB1[2])
+                qf3 = Point3D(fB2[0], fB2[1], fB2[2])
+                qf4 = Point3D(fA2[0], fA2[1], fA2[2])
                     
-                    if is_mode:
-                        baseA = np.asarray(points[0])
-                        dispA = np.asarray(displaced[0]) - baseA
-                        baseB = np.asarray(points[1])
-                        dispB = np.asarray(displaced[1]) - baseB
-                        val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
-                    else:
-                        sig_axial = line.get("axial_stress", 0.0)
-                        sig_bend_y = line.get("bending_stress_y", 0.0)
-                        sig_x = sig_axial + sig_bend_y
+                if is_mode:
+                    baseA = np.asarray(points[0])
+                    dispA = np.asarray(displaced[0]) - baseA
+                    baseB = np.asarray(points[1])
+                    dispB = np.asarray(displaced[1]) - baseB
+                    val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
+                else:
+                    sig_axial = line.get("axial_stress", 0.0)
+                    sig_bend_y = line.get("bending_stress_y", 0.0)
+                    sig_x = sig_axial + sig_bend_y
                         
-                        tau_y = line.get("shear_stress_y", 0.0)
-                        tau_z = line.get("shear_stress_z", 0.0)
-                        tau_t = line.get("torsional_stress", 0.0)
+                    tau_y = line.get("shear_stress_y", 0.0)
+                    tau_z = line.get("shear_stress_z", 0.0)
+                    tau_t = line.get("torsional_stress", 0.0)
                         
-                        val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
+                    val = np.sqrt(sig_x**2 + 3.0 * (tau_y**2 + tau_z**2 + tau_t**2)) / 1.0e6
                         
-                    color = _interpolate_thickness_color(val, vmin, vmax)
-                    canvas.add_polygon([qf1, qf2, qf3, qf4], color=color, outline="#000000", width=2, layer=13)
+                color = _interpolate_thickness_color(val, vmin, vmax)
+                canvas.add_polygon([qf1, qf2, qf3, qf4], color=color, outline="#000000", width=2, layer=13)
                     
         canvas.set_thickness_legend(
             values=all_vals,
@@ -3043,7 +3130,11 @@ class RuntimeFEMWindow:
                     self._selected_display_mode(),
                     max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
                     show_plate=self.show_plate_vis.get(),
-                    show_members=self.show_members_vis.get(),
+                    show_stiffeners=self.show_stiffener_vis.get(),
+                    show_girders=self.show_girder_vis.get(),
+                    plate_alpha=_safe_float(self.plate_alpha_vis.get(), 1.0),
+                    member_alpha=_safe_float(self.member_alpha_vis.get(), 0.95),
+                    colormap=str(self.colormap_vis.get()),
                     component=self._selected_component(),
                 ),
                 self.figure_parent,
@@ -3058,6 +3149,8 @@ class RuntimeFEMWindow:
     def _set_solver_running(self, is_running: bool) -> None:
         if self.run_button is not None:
             self.run_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
+        if self.cancel_button is not None:
+            self.cancel_button.configure(state=tk.NORMAL if is_running else tk.DISABLED)
         if self.progress_bar is not None:
             if is_running:
                 self.progress_bar.start(12)
@@ -3121,10 +3214,7 @@ class RuntimeFEMWindow:
             slamming_duration_s=max(_safe_float(self.slamming_duration_s.get(), 0.01), 0.0),
             slamming_total_time_s=max(_safe_float(self.slamming_total_time_s.get(), 0.05), 0.0),
             slamming_dt_s=max(_safe_float(self.slamming_dt_s.get(), 0.0005), 1.0e-9),
-            slamming_patch_center_a_m=_safe_float(self.slamming_patch_center_a_m.get(), 0.0),
-            slamming_patch_center_b_m=_safe_float(self.slamming_patch_center_b_m.get(), 0.0),
-            slamming_patch_size_a_m=max(_safe_float(self.slamming_patch_size_a_m.get(), 0.0), 0.0),
-            slamming_patch_size_b_m=max(_safe_float(self.slamming_patch_size_b_m.get(), 0.0), 0.0),
+            slamming_patches_json=str(self.slamming_patches_json.get()),
             slamming_include_static_load=bool(self.slamming_include_static_load.get()),
             imperfection_enabled=bool(self.imperfection_enabled.get()),
             imperfection_shape=str(self.imperfection_shape.get()),
@@ -3155,11 +3245,17 @@ class RuntimeFEMWindow:
 
         options = self._options()
         self._set_solver_running(True)
-        self._write_status("Running FEM solver...\n\n" + "The result plot will update when the solver finishes.")
+        self._cancel_requested = False
+        self._run_status_history = ["The result plot will update when the solver finishes.", ""]
+        self._write_status("Running FEM solver...\n\n" + "\n".join(self._run_status_history))
 
         def worker() -> None:
+            def status_cb(msg: str):
+                if getattr(self, "_cancel_requested", False):
+                    raise RuntimeError("Run stopped by user.")
+                self.solver_queue.put(msg)
             try:
-                self.solver_queue.put((run_runtime_fem(self.snapshot, options), None))
+                self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb), None))
             except Exception as error:
                 self.solver_queue.put((None, error))
 
@@ -3169,7 +3265,15 @@ class RuntimeFEMWindow:
 
     def _poll_solver_result(self) -> None:
         try:
-            result, error = self.solver_queue.get_nowait()
+            msg = self.solver_queue.get_nowait()
+            if isinstance(msg, str):
+                if not hasattr(self, "_run_status_history"):
+                    self._run_status_history = []
+                self._run_status_history.append(msg)
+                self._write_status("Running FEM solver...\n\n" + "\n".join(self._run_status_history))
+                self.window.after(100, self._poll_solver_result)
+                return
+            result, error = msg
         except queue.Empty:
             if self.solver_thread is not None and self.solver_thread.is_alive():
                 self.window.after(100, self._poll_solver_result)
@@ -3188,6 +3292,116 @@ class RuntimeFEMWindow:
         self._write_status(format_runtime_fem_result(result))
         self._refresh_figure()
 
+
+    def _slamming_select_all(self) -> None:
+        if not hasattr(self, "_slamming_patches"): return
+        for f in self._slamming_patches: f["selected"] = True
+        self._update_slamming_summary()
+        self._refresh_figure()
+
+    def _slamming_clear_all(self) -> None:
+        if not hasattr(self, "_slamming_patches"): return
+        for f in self._slamming_patches: f["selected"] = False
+        self._update_slamming_summary()
+        self._refresh_figure()
+
+    def _slamming_split_field(self, axis: str) -> None:
+        if not hasattr(self, "_slamming_patches"): return
+        if not hasattr(self, "_slamming_selected_index") or self._slamming_selected_index < 0 or self._slamming_selected_index >= len(self._slamming_patches): return
+        
+        coord = self.slamming_split_coord_var.get()
+        field = self._slamming_patches[self._slamming_selected_index]
+        
+        if axis == 'a':
+            if coord <= field["min_a"] + 1e-6 or coord >= field["max_a"] - 1e-6: return
+            new_field1 = dict(field)
+            new_field1["max_a"] = coord
+            new_field2 = dict(field)
+            new_field2["min_a"] = coord
+        else:
+            if coord <= field["min_b"] + 1e-6 or coord >= field["max_b"] - 1e-6: return
+            new_field1 = dict(field)
+            new_field1["max_b"] = coord
+            new_field2 = dict(field)
+            new_field2["min_b"] = coord
+            
+        self._slamming_patches.pop(self._slamming_selected_index)
+        self._slamming_patches.insert(self._slamming_selected_index, new_field2)
+        self._slamming_patches.insert(self._slamming_selected_index, new_field1)
+        self._update_slamming_summary()
+        self._refresh_figure()
+
+    def _update_slamming_summary(self) -> None:
+        if not hasattr(self, "_slamming_patches"): return
+        total = 0.0
+        for f in self._slamming_patches:
+            if f.get("selected", True):
+                total += (f["max_a"] - f["min_a"]) * (f["max_b"] - f["min_b"])
+        if hasattr(self, "slamming_area_var") and self.slamming_area_var is not None:
+            self.slamming_area_var.set(f"Patch Area: {total:.3f} m²")
+        self.slamming_patches_json.set(json.dumps([f for f in self._slamming_patches if f.get("selected", True)]))
+
+    def _generate_default_slamming_patches(self) -> None:
+        geometry = runtime_geometry_summary(self.snapshot)
+        is_cylinder = geometry.get("plot_type") == "cylinder"
+        if is_cylinder:
+            max_a = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
+            min_a = -0.5 * max_a
+            max_a = 0.5 * max_a
+            radius = max(float(geometry.get("radius_m") or 1.0), 1.0e-6)
+            min_b = 0.0
+            max_b = 2.0 * math.pi * radius
+        else:
+            min_a = 0.0
+            max_a = max(float(geometry.get("length_m") or 1.0), 1.0e-6)
+            min_b = 0.0
+            max_b = max(float(geometry.get("width_m") or 1.0), 1.0e-6)
+            
+        a_breaks = [min_a, max_a]
+        b_breaks = [min_b, max_b]
+        
+        if is_cylinder:
+            if geometry.get("has_girder"):
+                gir_spacing = float(geometry.get("girder_spacing_m") or 0.0)
+                if gir_spacing > 0.0:
+                    a_breaks = []
+                    num = int((max_a - min_a) / gir_spacing) + 1
+                    for i in range(num):
+                        z = min_a + i * gir_spacing
+                        if min_a <= z <= max_a:
+                            a_breaks.append(z)
+                    if min_a not in a_breaks: a_breaks.insert(0, min_a)
+                    if max_a not in a_breaks: a_breaks.append(max_a)
+        else:
+            if geometry.get("has_stiffener"):
+                spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
+                if spacing > 0.0:
+                    b_breaks = []
+                    num = int((max_b - min_b) / spacing) + 1
+                    for i in range(num):
+                        y = min_b + i * spacing
+                        if min_b <= y <= max_b:
+                            b_breaks.append(y)
+                    if min_b not in b_breaks: b_breaks.insert(0, min_b)
+                    if max_b not in b_breaks: b_breaks.append(max_b)
+                    
+        a_breaks = sorted(list(set(a_breaks)))
+        b_breaks = sorted(list(set(b_breaks)))
+        
+        self._slamming_patches = []
+        for i in range(len(a_breaks)-1):
+            for j in range(len(b_breaks)-1):
+                self._slamming_patches.append({
+                    "min_a": a_breaks[i], "max_a": a_breaks[i+1],
+                    "min_b": b_breaks[j], "max_b": b_breaks[j+1],
+                    "selected": False
+                })
+        self._update_slamming_summary()
+
+    def _redraw_base_3d(self) -> None:
+        self.current_result = None
+        self._refresh_figure()
+        self._write_status("Displaying base 3D model geometry.")
 
 def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:
     """Open the experimental runtime FEM popup for the app active line."""

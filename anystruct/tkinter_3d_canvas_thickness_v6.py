@@ -769,12 +769,17 @@ class Tkinter3DCanvas(tk.Frame):
                 )
             else:
                 outline = "" if interactive and primitive.get("fast_no_outline") else primitive["outline"]
+                kwargs = {
+                    "fill": primitive["color"],
+                    "outline": outline,
+                    "width": primitive["width"],
+                    "stipple": primitive.get("stipple", ""),
+                }
+                if primitive.get("tags"):
+                    kwargs["tags"] = primitive.get("tags")
                 self.canvas.create_polygon(
                     *coords,
-                    fill=primitive["color"],
-                    outline=outline,
-                    width=primitive["width"],
-                    stipple=primitive.get("stipple", ""),
+                    **kwargs
                 )
 
         self._draw_thickness_legend()
@@ -818,6 +823,7 @@ class Tkinter3DCanvas(tk.Frame):
         cull_backface: bool = False,
         fast_no_outline: bool = True,
         stipple: str = "",
+        tags: str = "",
     ) -> Optional[Dict[str, Any]]:
         if len(vertices) < 3:
             return None
@@ -840,6 +846,7 @@ class Tkinter3DCanvas(tk.Frame):
             "cull_backface": cull_backface,
             "fast_no_outline": fast_no_outline,
             "stipple": stipple,
+            "tags": tags,
         }
 
     @staticmethod
@@ -874,15 +881,16 @@ class Tkinter3DCanvas(tk.Frame):
                     int(obj.get("width", 1)),
                 )
             ]
-        if object_type == "polygon":
+        elif object_type == "polygon":
             primitive = self._polygon_primitive(
-                obj.get("vertices", []),
-                obj.get("color", "gray"),
-                obj.get("outline", "black"),
-                int(obj.get("width", 1)),
-                layer=int(obj.get("layer", 5)),
-                cull_backface=bool(obj.get("cull_backface", False)),
+                vertices=obj["vertices"],
+                color=obj["color"],
+                outline=obj["outline"],
+                width=obj["width"],
+                layer=obj.get("layer", 5),
+                cull_backface=obj.get("cull_backface", False),
                 stipple=obj.get("stipple", ""),
+                tags=obj.get("tags", ""),
             )
             return [primitive] if primitive else []
         if object_type == "cylinder":
@@ -1114,6 +1122,7 @@ class Tkinter3DCanvas(tk.Frame):
                     ],
                     patch_color,
                     outline,
+                    width=1,
                     layer=0,
                     cull_backface=cull_shell_backfaces,
                     stipple=shell_stipple,
@@ -1126,6 +1135,7 @@ class Tkinter3DCanvas(tk.Frame):
                 rings[-1],
                 color,
                 outline,
+                width=1,
                 layer=1,
                 cull_backface=cull_shell_backfaces,
                 stipple=shell_stipple,
@@ -1134,6 +1144,7 @@ class Tkinter3DCanvas(tk.Frame):
                 list(reversed(rings[0])),
                 color,
                 outline,
+                width=1,
                 layer=1,
                 cull_backface=cull_shell_backfaces,
                 stipple=shell_stipple,
@@ -1217,6 +1228,7 @@ class Tkinter3DCanvas(tk.Frame):
                 ],
                 web_color,
                 outline,
+                width=1,
                 layer=12,
                 cull_backface=False,
             )
@@ -1259,6 +1271,7 @@ class Tkinter3DCanvas(tk.Frame):
                         ],
                         flange_color,
                         outline,
+                        width=1,
                         layer=13,
                         cull_backface=False,
                     )
@@ -1382,6 +1395,7 @@ class Tkinter3DCanvas(tk.Frame):
                     face,
                     web_color,
                     outline,
+                    width=1,
                     layer=20,
                     cull_backface=False,
                 )
@@ -1423,6 +1437,7 @@ class Tkinter3DCanvas(tk.Frame):
                     ],
                     flange_color,
                     outline,
+                    width=1,
                     layer=21,
                     cull_backface=False,
                 )
@@ -1463,6 +1478,7 @@ class Tkinter3DCanvas(tk.Frame):
         cull_backface: bool = False,
         layer: int = 5,
         stipple: str = "",
+        tags: str = "",
     ) -> None:
         self.objects.append(
             {
@@ -1474,6 +1490,7 @@ class Tkinter3DCanvas(tk.Frame):
                 "cull_backface": cull_backface,
                 "layer": layer,
                 "stipple": stipple,
+                "tags": tags,
             }
         )
         self._invalidate_geometry_cache()
