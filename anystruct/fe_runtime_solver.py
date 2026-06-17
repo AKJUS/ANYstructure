@@ -37,10 +37,13 @@ except ModuleNotFoundError:
     from ANYstructure.anystruct import fe_solver
 
 try:
-    from anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, _interpolate_thickness_color
+    from anystruct import tkinter_3d_canvas_thickness_v6 as _tk3d_canvas_module
 except ModuleNotFoundError:
-    from ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 import Tkinter3DCanvas, Point3D, \
-        _interpolate_thickness_color
+    from ANYstructure.anystruct import tkinter_3d_canvas_thickness_v6 as _tk3d_canvas_module
+
+Tkinter3DCanvas = _tk3d_canvas_module.Tkinter3DCanvas
+Point3D = _tk3d_canvas_module.Point3D
+_interpolate_thickness_color = _tk3d_canvas_module._interpolate_thickness_color
 
 
 @dataclass(frozen=True)
@@ -632,6 +635,53 @@ def _all_grid_values(grid: list[list[float]]) -> list[float]:
     return [value for row in grid for value in row]
 
 
+def _clamped_alpha(value: Any, default: float = 1.0) -> float:
+    return min(max(_safe_float(value, default), 0.0), 1.0)
+
+
+def _alpha_to_stipple(alpha: float) -> str:
+    """Approximate alpha in Tk Canvas, which has no polygon alpha channel."""
+
+    alpha = _clamped_alpha(alpha, 1.0)
+    if alpha >= 0.94:
+        return ""
+    if alpha >= 0.68:
+        return "gray75"
+    if alpha >= 0.43:
+        return "gray50"
+    if alpha >= 0.18:
+        return "gray25"
+    return "gray12"
+
+
+def _blend_hex_color(color: str, alpha: float, background: str = "#ffffff") -> str:
+    """Blend a solid Tk colour towards the background to emulate opacity."""
+
+    alpha = _clamped_alpha(alpha, 1.0)
+    try:
+        foreground_rgb = np.asarray(mcolors.to_rgb(color), dtype=float)
+        background_rgb = np.asarray(mcolors.to_rgb(background), dtype=float)
+        return mcolors.to_hex(alpha * foreground_rgb + (1.0 - alpha) * background_rgb)
+    except Exception:
+        return color
+
+
+def _configure_tk_canvas_colormap(colormap: str) -> None:
+    """Keep the interactive canvas surface colours and legend in sync."""
+
+    name = str(colormap or "jet")
+    cmap = colormaps.get(name, colormaps["jet"])
+    existing = getattr(_tk3d_canvas_module, "_THICKNESS_COLOR_STOPS", ())
+    positions = tuple(float(item[0]) for item in existing if isinstance(item, (tuple, list)) and len(item) >= 2)
+    if len(positions) < 2:
+        positions = (0.0, 0.18, 0.36, 0.52, 0.66, 0.78, 0.88, 0.95, 1.0)
+    stops = tuple((position, mcolors.to_hex(cmap(position), keep_alpha=False)) for position in positions)
+    try:
+        setattr(_tk3d_canvas_module, "_THICKNESS_COLOR_STOPS", stops)
+    except Exception:
+        pass
+
+
 def _surface_facecolors(values_grid: list[list[float]], colormap: str = "jet"):
     values = _all_grid_values(values_grid) or [0.0]
     norm = mcolors.Normalize(vmin=min(values), vmax=max(values) if max(values) > min(values) else min(values) + 1.0)
@@ -792,6 +842,8 @@ def _plot_visualization_surface(
         colormap: str = "jet",
         component: str = "von_mises_pa",
 ) -> None:
+    plate_alpha = _clamped_alpha(plate_alpha, 1.0)
+    member_alpha = _clamped_alpha(member_alpha, 0.95)
     visualization, title, is_mode = _selected_visualization(result, display_mode, component)
     scalar_values = _plot_grid_values(visualization.get("stress_pa"))
     if is_mode:
@@ -891,6 +943,7 @@ def _plot_visualization_surface(
                 linewidth=0.15,
                 antialiased=True,
                 shade=False,
+                alpha=_clamped_alpha(plate_alpha, 1.0),
             )
         axis.set_xlabel("length [m]")
         axis.set_ylabel("width [m]")
@@ -902,6 +955,161 @@ def _plot_visualization_surface(
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
     mappable.set_array(_all_grid_values(color_grid))
     figure.colorbar(mappable, ax=axis, shrink=0.68, pad=0.1, label=colorbar_label)
+
+
+def _plot_base_geometry_surface(
+        axis: Any,
+        geometry: dict[str, Any],
+        is_cylinder: bool,
+        show_plate: bool = True,
+        show_stiffeners: bool = True,
+        show_girders: bool = True,
+        plate_alpha: float = 1.0,
+        member_alpha: float = 0.95,
+) -> None:
+    """Draw the unsolved model with the same visibility controls as results."""
+
+    plate_alpha = _clamped_alpha(plate_alpha, 1.0)
+    member_alpha = _clamped_alpha(member_alpha, 0.95)
+    drew_anything = False
+
+    if is_cylinder:
+        radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        theta = np.linspace(0.0, 2.0 * math.pi, 49)
+        axial = np.linspace(-0.5 * length, 0.5 * length, 13)
+        theta_grid, axial_grid = np.meshgrid(theta, axial)
+        x_grid = radius * np.cos(theta_grid)
+        y_grid = radius * np.sin(theta_grid)
+
+        if show_plate and plate_alpha > 0.0:
+            axis.plot_surface(
+                x_grid,
+                y_grid,
+                axial_grid,
+                color="#d8e2ea",
+                edgecolor="#708090",
+                linewidth=0.18,
+                alpha=plate_alpha,
+                antialiased=True,
+                shade=False,
+            )
+            drew_anything = True
+
+        if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
+            spacing = _safe_float(geometry.get("stiffener_spacing_m"), 0.0)
+            if spacing > 0.0:
+                count = max(1, int(round(2.0 * math.pi * radius / spacing)))
+                section = geometry.get("stiffener_section") or {}
+                web_height = max(_safe_float(section.get("web_height"), 0.1), 0.0)
+                member_radius = max(radius - 0.5 * web_height, 1.0e-6)
+                for index in range(count):
+                    angle = 2.0 * math.pi * index / count
+                    axis.plot(
+                        [member_radius * math.cos(angle)] * 2,
+                        [member_radius * math.sin(angle)] * 2,
+                        [-0.5 * length, 0.5 * length],
+                        color="#334155",
+                        linewidth=1.3,
+                        alpha=member_alpha,
+                    )
+                drew_anything = True
+
+        if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
+            spacing = _safe_float(geometry.get("girder_spacing_m"), 0.0)
+            if spacing > 0.0:
+                section = geometry.get("girder_section") or {}
+                web_height = max(_safe_float(section.get("web_height"), 0.12), 0.0)
+                member_radius = max(radius - 0.5 * web_height, 1.0e-6)
+                ring_theta = np.linspace(0.0, 2.0 * math.pi, 97)
+                count = max(1, int(math.floor(length / spacing)) + 1)
+                for index in range(count):
+                    z_position = -0.5 * length + index * spacing
+                    if z_position > 0.5 * length + 1.0e-9:
+                        break
+                    axis.plot(
+                        member_radius * np.cos(ring_theta),
+                        member_radius * np.sin(ring_theta),
+                        np.full_like(ring_theta, z_position),
+                        color="#7f1d1d",
+                        linewidth=1.8,
+                        alpha=member_alpha,
+                    )
+                drew_anything = True
+
+        axis.set_xlabel("x [m]")
+        axis.set_ylabel("y [m]")
+        axis.set_zlabel("height [m]")
+        try:
+            axis.set_box_aspect((2.0 * radius, 2.0 * radius, length))
+            axis.view_init(elev=18.0, azim=-45.0)
+        except Exception:
+            pass
+    else:
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
+        x_grid, y_grid = np.meshgrid([0.0, length], [0.0, width])
+        z_grid = np.zeros_like(x_grid)
+
+        if show_plate and plate_alpha > 0.0:
+            axis.plot_surface(
+                x_grid,
+                y_grid,
+                z_grid,
+                color="#d1d5db",
+                edgecolor="#64748b",
+                linewidth=0.3,
+                alpha=plate_alpha,
+                shade=False,
+            )
+            drew_anything = True
+
+        if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
+            spacing = _safe_float(geometry.get("stiffener_spacing_m"), 0.0)
+            section = geometry.get("stiffener_section") or {}
+            web_height = max(_safe_float(section.get("web_height"), 0.1), 0.0)
+            if spacing > 0.0:
+                count = max(1, int(math.floor(width / spacing)) + 1)
+                for index in range(count):
+                    y_position = index * spacing
+                    if y_position > width + 1.0e-9:
+                        break
+                    axis.plot(
+                        [0.0, length],
+                        [y_position, y_position],
+                        [web_height, web_height],
+                        color="#334155",
+                        linewidth=1.5,
+                        alpha=member_alpha,
+                    )
+                drew_anything = True
+
+        if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
+            section = geometry.get("girder_section") or {}
+            web_height = max(_safe_float(section.get("web_height"), 0.15), 0.0)
+            x_position = 0.5 * length
+            axis.plot(
+                [x_position, x_position],
+                [0.0, width],
+                [web_height, web_height],
+                color="#7f1d1d",
+                linewidth=2.0,
+                alpha=member_alpha,
+            )
+            drew_anything = True
+
+        axis.set_xlabel("length [m]")
+        axis.set_ylabel("width [m]")
+        axis.set_zlabel("height [m]")
+        try:
+            axis.set_box_aspect((length, width, max(0.18 * min(length, width), 0.1)))
+            axis.view_init(elev=22.0, azim=-55.0)
+        except Exception:
+            pass
+
+    axis.set_title("Base model geometry")
+    if not drew_anything:
+        axis.text2D(0.08, 0.56, "All model display items are hidden.", transform=axis.transAxes)
 
 
 def create_runtime_fem_result_figure(
@@ -924,11 +1132,16 @@ def create_runtime_fem_result_figure(
     geometry = runtime_geometry_summary(snapshot) if result is None else result.summary
 
     if result is None or not result.visualization:
-        geometry_ax.set_title("Static stress/displacement")
-        geometry_ax.text2D(0.08, 0.56, "Run FEM to plot stresses and displacements.", transform=geometry_ax.transAxes)
-        geometry_ax.set_xlabel("length [m]")
-        geometry_ax.set_ylabel("width/radius [m]")
-        geometry_ax.set_zlabel("displacement")
+        _plot_base_geometry_surface(
+            geometry_ax,
+            geometry,
+            snapshot.is_cylinder,
+            show_plate=show_plate,
+            show_stiffeners=show_stiffeners,
+            show_girders=show_girders,
+            plate_alpha=plate_alpha,
+            member_alpha=member_alpha,
+        )
     else:
         _plot_visualization_surface(
             figure, geometry_ax, geometry, result, display_mode, deformation_scale,
@@ -2007,13 +2220,55 @@ class RuntimeFEMWindow:
         self.upper_result_text = None
         self.solver_thread = None
         self.solver_queue = queue.Queue()
-        try:
-            self.deformation_scale.trace_add("write", lambda *_args: self._refresh_figure())
-        except Exception:
-            pass
+        self._plot_refresh_after_id: str | None = None
+        self._plot_trace_ids: list[tuple[tk.Variable, str]] = []
+        self._force_fit_next_refresh = True
 
         self._build()
+        self._bind_plot_configuration_traces()
         self._show_as_normal_maximizable_window()
+
+    def _bind_plot_configuration_traces(self) -> None:
+        """Redraw both the base model and solved result when plot options change."""
+
+        variables = (
+            self.deformation_scale,
+            self.show_plate_vis,
+            self.show_stiffener_vis,
+            self.show_girder_vis,
+            self.plate_alpha_vis,
+            self.member_alpha_vis,
+            self.colormap_vis,
+        )
+        for variable in variables:
+            try:
+                trace_id = variable.trace_add("write", self._schedule_plot_refresh)
+                self._plot_trace_ids.append((variable, trace_id))
+            except Exception:
+                pass
+
+    def _schedule_plot_refresh(self, *_args: Any) -> None:
+        """Debounce entry edits so typing does not rebuild the 3D scene per key."""
+
+        if self.figure_parent is None:
+            return
+        if self._plot_refresh_after_id is not None:
+            try:
+                self.window.after_cancel(self._plot_refresh_after_id)
+            except Exception:
+                pass
+            self._plot_refresh_after_id = None
+        try:
+            self._plot_refresh_after_id = self.window.after(90, self._run_scheduled_plot_refresh)
+        except Exception:
+            self._plot_refresh_after_id = None
+
+    def _run_scheduled_plot_refresh(self) -> None:
+        self._plot_refresh_after_id = None
+        try:
+            self._refresh_figure(preserve_view=True)
+        except tk.TclError:
+            pass
 
     def _show_as_normal_maximizable_window(self) -> None:
         """Keep the solver as a normal window with maximize controls available."""
@@ -2492,7 +2747,7 @@ class RuntimeFEMWindow:
             width=20,
         )
         self.result_case_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.result_case_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
+        self.result_case_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure(preserve_view=True))
 
         ttk.Label(selector_bar, text=" Component:").pack(side=tk.LEFT, padx=(6, 6))
         self.component_selector = ttk.Combobox(
@@ -2503,7 +2758,7 @@ class RuntimeFEMWindow:
             width=26,
         )
         self.component_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.component_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
+        self.component_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure(preserve_view=True))
         self.interactive_3d_checkbox = ttk.Checkbutton(
             selector_bar,
             text="Interactive 3D",
@@ -2726,7 +2981,7 @@ class RuntimeFEMWindow:
         else:
             return np.array([0.0, 0.0, 1.0], dtype=float)
 
-    def _populate_canvas_with_geometry(self, canvas: Tkinter3DCanvas) -> None:
+    def _populate_canvas_with_geometry(self, canvas: Tkinter3DCanvas, fit_view: bool = True) -> None:
         geometry = runtime_geometry_summary(self.snapshot)
         show_plate_var = getattr(self, "show_plate_vis", None)
         show_plate = show_plate_var.get() if show_plate_var is not None else True
@@ -2734,11 +2989,16 @@ class RuntimeFEMWindow:
         show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
         show_girders_var = getattr(self, "show_girder_vis", None)
         show_girders = show_girders_var.get() if show_girders_var is not None else True
+        plate_alpha = _clamped_alpha(self.plate_alpha_vis.get(), 1.0)
+        member_alpha = _clamped_alpha(self.member_alpha_vis.get(), 0.95)
+        plate_stipple = _alpha_to_stipple(plate_alpha)
+        member_stipple = _alpha_to_stipple(member_alpha)
+        _configure_tk_canvas_colormap(str(self.colormap_vis.get()))
 
         if self.snapshot.is_cylinder:
             radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
-            if show_plate:
+            if show_plate and plate_alpha > 0.0:
                 canvas.add_cylinder(
                     radius=radius,
                     height=length,
@@ -2748,11 +3008,11 @@ class RuntimeFEMWindow:
                     segments=32,
                     height_segments=12,
                     capped=False,
-                    opacity=0.6,
+                    opacity=plate_alpha,
                     show_backfaces=True,
                     show_thickness_legend=False
                 )
-            if show_stiffeners and geometry.get("has_stiffener"):
+            if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
                 stf_spacing = _safe_float(geometry.get("stiffener_spacing_m"))
                 if stf_spacing > 0.0:
                     num_longs = int(2.0 * math.pi * radius / stf_spacing)
@@ -2771,14 +3031,14 @@ class RuntimeFEMWindow:
                             web_thickness=tw,
                             flange_width=b,
                             flange_thickness=tf,
-                            color="#a0a0ff",
-                            outline="#404080",
+                            color=_blend_hex_color("#a0a0ff", member_alpha),
+                            outline=_blend_hex_color("#404080", member_alpha),
                             segments=4,
                             height_segments=8,
                             inside=True,
                             z_offset=0.0,
                         )
-            if show_girders and geometry.get("has_girder"):
+            if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
                 gir_spacing = _safe_float(geometry.get("girder_spacing_m"))
                 gir_sec = geometry.get("girder_section") or {}
                 ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.12)
@@ -2797,15 +3057,15 @@ class RuntimeFEMWindow:
                                 web_thickness=gtw,
                                 flange_width=gb,
                                 flange_thickness=gtf,
-                                color="#ffa0a0",
-                                outline="#804040",
+                                color=_blend_hex_color("#ffa0a0", member_alpha),
+                                outline=_blend_hex_color("#804040", member_alpha),
                                 segments=32,
                                 inside=True,
                             )
         else:
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
-            if show_plate:
+            if show_plate and plate_alpha > 0.0:
                 canvas.add_polygon(
                     [
                         Point3D(0.0, 0.0, 0.0),
@@ -2815,9 +3075,10 @@ class RuntimeFEMWindow:
                     ],
                     color="#d1d5db",
                     outline="#64748b",
-                    layer=5
+                    layer=5,
+                    stipple=plate_stipple
                 )
-            if show_stiffeners and geometry.get("has_stiffener"):
+            if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
                 spacing = _safe_float(geometry.get("stiffener_spacing_m"))
                 stf_sec = geometry.get("stiffener_section") or {}
                 hw = _safe_float(stf_sec.get("web_height") or stf_sec.get("web_h") or 0.1)
@@ -2842,7 +3103,8 @@ class RuntimeFEMWindow:
                                 color="#94a3b8",
                                 outline="#1f2937",
                                 width=2,
-                                layer=12
+                                layer=12,
+                                stipple=member_stipple
                             )
                             if b > 0.0:
                                 canvas.add_polygon(
@@ -2855,9 +3117,10 @@ class RuntimeFEMWindow:
                                     color="#334155",
                                     outline="#111827",
                                     width=2,
-                                    layer=13
+                                    layer=13,
+                                    stipple=member_stipple
                                 )
-            if show_girders and geometry.get("has_girder"):
+            if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
                 gir_sec = geometry.get("girder_section") or {}
                 ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.15)
                 gb = _safe_float(gir_sec.get("flange_width") or gir_sec.get("flange_w") or 0.08)
@@ -2872,7 +3135,8 @@ class RuntimeFEMWindow:
                     color="#fca5a5",
                     outline="#991b1b",
                     width=2,
-                    layer=12
+                    layer=12,
+                    stipple=member_stipple
                 )
                 if gb > 0.0:
                     canvas.add_polygon(
@@ -2885,16 +3149,23 @@ class RuntimeFEMWindow:
                         color="#b91c1c",
                         outline="#7f1d1d",
                         width=2,
-                        layer=13
+                        layer=13,
+                        stipple=member_stipple
                     )
-        canvas.after_idle(canvas.fit_to_scene)
+        if fit_view:
+            canvas.after_idle(canvas.fit_to_scene)
 
-    def _populate_canvas_with_results(self, canvas: Tkinter3DCanvas) -> None:
+    def _populate_canvas_with_results(self, canvas: Tkinter3DCanvas, fit_view: bool = True) -> None:
         result = self.current_result
         geometry = result.summary
         display_mode = self._selected_display_mode()
         deformation_scale = max(_safe_float(self.deformation_scale.get(), 0.0), 0.0)
         component = self._selected_component()
+        plate_alpha = _clamped_alpha(self.plate_alpha_vis.get(), 1.0)
+        member_alpha = _clamped_alpha(self.member_alpha_vis.get(), 0.95)
+        plate_stipple = _alpha_to_stipple(plate_alpha)
+        member_stipple = _alpha_to_stipple(member_alpha)
+        _configure_tk_canvas_colormap(str(self.colormap_vis.get()))
 
         visualization, title, is_mode = _selected_visualization(result, display_mode, component)
 
@@ -2906,8 +3177,15 @@ class RuntimeFEMWindow:
             color_grid = scalar_values
             colorbar_label = str(visualization.get("scalar_label") or "value")
         else:
-            color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
-            colorbar_label = "stress [MPa]"
+            if component.endswith("_pa"):
+                color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
+                colorbar_label = str(visualization.get("scalar_label", "stress")).replace("_pa", "") + " [MPa]"
+            elif "disp" in component:
+                color_grid = [[value * 1000.0 for value in row] for row in scalar_values]
+                colorbar_label = str(visualization.get("scalar_label", "displacement")).replace(" [m]", " [mm]")
+            else:
+                color_grid = scalar_values
+                colorbar_label = str(visualization.get("scalar_label", component))
 
         all_vals = _all_grid_values(color_grid)
         if all_vals:
@@ -2970,7 +3248,7 @@ class RuntimeFEMWindow:
 
         show_plate_var = getattr(self, "show_plate_vis", None)
         show_plate = show_plate_var.get() if show_plate_var is not None else True
-        if show_plate:
+        if show_plate and plate_alpha > 0.0:
             R = len(x)
             C = len(x[0]) if R > 0 else 0
             for i in range(R - 1):
@@ -2984,7 +3262,13 @@ class RuntimeFEMWindow:
                                 color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
                             j + 1])
                     color = _interpolate_thickness_color(avg_val, vmin, vmax)
-                    canvas.add_polygon([p1, p2, p3, p4], color=color, outline="#64748b", layer=5)
+                    canvas.add_polygon(
+                        [p1, p2, p3, p4],
+                        color=color,
+                        outline="#64748b",
+                        layer=5,
+                        stipple=plate_stipple,
+                    )
 
         show_stiffeners_var = getattr(self, "show_stiffener_vis", None)
         show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
@@ -2993,9 +3277,9 @@ class RuntimeFEMWindow:
 
         for line in visualization.get("member_lines") or ():
             role = str(line.get("role", "member")).lower()
-            if role == "stiffener" and not show_stiffeners:
+            if role == "stiffener" and (not show_stiffeners or member_alpha <= 0.0):
                 continue
-            if role == "girder" and not show_girders:
+            if role == "girder" and (not show_girders or member_alpha <= 0.0):
                 continue
 
             points = list(line.get("points") or ())
@@ -3068,7 +3352,14 @@ class RuntimeFEMWindow:
                     val = np.sqrt(sig_x ** 2 + 3.0 * (tau_y ** 2 + tau_z ** 2 + tau_t ** 2)) / 1.0e6
 
                 color = _interpolate_thickness_color(val, vmin, vmax)
-                canvas.add_polygon([q1, q2, q3, q4], color=color, outline="#000000", width=2, layer=12)
+                canvas.add_polygon(
+                    [q1, q2, q3, q4],
+                    color=color,
+                    outline="#000000",
+                    width=2,
+                    layer=12,
+                    stipple=member_stipple,
+                )
 
             if b_f > 0.0:
                 pA_top = pA + hw * wA
@@ -3105,14 +3396,22 @@ class RuntimeFEMWindow:
                     val = np.sqrt(sig_x ** 2 + 3.0 * (tau_y ** 2 + tau_z ** 2 + tau_t ** 2)) / 1.0e6
 
                 color = _interpolate_thickness_color(val, vmin, vmax)
-                canvas.add_polygon([qf1, qf2, qf3, qf4], color=color, outline="#000000", width=2, layer=13)
+                canvas.add_polygon(
+                    [qf1, qf2, qf3, qf4],
+                    color=color,
+                    outline="#000000",
+                    width=2,
+                    layer=13,
+                    stipple=member_stipple,
+                )
 
         canvas.set_thickness_legend(
             values=all_vals,
             unit=colorbar_label,
             title=title
         )
-        canvas.after_idle(canvas.fit_to_scene)
+        if fit_view:
+            canvas.after_idle(canvas.fit_to_scene)
 
     def _update_result_text(self) -> None:
         if self.upper_result_text is None:
@@ -3180,7 +3479,7 @@ class RuntimeFEMWindow:
         self.upper_result_text.insert(tk.END, "\n".join(lines))
         self.upper_result_text.config(state=tk.DISABLED)
 
-    def _refresh_figure(self) -> None:
+    def _refresh_figure(self, preserve_view: bool = False) -> None:
         self._update_result_text()
         if self.figure_parent is None:
             return
@@ -3212,17 +3511,20 @@ class RuntimeFEMWindow:
                     pass
                 self.figure_toolbar_frame = None
 
-            if self.result_canvas is None:
+            canvas_created = self.result_canvas is None
+            if canvas_created:
                 self.result_canvas = Tkinter3DCanvas(self.figure_parent, bg="white")
                 self.result_canvas.pack(fill=tk.BOTH, expand=True)
 
+            fit_view = bool(canvas_created or self._force_fit_next_refresh or not preserve_view)
+            self._force_fit_next_refresh = False
             self.result_canvas.clear()
             self.result_canvas.clear_thickness_legend()
 
             if self.current_result is None:
-                self._populate_canvas_with_geometry(self.result_canvas)
+                self._populate_canvas_with_geometry(self.result_canvas, fit_view=fit_view)
             else:
-                self._populate_canvas_with_results(self.result_canvas)
+                self._populate_canvas_with_results(self.result_canvas, fit_view=fit_view)
         else:
             if self.result_canvas is not None:
                 try:
@@ -3231,6 +3533,7 @@ class RuntimeFEMWindow:
                     pass
                 self.result_canvas = None
 
+            self._force_fit_next_refresh = False
             self._show_figure(
                 create_runtime_fem_result_figure(
                     self.snapshot,
@@ -3240,8 +3543,8 @@ class RuntimeFEMWindow:
                     show_plate=self.show_plate_vis.get(),
                     show_stiffeners=self.show_stiffener_vis.get(),
                     show_girders=self.show_girder_vis.get(),
-                    plate_alpha=_safe_float(self.plate_alpha_vis.get(), 1.0),
-                    member_alpha=_safe_float(self.member_alpha_vis.get(), 0.95),
+                    plate_alpha=_clamped_alpha(self.plate_alpha_vis.get(), 1.0),
+                    member_alpha=_clamped_alpha(self.member_alpha_vis.get(), 0.95),
                     colormap=str(self.colormap_vis.get()),
                     component=self._selected_component(),
                 ),
@@ -3398,6 +3701,7 @@ class RuntimeFEMWindow:
             return
 
         self.current_result = result
+        self._force_fit_next_refresh = True
         self._set_display_modes(result)
         self._write_status(format_runtime_fem_result(result))
         self._refresh_figure()
@@ -3511,6 +3815,7 @@ class RuntimeFEMWindow:
 
     def _redraw_base_3d(self) -> None:
         self.current_result = None
+        self._force_fit_next_refresh = True
         self._refresh_figure()
         self._write_status("Displaying base 3D model geometry.")
 
