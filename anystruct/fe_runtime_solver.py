@@ -777,23 +777,48 @@ def _plot_visualization_surface(
     if visualization.get("type") == "cylinder":
         axial = _plot_grid_values(visualization.get("axial_m"))
         theta = _plot_grid_values(visualization.get("theta_rad"))
-        radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
         radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
-        x = [
-            [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
-             for col_index in range(len(theta[row_index]))]
-            for row_index in range(len(theta))
-        ]
-        y = [
-            [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
-             for col_index in range(len(theta[row_index]))]
-            for row_index in range(len(theta))
-        ]
+        
+        disps = visualization.get("displacements", {})
+        dx_grid = _plot_grid_values(disps.get("disp_x", []))
+        dy_grid = _plot_grid_values(disps.get("disp_y", []))
+        dz_grid = _plot_grid_values(disps.get("disp_z", []))
+
+        if not dx_grid or not dy_grid or not dz_grid:
+            radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
+            x = [
+                [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(theta[row_index][col_index])
+                 for col_index in range(len(theta[row_index]))]
+                for row_index in range(len(theta))
+            ]
+            y = [
+                [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(theta[row_index][col_index])
+                 for col_index in range(len(theta[row_index]))]
+                for row_index in range(len(theta))
+            ]
+            z = axial
+        else:
+            x = [
+                [(radius * math.cos(theta[row_index][col_index]) + dx_grid[row_index][col_index] * scale)
+                 for col_index in range(len(theta[row_index]))]
+                for row_index in range(len(theta))
+            ]
+            y = [
+                [(radius * math.sin(theta[row_index][col_index]) + dy_grid[row_index][col_index] * scale)
+                 for col_index in range(len(theta[row_index]))]
+                for row_index in range(len(theta))
+            ]
+            z = [
+                [(axial[row_index][col_index] + dz_grid[row_index][col_index] * scale)
+                 for col_index in range(len(axial[row_index]))]
+                for row_index in range(len(axial))
+            ]
+
         if show_plate:
             axis.plot_surface(
                 np.asarray(x),
                 np.asarray(y),
-                np.asarray(axial),
+                np.asarray(z),
                 facecolors=np.asarray(facecolors),
                 rstride=1,
                 cstride=1,
@@ -806,7 +831,7 @@ def _plot_visualization_surface(
         axis.set_zlabel("height [m]")
         if show_members:
             _plot_member_lines(axis, visualization, scale)
-        _set_3d_axes_limits(axis, x, y, axial)
+        _set_3d_axes_limits(axis, x, y, z)
         try:
             axis.view_init(elev=18.0, azim=-45.0)
         except Exception:
@@ -1819,7 +1844,7 @@ class RuntimeFEMWindow:
         self.nonlinear_max_iterations = tk.IntVar(value=25)
         self.nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.nonlinear_layers = tk.IntVar(value=5)
-        self.deformation_scale = tk.DoubleVar(value=0.0)
+        self.deformation_scale = tk.StringVar(value="0.0")
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
         self.custom_use_nullspace_projection = tk.BooleanVar(value=False)
@@ -3328,7 +3353,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--example",
         choices=("girder_panel", "cylinder"),
-        default="girder_panel",
+        default="cylinder",
         help="Standalone example to open. Default is the flat stiffened girder panel.",
     )
     args = parser.parse_args()
