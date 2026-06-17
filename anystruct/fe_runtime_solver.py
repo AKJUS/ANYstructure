@@ -702,7 +702,7 @@ def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, 
     return list((result.visualization or {}).get("buckling_modes") or [])
 
 
-def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str) -> tuple[dict[str, Any], str, bool]:
+def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, component: str = "von_mises_pa") -> tuple[dict[str, Any], str, bool]:
     if display_mode == "plastic":
         visualization = dict(result.visualization or {})
         if visualization.get("plastic_strain"):
@@ -710,6 +710,22 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str) -> t
             visualization["scalar_label"] = visualization.get("plastic_strain_label") or "equiv. engineering plastic strain [-]"
             visualization["scalar_kind"] = "raw"
             return visualization, "Engineering plastic strain", False
+            
+    def apply_component(vis: dict[str, Any], title: str) -> tuple[dict[str, Any], str]:
+        fields = vis.get("fields", {})
+        disps = vis.get("displacements", {})
+        if component == "plastic_strain" and vis.get("plastic_strain"):
+            vis["stress_pa"] = vis["plastic_strain"]
+            vis["scalar_label"] = vis.get("plastic_strain_label", "equiv. engineering plastic strain [-]")
+            vis["scalar_kind"] = "raw"
+        elif component in fields:
+            vis["stress_pa"] = fields[component]
+            vis["scalar_label"] = component.replace("_", " ")
+        elif component in disps:
+            vis["stress_pa"] = disps[component]
+            vis["scalar_label"] = component.replace("_", " ") + " [m]"
+        return vis, title
+
     if display_mode.startswith("mode:"):
         try:
             mode_number = int(display_mode.split(":", 1)[1])
@@ -719,8 +735,11 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str) -> t
             if int(mode.get("mode_number", -1)) == mode_number:
                 factor = _safe_float(mode.get("load_factor"))
                 title = "Buckling mode " + str(mode_number) + "  LF=" + str(round(factor, 4))
-                return dict(mode.get("shape") or {}), title, True
-    return dict(result.visualization or {}), "Static stress/displacement", False
+                vis, _ = apply_component(dict(mode.get("shape") or {}), title)
+                return vis, title, True
+                
+    vis, title = apply_component(dict(result.visualization or {}), "Static stress/displacement")
+    return vis, title, False
 
 
 def _plot_visualization_surface(
@@ -732,8 +751,9 @@ def _plot_visualization_surface(
     deformation_scale: float | None = None,
     show_plate: bool = True,
     show_members: bool = True,
+    component: str = "von_mises_pa",
 ) -> None:
-    visualization, title, is_mode = _selected_visualization(result, display_mode)
+    visualization, title, is_mode = _selected_visualization(result, display_mode, component)
     scalar_values = _plot_grid_values(visualization.get("stress_pa"))
     if is_mode:
         color_grid = scalar_values
@@ -742,8 +762,15 @@ def _plot_visualization_surface(
         color_grid = scalar_values
         colorbar_label = str(visualization.get("scalar_label") or "value")
     else:
-        color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
-        colorbar_label = "stress [MPa]"
+        if component.endswith("_pa"):
+            color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
+            colorbar_label = str(visualization.get("scalar_label", "stress")).replace("_pa", "") + " [MPa]"
+        elif "disp" in component:
+            color_grid = [[value * 1000.0 for value in row] for row in scalar_values]
+            colorbar_label = str(visualization.get("scalar_label", "displacement")).replace(" [m]", " [mm]")
+        else:
+            color_grid = scalar_values
+            colorbar_label = str(visualization.get("scalar_label", component))
     facecolors, norm, cmap = _surface_facecolors(color_grid)
     scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
 
@@ -821,6 +848,7 @@ def create_runtime_fem_result_figure(
     deformation_scale: float | None = None,
     show_plate: bool = True,
     show_members: bool = True,
+    component: str = "von_mises_pa",
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
@@ -835,7 +863,7 @@ def create_runtime_fem_result_figure(
         geometry_ax.set_ylabel("width/radius [m]")
         geometry_ax.set_zlabel("displacement")
     else:
-        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale, show_plate=show_plate, show_members=show_members)
+        _plot_visualization_surface(figure, geometry_ax, geometry, result, display_mode, deformation_scale, show_plate=show_plate, show_members=show_members, component=component)
 
     figure.tight_layout()
     return figure
@@ -1835,8 +1863,23 @@ class RuntimeFEMWindow:
         self.memory_limit_mb = tk.DoubleVar(value=0.0)
         self.capacity_buckling_mode_number = tk.IntVar(value=1)
         self.capacity_mesh_min_elements_per_half_wave = tk.IntVar(value=4)
-        self.display_choice = tk.StringVar(value="Static displacement/stress")
-        self.display_mode_labels: dict[str, str] = {"Static displacement/stress": "static"}
+        self.result_case_choice = tk.StringVar(value="Static displacement/stress")
+        self.result_case_labels: dict[str, str] = {"Static displacement/stress": "static"}
+        self.component_choice = tk.StringVar(value="von_mises_pa")
+        self.component_labels: dict[str, str] = {
+            "Stress von Mises": "von_mises_pa",
+            "Displacement Magnitude": "disp_mag",
+            "Displacement X": "disp_x",
+            "Displacement Y": "disp_y",
+            "Displacement Z": "disp_z",
+            "Stress X (membrane)": "stress_x_membrane_pa",
+            "Stress Y (membrane)": "stress_y_membrane_pa",
+            "Stress XY (membrane)": "stress_xy_membrane_pa",
+            "Strain X (membrane)": "strain_x_membrane",
+            "Strain Y (membrane)": "strain_y_membrane",
+            "Strain XY (membrane)": "strain_xy_membrane",
+            "Equivalent Plastic Strain": "plastic_strain",
+        }
         self.current_result: RuntimeFEMRunResult | None = None
         self.result_text = None
         self.figure_canvas = None
@@ -1844,7 +1887,8 @@ class RuntimeFEMWindow:
         self.figure_toolbar_frame = None
         self.preview_canvas = None
         self.figure_parent = None
-        self.display_selector = None
+        self.result_case_selector = None
+        self.component_selector = None
         self.run_button = None
         self.progress_bar = None
         self.result_canvas = None
@@ -2116,7 +2160,7 @@ class RuntimeFEMWindow:
             "runtime_solver",
             "Runtime path",
             self.runtime_solver,
-            ("stepwise", "ANYintelligent capacity workflow"),
+            ("stepwise", "static only", "nonlinear static", "ANYintelligent capacity workflow"),
         )
         self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order, ("S4", "S8"))
         self._add_option_row(
@@ -2246,16 +2290,27 @@ class RuntimeFEMWindow:
         selector_bar = ttk.Frame(plot_holder)
         selector_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
         self._info_button(selector_bar, "display_choice").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Label(selector_bar, text="Display").pack(side=tk.LEFT, padx=(0, 6))
-        self.display_selector = ttk.Combobox(
+        ttk.Label(selector_bar, text="Result Case:").pack(side=tk.LEFT, padx=(0, 6))
+        self.result_case_selector = ttk.Combobox(
             selector_bar,
-            textvariable=self.display_choice,
+            textvariable=self.result_case_choice,
             state="readonly",
-            values=tuple(self.display_mode_labels),
-            width=34,
+            values=tuple(self.result_case_labels),
+            width=20,
         )
-        self.display_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.display_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
+        self.result_case_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.result_case_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
+        
+        ttk.Label(selector_bar, text=" Component:").pack(side=tk.LEFT, padx=(6, 6))
+        self.component_selector = ttk.Combobox(
+            selector_bar,
+            textvariable=self.component_choice,
+            state="readonly",
+            values=tuple(self.component_labels.keys()),
+            width=26,
+        )
+        self.component_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.component_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure())
         self.interactive_3d_checkbox = ttk.Checkbutton(
             selector_bar,
             text="Interactive 3D",
@@ -2459,7 +2514,10 @@ class RuntimeFEMWindow:
             pass
 
     def _selected_display_mode(self) -> str:
-        return self.display_mode_labels.get(str(self.display_choice.get()), "static")
+        return self.result_case_labels.get(str(self.result_case_choice.get()), "static")
+        
+    def _selected_component(self) -> str:
+        return self.component_labels.get(str(self.component_choice.get()), "von_mises_pa")
 
     def _set_display_modes(self, result: RuntimeFEMRunResult) -> None:
         labels = {"Static displacement/stress": "static"}
@@ -2470,10 +2528,10 @@ class RuntimeFEMWindow:
             load_factor = _safe_float(mode.get("load_factor"))
             label = "Mode " + str(mode_number) + "  LF " + str(round(load_factor, 4))
             labels[label] = "mode:" + str(mode_number)
-        self.display_mode_labels = labels
-        self.display_choice.set("Static displacement/stress")
-        if self.display_selector is not None:
-            self.display_selector.configure(values=tuple(labels))
+        self.result_case_labels = labels
+        self.result_case_choice.set("Static displacement/stress")
+        if self.result_case_selector is not None:
+            self.result_case_selector.configure(values=tuple(labels))
 
     def _get_shell_normal(self, p: np.ndarray, is_cylinder: bool) -> np.ndarray:
         if is_cylinder:
@@ -2651,8 +2709,9 @@ class RuntimeFEMWindow:
         geometry = result.summary
         display_mode = self._selected_display_mode()
         deformation_scale = max(_safe_float(self.deformation_scale.get(), 0.0), 0.0)
+        component = self._selected_component()
         
-        visualization, title, is_mode = _selected_visualization(result, display_mode)
+        visualization, title, is_mode = _selected_visualization(result, display_mode, component)
         
         scalar_values = _plot_grid_values(visualization.get("stress_pa"))
         if is_mode:
@@ -2960,6 +3019,7 @@ class RuntimeFEMWindow:
                     max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
                     show_plate=self.show_plate_vis.get(),
                     show_members=self.show_members_vis.get(),
+                    component=self._selected_component(),
                 ),
                 self.figure_parent,
             )

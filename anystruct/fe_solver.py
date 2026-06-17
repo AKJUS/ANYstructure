@@ -9,6 +9,7 @@ without changing the GUI handoff.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import collections
 import math
 
 import numpy as np
@@ -1292,22 +1293,57 @@ def build_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     return _flat_generated_geometry(geometry, config)
 
 
-def _nodal_von_mises(model, displacements: np.ndarray) -> dict[int, float]:
-    if _backend_compute_stresses is None or displacements is None:
+def _nodal_scalar_fields(model, stresses_by_element: dict[int, object]) -> dict[str, dict[int, float]]:
+    if not stresses_by_element:
         return {}
-    stresses_by_element = _backend_compute_stresses(model, displacements)
-    sums: dict[int, float] = {}
-    counts: dict[int, int] = {}
+    
+    field_mapping = {
+        "von_mises_pa": ("von_mises", "von_mises"),
+        "stress_x_membrane_pa": ("membrane_xx", "axial_stress"),
+        "stress_y_membrane_pa": ("membrane_yy", None),
+        "stress_xy_membrane_pa": ("membrane_xy", None),
+        "strain_x_membrane": ("membrane_strain_xx", "axial_strain"),
+        "strain_y_membrane": ("membrane_strain_yy", None),
+        "strain_xy_membrane": ("membrane_strain_xy", None),
+    }
+
+    sums = {k: collections.defaultdict(float) for k in field_mapping}
+    counts = {k: collections.defaultdict(int) for k in field_mapping}
+
     for element_id, stress in stresses_by_element.items():
-        element = model.mesh.get_element(element_id)
-        if element is None or "von_mises" not in stress:
+        element = model.mesh.elements.get(element_id)
+        if element is None:
             continue
-        value = float(np.mean(np.asarray(stress["von_mises"], dtype=float)))
-        for node_id in getattr(element, "node_ids", []):
-            node_id = int(node_id)
-            sums[node_id] = sums.get(node_id, 0.0) + value
-            counts[node_id] = counts.get(node_id, 0) + 1
-    return {node_id: sums[node_id] / max(counts[node_id], 1) for node_id in sums}
+            
+        is_beam = type(element).__name__ == "BeamElement"
+        node_ids = element.node_ids
+        
+        for field_name, (shell_key, beam_key) in field_mapping.items():
+            key = beam_key if is_beam else shell_key
+            if key is None or key not in stress:
+                continue
+                
+            val = stress[key]
+            if isinstance(val, (list, tuple)):
+                value = sum(val) / len(val)
+            elif hasattr(val, "size") and val.size > 0:
+                value = float(val.sum()) / val.size
+            else:
+                value = float(val)
+            
+            s_dict = sums[field_name]
+            c_dict = counts[field_name]
+            for node_id in node_ids:
+                nid = int(node_id)
+                s_dict[nid] += value
+                c_dict[nid] += 1
+                
+    result = {}
+    for field_name, s_dict in sums.items():
+        c_dict = counts[field_name]
+        if s_dict:
+            result[field_name] = {nid: total / c_dict[nid] for nid, total in s_dict.items()}
+    return result
 
 
 def _nodal_engineering_plastic_strain(model, element_states: dict[int, object] | None) -> dict[int, float]:
@@ -1332,10 +1368,18 @@ def _nodal_engineering_plastic_strain(model, element_states: dict[int, object] |
     return values
 
 
-def _visualization_member_lines(generated_geometry: dict, model, displacements: np.ndarray) -> tuple[dict[str, object], ...]:
+def _visualization_member_lines(
+    generated_geometry: dict,
+    model,
+    displacements: np.ndarray,
+    stresses_by_element: dict[int, object] | None = None,
+) -> tuple[dict[str, object], ...]:
     lines: list[dict[str, object]] = []
     if displacements is None:
         return ()
+        
+    stresses = stresses_by_element or {}
+    
     for beam in generated_geometry.get("beams", []) or []:
         node_ids = [int(node_id) for node_id in beam.get("node_ids", [])]
         if len(node_ids) < 2:
@@ -1361,9 +1405,7 @@ def _visualization_member_lines(generated_geometry: dict, model, displacements: 
             try:
                 element = model.mesh.get_element(int(element_id))
                 if element is not None:
-                    mat_name = getattr(element, "material_name", "default")
-                    material = model.materials.get(mat_name, model.materials.get("default"))
-                    beam_stresses = element.compute_stresses(model.mesh, displacements, material)
+                    beam_stresses = stresses.get(int(element_id)) or {}
                     c_y, c_z = element._fiber_distances()
             except Exception:
                 pass
@@ -1385,13 +1427,13 @@ def _visualization_member_lines(generated_geometry: dict, model, displacements: 
                 "c_z": float(c_z),
                 "eccentricity": float((beam.get("section") or {}).get("eccentricity_m") or 0.0),
                 # Include stress component results
-                "axial_stress": float(beam_stresses.get("axial_stress", 0.0)),
-                "bending_stress_y": float(beam_stresses.get("bending_stress_y", 0.0)),
-                "bending_stress_z": float(beam_stresses.get("bending_stress_z", 0.0)),
-                "shear_stress_y": float(beam_stresses.get("shear_stress_y", 0.0)),
-                "shear_stress_z": float(beam_stresses.get("shear_stress_z", 0.0)),
-                "torsional_stress": float(beam_stresses.get("torsional_stress", 0.0)),
-                "von_mises": float(beam_stresses.get("von_mises", 0.0)),
+                "axial_stress": float(beam_stresses.get("axial_stress", 0.0) if hasattr(beam_stresses.get("axial_stress"), "real") else (beam_stresses.get("axial_stress", [0.0])[0] if beam_stresses.get("axial_stress") is not None else 0.0)),
+                "bending_stress_y": float(beam_stresses.get("bending_stress_y", 0.0) if hasattr(beam_stresses.get("bending_stress_y"), "real") else (beam_stresses.get("bending_stress_y", [0.0])[0] if beam_stresses.get("bending_stress_y") is not None else 0.0)),
+                "bending_stress_z": float(beam_stresses.get("bending_stress_z", 0.0) if hasattr(beam_stresses.get("bending_stress_z"), "real") else (beam_stresses.get("bending_stress_z", [0.0])[0] if beam_stresses.get("bending_stress_z") is not None else 0.0)),
+                "shear_stress_y": float(beam_stresses.get("shear_stress_y", 0.0) if hasattr(beam_stresses.get("shear_stress_y"), "real") else (beam_stresses.get("shear_stress_y", [0.0])[0] if beam_stresses.get("shear_stress_y") is not None else 0.0)),
+                "shear_stress_z": float(beam_stresses.get("shear_stress_z", 0.0) if hasattr(beam_stresses.get("shear_stress_z"), "real") else (beam_stresses.get("shear_stress_z", [0.0])[0] if beam_stresses.get("shear_stress_z") is not None else 0.0)),
+                "torsional_stress": float(beam_stresses.get("torsional_stress", 0.0) if hasattr(beam_stresses.get("torsional_stress"), "real") else (beam_stresses.get("torsional_stress", [0.0])[0] if beam_stresses.get("torsional_stress") is not None else 0.0)),
+                "von_mises": float(beam_stresses.get("von_mises", 0.0) if hasattr(beam_stresses.get("von_mises"), "real") else (beam_stresses.get("von_mises", [0.0])[0] if beam_stresses.get("von_mises") is not None else 0.0)),
             }
         )
     return tuple(lines)
@@ -1405,81 +1447,122 @@ def _visualization_from_full_result(
     scalar_label: str = "stress [Pa]",
 ) -> dict[str, object]:
     grid = generated_geometry.get("plot_grid") or []
-    scalar_by_node = _nodal_von_mises(model, displacements) if scalar_by_node is None else scalar_by_node
     if not grid or displacements is None:
         return {}
 
-    if generated_geometry.get("plot_type") == "cylinder":
-        radius = _positive(generated_geometry.get("radius_m", 1.0), 1.0)
-        axial_grid = []
-        theta_grid = []
-        radial_grid = []
-        stress_grid = []
+    stresses_by_element = {}
+    if _backend_compute_stresses is not None:
+        stresses_by_element = _backend_compute_stresses(model, displacements)
+
+    fields = _nodal_scalar_fields(model, stresses_by_element)
+    if scalar_by_node is not None:
+        fields["custom_scalar"] = scalar_by_node
+
+    is_cylinder = generated_geometry.get("plot_type") == "cylinder"
+    radius = _positive(generated_geometry.get("radius_m", 1.0), 1.0) if is_cylinder else 0.0
+
+    x_grid, y_grid, w_grid = [], [], []
+    disp_grids = {"disp_x": [], "disp_y": [], "disp_z": [], "disp_mag": []}
+    field_grids = {k: [] for k in fields}
+    
+    get_node = model.mesh.get_node
+
+    if is_cylinder:
         for row in grid:
-            axial_row = []
-            theta_row = []
-            radial_row = []
-            stress_row = []
+            x_row, y_row, w_row = [], [], []
+            dx_row, dy_row, dz_row, dmag_row = [], [], [], []
+            f_rows = {k: [] for k in fields}
+            
             for node_id in row:
-                node = model.mesh.get_node(int(node_id))
+                nid = int(node_id)
+                node = get_node(nid)
                 if node is None:
                     continue
-                x = float(node.x)
-                y = float(node.y)
-                theta = math.atan2(y, x)
-                radial = np.array([math.cos(theta), math.sin(theta), 0.0], dtype=float)
-                translation = np.asarray(displacements[node.dofs[:3]], dtype=float)
-                radial_displacement = float(translation @ radial)
-                axial_row.append(float(node.z))
-                theta_row.append(theta if theta >= 0.0 else theta + 2.0 * math.pi)
-                radial_row.append(radial_displacement)
-                stress_row.append(float(scalar_by_node.get(int(node_id), abs(radial_displacement))))
-            axial_grid.append(tuple(axial_row))
-            theta_grid.append(tuple(theta_row))
-            radial_grid.append(tuple(radial_row))
-            stress_grid.append(tuple(stress_row))
-        return {
-            "type": "cylinder",
-            "radius_m": radius,
-            "axial_m": tuple(axial_grid),
-            "theta_rad": tuple(theta_grid),
-            "radial_displacement_m": tuple(radial_grid),
-            "stress_pa": tuple(stress_grid),
-            "scalar_label": scalar_label,
-            "member_lines": _visualization_member_lines(generated_geometry, model, displacements),
-        }
+                
+                dofs = node.dofs
+                dx = float(displacements[dofs[0]])
+                dy = float(displacements[dofs[1]])
+                dz = float(displacements[dofs[2]])
+                dmag = math.sqrt(dx*dx + dy*dy + dz*dz)
+                
+                nx, ny, nz = float(node.x), float(node.y), float(node.z)
+                theta = math.atan2(ny, nx)
+                rad_disp = dx * math.cos(theta) + dy * math.sin(theta)
+                
+                x_row.append(nz)
+                y_row.append(theta if theta >= 0.0 else theta + 2.0 * math.pi)
+                w_row.append(rad_disp)
+                
+                dx_row.append(dx)
+                dy_row.append(dy)
+                dz_row.append(dz)
+                dmag_row.append(dmag)
+                
+                for k, field_dict in fields.items():
+                    f_rows[k].append(float(field_dict.get(nid, abs(rad_disp))))
+                    
+            x_grid.append(tuple(x_row))
+            y_grid.append(tuple(y_row))
+            w_grid.append(tuple(w_row))
+            disp_grids["disp_x"].append(tuple(dx_row))
+            disp_grids["disp_y"].append(tuple(dy_row))
+            disp_grids["disp_z"].append(tuple(dz_row))
+            disp_grids["disp_mag"].append(tuple(dmag_row))
+            for k, row_list in f_rows.items():
+                field_grids[k].append(tuple(row_list))
+    else:
+        for row in grid:
+            x_row, y_row, w_row = [], [], []
+            dx_row, dy_row, dz_row, dmag_row = [], [], [], []
+            f_rows = {k: [] for k in fields}
+            
+            for node_id in row:
+                nid = int(node_id)
+                node = get_node(nid)
+                if node is None:
+                    continue
+                
+                dofs = node.dofs
+                dx = float(displacements[dofs[0]])
+                dy = float(displacements[dofs[1]])
+                dz = float(displacements[dofs[2]])
+                dmag = math.sqrt(dx*dx + dy*dy + dz*dz)
+                
+                x_row.append(float(node.x))
+                y_row.append(float(node.y))
+                w_row.append(dz)
+                
+                dx_row.append(dx)
+                dy_row.append(dy)
+                dz_row.append(dz)
+                dmag_row.append(dmag)
+                
+                for k, field_dict in fields.items():
+                    f_rows[k].append(float(field_dict.get(nid, abs(dz))))
+                    
+            x_grid.append(tuple(x_row))
+            y_grid.append(tuple(y_row))
+            w_grid.append(tuple(w_row))
+            disp_grids["disp_x"].append(tuple(dx_row))
+            disp_grids["disp_y"].append(tuple(dy_row))
+            disp_grids["disp_z"].append(tuple(dz_row))
+            disp_grids["disp_mag"].append(tuple(dmag_row))
+            for k, row_list in f_rows.items():
+                field_grids[k].append(tuple(row_list))
 
-    x_grid = []
-    y_grid = []
-    w_grid = []
-    stress_grid = []
-    for row in grid:
-        x_row = []
-        y_row = []
-        w_row = []
-        stress_row = []
-        for node_id in row:
-            node = model.mesh.get_node(int(node_id))
-            if node is None:
-                continue
-            x_row.append(float(node.x))
-            y_row.append(float(node.y))
-            w = float(displacements[node.dofs[2]])
-            w_row.append(w)
-            stress_row.append(float(scalar_by_node.get(int(node_id), abs(w))))
-        x_grid.append(tuple(x_row))
-        y_grid.append(tuple(y_row))
-        w_grid.append(tuple(w_row))
-        stress_grid.append(tuple(stress_row))
-    return {
-        "type": "flat",
-        "x_m": tuple(x_grid),
-        "y_m": tuple(y_grid),
-        "w_m": tuple(w_grid),
-        "stress_pa": tuple(stress_grid),
+    result = {
+        "type": "cylinder" if is_cylinder else "flat",
+        "radius_m": radius,
+        "x_m" if not is_cylinder else "axial_m": tuple(x_grid),
+        "y_m" if not is_cylinder else "theta_rad": tuple(y_grid),
+        "w_m" if not is_cylinder else "radial_displacement_m": tuple(w_grid),
+        "displacements": {k: tuple(v) for k, v in disp_grids.items()},
+        "fields": {k: tuple(v) for k, v in field_grids.items()},
+        "stress_pa": tuple(field_grids.get("custom_scalar", field_grids.get("von_mises_pa", w_grid))),
         "scalar_label": scalar_label,
-        "member_lines": _visualization_member_lines(generated_geometry, model, displacements),
+        "member_lines": _visualization_member_lines(generated_geometry, model, displacements, stresses_by_element),
     }
+    return result
 
 
 def _buckling_mode_visualizations(generated_geometry: dict, model, buckling_result) -> tuple[dict[str, object], ...]:
@@ -1655,8 +1738,16 @@ def _wants_nonlinear_buckling(config: LightweightFEMConfig) -> bool:
     }
 
 
+def _wants_eigenvalue_buckling(config: LightweightFEMConfig) -> bool:
+    choice = _normalized_choice(config.runtime_solver, "stepwise")
+    return choice not in {"static only", "nonlinear static"}
+
+
 def _wants_static_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
     choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
+    runtime = _normalized_choice(config.runtime_solver, "stepwise")
+    if runtime == "nonlinear static":
+        return True
     return choice in {
         "geometric nonlinear static",
         "material nonlinear static",
@@ -2317,6 +2408,12 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
         )
 
     static_status = str((solver_info.get("convergence_info") or {}).get("status", "unknown"))
+    
+    # Extract the backend name from convergence_info -> backend -> backend
+    backend_info = (solver_info.get("convergence_info") or {}).get("backend") or {}
+    backend_name = str(backend_info.get("backend", "unknown backend"))
+    diagnostics.append(f"Linear solver backend used: {backend_name}")
+
     if static_status != "converged":
         diagnostics.append("Static solve status: " + static_status)
         return LightweightFEMResult(
@@ -2540,8 +2637,16 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig) -> Lightwei
     buckling_kwargs = _buckling_solver_kwargs(config)
     if capacity_workflow_result is not None:
         buckling_result = capacity_workflow_result.buckling_result
-    else:
+    elif _wants_eigenvalue_buckling(config):
         buckling_result = _backend_solve_buckling(model, prestress_states, num_modes=int(config.num_buckling_modes), **buckling_kwargs)
+    else:
+        # Dummy result if buckling is explicitly skipped by runtime path
+        class DummyBucklingResult:
+            modes = ()
+            failed = False
+            status = "skipped by runtime path"
+            diagnostics = ()
+        buckling_result = DummyBucklingResult()
     if not buckling_result.modes and geometry.get("geometry") == "cylinder" and abs(float(effective_pressure)) > 0.0:
         pressure_states = _cylinder_pressure_prestress_states(
             model,

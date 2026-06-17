@@ -19,6 +19,24 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import LinearOperator, splu
 
+try:
+    from pypardiso import PyPardisoSolver
+    _HAS_PYPARDISO = True
+except ImportError:
+    _HAS_PYPARDISO = False
+
+try:
+    from numba import njit, prange
+    _HAS_NUMBA = True
+except ImportError:
+    def njit(*args, **kwargs):
+        def wrapper(func):
+            return func
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return wrapper
+    prange = range
+    _HAS_NUMBA = False
 
 class MatrixClass(str, Enum):
     """Declared numerical class of a sparse matrix."""
@@ -111,7 +129,56 @@ class SparseSolverBackend:
         )
 
 
-DEFAULT_BACKEND = SparseSolverBackend()
+class PyPardisoSolverBackend:
+    """Intel MKL PARDISO backend using pypardiso."""
+
+    name = "pypardiso"
+
+    def factorize(
+        self,
+        matrix: sparse.spmatrix,
+        matrix_class: MatrixClass,
+        *,
+        signature: Optional[str] = None,
+        options: Optional[Mapping[str, Any]] = None,
+    ) -> FactorizationHandle:
+        start = time.time()
+        try:
+            csc = sparse.csc_matrix(matrix)
+            
+            class PyPardisoWrapper:
+                def __init__(self, mat):
+                    self.ps = PyPardisoSolver()
+                    self.mat = mat
+                    self.ps.factorize(self.mat)
+                def solve(self, rhs):
+                    return self.ps.solve(self.mat, rhs)
+
+            wrapper = PyPardisoWrapper(csc)
+            
+        except Exception as exc:
+            return FactorizationHandle(
+                matrix_shape=tuple(int(v) for v in matrix.shape),
+                matrix_class=matrix_class,
+                backend_name=self.name,
+                ordering="MKL PARDISO",
+                signature=signature,
+                factorization_time=time.time() - start,
+                status="failed",
+                failure_reason=str(exc),
+            )
+        return FactorizationHandle(
+            matrix_shape=tuple(int(v) for v in matrix.shape),
+            matrix_class=matrix_class,
+            backend_name=self.name,
+            ordering="MKL PARDISO",
+            signature=signature,
+            factorization_time=time.time() - start,
+            _solver=wrapper,
+        )
+
+
+DEFAULT_BACKEND = PyPardisoSolverBackend() if _HAS_PYPARDISO else SparseSolverBackend()
 
 
 def _options_signature(options: Optional[Mapping[str, Any]]) -> str:

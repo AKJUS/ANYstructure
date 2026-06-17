@@ -1170,6 +1170,14 @@ class ShellElement(Element):
             "shear_xz": np.zeros(num_ip),
             "shear_yz": np.zeros(num_ip),
             "von_mises": np.zeros(num_ip),
+            "membrane_strain_xx": np.zeros(num_ip),
+            "membrane_strain_yy": np.zeros(num_ip),
+            "membrane_strain_xy": np.zeros(num_ip),
+            "curvature_xx": np.zeros(num_ip),
+            "curvature_yy": np.zeros(num_ip),
+            "curvature_xy": np.zeros(num_ip),
+            "shear_strain_xz": np.zeros(num_ip),
+            "shear_strain_yz": np.zeros(num_ip),
         }
         if return_global:
             stresses.update({
@@ -1229,6 +1237,14 @@ class ShellElement(Element):
             stresses["membrane_xx"][idx] = sigma_m[0]
             stresses["membrane_yy"][idx] = sigma_m[1]
             stresses["membrane_xy"][idx] = sigma_m[2]
+            stresses["membrane_strain_xx"][idx] = membrane_strain[0]
+            stresses["membrane_strain_yy"][idx] = membrane_strain[1]
+            stresses["membrane_strain_xy"][idx] = membrane_strain[2]
+            stresses["curvature_xx"][idx] = curvature[0]
+            stresses["curvature_yy"][idx] = curvature[1]
+            stresses["curvature_xy"][idx] = curvature[2]
+            stresses["shear_strain_xz"][idx] = shear_strain[0]
+            stresses["shear_strain_yz"][idx] = shear_strain[1]
             stresses["bending_xx"][idx] = sigma_b[0]
             stresses["bending_yy"][idx] = sigma_b[1]
             stresses["bending_xy"][idx] = sigma_b[2]
@@ -1883,6 +1899,11 @@ class BeamElement(Element):
             "shear_stress_z": tau_z,
             "torsional_stress": tau_torsion,
             "von_mises": von_mises,
+            "axial_strain": (u2 - u1) / L,
+            "curvature_y": kappa_y,
+            "curvature_z": kappa_z,
+            "shear_strain_y": gamma_xy,
+            "shear_strain_z": gamma_xz,
         }
 
 
