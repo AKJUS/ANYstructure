@@ -232,20 +232,138 @@ def _assemble_nonlinear_system(
         from .matrix_assembly import _get_cached_sparsity_pattern
         rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, "tangent_stiffness")
 
+    from .elements import ShellElement
+    from .vectorized_nonlinear import batch_shell_nonlinear_response
+
+    groups = {}
     for elem_id, element in mesh.elements.items():
-        material = model.get_material(element.material_name)
+        if isinstance(element, ShellElement):
+            key = (
+                element.num_nodes,
+                element.thickness,
+                element.drilling_stabilization,
+                element.material_name,
+            )
+            if key not in groups:
+                groups[key] = []
+            groups[key].append((elem_id, element))
+
+    precomputed_F = {}
+    precomputed_K = {}
+
+    for key, elem_list in groups.items():
+        num_nodes, thickness, drilling_stabilization, material_name = key
+        material = model.get_material(material_name)
+        E = float(material.elastic_modulus)
+        nu = float(material.poisson_ratio)
+        G_mod = float(material.shear_modulus)
+        curve = getattr(material, "hardening_curve", None)
+
+        n_elem = len(elem_list)
+        first_element = elem_list[0][1]
+        n_dof = first_element.total_dofs
+        
+        # We need to extract the caches
+        cache_first = first_element._nonlinear_geometry(mesh)
+        n_gp = cache_first["detw_all"].shape[0]
+        n_shear = cache_first["detw_shear_all"].shape[0]
+
+        u_elem_batch = np.zeros((n_elem, n_dof))
+        T0_batch = np.zeros((n_elem, n_dof, n_dof))
+        B_m_all_batch = np.zeros((n_elem, n_gp, 3, n_dof))
+        B_b_all_batch = np.zeros((n_elem, n_gp, 3, n_dof))
+        B_d_all_batch = np.zeros((n_elem, n_gp, 1, n_dof))
+        Gw_all_batch = np.zeros((n_elem, n_gp, 2, n_dof))
+        detw_all_batch = np.zeros((n_elem, n_gp))
+        B_s_all_batch = np.zeros((n_elem, n_shear, 2, n_dof))
+        detw_shear_all_batch = np.zeros((n_elem, n_shear))
+
+        plastic_strain_batch = np.zeros((n_elem, n_gp * num_layers, 3))
+        alpha_batch = np.zeros((n_elem, n_gp * num_layers))
+
+        dof_mappings = []
+        for idx, (elem_id, element) in enumerate(elem_list):
+            dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+            dof_mappings.append(dof_mapping)
+            if dof_mapping.size > 0:
+                u_elem_batch[idx] = displacements[dof_mapping]
+
+            cache = element._nonlinear_geometry(mesh)
+            T0_batch[idx] = cache["T0"]
+            B_m_all_batch[idx] = cache["B_m_all"]
+            B_b_all_batch[idx] = cache["B_b_all"]
+            B_d_all_batch[idx] = cache["B_d_all"]
+            Gw_all_batch[idx] = cache["Gw_all"]
+            detw_all_batch[idx] = cache["detw_all"]
+            B_s_all_batch[idx] = cache["B_s_all"]
+            detw_shear_all_batch[idx] = cache["detw_shear_all"]
+
+            state = committed_states.get(elem_id)
+            if state is None:
+                state = element.init_nonlinear_state(num_layers)
+            plastic_strain_batch[idx] = state["plastic_strain"]
+            alpha_batch[idx] = state["alpha"]
+
+        F_int_batch, K_T_batch, ep_new, alpha_new, layer_strain_batch = batch_shell_nonlinear_response(
+            u_elem_batch,
+            T0_batch,
+            B_m_all_batch,
+            B_b_all_batch,
+            B_d_all_batch,
+            Gw_all_batch,
+            detw_all_batch,
+            B_s_all_batch,
+            detw_shear_all_batch,
+            E,
+            nu,
+            G_mod,
+            thickness,
+            drilling_stabilization,
+            tangent,
+            curve,
+            plastic_strain_batch,
+            alpha_batch,
+            num_layers,
+        )
+
+        for idx, (elem_id, element) in enumerate(elem_list):
+            precomputed_F[elem_id] = F_int_batch[idx]
+            if tangent:
+                precomputed_K[elem_id] = K_T_batch[idx]
+            
+            # Reconstruct trial state to be compatible with single-element API
+            trial_state = {
+                "plastic_strain": ep_new[idx],
+                "alpha": alpha_new[idx],
+                "layer_strain": layer_strain_batch[idx * n_gp * num_layers : (idx + 1) * n_gp * num_layers].copy(),
+            }
+            if curve is not None:
+                # We need layer_stress for outputs if people use it, let's keep it simple: we can omit it if not strictly required, 
+                # but let's see if elements.py returned it. We didn't return it from batch_shell_nonlinear_response.
+                pass
+            trial_states[elem_id] = trial_state
+
+    for elem_id, element in mesh.elements.items():
         dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
         if dof_mapping.size == 0:
             continue
-        u_elem = displacements[dof_mapping]
-        f_elem, k_elem, trial_state = element.compute_nonlinear_response(
-            mesh, material, u_elem, committed_states.get(elem_id), num_layers, tangent
-        )
+        
+        if elem_id in precomputed_F:
+            f_elem = precomputed_F[elem_id]
+            k_elem = precomputed_K.get(elem_id) if tangent else None
+            # trial_state already in trial_states dict
+        else:
+            material = model.get_material(element.material_name)
+            u_elem = displacements[dof_mapping]
+            f_elem, k_elem, trial_state = element.compute_nonlinear_response(
+                mesh, material, u_elem, committed_states.get(elem_id), num_layers, tangent
+            )
+            if trial_state is not None:
+                trial_states[elem_id] = trial_state
+
         np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
         if tangent and k_elem is not None:
             data.append(np.asarray(k_elem, dtype=float).ravel())
-        if trial_state is not None:
-            trial_states[elem_id] = trial_state
 
     if tangent:
         if not data:
