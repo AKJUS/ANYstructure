@@ -214,58 +214,29 @@ def _local_dof_index(dof: Union[str, int]) -> int:
     return index
 
 
-@dataclass
-class NonlinearBatchGroup:
-    E: float
-    nu: float
-    G_mod: float
-    thickness: float
-    drilling_stabilization: float
-    curve: Optional[np.ndarray]
-    n_elem: int
-    n_dof: int
-    n_gp: int
-    num_layers: int
-    n_shear: int
-    dof_mappings: np.ndarray
-    elem_ids: np.ndarray
-    T0_batch: np.ndarray
-    B_m_all_batch: np.ndarray
-    B_b_all_batch: np.ndarray
-    B_d_all_batch: np.ndarray
-    Gw_all_batch: np.ndarray
-    detw_all_batch: np.ndarray
-    B_s_all_batch: np.ndarray
-    detw_shear_all_batch: np.ndarray
-
-@dataclass
-class NonlinearSolverCache:
-    shell_batches: List[NonlinearBatchGroup]
-    fallback_elements: List[Tuple[int, Any, np.ndarray, Any]]
-    rows_concat: np.ndarray
-    cols_concat: np.ndarray
-    total_dofs: int
-    element_order: List[int]
-
-def _build_nonlinear_cache(model: "FEModel", num_layers: int) -> NonlinearSolverCache:
+def _assemble_nonlinear_system(
+    model: "FEModel",
+    displacements: np.ndarray,
+    committed_states: Dict[int, Any],
+    num_layers: int,
+    tangent: bool = True,
+) -> Tuple[np.ndarray, Any, Dict[int, Any]]:
+    """Assemble F_int (and the tangent K_T when requested) at a state."""
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
-    element_order = list(mesh.elements.keys())
-    
-    from .matrix_assembly import _get_cached_sparsity_pattern
-    rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, "tangent_stiffness")
-    
+    F_int = np.zeros(total_dofs, dtype=float)
+    data: list = []
+    trial_states: Dict[int, Any] = {}
+
+    if tangent:
+        from .matrix_assembly import _get_cached_sparsity_pattern
+        rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, "tangent_stiffness")
+
     from .elements import ShellElement
+    from .vectorized_nonlinear import batch_shell_nonlinear_response
 
     groups = {}
-    fallback_elements = []
-    
-    for elem_id in element_order:
-        element = mesh.elements[elem_id]
-        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
-        if dof_mapping.size == 0:
-            continue
-            
+    for elem_id, element in mesh.elements.items():
         if isinstance(element, ShellElement):
             key = (
                 element.num_nodes,
@@ -275,12 +246,11 @@ def _build_nonlinear_cache(model: "FEModel", num_layers: int) -> NonlinearSolver
             )
             if key not in groups:
                 groups[key] = []
-            groups[key].append((elem_id, element, dof_mapping))
-        else:
-            material = model.get_material(element.material_name)
-            fallback_elements.append((elem_id, element, dof_mapping, material))
+            groups[key].append((elem_id, element))
 
-    shell_batches = []
+    precomputed_F = {}
+    precomputed_K = {}
+
     for key, elem_list in groups.items():
         num_nodes, thickness, drilling_stabilization, material_name = key
         material = model.get_material(material_name)
@@ -293,10 +263,12 @@ def _build_nonlinear_cache(model: "FEModel", num_layers: int) -> NonlinearSolver
         first_element = elem_list[0][1]
         n_dof = first_element.total_dofs
         
+        # We need to extract the caches
         cache_first = first_element._nonlinear_geometry(mesh)
         n_gp = cache_first["detw_all"].shape[0]
         n_shear = cache_first["detw_shear_all"].shape[0]
 
+        u_elem_batch = np.zeros((n_elem, n_dof))
         T0_batch = np.zeros((n_elem, n_dof, n_dof))
         B_m_all_batch = np.zeros((n_elem, n_gp, 3, n_dof))
         B_b_all_batch = np.zeros((n_elem, n_gp, 3, n_dof))
@@ -305,13 +277,16 @@ def _build_nonlinear_cache(model: "FEModel", num_layers: int) -> NonlinearSolver
         detw_all_batch = np.zeros((n_elem, n_gp))
         B_s_all_batch = np.zeros((n_elem, n_shear, 2, n_dof))
         detw_shear_all_batch = np.zeros((n_elem, n_shear))
-        
-        dof_mappings = np.zeros((n_elem, n_dof), dtype=np.intp)
-        elem_ids = np.zeros(n_elem, dtype=int)
 
-        for idx, (elem_id, element, dof_mapping) in enumerate(elem_list):
-            elem_ids[idx] = elem_id
-            dof_mappings[idx] = dof_mapping
+        plastic_strain_batch = np.zeros((n_elem, n_gp * num_layers, 3))
+        alpha_batch = np.zeros((n_elem, n_gp * num_layers))
+
+        dof_mappings = []
+        for idx, (elem_id, element) in enumerate(elem_list):
+            dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+            dof_mappings.append(dof_mapping)
+            if dof_mapping.size > 0:
+                u_elem_batch[idx] = displacements[dof_mapping]
 
             cache = element._nonlinear_geometry(mesh)
             T0_batch[idx] = cache["T0"]
@@ -323,110 +298,79 @@ def _build_nonlinear_cache(model: "FEModel", num_layers: int) -> NonlinearSolver
             B_s_all_batch[idx] = cache["B_s_all"]
             detw_shear_all_batch[idx] = cache["detw_shear_all"]
 
-        shell_batches.append(
-            NonlinearBatchGroup(
-                E=E, nu=nu, G_mod=G_mod, thickness=thickness, drilling_stabilization=drilling_stabilization,
-                curve=curve, n_elem=n_elem, n_dof=n_dof, n_gp=n_gp, num_layers=num_layers, n_shear=n_shear,
-                dof_mappings=dof_mappings, elem_ids=elem_ids,
-                T0_batch=T0_batch, B_m_all_batch=B_m_all_batch, B_b_all_batch=B_b_all_batch,
-                B_d_all_batch=B_d_all_batch, Gw_all_batch=Gw_all_batch, detw_all_batch=detw_all_batch,
-                B_s_all_batch=B_s_all_batch, detw_shear_all_batch=detw_shear_all_batch,
-            )
-        )
-        
-    return NonlinearSolverCache(shell_batches, fallback_elements, rows_concat, cols_concat, total_dofs, element_order)
-
-def _assemble_nonlinear_system(
-    cache: NonlinearSolverCache,
-    mesh: "FEMesh",
-    displacements: np.ndarray,
-    committed_states: Dict[int, Any],
-    tangent: bool = True,
-) -> Tuple[np.ndarray, Any, Dict[int, Any]]:
-    """Assemble F_int (and the tangent K_T when requested) using pre-cached geometric batches."""
-    from .vectorized_nonlinear import batch_shell_nonlinear_response
-    
-    total_dofs = cache.total_dofs
-    F_int = np.zeros(total_dofs, dtype=float)
-    trial_states: Dict[int, Any] = {}
-    
-    precomputed_F = {}
-    precomputed_K = {}
-
-    for batch in cache.shell_batches:
-        u_elem_batch = displacements[batch.dof_mappings]
-        plastic_strain_batch = np.zeros((batch.n_elem, batch.n_gp * batch.num_layers, 3))
-        alpha_batch = np.zeros((batch.n_elem, batch.n_gp * batch.num_layers))
-
-        for idx, elem_id in enumerate(batch.elem_ids):
             state = committed_states.get(elem_id)
-            if state is not None:
-                plastic_strain_batch[idx] = state["plastic_strain"]
-                alpha_batch[idx] = state["alpha"]
+            if state is None:
+                state = element.init_nonlinear_state(num_layers)
+            plastic_strain_batch[idx] = state["plastic_strain"]
+            alpha_batch[idx] = state["alpha"]
 
         F_int_batch, K_T_batch, ep_new, alpha_new, layer_strain_batch = batch_shell_nonlinear_response(
             u_elem_batch,
-            batch.T0_batch,
-            batch.B_m_all_batch,
-            batch.B_b_all_batch,
-            batch.B_d_all_batch,
-            batch.Gw_all_batch,
-            batch.detw_all_batch,
-            batch.B_s_all_batch,
-            batch.detw_shear_all_batch,
-            batch.E,
-            batch.nu,
-            batch.G_mod,
-            batch.thickness,
-            batch.drilling_stabilization,
+            T0_batch,
+            B_m_all_batch,
+            B_b_all_batch,
+            B_d_all_batch,
+            Gw_all_batch,
+            detw_all_batch,
+            B_s_all_batch,
+            detw_shear_all_batch,
+            E,
+            nu,
+            G_mod,
+            thickness,
+            drilling_stabilization,
             tangent,
-            batch.curve,
+            curve,
             plastic_strain_batch,
             alpha_batch,
-            batch.num_layers,
+            num_layers,
         )
 
-        for idx, elem_id in enumerate(batch.elem_ids):
+        for idx, (elem_id, element) in enumerate(elem_list):
             precomputed_F[elem_id] = F_int_batch[idx]
             if tangent:
                 precomputed_K[elem_id] = K_T_batch[idx]
-            trial_states[elem_id] = {
+            
+            # Reconstruct trial state to be compatible with single-element API
+            trial_state = {
                 "plastic_strain": ep_new[idx],
                 "alpha": alpha_new[idx],
-                "layer_strain": layer_strain_batch[idx * batch.n_gp * batch.num_layers : (idx + 1) * batch.n_gp * batch.num_layers].copy(),
+                "layer_strain": layer_strain_batch[idx * n_gp * num_layers : (idx + 1) * n_gp * num_layers].copy(),
             }
+            if curve is not None:
+                # We need layer_stress for outputs if people use it, let's keep it simple: we can omit it if not strictly required, 
+                # but let's see if elements.py returned it. We didn't return it from batch_shell_nonlinear_response.
+                pass
+            trial_states[elem_id] = trial_state
 
-    data = []
-    
-    for elem_id in cache.element_order:
+    for elem_id, element in mesh.elements.items():
+        dof_mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.intp)
+        if dof_mapping.size == 0:
+            continue
+        
         if elem_id in precomputed_F:
             f_elem = precomputed_F[elem_id]
-            if tangent:
-                k_elem = precomputed_K[elem_id]
-                data.append(np.asarray(k_elem, dtype=float).ravel())
-            dof_mapping = np.asarray(mesh.elements[elem_id].get_dof_mapping(mesh), dtype=np.intp)
-            np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
-            continue
-            
-        fallback_match = next((item for item in cache.fallback_elements if item[0] == elem_id), None)
-        if fallback_match:
-            _, element, dof_mapping, material = fallback_match
+            k_elem = precomputed_K.get(elem_id) if tangent else None
+            # trial_state already in trial_states dict
+        else:
+            material = model.get_material(element.material_name)
             u_elem = displacements[dof_mapping]
             f_elem, k_elem, trial_state = element.compute_nonlinear_response(
-                mesh, material, u_elem, committed_states.get(elem_id), batch.num_layers if cache.shell_batches else 5, tangent
+                mesh, material, u_elem, committed_states.get(elem_id), num_layers, tangent
             )
             if trial_state is not None:
                 trial_states[elem_id] = trial_state
-            np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
-            if tangent and k_elem is not None:
-                data.append(np.asarray(k_elem, dtype=float).ravel())
+
+        np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
+        if tangent and k_elem is not None:
+            data.append(np.asarray(k_elem, dtype=float).ravel())
 
     if tangent:
         if not data:
             K_T = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
         else:
             K_T = sparse.coo_matrix(
-                (np.concatenate(data), (cache.rows_concat, cache.cols_concat)),
+                (np.concatenate(data), (rows_concat, cols_concat)),
                 shape=(total_dofs, total_dofs),
                 dtype=float,
             ).tocsr()
@@ -500,7 +444,6 @@ def _copy_initial_states(initial_element_states: Optional[Mapping[int, Any]]) ->
 def _solve_static_displacement_control(
     *,
     model: "FEModel",
-    cache: NonlinearSolverCache,
     T: sparse.csr_matrix,
     u0: np.ndarray,
     F_const: np.ndarray,
@@ -569,7 +512,7 @@ def _solve_static_displacement_control(
             total_iterations += 1
             u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
             F_int, K_T, trial_states = _assemble_nonlinear_system(
-                cache, model.mesh, u, committed_states
+                model, u, committed_states, num_layers
             )
             residual = np.asarray(T.T @ (F_const_dc + lam * F_prop_dc - F_int), dtype=float).reshape(-1)
             residual_norm = float(np.linalg.norm(residual))
@@ -769,15 +712,12 @@ def solve_static_nonlinear(
         for stage, vector in zip(load_program.stages, stage_vectors):
             F_ext += factors[stage.name] * vector
         return F_ext, factors, load_program.active_stage(path_factor)
-        
-    cache = _build_nonlinear_cache(model, num_layers)
 
     if control_name == "displacement":
         if displacement_control is None:
             raise ValueError("displacement_control is required when control='displacement'")
         return _solve_static_displacement_control(
             model=model,
-            cache=cache,
             T=T,
             u0=u0,
             F_const=F_const,
@@ -810,7 +750,7 @@ def solve_static_nonlinear(
         q_trial = q_start.copy()
         u = np.asarray(T @ q_trial + u0, dtype=float).reshape(-1)
         F_int, K_T, trial_states = _assemble_nonlinear_system(
-            cache, model.mesh, u, committed_states
+            model, u, committed_states, num_layers
         )
         residual = F_ext_red - np.asarray(T.T @ F_int, dtype=float).reshape(-1)
         residual_norm = float(np.linalg.norm(residual))
@@ -838,7 +778,7 @@ def solve_static_nonlinear(
                 q_trial = q_trial + dq
                 u = np.asarray(T @ q_trial + u0, dtype=float).reshape(-1)
                 F_int, K_T, trial_states = _assemble_nonlinear_system(
-                    cache, model.mesh, u, committed_states
+                    model, u, committed_states, num_layers
                 )
                 residual = F_ext_red - np.asarray(T.T @ F_int, dtype=float).reshape(-1)
                 residual_norm = float(np.linalg.norm(residual))
@@ -858,14 +798,14 @@ def solve_static_nonlinear(
                 u = np.asarray(T @ q_candidate + u0, dtype=float).reshape(-1)
                 with_tangent = trial == 0
                 F_c, K_c, states_c = _assemble_nonlinear_system(
-                    cache, model.mesh, u, committed_states, tangent=with_tangent
+                    model, u, committed_states, num_layers, tangent=with_tangent
                 )
                 r_c = F_ext_red - np.asarray(T.T @ F_c, dtype=float).reshape(-1)
                 rn_c = float(np.linalg.norm(r_c))
                 if np.isfinite(rn_c) and rn_c < residual_norm:
                     if not with_tangent:
                         F_c, K_c, states_c = _assemble_nonlinear_system(
-                            cache, model.mesh, u, committed_states, tangent=True
+                            model, u, committed_states, num_layers, tangent=True
                         )
                         r_c = F_ext_red - np.asarray(T.T @ F_c, dtype=float).reshape(-1)
                         rn_c = float(np.linalg.norm(r_c))

@@ -178,7 +178,71 @@ class PyPardisoSolverBackend:
         )
 
 
-DEFAULT_BACKEND = PyPardisoSolverBackend() if _HAS_PYPARDISO else SparseSolverBackend()
+class AutoSparseSolverBackend:
+    """Size-aware backend selector with SciPy fallback.
+
+    PyPardiso has substantial setup overhead on tiny systems.  The auto backend
+    keeps SuperLU as the fast small-matrix path and uses PyPardiso only once the
+    matrix is large enough to amortize that overhead.  Callers may force a
+    backend with ``options={"backend": "pypardiso"}`` or
+    ``options={"backend": "scipy_superlu"}``.
+    """
+
+    name = "auto"
+
+    def __init__(
+        self,
+        *,
+        scipy_backend: Optional[SparseSolverBackend] = None,
+        pardiso_backend: Optional[PyPardisoSolverBackend] = None,
+        pypardiso_min_dimension: int = 500,
+        pypardiso_min_nnz: int = 20_000,
+    ):
+        self.scipy_backend = scipy_backend or SparseSolverBackend()
+        self.pardiso_backend = (pardiso_backend or PyPardisoSolverBackend()) if _HAS_PYPARDISO else None
+        self.pypardiso_min_dimension = int(pypardiso_min_dimension)
+        self.pypardiso_min_nnz = int(pypardiso_min_nnz)
+
+    def _use_pypardiso(self, matrix: sparse.spmatrix, options: Mapping[str, Any]) -> bool:
+        requested = str(options.get("backend", options.get("solver", "auto"))).lower()
+        if requested in {"scipy", "scipy_superlu", "superlu"}:
+            return False
+        if requested in {"pypardiso", "pardiso", "mkl_pardiso"}:
+            return self.pardiso_backend is not None
+        if self.pardiso_backend is None:
+            return False
+        min_dimension = int(options.get("pypardiso_min_dimension", self.pypardiso_min_dimension))
+        min_nnz = int(options.get("pypardiso_min_nnz", self.pypardiso_min_nnz))
+        return max(int(matrix.shape[0]), int(matrix.shape[1])) >= min_dimension and int(matrix.nnz) >= min_nnz
+
+    def factorize(
+        self,
+        matrix: sparse.spmatrix,
+        matrix_class: MatrixClass,
+        *,
+        signature: Optional[str] = None,
+        options: Optional[Mapping[str, Any]] = None,
+    ) -> FactorizationHandle:
+        options_dict = dict(options or {})
+        if not self._use_pypardiso(matrix, options_dict):
+            handle = self.scipy_backend.factorize(matrix, matrix_class, signature=signature, options=options_dict)
+            handle.metadata.setdefault("auto_backend_policy", "scipy_small_matrix")
+            return handle
+
+        assert self.pardiso_backend is not None
+        handle = self.pardiso_backend.factorize(matrix, matrix_class, signature=signature, options=options_dict)
+        handle.metadata.setdefault("auto_backend_policy", "pypardiso_large_matrix")
+        if handle.status == "ok":
+            return handle
+
+        fallback = self.scipy_backend.factorize(matrix, matrix_class, signature=signature, options=options_dict)
+        fallback.metadata["auto_backend_policy"] = "scipy_after_pypardiso_failure"
+        fallback.metadata["fallback_from_backend"] = handle.backend_name
+        fallback.metadata["fallback_failure_reason"] = handle.failure_reason
+        return fallback
+
+
+DEFAULT_BACKEND = AutoSparseSolverBackend() if _HAS_PYPARDISO else SparseSolverBackend()
 
 
 def _options_signature(options: Optional[Mapping[str, Any]]) -> str:

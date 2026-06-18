@@ -28,7 +28,9 @@ Transverse shear depends on the topology:
       edge midpoints and interpolated), integrated at the full 2x2 rule.  This
       avoids both shear locking and the spurious zero-energy w-hourglass mode
       of one-point reduced shear integration.
-    * 8-node: reduced 2x2 shear integration (S8R style).
+    * 8-node: reduced 2x2 shear integration (S8R style).  When full element
+      reduced integration is requested, a small nullspace-projection
+      hourglass stiffness stabilizes modes outside the six rigid-body modes.
 
 Beam section convention
 -----------------------
@@ -536,16 +538,18 @@ class ShellElement(Element):
     def __init__(
         self,
         element_id: int,
-        node_ids: list[int],
+        node_ids: List[int],
         material_name: str = "default",
         thickness: float = 0.01,
         drilling_stabilization: float = 1.0e-3,
         reduced_integration: bool = False,
+        hourglass_stabilization: float = 1.0e-6,
     ):
         super().__init__(element_id, node_ids, material_name)
         self.thickness = float(thickness)
         self.drilling_stabilization = float(drilling_stabilization)
         self.reduced_integration = reduced_integration
+        self.hourglass_stabilization = float(hourglass_stabilization)
         self._is_8node = len(node_ids) == 8
         self._is_4node = len(node_ids) == 4
         if not (self._is_4node or self._is_8node):
@@ -783,6 +787,60 @@ class ShellElement(Element):
         )
         return inv_j2 @ B_covariant, det_j
 
+    def _rigid_body_mode_matrix(self, coords: np.ndarray) -> np.ndarray:
+        modes = np.zeros((self.total_dofs, 6), dtype=float)
+        centroid = np.mean(coords, axis=0)
+        axes = np.eye(3, dtype=float)
+
+        for local, coord in enumerate(coords):
+            base = local * 6
+            r = coord - centroid
+            modes[base + 0, 0] = 1.0
+            modes[base + 1, 1] = 1.0
+            modes[base + 2, 2] = 1.0
+            for axis_index, axis in enumerate(axes):
+                displacement = _cross3(axis, r)
+                modes[base : base + 3, 3 + axis_index] = displacement
+                modes[base + 3 : base + 6, 3 + axis_index] = axis
+
+        q, rmat = np.linalg.qr(modes)
+        diag = np.abs(np.diag(rmat))
+        if diag.size == 0:
+            return np.zeros((self.total_dofs, 0), dtype=float)
+        keep = diag > max(float(np.max(diag)) * 1.0e-10, _SMALL)
+        return q[:, keep]
+
+    def _hourglass_stabilization_matrix(self, K_base: np.ndarray, coords: np.ndarray) -> np.ndarray:
+        """Small stiffness on reduced-integration Q8 modes outside rigid motion."""
+        coefficient = float(getattr(self, "hourglass_stabilization", 0.0))
+        if not (self._is_8node and self.reduced_integration) or coefficient <= 0.0:
+            return np.zeros_like(K_base)
+
+        K_sym = 0.5 * (K_base + K_base.T)
+        eigvals, eigvecs = np.linalg.eigh(K_sym)
+        max_eig = max(float(np.max(np.abs(eigvals))), 1.0)
+        zero_tol = 1.0e-9 * max_eig
+        zero_mask = np.abs(eigvals) < zero_tol
+        if int(np.sum(zero_mask)) <= 6:
+            return np.zeros_like(K_base)
+
+        zero_space = eigvecs[:, zero_mask]
+        rigid = self._rigid_body_mode_matrix(coords)
+        if rigid.size:
+            zero_space = zero_space - rigid @ (rigid.T @ zero_space)
+
+        u, singular_values, _ = np.linalg.svd(zero_space, full_matrices=False)
+        if singular_values.size == 0:
+            return np.zeros_like(K_base)
+        keep = singular_values > 1.0e-8
+        if not np.any(keep):
+            return np.zeros_like(K_base)
+
+        hourglass_modes = u[:, keep]
+        stiffness_scale = coefficient * max_eig
+        K_hg = stiffness_scale * (hourglass_modes @ hourglass_modes.T)
+        return 0.5 * (K_hg + K_hg.T)
+
     def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
         coords = self.get_node_coordinates(mesh)
         E = material.elastic_modulus
@@ -829,6 +887,9 @@ class ShellElement(Element):
                 _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
                 K_local = (B_s.T @ D_shear @ B_s) * det_j * weight
                 K += T.T @ K_local @ T
+
+        self._hourglass_stiffness_matrix = self._hourglass_stabilization_matrix(K, coords)
+        K += self._hourglass_stiffness_matrix
 
         self._stiffness_matrix = K
         return K
@@ -1139,9 +1200,23 @@ class ShellElement(Element):
         )
         K_loc = K_loc_temp if tangent else None
 
+        K_hg = getattr(self, "_hourglass_stiffness_matrix", None)
+        if self._is_8node and self.reduced_integration and float(getattr(self, "hourglass_stabilization", 0.0)) > 0.0:
+            if K_hg is None:
+                self.compute_stiffness_matrix(mesh, material)
+                K_hg = getattr(self, "_hourglass_stiffness_matrix", None)
+
+        F_global = T0.T @ F_loc
+        if K_hg is not None:
+            u_global = np.asarray(u_elem, dtype=float)
+            F_global = F_global + K_hg @ u_global
+
         if not tangent:
-            return T0.T @ F_loc, None, trial_state
-        return T0.T @ F_loc, T0.T @ K_loc @ T0, trial_state
+            return F_global, None, trial_state
+        K_global = T0.T @ K_loc @ T0
+        if K_hg is not None:
+            K_global = K_global + K_hg
+        return F_global, K_global, trial_state
 
     def compute_stresses(
         self,
@@ -1176,14 +1251,6 @@ class ShellElement(Element):
             "shear_xz": np.zeros(num_ip),
             "shear_yz": np.zeros(num_ip),
             "von_mises": np.zeros(num_ip),
-            "membrane_strain_xx": np.zeros(num_ip),
-            "membrane_strain_yy": np.zeros(num_ip),
-            "membrane_strain_xy": np.zeros(num_ip),
-            "curvature_xx": np.zeros(num_ip),
-            "curvature_yy": np.zeros(num_ip),
-            "curvature_xy": np.zeros(num_ip),
-            "shear_strain_xz": np.zeros(num_ip),
-            "shear_strain_yz": np.zeros(num_ip),
         }
         if return_global:
             stresses.update({
@@ -1243,14 +1310,6 @@ class ShellElement(Element):
             stresses["membrane_xx"][idx] = sigma_m[0]
             stresses["membrane_yy"][idx] = sigma_m[1]
             stresses["membrane_xy"][idx] = sigma_m[2]
-            stresses["membrane_strain_xx"][idx] = membrane_strain[0]
-            stresses["membrane_strain_yy"][idx] = membrane_strain[1]
-            stresses["membrane_strain_xy"][idx] = membrane_strain[2]
-            stresses["curvature_xx"][idx] = curvature[0]
-            stresses["curvature_yy"][idx] = curvature[1]
-            stresses["curvature_xy"][idx] = curvature[2]
-            stresses["shear_strain_xz"][idx] = shear_strain[0]
-            stresses["shear_strain_yz"][idx] = shear_strain[1]
             stresses["bending_xx"][idx] = sigma_b[0]
             stresses["bending_yy"][idx] = sigma_b[1]
             stresses["bending_xy"][idx] = sigma_b[2]
@@ -1905,11 +1964,6 @@ class BeamElement(Element):
             "shear_stress_z": tau_z,
             "torsional_stress": tau_torsion,
             "von_mises": von_mises,
-            "axial_strain": (u2 - u1) / L,
-            "curvature_y": kappa_y,
-            "curvature_z": kappa_z,
-            "shear_strain_y": gamma_xy,
-            "shear_strain_z": gamma_xz,
         }
 
 

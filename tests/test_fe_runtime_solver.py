@@ -1,5 +1,6 @@
 from matplotlib.figure import Figure
 from pathlib import Path
+import json
 import math
 
 import pytest
@@ -690,11 +691,11 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "def _info_button(self, parent: Any, key: str) -> ttk.Button:" in source
     assert "def _show_solver_info(self, key: str) -> None:" in source
     assert "ttk.Button(parent, text=\"i\", width=2" in source
-    assert "future_inputs = ttk.LabelFrame(mid_panel, text=\"Analysis options\")" in source
-    assert "constraints = ttk.LabelFrame(future_inputs, text=\"Supports and load path\")" in source
-    assert "solver_options = ttk.LabelFrame(future_inputs, text=\"Solver\")" in source
-    assert "members = ttk.LabelFrame(future_inputs, text=\"Member modelling\")" in source
-    assert "material = ttk.LabelFrame(future_inputs, text=\"Material and recovery\")" in source
+    assert "self.options_notebook = ttk.Notebook(mid_panel)" in source
+    assert "constraints = ttk.LabelFrame(tab_general, text=\"Supports and load path\")" in source
+    assert "solver_options = ttk.LabelFrame(tab_general, text=\"Solver\")" in source
+    assert "members = ttk.LabelFrame(tab_properties, text=\"Member modelling\")" in source
+    assert "material = ttk.LabelFrame(tab_properties, text=\"Material and recovery\")" in source
     assert "self.upper_result_frame = ttk.LabelFrame(right_panel, text=\"Result text\")" in source
     assert "self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
     assert "self.upper_result_text = tk.Text(" in source
@@ -709,11 +710,13 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "include_end_lids=bool(self.include_end_lids.get())" in source
     assert "self.boundary_condition = tk.StringVar(value=\"auto\")" in source
     assert "self.shell_element_order = tk.StringVar(value=\"S4\")" in source
+    assert "self.beam_element_order = tk.StringVar(value=\"B2\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
     assert "self.pressure_direction = tk.StringVar(value=\"external\")" in source
     assert "self.axial_force_n = tk.DoubleVar(value=0.0)" in source
     assert "self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
+    assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9" in source
     assert "self.progress_bar.start(12)" in source
     assert "threading.Thread(target=worker, daemon=True)" in source
@@ -728,11 +731,20 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.custom_loads_add_to_imported = tk.BooleanVar(value=False)" in source
     assert "self.custom_use_nullspace_projection = tk.BooleanVar(value=False)" in source
     assert "self.custom_pressure_pa = tk.DoubleVar(value=0.0)" in source
-    assert "self.deformation_scale = tk.DoubleVar(value=0.0)" in source
-    assert "custom = ttk.LabelFrame(future_inputs, text=\"Custom loads and boundary conditions\")" in source
+    assert "self.custom_loads_json = tk.StringVar(value=\"[]\")" in source
+    assert "self._custom_load_entries: list[dict[str, Any]] = []" in source
+    assert "self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()" in source
+    assert "self.deformation_scale = tk.StringVar(value=\"0.0\")" in source
+    assert "custom = ttk.LabelFrame(tab_advanced, text=\"Custom loads and boundary conditions\")" in source
+    assert "load_list = ttk.LabelFrame(tab_advanced, text=\"Loads to run\")" in source
+    assert "ttk.Button(actions, text=\"Add load\", command=self._add_custom_load_from_selection)" in source
+    assert "ttk.Button(actions, text=\"Delete load\", command=self._delete_selected_custom_load)" in source
+    assert "self._custom_load_tree = ttk.Treeview(" in source
+    assert "canvas.canvas.bind(\"<ButtonRelease-3>\", self._on_custom_load_edge_canvas_release, add=\"+\")" in source
     assert "custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get())" in source
     assert "custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get())" in source
     assert "custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0)" in source
+    assert "custom_loads_json=str(self.custom_loads_json.get())" in source
     assert "plate_edge_x0_support=str(self.plate_edge_x0_support.get())" in source
     assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
     assert "\"nullspace_projection\"" in source
@@ -985,6 +997,33 @@ def test_runtime_generated_mesh_supports_s8_shells_and_enforced_displacement():
     assert any(support["name"] == "enforced_panel_displacement" for support in generated["supports"])
 
 
+def test_runtime_generated_mesh_supports_b2_and_b3_beam_elements():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": 0.5,
+        "girder_spacing_m": 1.0,
+    }
+
+    b2 = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", beam_element_order="B2"),
+    )
+    b3_config = fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", beam_element_order="B3")
+    b3 = fe_solver.build_generated_geometry(geometry, b3_config)
+
+    assert b2["beams"]
+    assert b3["beams"]
+    assert {len(beam["node_ids"]) for beam in b2["beams"]} == {2}
+    assert {len(beam["node_ids"]) for beam in b3["beams"]} == {3}
+    assert fe_solver._mesh_size_diagnostics(b2)["beam_order"] == "B2"
+    assert fe_solver._mesh_size_diagnostics(b3)["beam_order"] == "B3"
+
+
 def test_custom_plate_supports_and_edge_loads_are_applied():
     geometry = {
         "geometry": "flat panel",
@@ -1014,6 +1053,71 @@ def test_custom_plate_supports_and_edge_loads_are_applied():
     assert result.prestress_summary["nullspace_projection"] == 0.0
     assert any("custom load and boundary-condition mode" in item.lower() for item in result.diagnostics)
     assert any("replace imported/generated" in item.lower() for item in result.diagnostics)
+
+
+def test_custom_selected_internal_edge_load_adds_mesh_breaks_and_resultant():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        plate_edge_x0_support="fixed",
+        custom_selected_edge_load_n_per_m=250.0,
+        custom_edge_segments_json=(
+            '[{"varying_axis":"a","fixed_coordinate":0.5,'
+            '"start_coordinate":0.5,"end_coordinate":1.5}]'
+        ),
+    )
+
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    coords = {node["id"]: tuple(node["coords"]) for node in generated["nodes"]}
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert 0.5 in {round(coord[0], 6) for coord in coords.values()}
+    assert 1.5 in {round(coord[0], 6) for coord in coords.values()}
+    assert 0.5 in {round(coord[1], 6) for coord in coords.values()}
+    assert result.status == "ok"
+    assert result.load_resultant["force_n"][1] == pytest.approx(250.0)
+    assert any("selected edge segments" in item.lower() for item in result.diagnostics)
+
+
+def test_saved_custom_load_entries_add_panel_and_edge_breaks_to_mesh():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        custom_loads_json=json.dumps([
+            {
+                "type": "pressure",
+                "pressure_pa": 500.0,
+                "patches": [{"min_a": 0.25, "max_a": 0.75, "min_b": 0.2, "max_b": 0.6}],
+            },
+            {
+                "type": "edge",
+                "line_load_n_per_m": 125.0,
+                "edges": [{"varying_axis": "a", "fixed_coordinate": 0.5, "start_coordinate": 0.4, "end_coordinate": 0.8}],
+            },
+        ]),
+    )
+
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    coords = {node["id"]: tuple(node["coords"]) for node in generated["nodes"]}
+
+    assert {0.25, 0.75, 0.4, 0.8}.issubset({round(coord[0], 6) for coord in coords.values()})
+    assert {0.2, 0.5, 0.6}.issubset({round(coord[1], 6) for coord in coords.values()})
+    assert fe_solver._custom_pressure_patch_count(config) == 1
+    assert len(fe_solver._custom_edge_segments(config)) == 1
 
 
 def test_custom_plate_loads_can_be_added_to_imported_pressure():
@@ -1443,7 +1547,7 @@ def test_production_solver_can_use_anyintelligent_capacity_workflow_path():
     assert any("capacity workflow completed" in item.lower() for item in result.diagnostics)
 
 
-def test_production_solver_runs_slamming_transient_and_stress_free_imperfection():
+def test_production_solver_runs_custom_time_domain_response_and_stress_free_imperfection():
     result = fe_solver.run_production_fem(
         {
             "geometry": "flat panel",
@@ -1461,11 +1565,12 @@ def test_production_solver_runs_slamming_transient_and_stress_free_imperfection(
             imperfection_amplitude_m=0.001,
             imperfection_wave_a=1,
             imperfection_wave_b=1,
-            slamming_enabled=True,
-            slamming_pressure_pa=1000.0,
-            slamming_duration_s=0.001,
-            slamming_total_time_s=0.002,
-            slamming_dt_s=0.001,
+            custom_load_bc_enabled=True,
+            custom_pressure_pa=1000.0,
+            custom_time_domain_enabled=True,
+            custom_time_domain_duration_s=0.001,
+            custom_time_domain_total_time_s=0.002,
+            custom_time_domain_dt_s=0.001,
         ),
     )
 
@@ -1475,13 +1580,13 @@ def test_production_solver_runs_slamming_transient_and_stress_free_imperfection(
     assert prestress["imperfection_status"] == "applied"
     assert prestress["imperfection_kind"] == "plate half-wave"
     assert prestress["imperfection_max_offset_m"] == pytest.approx(0.001)
-    assert prestress["slamming_status"] == "completed"
-    assert prestress["slamming_selected_shells"] == pytest.approx(result.mesh_info["shells"])
-    assert prestress["slamming_peak_displacement_m"] > 0.0
-    assert any("Transient slamming response completed" in item for item in result.diagnostics)
+    assert prestress["custom_time_domain_status"] == "completed"
+    assert prestress["custom_time_domain_selected_shells"] == pytest.approx(result.mesh_info["shells"])
+    assert prestress["custom_time_domain_peak_displacement_m"] > 0.0
+    assert any("Custom time-domain response completed" in item for item in result.diagnostics)
 
 
-def test_runtime_result_print_and_gui_source_include_slamming_and_imperfection_inputs():
+def test_runtime_result_print_and_gui_source_include_custom_time_domain_and_imperfection_inputs():
     result = fe_runtime_solver.RuntimeFEMRunResult(
         status="ok",
         summary={
@@ -1526,16 +1631,16 @@ def test_runtime_result_print_and_gui_source_include_slamming_and_imperfection_i
             "imperfection_amplitude_m": 0.001,
             "imperfection_wave_a": 1,
             "imperfection_wave_b": 2,
-            "slamming_enabled": True,
-            "slamming_pressure_pa": 1000.0,
-            "slamming_duration_s": 0.001,
-            "slamming_total_time_s": 0.002,
-            "slamming_dt_s": 0.001,
-            "slamming_patch_center_a_m": 0.0,
-            "slamming_patch_center_b_m": 0.0,
-            "slamming_patch_size_a_m": 0.0,
-            "slamming_patch_size_b_m": 0.0,
-            "slamming_include_static_load": False,
+            "custom_time_domain_enabled": True,
+            "custom_pressure_pa": 1000.0,
+            "custom_time_domain_duration_s": 0.001,
+            "custom_time_domain_total_time_s": 0.002,
+            "custom_time_domain_dt_s": 0.001,
+            "custom_pressure_patch_count": 1,
+            "custom_pressure_patch_area_m2": 0.18,
+            "custom_edge_segment_count": 2,
+            "custom_selected_edge_load_n_per_m": 300.0,
+            "custom_time_domain_include_static_load": False,
             "prestress_summary": {
                 "imperfection_status": "applied",
                 "imperfection_kind": "plate half-wave",
@@ -1543,10 +1648,10 @@ def test_runtime_result_print_and_gui_source_include_slamming_and_imperfection_i
                 "imperfection_max_offset_m": 0.001,
                 "imperfection_waves_a": 1,
                 "imperfection_waves_b": 2,
-                "slamming_status": "completed",
-                "slamming_selected_shells": 16,
-                "slamming_peak_displacement_m": 0.0002,
-                "slamming_peak_von_mises_pa": 2.5e6,
+                "custom_time_domain_status": "completed",
+                "custom_time_domain_selected_shells": 16,
+                "custom_time_domain_peak_displacement_m": 0.0002,
+                "custom_time_domain_peak_von_mises_pa": 2.5e6,
             },
         },
     )
@@ -1555,12 +1660,12 @@ def test_runtime_result_print_and_gui_source_include_slamming_and_imperfection_i
     source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_runtime_solver.py").read_text(encoding="utf-8")
 
     assert "Geometric imperfection input:" in text
-    assert "Transient slamming input:" in text
+    assert "Custom time-domain input:" in text
     assert "Applied geometric imperfection:" in text
-    assert "Transient slamming response:" in text
-    assert "self.slamming_enabled = tk.BooleanVar(value=False)" in source
+    assert "Custom time-domain response:" in text
+    assert "self.custom_time_domain_enabled = tk.BooleanVar(value=False)" in source
     assert "self.imperfection_enabled = tk.BooleanVar(value=False)" in source
-    assert "Transient slamming" in source
+    assert "Custom time-domain load" in source
     assert "Imperfections" in source
 
 

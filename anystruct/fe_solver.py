@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import collections
+import json
 import math
 
 import numpy as np
@@ -63,6 +64,7 @@ class LightweightFEMConfig:
     boundary_condition: str = "auto"
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
+    beam_element_order: str = "B2"
     analysis_type: str = "linear eigenvalue"
     buckling_analysis_type: str = "linear eigenvalue"
     pressure_direction: str = "external"
@@ -100,13 +102,15 @@ class LightweightFEMConfig:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
-    slamming_enabled: bool = False
-    slamming_pressure_pa: float = 0.0
-    slamming_duration_s: float = 0.01
-    slamming_total_time_s: float = 0.05
-    slamming_dt_s: float = 0.0005
-    slamming_patches_json: str = "[]"
-    slamming_include_static_load: bool = False
+    custom_loads_json: str = "[]"
+    custom_pressure_patches_json: str = "[]"
+    custom_edge_segments_json: str = "[]"
+    custom_selected_edge_load_n_per_m: float = 0.0
+    custom_time_domain_enabled: bool = False
+    custom_time_domain_duration_s: float = 0.01
+    custom_time_domain_total_time_s: float = 0.05
+    custom_time_domain_dt_s: float = 0.0005
+    custom_time_domain_include_static_load: bool = False
     imperfection_enabled: bool = False
     imperfection_shape: str = "standard plate/cylinder"
     imperfection_amplitude_m: float = 0.0
@@ -499,16 +503,34 @@ def _wants_s8(config: LightweightFEMConfig) -> bool:
     return _normalized_choice(config.shell_element_order, "s4") in {"s8", "s8r", "8 node", "8 node shell", "quadratic"}
 
 
+def _wants_b3(config: LightweightFEMConfig) -> bool:
+    return _normalized_choice(config.beam_element_order, "b2") in {"b3", "3 node", "3 node beam", "quadratic", "quadratic beam"}
+
+
 def _shell_order_from_geometry(generated_geometry: dict) -> str:
     for shell in generated_geometry.get("shells", []) or []:
         return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
     return "S4"
 
 
+def _beam_order_from_geometry(generated_geometry: dict) -> str:
+    for beam in generated_geometry.get("beams", []) or []:
+        return "B3" if len(beam.get("node_ids", [])) == 3 else "B2"
+    return "B2"
+
+
 def _shell_element_type(shell: dict[str, object]) -> str:
     if "type" in shell:
         return str(shell["type"])
     return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
+
+
+def _refined_midpoint_breaks(values: list[float]) -> list[float]:
+    refined = [float(values[0])] if values else []
+    for start, end in zip(values, values[1:]):
+        refined.append(0.5 * (float(start) + float(end)))
+        refined.append(float(end))
+    return sorted(set(round(float(value), 12) for value in refined))
 
 
 def _node_lookup(nodes: list[dict[str, object]]) -> dict[int, np.ndarray]:
@@ -940,6 +962,35 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     div_y = _line_divisions(width, config, base_div, member_spacing_cap)
     x_breaks = _axis_breaks(length, div_x, girder_positions, member_spacing_cap)
     y_breaks = _axis_breaks(width, div_y, stiffener_positions, member_spacing_cap)
+
+    def add_breakpoint(values: list[float], value: object, limit: float) -> list[float]:
+        coordinate = float(value or 0.0)
+        if 1.0e-9 < coordinate < limit - 1.0e-9:
+            values.append(coordinate)
+        return sorted(set(round(float(item), 12) for item in values))
+
+    if config.custom_load_bc_enabled:
+        for patch in _custom_pressure_patches(config):
+            x_breaks = add_breakpoint(x_breaks, patch.get("min_a"), length)
+            x_breaks = add_breakpoint(x_breaks, patch.get("max_a"), length)
+            y_breaks = add_breakpoint(y_breaks, patch.get("min_b"), width)
+            y_breaks = add_breakpoint(y_breaks, patch.get("max_b"), width)
+        for segment in _custom_edge_segments(config):
+            if str(segment.get("varying_axis", "a")).lower() == "a":
+                y_breaks = add_breakpoint(y_breaks, segment.get("fixed_coordinate"), width)
+                x_breaks = add_breakpoint(x_breaks, segment.get("start_coordinate"), length)
+                x_breaks = add_breakpoint(x_breaks, segment.get("end_coordinate"), length)
+            else:
+                x_breaks = add_breakpoint(x_breaks, segment.get("fixed_coordinate"), length)
+                y_breaks = add_breakpoint(y_breaks, segment.get("start_coordinate"), width)
+                y_breaks = add_breakpoint(y_breaks, segment.get("end_coordinate"), width)
+
+    if _wants_b3(config):
+        if stiffener_positions:
+            x_breaks = _refined_midpoint_breaks(x_breaks)
+        if girder_positions:
+            y_breaks = _refined_midpoint_breaks(y_breaks)
+
     rows = len(x_breaks)
     cols = len(y_breaks)
 
@@ -985,11 +1036,17 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             config.stiffener_eccentricity_m,
             orientation,
         )
-        for row in range(rows - 1):
+        row_range = range(0, rows - 2, 2) if _wants_b3(config) else range(rows - 1)
+        for row in row_range:
+            beam_nodes = (
+                [node_id(row, mid_col), node_id(row + 1, mid_col), node_id(row + 2, mid_col)]
+                if _wants_b3(config)
+                else [node_id(row, mid_col), node_id(row + 1, mid_col)]
+            )
             beams.append(
                 {
                     "id": beam_id,
-                    "node_ids": [node_id(row, mid_col), node_id(row + 1, mid_col)],
+                    "node_ids": beam_nodes,
                     "section": section,
                     "role": "stiffener",
                     "material": "steel",
@@ -1006,11 +1063,17 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             config.girder_eccentricity_m,
             orientation,
         )
-        for col in range(cols - 1):
+        col_range = range(0, cols - 2, 2) if _wants_b3(config) else range(cols - 1)
+        for col in col_range:
+            beam_nodes = (
+                [node_id(mid_row, col), node_id(mid_row, col + 1), node_id(mid_row, col + 2)]
+                if _wants_b3(config)
+                else [node_id(mid_row, col), node_id(mid_row, col + 1)]
+            )
             beams.append(
                 {
                     "id": beam_id,
-                    "node_ids": [node_id(mid_row, col), node_id(mid_row, col + 1)],
+                    "node_ids": beam_nodes,
                     "section": section,
                     "role": "girder",
                     "material": "steel",
@@ -1107,6 +1170,8 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             axial_div = max(axial_div, int(math.ceil(length / target_size)))
     if stiffener_count > 0:
         circumferential_div = _multiple_at_least(circumferential_div, stiffener_count)
+    if _wants_b3(config) and config.include_girders and geometry.get("has_girder"):
+        circumferential_div *= 2
     girder_positions = []
     if config.include_girders and geometry.get("has_girder"):
         if girder_spacing > 1.0e-9:
@@ -1117,6 +1182,8 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         else:
             girder_positions = [length / 2.0]
     z_breaks = _axis_breaks(length, axial_div, tuple(girder_positions))
+    if _wants_b3(config) and config.include_stiffeners and geometry.get("has_stiffener"):
+        z_breaks = _refined_midpoint_breaks(z_breaks)
     rows = len(z_breaks)
     axial_div = rows - 1
     cols = circumferential_div
@@ -1169,11 +1236,17 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             if _normalized_choice(orientation) == "radial":
                 theta = 2.0 * math.pi * col / cols
                 section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
-            for row in range(axial_div):
+            row_range = range(0, axial_div - 1, 2) if _wants_b3(config) else range(axial_div)
+            for row in row_range:
+                beam_nodes = (
+                    [node_id(row, col), node_id(row + 1, col), node_id(row + 2, col)]
+                    if _wants_b3(config)
+                    else [node_id(row, col), node_id(row + 1, col)]
+                )
                 beams.append(
                     {
                         "id": beam_id,
-                        "node_ids": [node_id(row, col), node_id(row + 1, col)],
+                        "node_ids": beam_nodes,
                         "section": section,
                         "role": "stiffener",
                         "material": "steel",
@@ -1191,15 +1264,21 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         )
         ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
         for row in ring_rows:
-            for col in range(cols):
+            col_range = range(0, cols, 2) if _wants_b3(config) else range(cols)
+            for col in col_range:
                 section = dict(base_section)
                 if _normalized_choice(orientation) == "radial":
                     theta = 2.0 * math.pi * (col + 0.5) / cols
                     section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
+                beam_nodes = (
+                    [node_id(row, col), node_id(row, col + 1), node_id(row, col + 2)]
+                    if _wants_b3(config)
+                    else [node_id(row, col), node_id(row, col + 1)]
+                )
                 beams.append(
                     {
                         "id": beam_id,
-                        "node_ids": [node_id(row, col), node_id(row, col + 1)],
+                        "node_ids": beam_nodes,
                         "section": section,
                         "role": "girder",
                         "material": "steel",
@@ -1321,7 +1400,7 @@ def _nodal_scalar_fields(model, stresses_by_element: dict[int, object]) -> dict[
         if element is None:
             continue
             
-        is_beam = type(element).__name__ == "BeamElement"
+        is_beam = type(element).__name__ in {"BeamElement", "QuadraticBeamElement"}
         node_ids = element.node_ids
         
         for field_name, (shell_key, beam_key) in field_mapping.items():
@@ -1392,7 +1471,8 @@ def _visualization_member_lines(
             continue
         points = []
         displaced = []
-        for node_id in node_ids[:2]:
+        plot_node_ids = node_ids if len(node_ids) == 3 else node_ids[:2]
+        for node_id in plot_node_ids:
             node = model.mesh.get_node(node_id)
             if node is None:
                 break
@@ -1420,7 +1500,7 @@ def _visualization_member_lines(
             {
                 "id": int(beam.get("id", 0)),
                 "role": str(beam.get("role", "member")),
-                "node_ids": tuple(node_ids[:2]),
+                "node_ids": tuple(plot_node_ids),
                 "points": tuple(points),
                 "displaced_points": tuple(displaced),
                 "section_label": str((beam.get("section") or {}).get("label", "")),
@@ -1625,6 +1705,8 @@ def _effective_pressure_pa(config: LightweightFEMConfig) -> float:
     custom = float(config.custom_pressure_pa or 0.0)
     if not config.custom_load_bc_enabled:
         return imported
+    if _custom_pressure_load_entries(config):
+        return imported if config.custom_loads_add_to_imported else 0.0
     if config.custom_loads_add_to_imported:
         return imported + custom
     return custom
@@ -1944,17 +2026,80 @@ def _element_centroid(model, element_id: int) -> np.ndarray | None:
         return None
 
 
-def _slamming_patch_element_ids(model, generated_geometry: dict, geometry: dict, config: LightweightFEMConfig) -> tuple[int, ...]:
+def _custom_load_entries(config: LightweightFEMConfig) -> list[dict[str, object]]:
+    try:
+        import json
+        raw_entries = json.loads(config.custom_loads_json) if config.custom_loads_json else []
+    except Exception:
+        return []
+    if not isinstance(raw_entries, list):
+        return []
+    return [entry for entry in raw_entries if isinstance(entry, dict)]
+
+
+def _custom_pressure_load_entries(config: LightweightFEMConfig) -> list[dict[str, object]]:
+    entries = [
+        entry for entry in _custom_load_entries(config)
+        if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}
+    ]
+    return entries
+
+
+def _custom_edge_load_entries(config: LightweightFEMConfig) -> list[dict[str, object]]:
+    entries = [
+        entry for entry in _custom_load_entries(config)
+        if str(entry.get("type", "")).lower() in {"edge", "edge_load"}
+    ]
+    return entries
+
+
+def _normalised_custom_pressure_patches(patches: object) -> list[dict[str, float]]:
+    if not isinstance(patches, list):
+        return []
+    normalised: list[dict[str, float]] = []
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        min_a = float(patch.get("min_a", 0.0))
+        max_a = float(patch.get("max_a", 0.0))
+        min_b = float(patch.get("min_b", 0.0))
+        max_b = float(patch.get("max_b", 0.0))
+        if max_a <= min_a or max_b <= min_b:
+            continue
+        normalised.append({
+            "min_a": min_a,
+            "max_a": max_a,
+            "min_b": min_b,
+            "max_b": max_b,
+        })
+    return normalised
+
+
+def _custom_pressure_patches(config: LightweightFEMConfig) -> list[dict[str, float]]:
+    entries = _custom_pressure_load_entries(config)
+    if entries:
+        patches: list[dict[str, float]] = []
+        for entry in entries:
+            patches.extend(_normalised_custom_pressure_patches(entry.get("patches", [])))
+        return patches
+    try:
+        import json
+        raw_patches = json.loads(config.custom_pressure_patches_json) if config.custom_pressure_patches_json else []
+    except Exception:
+        return []
+    return _normalised_custom_pressure_patches(raw_patches)
+
+
+def _custom_pressure_patch_element_ids_from_patches(
+        model,
+        generated_geometry: dict,
+        geometry: dict,
+        patches: list[dict[str, float]],
+) -> tuple[int, ...]:
     shell_ids = _shell_element_ids(model)
     if not shell_ids:
         return ()
-    
-    try:
-        import json
-        patches = json.loads(config.slamming_patches_json) if config.slamming_patches_json else []
-    except Exception:
-        patches = []
-        
+
     if not patches:
         return shell_ids
 
@@ -2016,27 +2161,72 @@ def _slamming_patch_element_ids(model, generated_geometry: dict, geometry: dict,
     return tuple(selected) or shell_ids
 
 
-def _run_slamming_transient(model, load_case, generated_geometry: dict, geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
-    if not config.slamming_enabled:
+def _custom_pressure_patch_element_ids(
+        model,
+        generated_geometry: dict,
+        geometry: dict,
+        config: LightweightFEMConfig,
+) -> tuple[int, ...]:
+    return _custom_pressure_patch_element_ids_from_patches(
+        model,
+        generated_geometry,
+        geometry,
+        _custom_pressure_patches(config),
+    )
+
+
+def _run_custom_time_domain_response(
+        model,
+        load_case,
+        generated_geometry: dict,
+        geometry: dict,
+        config: LightweightFEMConfig,
+) -> dict[str, object]:
+    if not config.custom_time_domain_enabled:
         return {}
     if _full_backend is None or _backend_solve_transient_newmark is None:
         return {"status": "unavailable"}
-    pressure = abs(float(config.slamming_pressure_pa or 0.0))
-    duration = max(float(config.slamming_duration_s or 0.0), 0.0)
-    total_time = max(float(config.slamming_total_time_s or 0.0), duration)
-    dt = max(float(config.slamming_dt_s or 0.0), 1.0e-9)
-    if pressure <= 0.0 or duration <= 0.0 or total_time <= 0.0:
-        return {"status": "skipped", "reason": "slamming pressure, duration and total time must be positive"}
-    patch_ids = _slamming_patch_element_ids(model, generated_geometry, geometry, config)
+    duration = max(float(config.custom_time_domain_duration_s or 0.0), 0.0)
+    total_time = max(float(config.custom_time_domain_total_time_s or 0.0), duration)
+    dt = max(float(config.custom_time_domain_dt_s or 0.0), 1.0e-9)
+    pressure_entries = _custom_pressure_load_entries(config)
+    pressure_patches = []
+    output_element_ids: set[int] = set()
+    if pressure_entries:
+        for index, entry in enumerate(pressure_entries, start=1):
+            pressure = abs(float(entry.get("pressure_pa", 0.0) or 0.0))
+            if pressure <= 0.0:
+                continue
+            patches = _normalised_custom_pressure_patches(entry.get("patches", []))
+            patch_ids = _custom_pressure_patch_element_ids_from_patches(model, generated_geometry, geometry, patches)
+            if not patch_ids:
+                continue
+            output_element_ids.update(int(element_id) for element_id in patch_ids)
+            pressure_patches.append(_full_backend.PressurePatch.rectangular_pulse(
+                name="runtime_custom_pressure_patch_" + str(index),
+                pressure=_pressure_sign(config) * pressure,
+                start_time=0.0,
+                end_time=duration,
+                element_ids=patch_ids,
+            ))
+    else:
+        pressure = abs(float(config.custom_pressure_pa or 0.0))
+        if pressure > 0.0:
+            patch_ids = _custom_pressure_patch_element_ids(model, generated_geometry, geometry, config)
+            output_element_ids.update(int(element_id) for element_id in patch_ids)
+            if patch_ids:
+                pressure_patches.append(_full_backend.PressurePatch.rectangular_pulse(
+                    name="runtime_custom_pressure_patch",
+                    pressure=_pressure_sign(config) * pressure,
+                    start_time=0.0,
+                    end_time=duration,
+                    element_ids=patch_ids,
+                ))
+    if not pressure_patches or duration <= 0.0 or total_time <= 0.0:
+        return {"status": "skipped", "reason": "custom pressure, duration and total time must be positive"}
+    patch_ids = tuple(sorted(output_element_ids))
     if not patch_ids:
         return {"status": "skipped", "reason": "no shell elements selected"}
-    patch = _full_backend.PressurePatch.rectangular_pulse(
-        name="runtime_slamming_patch",
-        pressure=_pressure_sign(config) * pressure,
-        start_time=0.0,
-        end_time=duration,
-        element_ids=patch_ids,
-    )
     transient_config = _full_backend.TransientConfig(
         dt=dt,
         t_end=total_time,
@@ -2046,16 +2236,16 @@ def _run_slamming_transient(model, load_case, generated_geometry: dict, geometry
         recovery=_recovery_config(config),
         resource_config=_resource_config(config),
     )
-    base_load_case = load_case if config.slamming_include_static_load else None
+    base_load_case = load_case if config.custom_time_domain_include_static_load else None
     transient = _backend_solve_transient_newmark(
         model,
         transient_config,
-        pressure_patches=[patch],
+        pressure_patches=pressure_patches,
         base_load_case=base_load_case,
     )
     return {
         "status": str(transient.status),
-        "pressure_pa": pressure,
+        "pressure_pa": max(abs(float(getattr(patch, "pressure", 0.0))) for patch in pressure_patches),
         "duration_s": duration,
         "total_time_s": total_time,
         "dt_s": dt,
@@ -2063,7 +2253,7 @@ def _run_slamming_transient(model, load_case, generated_geometry: dict, geometry
         "peak_displacement_m": float(transient.peak_displacement),
         "peak_von_mises_pa": float(transient.peak_von_mises_stress),
         "force_impulse_n_s": tuple(float(value) for value in np.asarray(transient.force_impulse, dtype=float).reshape(3)),
-        "include_static_load": bool(config.slamming_include_static_load),
+        "include_static_load": bool(config.custom_time_domain_include_static_load),
     }
 
 
@@ -2071,6 +2261,7 @@ def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | 
     nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
     grid = generated_geometry.get("plot_grid") or []
     diagnostics: dict[str, float | int | str] = {"shell_order": _shell_order_from_geometry(generated_geometry)}
+    diagnostics["beam_order"] = _beam_order_from_geometry(generated_geometry)
     if not grid:
         return diagnostics
     if generated_geometry.get("plot_type") == "cylinder":
@@ -2160,6 +2351,137 @@ def _apply_weighted_edge_load(load_case, weights: dict[int, float], force_per_le
         load_case.add_nodal_load(int(node_id), forces=vector * float(weight))
 
 
+def _custom_pressure_patch_count(config: LightweightFEMConfig) -> int:
+    return len(_custom_pressure_patches(config))
+
+
+def _custom_pressure_uses_selected_patches(config: LightweightFEMConfig) -> bool:
+    return bool(config.custom_load_bc_enabled) and _custom_pressure_patch_count(config) > 0
+
+
+def _add_custom_panel_pressure_loads(
+        model,
+        load_case,
+        generated_geometry: dict,
+        geometry: dict,
+        config: LightweightFEMConfig,
+) -> int:
+    if not _custom_pressure_uses_selected_patches(config):
+        return 0
+    pressure_entries = _custom_pressure_load_entries(config)
+    if pressure_entries:
+        applied = 0
+        for entry in pressure_entries:
+            pressure = abs(float(entry.get("pressure_pa", 0.0) or 0.0))
+            if pressure <= 0.0:
+                continue
+            patches = _normalised_custom_pressure_patches(entry.get("patches", []))
+            element_ids = _custom_pressure_patch_element_ids_from_patches(
+                model,
+                generated_geometry,
+                geometry,
+                patches,
+            )
+            for element_id in element_ids:
+                load_case.add_pressure_load(int(element_id), _pressure_sign(config) * pressure * float(config.load_scale))
+            applied += len(element_ids)
+        return applied
+
+    pressure = abs(float(config.custom_pressure_pa or 0.0))
+    if pressure <= 0.0:
+        return 0
+    element_ids = _custom_pressure_patch_element_ids(model, generated_geometry, geometry, config)
+    for element_id in element_ids:
+        load_case.add_pressure_load(int(element_id), _pressure_sign(config) * pressure * float(config.load_scale))
+    return len(element_ids)
+
+
+def _custom_edge_segments(config: LightweightFEMConfig) -> list[dict[str, float | str]]:
+    edge_entries = _custom_edge_load_entries(config)
+    if edge_entries:
+        raw_segments: list[object] = []
+        for entry in edge_entries:
+            edges = entry.get("edges", [])
+            if isinstance(edges, list):
+                raw_segments.extend(edges)
+    else:
+        try:
+            import json
+            raw_segments = json.loads(config.custom_edge_segments_json) if config.custom_edge_segments_json else []
+        except Exception:
+            return []
+    if not isinstance(raw_segments, list):
+        return []
+    segments: list[dict[str, float | str]] = []
+    for raw in raw_segments:
+        if not isinstance(raw, dict):
+            continue
+        start = float(raw.get("start_coordinate", 0.0))
+        end = float(raw.get("end_coordinate", 0.0))
+        if abs(end - start) <= 1.0e-12:
+            continue
+        segments.append({
+            "varying_axis": str(raw.get("varying_axis", "a")).lower(),
+            "fixed_coordinate": float(raw.get("fixed_coordinate", 0.0)),
+            "start_coordinate": min(start, end),
+            "end_coordinate": max(start, end),
+        })
+    return segments
+
+
+def _flat_segment_nodes(nodes: list, segment: dict[str, float | str], tol: float) -> tuple[list, int, np.ndarray]:
+    varying_axis = str(segment.get("varying_axis", "a")).lower()
+    fixed = float(segment.get("fixed_coordinate", 0.0))
+    start = float(segment.get("start_coordinate", 0.0))
+    end = float(segment.get("end_coordinate", 0.0))
+    if varying_axis == "a":
+        selected = [
+            node for node in nodes
+            if abs(float(node.y) - fixed) <= tol and start - tol <= float(node.x) <= end + tol
+        ]
+        return selected, 0, np.array([0.0, 1.0, 0.0])
+    selected = [
+        node for node in nodes
+        if abs(float(node.x) - fixed) <= tol and start - tol <= float(node.y) <= end + tol
+    ]
+    return selected, 1, np.array([float(1.0), 0.0, 0.0])
+
+
+def _add_custom_selected_edge_loads(model, load_case, nodes: list, generated_geometry: dict, config: LightweightFEMConfig, tol: float) -> None:
+    if not config.custom_load_bc_enabled:
+        return
+    if generated_geometry.get("plot_type") != "flat":
+        return
+    edge_entries = _custom_edge_load_entries(config)
+    if edge_entries:
+        load_groups: list[tuple[float, list[dict[str, float | str]]]] = []
+        for entry in edge_entries:
+            line_load = float(entry.get("line_load_n_per_m", 0.0) or 0.0)
+            if abs(line_load) <= 0.0:
+                continue
+            raw_edges = entry.get("edges", [])
+            if not isinstance(raw_edges, list):
+                continue
+            edge_config = LightweightFEMConfig(custom_edge_segments_json=json.dumps(raw_edges))
+            load_groups.append((line_load, _custom_edge_segments(edge_config)))
+    else:
+        line_load = float(config.custom_selected_edge_load_n_per_m or 0.0)
+        if abs(line_load) <= 0.0:
+            return
+        load_groups = [(line_load, _custom_edge_segments(config))]
+
+    for line_load, segments in load_groups:
+        if not segments:
+            continue
+        for segment in segments:
+            segment_nodes, weight_axis, direction = _flat_segment_nodes(nodes, segment, tol)
+            _apply_weighted_edge_load(
+                load_case,
+                _line_node_weights(segment_nodes, weight_axis),
+                direction * line_load,
+            )
+
+
 def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: LightweightFEMConfig) -> None:
     if not config.custom_load_bc_enabled:
         return
@@ -2191,6 +2513,7 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
     _apply_weighted_edge_load(load_case, _line_node_weights(x1_nodes, 1), np.array([float(config.plate_edge_x1_load_n_per_m), 0.0, 0.0]))
     _apply_weighted_edge_load(load_case, _line_node_weights(y0_nodes, 0), np.array([0.0, -float(config.plate_edge_y0_load_n_per_m), 0.0]))
     _apply_weighted_edge_load(load_case, _line_node_weights(y1_nodes, 0), np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
+    _add_custom_selected_edge_loads(model, load_case, nodes, generated_geometry, config, tol)
 
 
 def _add_generated_end_moments(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
@@ -2316,8 +2639,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     effective_yield_stress = float(material_properties.get("sigma_yield", config.yield_stress_pa)) if material_properties else config.yield_stress_pa
     include_imported_loads = _include_imported_loads(config)
     effective_pressure = _effective_pressure_pa(config)
+    symmetric_pressure = effective_pressure
+    if _custom_pressure_uses_selected_patches(config):
+        symmetric_pressure = float(config.pressure_pa or 0.0) if include_imported_loads else 0.0
     backend_config = _full_backend.AnyStructureFEMConfig(
-        pressure_pa=abs(float(effective_pressure)),
+        pressure_pa=abs(float(symmetric_pressure)),
         pressure_sign=_pressure_sign(config),
         load_scale=float(config.load_scale),
         num_buckling_modes=int(config.num_buckling_modes),
@@ -2345,7 +2671,6 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         diagnostics.append("Applied prescribed displacement constraints from the enforced displacement input.")
     if _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
-        _upgrade_shells_to_s8(nodes, shells, element_type=elem_type)
         diagnostics.append(f"Generated {elem_type} shell elements with shared midside nodes.")
     if _normalized_choice(config.symmetry_mode) == "cyclic":
         diagnostics.append("Cyclic symmetry requested; generated runtime geometry is a full 360-degree model, so no sector coupling was added.")
@@ -2361,7 +2686,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             diagnostics.append("Custom loads are added to the imported/generated pressure, axial force and end moment inputs.")
         else:
             diagnostics.append("Custom loads replace imported/generated pressure, axial force and end moment inputs.")
-        if abs(float(config.custom_pressure_pa or 0.0)) > 0.0:
+        custom_load_count = len(_custom_load_entries(config))
+        if custom_load_count:
+            diagnostics.append("Using " + str(custom_load_count) + " saved custom pressure/edge load item(s).")
+        if not custom_load_count and abs(float(config.custom_pressure_pa or 0.0)) > 0.0:
             diagnostics.append("Applied custom manual pressure: " + str(round(float(config.custom_pressure_pa), 3)) + " Pa.")
         if config.custom_use_nullspace_projection:
             diagnostics.append("Custom boundary condition is rigid-body nullspace projection with automatic generalized load balancing.")
@@ -2382,8 +2710,15 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         )
     if config.imperfection_enabled:
         diagnostics.append("Geometric imperfection input is enabled; offsets are applied as stress-free reference geometry.")
-    if config.slamming_enabled:
-        diagnostics.append("Transient slamming pressure input is enabled; it is solved as a separate linear Newmark pressure-patch response.")
+    if _custom_pressure_uses_selected_patches(config):
+        diagnostics.append("Custom pressure is applied only to the selected panel patches.")
+    if (
+            (_custom_edge_load_entries(config) and _custom_edge_segments(config))
+            or (abs(float(config.custom_selected_edge_load_n_per_m or 0.0)) > 0.0 and _custom_edge_segments(config))
+    ):
+        diagnostics.append("Custom selected edge segments receive an additional line load.")
+    if config.custom_time_domain_enabled:
+        diagnostics.append("Custom time-domain pressure response is enabled and solved with the linear Newmark pressure-patch solver.")
 
     try:
         if status_callback: status_callback("Building FE model...")
@@ -2405,10 +2740,13 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             )
         elif imperfection_info:
             diagnostics.append("Imperfection input was not applied: " + str(imperfection_info.get("reason", imperfection_info.get("status", "unknown"))))
-        if abs(float(effective_pressure)) > 0.0:
+        if abs(float(symmetric_pressure)) > 0.0:
             load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
         else:
             load_case = _full_backend.LoadCase("custom_fem_loads" if config.custom_load_bc_enabled else "anystructure_symmetric_load")
+        selected_pressure_shells = _add_custom_panel_pressure_loads(model, load_case, generated_geometry, geometry, config)
+        if selected_pressure_shells:
+            diagnostics.append("Applied selected custom pressure to " + str(selected_pressure_shells) + " shell elements.")
         if include_imported_loads:
             _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
             _add_generated_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
@@ -2465,28 +2803,28 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         prestress_summary["imperfection_max_offset_m"] = float(imperfection_info.get("max_offset_m", 0.0) or 0.0)
         prestress_summary["imperfection_waves_a"] = float(imperfection_info.get("waves_a", 0.0) or 0.0)
         prestress_summary["imperfection_waves_b"] = float(imperfection_info.get("waves_b", 0.0) or 0.0)
-    if config.slamming_enabled:
-        if status_callback: status_callback("Solving transient slamming dynamics...")
+    if config.custom_time_domain_enabled:
+        if status_callback: status_callback("Solving custom time-domain pressure response...")
         try:
-            slamming_summary = _run_slamming_transient(model, load_case, generated_geometry, geometry, config)
-            if slamming_summary:
-                prestress_summary["slamming_status"] = str(slamming_summary.get("status", ""))
-                prestress_summary["slamming_pressure_pa"] = float(slamming_summary.get("pressure_pa", 0.0) or 0.0)
-                prestress_summary["slamming_selected_shells"] = float(slamming_summary.get("selected_shells", 0.0) or 0.0)
-                prestress_summary["slamming_peak_displacement_m"] = float(slamming_summary.get("peak_displacement_m", 0.0) or 0.0)
-                prestress_summary["slamming_peak_von_mises_pa"] = float(slamming_summary.get("peak_von_mises_pa", 0.0) or 0.0)
+            transient_summary = _run_custom_time_domain_response(model, load_case, generated_geometry, geometry, config)
+            if transient_summary:
+                prestress_summary["custom_time_domain_status"] = str(transient_summary.get("status", ""))
+                prestress_summary["custom_time_domain_pressure_pa"] = float(transient_summary.get("pressure_pa", 0.0) or 0.0)
+                prestress_summary["custom_time_domain_selected_shells"] = float(transient_summary.get("selected_shells", 0.0) or 0.0)
+                prestress_summary["custom_time_domain_peak_displacement_m"] = float(transient_summary.get("peak_displacement_m", 0.0) or 0.0)
+                prestress_summary["custom_time_domain_peak_von_mises_pa"] = float(transient_summary.get("peak_von_mises_pa", 0.0) or 0.0)
                 diagnostics.append(
-                    "Transient slamming response "
-                    + str(slamming_summary.get("status", "unknown"))
+                    "Custom time-domain response "
+                    + str(transient_summary.get("status", "unknown"))
                     + "; selected shells "
-                    + str(int(float(slamming_summary.get("selected_shells", 0.0) or 0.0)))
+                    + str(int(float(transient_summary.get("selected_shells", 0.0) or 0.0)))
                     + ", peak displacement "
-                    + str(round(float(slamming_summary.get("peak_displacement_m", 0.0) or 0.0) * 1000.0, 4))
+                    + str(round(float(transient_summary.get("peak_displacement_m", 0.0) or 0.0) * 1000.0, 4))
                     + " mm."
                 )
         except Exception as exc:
-            prestress_summary["slamming_status"] = "failed"
-            diagnostics.append("Transient slamming solve failed: " + str(exc))
+            prestress_summary["custom_time_domain_status"] = "failed"
+            diagnostics.append("Custom time-domain solve failed: " + str(exc))
     prestress_summary["constraint_method"] = str(solver_info.get("constraint_method", ""))
     prestress_summary["constraint_mode"] = str(solver_info.get("constraint_mode", ""))
     nullspace_info = solver_info.get("nullspace_info") or {}

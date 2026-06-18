@@ -75,6 +75,7 @@ class RuntimeFEMOptions:
     boundary_condition: str = "auto"
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
+    beam_element_order: str = "B2"
     analysis_type: str = "linear eigenvalue"
     buckling_analysis_type: str = "linear eigenvalue"
     pressure_direction: str = "external"
@@ -113,13 +114,15 @@ class RuntimeFEMOptions:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
-    slamming_enabled: bool = False
-    slamming_pressure_pa: float = 0.0
-    slamming_duration_s: float = 0.01
-    slamming_total_time_s: float = 0.05
-    slamming_dt_s: float = 0.0005
-    slamming_patches_json: str = ""
-    slamming_include_static_load: bool = False
+    custom_loads_json: str = ""
+    custom_pressure_patches_json: str = ""
+    custom_edge_segments_json: str = ""
+    custom_selected_edge_load_n_per_m: float = 0.0
+    custom_time_domain_enabled: bool = False
+    custom_time_domain_duration_s: float = 0.01
+    custom_time_domain_total_time_s: float = 0.05
+    custom_time_domain_dt_s: float = 0.0005
+    custom_time_domain_include_static_load: bool = False
     imperfection_enabled: bool = False
     imperfection_shape: str = "standard plate/cylinder"
     imperfection_amplitude_m: float = 0.0
@@ -408,15 +411,100 @@ def runtime_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]
     return _flat_geometry_summary(snapshot)
 
 
+def _runtime_custom_load_entries(raw_json: str) -> list[dict[str, Any]]:
+    try:
+        raw_entries = json.loads(raw_json or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw_entries, list):
+        return []
+    return [entry for entry in raw_entries if isinstance(entry, dict)]
+
+
+def _runtime_custom_pressure_patches(options: RuntimeFEMOptions) -> list[dict[str, float]]:
+    entries = _runtime_custom_load_entries(options.custom_loads_json)
+    raw_patches: list[Any] = []
+    if entries:
+        for entry in entries:
+            if str(entry.get("type", "")).lower() not in {"pressure", "panel_pressure"}:
+                continue
+            patches = entry.get("patches", [])
+            if isinstance(patches, list):
+                raw_patches.extend(patches)
+    else:
+        try:
+            raw_loaded = json.loads(options.custom_pressure_patches_json or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_loaded = []
+        if isinstance(raw_loaded, list):
+            raw_patches = raw_loaded
+
+    patches: list[dict[str, float]] = []
+    for raw_patch in raw_patches:
+        if not isinstance(raw_patch, dict):
+            continue
+        patch = {
+            "min_a": _safe_float(raw_patch.get("min_a")),
+            "max_a": _safe_float(raw_patch.get("max_a")),
+            "min_b": _safe_float(raw_patch.get("min_b")),
+            "max_b": _safe_float(raw_patch.get("max_b")),
+        }
+        if patch["max_a"] > patch["min_a"] and patch["max_b"] > patch["min_b"]:
+            patches.append(patch)
+    return patches
+
+
+def _runtime_custom_edges(options: RuntimeFEMOptions) -> list[dict[str, float | str]]:
+    entries = _runtime_custom_load_entries(options.custom_loads_json)
+    raw_edges: list[Any] = []
+    if entries:
+        for entry in entries:
+            if str(entry.get("type", "")).lower() not in {"edge", "edge_load"}:
+                continue
+            edges = entry.get("edges", [])
+            if isinstance(edges, list):
+                raw_edges.extend(edges)
+    else:
+        try:
+            raw_loaded = json.loads(options.custom_edge_segments_json or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_loaded = []
+        if isinstance(raw_loaded, list):
+            raw_edges = raw_loaded
+
+    custom_edges: list[dict[str, float | str]] = []
+    for raw_edge in raw_edges:
+        if not isinstance(raw_edge, dict):
+            continue
+        start = _safe_float(raw_edge.get("start_coordinate"))
+        end = _safe_float(raw_edge.get("end_coordinate"))
+        if abs(end - start) <= 1.0e-12:
+            continue
+        custom_edges.append({
+            "varying_axis": str(raw_edge.get("varying_axis", "a")),
+            "fixed_coordinate": _safe_float(raw_edge.get("fixed_coordinate")),
+            "start_coordinate": min(start, end),
+            "end_coordinate": max(start, end),
+        })
+    return custom_edges
+
+
 def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions,
                     status_callback=None) -> RuntimeFEMRunResult:
     """Run the ANYstructure-owned lightweight FEM solver."""
 
     geometry = runtime_geometry_summary(snapshot)
     diagnostics = list(snapshot.diagnostics)
+    custom_load_entries = _runtime_custom_load_entries(options.custom_loads_json)
+    listed_pressure = sum(
+        abs(_safe_float(entry.get("pressure_pa"), 0.0))
+        for entry in custom_load_entries
+        if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}
+    )
     effective_pressure = float(
         options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
-    effective_pressure += float(options.custom_pressure_pa if options.custom_load_bc_enabled else 0.0)
+    if options.custom_load_bc_enabled:
+        effective_pressure += float(listed_pressure if custom_load_entries else options.custom_pressure_pa)
     solver_config = fe_solver.LightweightFEMConfig(
         mesh_fidelity=options.mesh_fidelity,
         pressure_pa=options.pressure_pa,
@@ -430,6 +518,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         boundary_condition=options.boundary_condition,
         symmetry_mode=options.symmetry_mode,
         shell_element_order=options.shell_element_order,
+        beam_element_order=options.beam_element_order,
         analysis_type=options.analysis_type,
         buckling_analysis_type=options.buckling_analysis_type,
         pressure_direction=options.pressure_direction,
@@ -467,13 +556,15 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         plate_edge_y1_load_n_per_m=options.plate_edge_y1_load_n_per_m,
         cylinder_lower_edge_load_n_per_m=options.cylinder_lower_edge_load_n_per_m,
         cylinder_upper_edge_load_n_per_m=options.cylinder_upper_edge_load_n_per_m,
-        slamming_enabled=options.slamming_enabled,
-        slamming_pressure_pa=options.slamming_pressure_pa,
-        slamming_duration_s=options.slamming_duration_s,
-        slamming_total_time_s=options.slamming_total_time_s,
-        slamming_dt_s=options.slamming_dt_s,
-        slamming_patches_json=options.slamming_patches_json,
-        slamming_include_static_load=options.slamming_include_static_load,
+        custom_loads_json=options.custom_loads_json,
+        custom_pressure_patches_json=options.custom_pressure_patches_json,
+        custom_edge_segments_json=options.custom_edge_segments_json,
+        custom_selected_edge_load_n_per_m=options.custom_selected_edge_load_n_per_m,
+        custom_time_domain_enabled=options.custom_time_domain_enabled,
+        custom_time_domain_duration_s=options.custom_time_domain_duration_s,
+        custom_time_domain_total_time_s=options.custom_time_domain_total_time_s,
+        custom_time_domain_dt_s=options.custom_time_domain_dt_s,
+        custom_time_domain_include_static_load=options.custom_time_domain_include_static_load,
         imperfection_enabled=options.imperfection_enabled,
         imperfection_shape=options.imperfection_shape,
         imperfection_amplitude_m=options.imperfection_amplitude_m,
@@ -503,23 +594,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         solver_result = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
     diagnostics.extend(solver_result.diagnostics)
 
-    slamming_patches: list[dict[str, float]] = []
-    try:
-        raw_patches = json.loads(options.slamming_patches_json or "[]")
-        if isinstance(raw_patches, list):
-            for raw_patch in raw_patches:
-                if not isinstance(raw_patch, dict):
-                    continue
-                patch = {
-                    "min_a": _safe_float(raw_patch.get("min_a")),
-                    "max_a": _safe_float(raw_patch.get("max_a")),
-                    "min_b": _safe_float(raw_patch.get("min_b")),
-                    "max_b": _safe_float(raw_patch.get("max_b")),
-                }
-                if patch["max_a"] > patch["min_a"] and patch["max_b"] > patch["min_b"]:
-                    slamming_patches.append(patch)
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
-        diagnostics.append("Invalid slamming patch definition in result summary: " + str(error))
+    custom_patches = _runtime_custom_pressure_patches(options)
+    custom_edges = _runtime_custom_edges(options)
 
     summary = {
         **geometry,
@@ -536,6 +612,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "boundary_condition": str(options.boundary_condition),
         "symmetry_mode": str(options.symmetry_mode),
         "shell_element_order": str(options.shell_element_order),
+        "beam_element_order": str(options.beam_element_order),
         "analysis_type": str(options.analysis_type),
         "buckling_analysis_type": str(options.buckling_analysis_type),
         "pressure_direction": str(options.pressure_direction),
@@ -574,19 +651,23 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "plate_edge_y1_load_n_per_m": float(options.plate_edge_y1_load_n_per_m),
         "cylinder_lower_edge_load_n_per_m": float(options.cylinder_lower_edge_load_n_per_m),
         "cylinder_upper_edge_load_n_per_m": float(options.cylinder_upper_edge_load_n_per_m),
-        "slamming_enabled": bool(options.slamming_enabled),
-        "slamming_pressure_pa": float(options.slamming_pressure_pa),
-        "slamming_duration_s": float(options.slamming_duration_s),
-        "slamming_total_time_s": float(options.slamming_total_time_s),
-        "slamming_dt_s": float(options.slamming_dt_s),
-        "slamming_patches_json": str(options.slamming_patches_json),
-        "slamming_patch_count": len(slamming_patches),
-        "slamming_patch_area_m2": sum(
+        "custom_loads_json": str(options.custom_loads_json),
+        "custom_load_count": len(custom_load_entries),
+        "custom_pressure_patches_json": str(options.custom_pressure_patches_json),
+        "custom_edge_segments_json": str(options.custom_edge_segments_json),
+        "custom_selected_edge_load_n_per_m": float(options.custom_selected_edge_load_n_per_m),
+        "custom_pressure_patch_count": len(custom_patches),
+        "custom_pressure_patch_area_m2": sum(
             max(0.0, patch["max_a"] - patch["min_a"])
             * max(0.0, patch["max_b"] - patch["min_b"])
-            for patch in slamming_patches
+            for patch in custom_patches
         ),
-        "slamming_include_static_load": bool(options.slamming_include_static_load),
+        "custom_edge_segment_count": len(custom_edges),
+        "custom_time_domain_enabled": bool(options.custom_time_domain_enabled),
+        "custom_time_domain_duration_s": float(options.custom_time_domain_duration_s),
+        "custom_time_domain_total_time_s": float(options.custom_time_domain_total_time_s),
+        "custom_time_domain_dt_s": float(options.custom_time_domain_dt_s),
+        "custom_time_domain_include_static_load": bool(options.custom_time_domain_include_static_load),
         "imperfection_enabled": bool(options.imperfection_enabled),
         "imperfection_shape": str(options.imperfection_shape),
         "imperfection_amplitude_m": float(options.imperfection_amplitude_m),
@@ -758,25 +839,26 @@ def _plot_member_lines(
         if len(points) < 2:
             continue
         plot_points = []
-        for index, point in enumerate(points[:2]):
+        for index, point in enumerate(points):
             try:
                 base = np.asarray(point, dtype=float)
                 moved = np.asarray(displaced[index], dtype=float) if index < len(displaced) else base
             except Exception:
                 continue
             plot_points.append(base + (moved - base) * float(scale))
-        if len(plot_points) != 2:
+        if len(plot_points) < 2:
             continue
         color, width = role_style.get(role, ("#475569", 1.4))
-        axis.plot(
-            [plot_points[0][0], plot_points[1][0]],
-            [plot_points[0][1], plot_points[1][1]],
-            [plot_points[0][2], plot_points[1][2]],
-            color=color,
-            linewidth=width,
-            alpha=member_alpha,
-            solid_capstyle="round",
-        )
+        for start, end in zip(plot_points, plot_points[1:]):
+            axis.plot(
+                [start[0], end[0]],
+                [start[1], end[1]],
+                [start[2], end[2]],
+                color=color,
+                linewidth=width,
+                alpha=member_alpha,
+                solid_capstyle="round",
+            )
 
 
 def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, Any]]:
@@ -1251,6 +1333,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Geometry: " + str(summary.get("geometry", "")),
         "Mesh fidelity: " + str(summary.get("mesh_fidelity", "")),
         "Shell element: " + str(summary.get("shell_element_order", "")),
+        "Beam element: " + str(summary.get("beam_element_order", "")),
         "Boundary condition: " + str(summary.get("boundary_condition", "")),
         "Symmetry: " + str(summary.get("symmetry_mode", "")),
         "Analysis type: " + str(summary.get("analysis_type", "")),
@@ -1299,6 +1382,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         lines.append("Custom nullspace boundary: " + str(bool(summary.get("custom_use_nullspace_projection"))))
         lines.append("Allow unbalanced free-free loads: " + str(bool(summary.get("allow_unbalanced_free_free"))))
         lines.append("Custom pressure [Pa]: " + str(round(_safe_float(summary.get("custom_pressure_pa")), 3)))
+        lines.append("Selected pressure panels: " + str(_safe_int(summary.get("custom_pressure_patch_count"), 0)))
+        lines.append("Selected pressure panel area [m2]: " + str(round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)))
+        lines.append("Selected edge segments: " + str(_safe_int(summary.get("custom_edge_segment_count"), 0)))
+        lines.append("Selected edge load [N/m]: " + str(round(_safe_float(summary.get("custom_selected_edge_load_n_per_m")), 3)))
         if str(summary.get("geometry", "")).lower().startswith("cylinder"):
             lines.extend(
                 [
@@ -1346,20 +1433,20 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     _safe_int(summary.get("imperfection_wave_b"), 1)),
             ]
         )
-    if summary.get("slamming_enabled"):
+    if summary.get("custom_time_domain_enabled"):
         lines.extend(
             [
                 "",
-                "Transient slamming input:",
-                " - pressure [Pa]: " + str(round(_safe_float(summary.get("slamming_pressure_pa")), 3)),
+                "Custom time-domain input:",
+                " - pressure [Pa]: " + str(round(_safe_float(summary.get("custom_pressure_pa")), 3)),
                 " - duration / total time [s]: "
-                + str(round(_safe_float(summary.get("slamming_duration_s")), 6))
+                + str(round(_safe_float(summary.get("custom_time_domain_duration_s")), 6))
                 + " / "
-                + str(round(_safe_float(summary.get("slamming_total_time_s")), 6)),
-                " - dt [s]: " + str(round(_safe_float(summary.get("slamming_dt_s")), 8)),
-                " - selected patches: " + str(_safe_int(summary.get("slamming_patch_count"), 0)),
-                " - selected patch area [m²]: " + str(round(_safe_float(summary.get("slamming_patch_area_m2")), 4)),
-                " - include static load in transient: " + str(bool(summary.get("slamming_include_static_load"))),
+                + str(round(_safe_float(summary.get("custom_time_domain_total_time_s")), 6)),
+                " - dt [s]: " + str(round(_safe_float(summary.get("custom_time_domain_dt_s")), 8)),
+                " - selected patches: " + str(_safe_int(summary.get("custom_pressure_patch_count"), 0)),
+                " - selected patch area [m2]: " + str(round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)),
+                " - include static load in time domain: " + str(bool(summary.get("custom_time_domain_include_static_load"))),
             ]
         )
     if (
@@ -1397,6 +1484,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             " - beams: " + str(mesh_info.get("beams", 0)),
             " - rigid lids: " + str(mesh_info.get("rigid_lids", 0)),
             " - shell order: " + str(mesh_info.get("shell_order", "")),
+            " - beam order: " + str(mesh_info.get("beam_order", "")),
         ])
         for key in ("max_x_edge_m", "max_y_edge_m", "max_circumferential_edge_m", "max_axial_edge_m"):
             if key in mesh_info:
@@ -1445,12 +1533,12 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "imperfection_waves_a",
             "imperfection_waves_b",
         }
-        slamming_keys = {
-            "slamming_status",
-            "slamming_pressure_pa",
-            "slamming_selected_shells",
-            "slamming_peak_displacement_m",
-            "slamming_peak_von_mises_pa",
+        custom_time_domain_keys = {
+            "custom_time_domain_status",
+            "custom_time_domain_pressure_pa",
+            "custom_time_domain_selected_shells",
+            "custom_time_domain_peak_displacement_m",
+            "custom_time_domain_peak_von_mises_pa",
         }
         runtime_keys = {
             "runtime_solver",
@@ -1484,7 +1572,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             *material_keys,
             *nonlinear_static_keys,
             *imperfection_keys,
-            *slamming_keys,
+            *custom_time_domain_keys,
             *runtime_keys,
         }
         if prestress.get("material_model"):
@@ -1558,15 +1646,15 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 _safe_int(prestress.get("imperfection_waves_b"), 0)))
             lines.append(
                 " - meaning: the coordinates were offset before solving, so zero displacement in the imperfect model is stress free.")
-        slamming_status = str(prestress.get("slamming_status", "") or "")
-        if slamming_status:
-            lines.extend(["", "Transient slamming response:"])
-            lines.append(" - status: " + slamming_status)
-            lines.append(" - selected shell elements: " + str(_safe_int(prestress.get("slamming_selected_shells"), 0)))
+        custom_time_domain_status = str(prestress.get("custom_time_domain_status", "") or "")
+        if custom_time_domain_status:
+            lines.extend(["", "Custom time-domain response:"])
+            lines.append(" - status: " + custom_time_domain_status)
+            lines.append(" - selected shell elements: " + str(_safe_int(prestress.get("custom_time_domain_selected_shells"), 0)))
             lines.append(" - peak displacement [mm]: " + str(
-                round(1000.0 * _safe_float(prestress.get("slamming_peak_displacement_m")), 4)))
+                round(1000.0 * _safe_float(prestress.get("custom_time_domain_peak_displacement_m")), 4)))
             lines.append(" - peak von Mises [MPa]: " + str(
-                round(_safe_float(prestress.get("slamming_peak_von_mises_pa")) / 1.0e6, 3)))
+                round(_safe_float(prestress.get("custom_time_domain_peak_von_mises_pa")) / 1.0e6, 3)))
             lines.append(
                 " - meaning: this is a linear Newmark response to the prescribed pressure pulse; it is reported separately from the static buckling prestress.")
         for key, value in prestress.items():
@@ -1624,61 +1712,61 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Affects displacements, stresses, recovered prestress and buckling load factors.",
         "caution": "When analysing imported FEA result stresses, avoid double counting pressure unless pressure is intentionally part of the buckling load case.",
     },
-    "slamming_enabled": {
-        "title": "Transient Slamming",
-        "purpose": "Runs the synced ANYintelligent linear transient pressure-patch solver for a slamming pulse.",
+    "custom_time_domain_enabled": {
+        "title": "Custom Time-Domain Load",
+        "purpose": "Runs the synced ANYintelligent linear time-domain pressure-patch solver for a custom load pulse.",
         "use": "When enabled, a prescribed shell-normal pressure pulse is applied to the selected shell patch and advanced with Newmark average acceleration. This is a separate transient response calculation after the normal static solve.",
-        "output": "Adds slamming status, selected shell count, peak transient displacement and peak transient von Mises stress to the result print.",
+        "output": "Adds custom load status, selected shell count, peak transient displacement and peak transient von Mises stress to the result print.",
         "caution": "This is prescribed structural response only: no fluid-structure interaction, added mass, water entry, cavitation or pressure feedback is included.",
     },
-    "slamming_pressure_pa": {
-        "title": "Slamming Pressure",
-        "purpose": "Peak pressure magnitude for the transient slamming pulse.",
-        "use": "The pressure sign follows the selected pressure direction. The pulse starts at t = 0 and remains constant until the slamming duration.",
+    "custom_pressure_pa": {
+        "title": "Custom Load Pressure",
+        "purpose": "Peak pressure magnitude for the transient custom load pulse.",
+        "use": "The pressure sign follows the selected pressure direction. The pulse starts at t = 0 and remains constant until the custom load duration.",
         "output": "Controls the transient impulse, peak displacement and transient stress response.",
         "caution": "Do not also include the same pressure as a static pressure unless that is the intended load history.",
     },
-    "slamming_duration_s": {
-        "title": "Slamming Duration",
+    "custom_time_domain_duration_s": {
+        "title": "Custom Load Duration",
         "purpose": "Length of the constant pressure pulse in seconds.",
         "use": "The transient load is active from t = 0 to this time, then returns to zero.",
         "output": "Controls impulse and dynamic amplification.",
         "caution": "Use a time step small enough to resolve the pulse duration.",
     },
-    "slamming_total_time_s": {
-        "title": "Slamming Total Time",
+    "custom_time_domain_total_time_s": {
+        "title": "Custom Load Total Time",
         "purpose": "Total transient analysis time.",
         "use": "The solver saves the response until this time, including the free vibration after the pulse has ended.",
         "output": "Controls how much of the transient response is searched for peak displacement and stress.",
         "caution": "Long runs with small dt increase runtime.",
     },
-    "slamming_dt_s": {
-        "title": "Slamming Time Step",
+    "custom_time_domain_dt_s": {
+        "title": "Custom Load Time Step",
         "purpose": "Fixed Newmark time step.",
         "use": "The transient solver reuses the effective stiffness factorization when possible, but the number of steps still scales with total_time / dt.",
         "output": "Affects transient accuracy and runtime.",
         "caution": "The Newmark method is stable for the default parameters, but a coarse time step can miss the pressure pulse and peak response.",
     },
-    "slamming_patch_center": {
-        "title": "Slamming Patch Centre",
+    "custom_pressure_patch_center": {
+        "title": "Custom Pressure Patch Centre",
         "purpose": "Patch centre coordinates used to select shell elements by centroid.",
         "use": "For flat panels, A is x and B is y. For cylinders, A is axial z and B is circumferential arc length measured from the positive X direction. Zero uses the model centre for A and the positive X seam for B.",
-        "output": "Changes which shell elements receive the transient slamming pulse.",
+        "output": "Changes which shell elements receive the transient custom load pulse.",
         "caution": "Selection is centroid based. If exact patch membership is required, verify selected shell count and plot resolution.",
     },
-    "slamming_patch_size": {
-        "title": "Slamming Patch Size",
+    "custom_pressure_patch_size": {
+        "title": "Custom Pressure Patch Size",
         "purpose": "Patch dimensions used for centroid-based shell selection.",
         "use": "For flat panels, A/B are x/y dimensions. For cylinders, A is axial length and B is circumferential arc length. If either value is zero, all shell elements are loaded.",
         "output": "Changes the loaded area, impulse and transient response.",
         "caution": "Very small patches may select no element on a coarse mesh; the wrapper then falls back to loading all shells to avoid a silent zero-load run.",
     },
-    "slamming_include_static_load": {
-        "title": "Slamming Base Load",
-        "purpose": "Adds the current static load vector as a constant base load in the transient slamming run.",
-        "use": "Leave off to study the slamming pulse alone. Enable when the transient pressure is intentionally superposed on the static load case.",
+    "custom_time_domain_include_static_load": {
+        "title": "Custom Load Base Load",
+        "purpose": "Adds the current static load vector as a constant base load in the transient custom load run.",
+        "use": "Leave off to study the custom load pulse alone. Enable when the transient pressure is intentionally superposed on the static load case.",
         "output": "Changes transient displacement, stress and impulse resultants.",
-        "caution": "This can double count pressure if the static pressure already represents the same slamming event.",
+        "caution": "This can double count pressure if the static pressure already represents the same custom load event.",
     },
     "load_scale": {
         "title": "Load Scale",
@@ -1789,7 +1877,7 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "title": "Recovery History",
         "purpose": "Controls how much transient/nonlinear history data the backend is allowed to retain.",
         "use": "Full keeps all selected histories, selected limits recovery scope, and envelope stores peak/envelope style histories where supported.",
-        "output": "Recorded in result provenance and passed to transient slamming recovery policy.",
+        "output": "Recorded in result provenance and passed to transient custom load recovery policy.",
         "caution": "This is mostly a memory-management control; static stress plots still recover the full current field needed for the display.",
     },
     "recovery_threads": {
@@ -1840,6 +1928,13 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "use": "S4 is faster. S8 adds shared midside nodes and uses higher-order shell interpolation in the core solver. S8R is the reduced integration version of S8.",
         "output": "Mesh diagnostics report the shell order. S8 usually increases node count and runtime. S8R significantly speeds up S8 by reducing integration points.",
         "caution": "S8 can improve curvature and bending representation, but it should be verified with mesh convergence. S8R exhibits hourglass modes, so use with caution for unconstrained models.",
+    },
+    "beam_element_order": {
+        "title": "Beam Element",
+        "purpose": "Selects 2-node or 3-node beam elements for generated stiffeners, girders and frames.",
+        "use": "B2 keeps the current two-node Timoshenko beam mesh. B3 inserts beam-direction mid nodes and emits quadratic three-node beam elements.",
+        "output": "Mesh diagnostics report the beam order. B3 increases beam interpolation order and adds nodes along member lines.",
+        "caution": "B3 is useful for member curvature studies but adds degrees of freedom. Use B2 for faster routine runs.",
     },
     "analysis_type": {
         "title": "Analysis Type",
@@ -2113,6 +2208,7 @@ class RuntimeFEMWindow:
         self.boundary_condition = tk.StringVar(value="auto")
         self.symmetry_mode = tk.StringVar(value="none")
         self.shell_element_order = tk.StringVar(value="S4")
+        self.beam_element_order = tk.StringVar(value="B2")
         self.analysis_type = tk.StringVar(value="linear eigenvalue")
         self.buckling_analysis_type = tk.StringVar(value="linear eigenvalue")
         self.pressure_direction = tk.StringVar(value="external")
@@ -2151,20 +2247,28 @@ class RuntimeFEMWindow:
         self.plate_edge_y1_load_n_per_m = tk.DoubleVar(value=0.0)
         self.cylinder_lower_edge_load_n_per_m = tk.DoubleVar(value=0.0)
         self.cylinder_upper_edge_load_n_per_m = tk.DoubleVar(value=0.0)
-        self.slamming_enabled = tk.BooleanVar(value=False)
-        self.slamming_pressure_pa = tk.DoubleVar(value=0.0)
-        self.slamming_duration_s = tk.DoubleVar(value=0.01)
-        self.slamming_total_time_s = tk.DoubleVar(value=0.05)
-        self.slamming_dt_s = tk.DoubleVar(value=0.0005)
-        self.slamming_patches_json = tk.StringVar(value="[]")
-        self._slamming_patches: list[dict] = []
-        self._slamming_manual_cuts: list[dict[str, Any]] = []
-        self._slamming_selected_index: int = -1
-        self._slamming_selection_active = False
-        self._slamming_click_origin: tuple[int, int] | None = None
-        self._slamming_selection_button = None
-        self._generate_default_slamming_patches()
-        self.slamming_include_static_load = tk.BooleanVar(value=False)
+        self.custom_time_domain_enabled = tk.BooleanVar(value=False)
+        self.custom_time_domain_duration_s = tk.DoubleVar(value=0.01)
+        self.custom_time_domain_total_time_s = tk.DoubleVar(value=0.05)
+        self.custom_time_domain_dt_s = tk.DoubleVar(value=0.0005)
+        self.custom_loads_json = tk.StringVar(value="[]")
+        self.custom_pressure_patches_json = tk.StringVar(value="[]")
+        self.custom_edge_segments_json = tk.StringVar(value="[]")
+        self.custom_selected_edge_load_n_per_m = tk.DoubleVar(value=0.0)
+        self._custom_load_entries: list[dict[str, Any]] = []
+        self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()
+        self._custom_load_tree: ttk.Treeview | None = None
+        self._custom_load_tree_scrollbar: ttk.Scrollbar | None = None
+        self._custom_load_trace_ids: list[tuple[tk.Variable, str]] = []
+        self._custom_load_patches: list[dict] = []
+        self._custom_load_manual_cuts: list[dict[str, Any]] = []
+        self._custom_load_selected_index: int = -1
+        self._custom_load_selection_active = False
+        self._custom_load_click_origin: tuple[int, int] | None = None
+        self._custom_load_edge_click_origin: tuple[int, int] | None = None
+        self._custom_load_selection_button = None
+        self._generate_default_custom_load_patches()
+        self.custom_time_domain_include_static_load = tk.BooleanVar(value=False)
         self.imperfection_enabled = tk.BooleanVar(value=False)
         self.imperfection_shape = tk.StringVar(value="standard plate/cylinder")
         self.imperfection_amplitude_m = tk.DoubleVar(value=0.0)
@@ -2551,24 +2655,26 @@ class RuntimeFEMWindow:
         )
         self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order,
                              ("S4", "S8", "S8R"))
+        self._add_option_row(solver_options, 2, "beam_element_order", "Beam element", self.beam_element_order,
+                             ("B2", "B3"))
         self._add_option_row(
             solver_options,
-            2,
+            3,
             "analysis_type",
             "Analysis",
             self.analysis_type,
             ("linear eigenvalue", "nonlinear stability", "geometric nonlinear static",
              "geom. + material nonlinear static"),
         )
-        self._add_option_row(solver_options, 3, "buckling_analysis_type", "Buckling", self.buckling_analysis_type,
+        self._add_option_row(solver_options, 4, "buckling_analysis_type", "Buckling", self.buckling_analysis_type,
                              ("linear eigenvalue", "nonlinear limit"))
-        self._add_option_row(solver_options, 4, "solver_type", "Linear solver", self.solver_type,
+        self._add_option_row(solver_options, 5, "solver_type", "Linear solver", self.solver_type,
                              ("direct", "gmres", "minres", "bicgstab"))
-        self._add_entry_row(solver_options, 5, "nonlinear_max_load_factor", "NL max LF", self.nonlinear_max_load_factor)
-        self._add_entry_row(solver_options, 6, "nonlinear_steps", "NL steps", self.nonlinear_steps, width=8)
-        self._add_entry_row(solver_options, 7, "nonlinear_max_iterations", "NL iterations",
+        self._add_entry_row(solver_options, 6, "nonlinear_max_load_factor", "NL max LF", self.nonlinear_max_load_factor)
+        self._add_entry_row(solver_options, 7, "nonlinear_steps", "NL steps", self.nonlinear_steps, width=8)
+        self._add_entry_row(solver_options, 8, "nonlinear_max_iterations", "NL iterations",
                             self.nonlinear_max_iterations, width=8)
-        self._add_entry_row(solver_options, 8, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
+        self._add_entry_row(solver_options, 9, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
 
         buckling_validity = ttk.LabelFrame(tab_general, text="Buckling validity and resources")
         buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -2644,34 +2750,34 @@ class RuntimeFEMWindow:
                                                                                       padx=(0, 8), pady=4)
         imperfections.columnconfigure(3, weight=1)
 
-        slamming = ttk.LabelFrame(tab_advanced, text="Transient slamming")
-        slamming.pack(fill=tk.X, padx=8, pady=(0, 8))
-        self._configure_option_grid(slamming)
-        self._add_check_row(slamming, 0, "slamming_enabled", "Run slamming transient", self.slamming_enabled)
-        self._add_check_row(slamming, 1, "slamming_include_static_load", "Include static load in transient",
-                            self.slamming_include_static_load)
-        self._add_entry_row(slamming, 2, "slamming_pressure_pa", "Pressure [Pa]", self.slamming_pressure_pa)
-        self._add_entry_row(slamming, 3, "slamming_duration_s", "Duration [s]", self.slamming_duration_s)
-        self._add_entry_row(slamming, 4, "slamming_total_time_s", "Total time [s]", self.slamming_total_time_s)
-        self._add_entry_row(slamming, 5, "slamming_dt_s", "dt [s]", self.slamming_dt_s)
+        time_domain = ttk.LabelFrame(tab_advanced, text="Custom time-domain load")
+        time_domain.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(time_domain)
+        self._add_check_row(time_domain, 0, "custom_time_domain_enabled", "Run custom load in time domain", self.custom_time_domain_enabled)
+        self._add_check_row(time_domain, 1, "custom_time_domain_include_static_load", "Include static load in time domain",
+                            self.custom_time_domain_include_static_load)
+        self._add_entry_row(time_domain, 2, "custom_pressure_pa", "Pressure [Pa]", self.custom_pressure_pa)
+        self._add_entry_row(time_domain, 3, "custom_time_domain_duration_s", "Duration [s]", self.custom_time_domain_duration_s)
+        self._add_entry_row(time_domain, 4, "custom_time_domain_total_time_s", "Total time [s]", self.custom_time_domain_total_time_s)
+        self._add_entry_row(time_domain, 5, "custom_time_domain_dt_s", "dt [s]", self.custom_time_domain_dt_s)
 
-        self.slamming_area_var = tk.StringVar(value="Patch Area: 0.00 m²")
-        ttk.Label(slamming, textvariable=self.slamming_area_var).grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
+        self.custom_load_area_var = tk.StringVar(value="Patch Area: 0.00 mÂ²")
+        ttk.Label(time_domain, textvariable=self.custom_load_area_var).grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
 
-        self._slamming_selection_button = ttk.Button(
-            slamming,
+        self._custom_load_selection_button = ttk.Button(
+            time_domain,
             text="Start selection",
-            command=self._toggle_slamming_selection,
+            command=self._toggle_custom_load_selection,
         )
-        self._slamming_selection_button.grid(row=6, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(slamming, text="Select All", command=self._slamming_select_all).grid(
+        self._custom_load_selection_button.grid(row=6, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(time_domain, text="Select All", command=self._custom_load_select_all).grid(
             row=6, column=2, sticky=tk.EW, padx=(0, 4), pady=4
         )
-        ttk.Button(slamming, text="Clear", command=self._slamming_clear_all).grid(
+        ttk.Button(time_domain, text="Clear", command=self._custom_load_clear_all).grid(
             row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4
         )
 
-        btn_frame = ttk.Frame(slamming)
+        btn_frame = ttk.Frame(time_domain)
         btn_frame.grid(
             row=7,
             column=0,
@@ -2683,7 +2789,7 @@ class RuntimeFEMWindow:
         ttk.Button(
             btn_frame,
             text="Split A (Z/X)",
-            command=lambda: self._slamming_split_field("a"),
+            command=lambda: self._custom_load_split_field("a"),
         ).pack(
             side=tk.LEFT,
             expand=True,
@@ -2693,7 +2799,7 @@ class RuntimeFEMWindow:
         ttk.Button(
             btn_frame,
             text="Split B (Arc/Y)",
-            command=lambda: self._slamming_split_field("b"),
+            command=lambda: self._custom_load_split_field("b"),
         ).pack(
             side=tk.LEFT,
             expand=True,
@@ -2701,7 +2807,7 @@ class RuntimeFEMWindow:
             padx=(2, 0),
         )
 
-        slamming.columnconfigure(3, weight=1)
+        time_domain.columnconfigure(3, weight=1)
 
         custom = ttk.LabelFrame(tab_advanced, text="Custom loads and boundary conditions")
         custom.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -2737,7 +2843,45 @@ class RuntimeFEMWindow:
         ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3,
                                                                                              sticky=tk.EW, padx=(0, 8),
                                                                                              pady=4)
+        self._add_entry_row(custom, 11, "custom_selected_edge_load", "Selected edges [N/m]",
+                            self.custom_selected_edge_load_n_per_m)
         custom.columnconfigure(3, weight=1)
+
+        load_list = ttk.LabelFrame(tab_advanced, text="Loads to run")
+        load_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        actions = ttk.Frame(load_list)
+        actions.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Button(actions, text="Add load", command=self._add_custom_load_from_selection).pack(
+            side=tk.LEFT,
+            padx=(0, 4),
+        )
+        ttk.Button(actions, text="Delete load", command=self._delete_selected_custom_load).pack(side=tk.LEFT)
+        columns = ("type", "value", "selection", "notes")
+        self._custom_load_tree = ttk.Treeview(
+            load_list,
+            columns=columns,
+            show="headings",
+            height=9,
+            selectmode="browse",
+        )
+        self._custom_load_tree.heading("type", text="Type")
+        self._custom_load_tree.heading("value", text="Value")
+        self._custom_load_tree.heading("selection", text="Selection")
+        self._custom_load_tree.heading("notes", text="Boundary / notes")
+        self._custom_load_tree.column("type", width=88, stretch=False, anchor=tk.W)
+        self._custom_load_tree.column("value", width=110, stretch=False, anchor=tk.W)
+        self._custom_load_tree.column("selection", width=180, stretch=True, anchor=tk.W)
+        self._custom_load_tree.column("notes", width=240, stretch=True, anchor=tk.W)
+        self._custom_load_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=(0, 8))
+        self._custom_load_tree_scrollbar = ttk.Scrollbar(
+            load_list,
+            orient=tk.VERTICAL,
+            command=self._custom_load_tree.yview,
+        )
+        self._custom_load_tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=(0, 8))
+        self._custom_load_tree.configure(yscrollcommand=self._custom_load_tree_scrollbar.set)
+        self._bind_custom_load_list_traces()
+        self._refresh_custom_load_list()
 
         vis_group = ttk.LabelFrame(tab_visualization, text="Plot configuration")
         vis_group.pack(fill=tk.X, padx=8, pady=(8, 8))
@@ -3022,11 +3166,14 @@ class RuntimeFEMWindow:
         show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
         show_girders_var = getattr(self, "show_girder_vis", None)
         show_girders = show_girders_var.get() if show_girders_var is not None else True
-        plate_alpha = _clamped_alpha(self.plate_alpha_vis.get(), 1.0)
-        member_alpha = _clamped_alpha(self.member_alpha_vis.get(), 0.95)
+        plate_alpha_var = getattr(self, "plate_alpha_vis", None)
+        member_alpha_var = getattr(self, "member_alpha_vis", None)
+        colormap_var = getattr(self, "colormap_vis", None)
+        plate_alpha = _clamped_alpha(plate_alpha_var.get() if plate_alpha_var is not None else 1.0, 1.0)
+        member_alpha = _clamped_alpha(member_alpha_var.get() if member_alpha_var is not None else 0.95, 0.95)
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
-        _configure_tk_canvas_colormap(str(self.colormap_vis.get()))
+        _configure_tk_canvas_colormap(str(colormap_var.get() if colormap_var is not None else "jet"))
 
         if self.snapshot.is_cylinder:
             radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
@@ -3185,7 +3332,8 @@ class RuntimeFEMWindow:
                         layer=13,
                         stipple=member_stipple
                     )
-        self._draw_slamming_patch_outlines(canvas)
+        if hasattr(self, "_custom_load_patches"):
+            self._draw_custom_load_patch_outlines(canvas)
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
 
@@ -3451,7 +3599,7 @@ class RuntimeFEMWindow:
                     stipple=member_stipple,
                 )
 
-        self._draw_slamming_patch_outlines(canvas)
+        self._draw_custom_load_patch_outlines(canvas)
         canvas.set_thickness_legend(
             values=all_vals,
             unit=colorbar_label,
@@ -3564,11 +3712,11 @@ class RuntimeFEMWindow:
             if canvas_created:
                 self.result_canvas = Tkinter3DCanvas(self.figure_parent, bg="white")
                 self.result_canvas.pack(fill=tk.BOTH, expand=True)
-                self._bind_slamming_canvas_selection(self.result_canvas)
+                self._bind_custom_load_canvas_selection(self.result_canvas)
 
             try:
                 self.result_canvas.canvas.configure(
-                    cursor="crosshair" if self._slamming_selection_active else ""
+                    cursor="crosshair" if self._custom_load_selection_active else ""
                 )
             except Exception:
                 pass
@@ -3639,6 +3787,7 @@ class RuntimeFEMWindow:
             boundary_condition=str(self.boundary_condition.get()),
             symmetry_mode=str(self.symmetry_mode.get()),
             shell_element_order=str(self.shell_element_order.get()),
+            beam_element_order=str(self.beam_element_order.get()),
             analysis_type=str(self.analysis_type.get()),
             buckling_analysis_type=str(self.buckling_analysis_type.get()),
             pressure_direction=str(self.pressure_direction.get()),
@@ -3677,13 +3826,15 @@ class RuntimeFEMWindow:
             plate_edge_y1_load_n_per_m=_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0),
             cylinder_lower_edge_load_n_per_m=_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0),
             cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0),
-            slamming_enabled=bool(self.slamming_enabled.get()),
-            slamming_pressure_pa=max(_safe_float(self.slamming_pressure_pa.get(), 0.0), 0.0),
-            slamming_duration_s=max(_safe_float(self.slamming_duration_s.get(), 0.01), 0.0),
-            slamming_total_time_s=max(_safe_float(self.slamming_total_time_s.get(), 0.05), 0.0),
-            slamming_dt_s=max(_safe_float(self.slamming_dt_s.get(), 0.0005), 1.0e-9),
-            slamming_patches_json=str(self.slamming_patches_json.get()),
-            slamming_include_static_load=bool(self.slamming_include_static_load.get()),
+            custom_loads_json=str(self.custom_loads_json.get()),
+            custom_pressure_patches_json=str(self.custom_pressure_patches_json.get()),
+            custom_edge_segments_json=str(self.custom_edge_segments_json.get()),
+            custom_selected_edge_load_n_per_m=_safe_float(self.custom_selected_edge_load_n_per_m.get(), 0.0),
+            custom_time_domain_enabled=bool(self.custom_time_domain_enabled.get()),
+            custom_time_domain_duration_s=max(_safe_float(self.custom_time_domain_duration_s.get(), 0.01), 0.0),
+            custom_time_domain_total_time_s=max(_safe_float(self.custom_time_domain_total_time_s.get(), 0.05), 0.0),
+            custom_time_domain_dt_s=max(_safe_float(self.custom_time_domain_dt_s.get(), 0.0005), 1.0e-9),
+            custom_time_domain_include_static_load=bool(self.custom_time_domain_include_static_load.get()),
             imperfection_enabled=bool(self.imperfection_enabled.get()),
             imperfection_shape=str(self.imperfection_shape.get()),
             imperfection_amplitude_m=max(_safe_float(self.imperfection_amplitude_m.get(), 0.0), 0.0),
@@ -3703,6 +3854,215 @@ class RuntimeFEMWindow:
             capacity_mesh_min_elements_per_half_wave=max(
                 _safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
         )
+
+    def _bind_custom_load_list_traces(self) -> None:
+        if self._custom_load_trace_ids:
+            return
+        variables: tuple[tk.Variable, ...] = (
+            self.custom_load_bc_enabled,
+            self.custom_loads_add_to_imported,
+            self.custom_use_nullspace_projection,
+            self.allow_unbalanced_free_free,
+            self.plate_edge_x0_support,
+            self.plate_edge_x1_support,
+            self.plate_edge_y0_support,
+            self.plate_edge_y1_support,
+            self.cylinder_lower_support,
+            self.cylinder_upper_support,
+            self.plate_edge_x0_load_n_per_m,
+            self.plate_edge_x1_load_n_per_m,
+            self.plate_edge_y0_load_n_per_m,
+            self.plate_edge_y1_load_n_per_m,
+            self.cylinder_lower_edge_load_n_per_m,
+            self.cylinder_upper_edge_load_n_per_m,
+            self.custom_time_domain_enabled,
+            self.custom_time_domain_duration_s,
+            self.custom_time_domain_total_time_s,
+            self.custom_time_domain_dt_s,
+            self.custom_time_domain_include_static_load,
+        )
+        for variable in variables:
+            trace_id = variable.trace_add("write", lambda *_args: self._refresh_custom_load_list())
+            self._custom_load_trace_ids.append((variable, trace_id))
+
+    def _custom_boundary_summary(self) -> tuple[str, str]:
+        flags = [
+            "custom on" if bool(self.custom_load_bc_enabled.get()) else "custom off",
+            "add imported" if bool(self.custom_loads_add_to_imported.get()) else "replace imported",
+        ]
+        if bool(self.custom_use_nullspace_projection.get()):
+            flags.append("nullspace")
+        if bool(self.allow_unbalanced_free_free.get()):
+            flags.append("allow free-free")
+        if self.snapshot.is_cylinder:
+            supports = (
+                "lower=" + str(self.cylinder_lower_support.get())
+                + ", upper=" + str(self.cylinder_upper_support.get())
+            )
+            edge_loads = (
+                "lower "
+                + f"{_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0):g}"
+                + ", upper "
+                + f"{_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0):g}"
+                + " N/m"
+            )
+        else:
+            supports = (
+                "x0=" + str(self.plate_edge_x0_support.get())
+                + ", x1=" + str(self.plate_edge_x1_support.get())
+                + ", y0=" + str(self.plate_edge_y0_support.get())
+                + ", y1=" + str(self.plate_edge_y1_support.get())
+            )
+            edge_loads = (
+                "x0 "
+                + f"{_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0):g}"
+                + ", x1 "
+                + f"{_safe_float(self.plate_edge_x1_load_n_per_m.get(), 0.0):g}"
+                + ", y0 "
+                + f"{_safe_float(self.plate_edge_y0_load_n_per_m.get(), 0.0):g}"
+                + ", y1 "
+                + f"{_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0):g}"
+                + " N/m"
+            )
+        time_domain = "time off"
+        if bool(self.custom_time_domain_enabled.get()):
+            time_domain = (
+                "time dt="
+                + f"{_safe_float(self.custom_time_domain_dt_s.get(), 0.0):g}"
+                + " s, duration="
+                + f"{_safe_float(self.custom_time_domain_duration_s.get(), 0.0):g}"
+                + " s, total="
+                + f"{_safe_float(self.custom_time_domain_total_time_s.get(), 0.0):g}"
+                + " s"
+            )
+            if bool(self.custom_time_domain_include_static_load.get()):
+                time_domain += ", static included"
+        return supports, "; ".join(flags + [edge_loads, time_domain])
+
+    @staticmethod
+    def _custom_load_entry_selection_text(entry: dict[str, Any]) -> str:
+        if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}:
+            patches = entry.get("patches", [])
+            count = len(patches) if isinstance(patches, list) else 0
+            area = 0.0
+            if isinstance(patches, list):
+                for patch in patches:
+                    if not isinstance(patch, dict):
+                        continue
+                    area += max(0.0, _safe_float(patch.get("max_a")) - _safe_float(patch.get("min_a"))) * max(
+                        0.0,
+                        _safe_float(patch.get("max_b")) - _safe_float(patch.get("min_b")),
+                    )
+            return f"{count} panel(s), {area:.3f} m2"
+        edges = entry.get("edges", [])
+        count = len(edges) if isinstance(edges, list) else 0
+        return f"{count} edge segment(s)"
+
+    @staticmethod
+    def _custom_load_entry_value_text(entry: dict[str, Any]) -> str:
+        if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}:
+            return f"{_safe_float(entry.get('pressure_pa'), 0.0):g} Pa"
+        return f"{_safe_float(entry.get('line_load_n_per_m'), 0.0):g} N/m"
+
+    def _refresh_custom_load_list(self) -> None:
+        tree = getattr(self, "_custom_load_tree", None)
+        if tree is None:
+            return
+        selected = tree.selection()
+        selected_iid = selected[0] if selected else ""
+        for item in tree.get_children():
+            tree.delete(item)
+        boundary_selection, boundary_notes = self._custom_boundary_summary()
+        tree.insert("", tk.END, iid="boundary", values=("Boundary", "", boundary_selection, boundary_notes))
+        for index, entry in enumerate(self._custom_load_entries):
+            entry_type = str(entry.get("type", "")).lower()
+            type_text = "Pressure" if entry_type in {"pressure", "panel_pressure"} else "Edge load"
+            notes = "time-domain capable" if type_text == "Pressure" and bool(self.custom_time_domain_enabled.get()) else ""
+            tree.insert(
+                "",
+                tk.END,
+                iid=f"load:{index}",
+                values=(
+                    type_text,
+                    self._custom_load_entry_value_text(entry),
+                    self._custom_load_entry_selection_text(entry),
+                    notes,
+                ),
+            )
+        if selected_iid and tree.exists(selected_iid):
+            tree.selection_set(selected_iid)
+
+    def _sync_custom_load_payloads(self) -> None:
+        entries = [dict(entry) for entry in self._custom_load_entries]
+        self.custom_loads_json.set(json.dumps(entries))
+        pressure_patches: list[dict[str, Any]] = []
+        edge_segments: list[dict[str, Any]] = []
+        for entry in entries:
+            if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}:
+                patches = entry.get("patches", [])
+                if isinstance(patches, list):
+                    pressure_patches.extend([dict(patch) for patch in patches if isinstance(patch, dict)])
+            elif str(entry.get("type", "")).lower() in {"edge", "edge_load"}:
+                edges = entry.get("edges", [])
+                if isinstance(edges, list):
+                    edge_segments.extend([dict(edge) for edge in edges if isinstance(edge, dict)])
+        self.custom_pressure_patches_json.set(json.dumps(pressure_patches))
+        self.custom_edge_segments_json.set(json.dumps(edge_segments))
+        self._refresh_custom_load_list()
+
+    def _add_custom_load_from_selection(self) -> None:
+        selected_patches = [
+            dict(patch)
+            for patch in getattr(self, "_custom_load_patches", ())
+            if bool(patch.get("selected", False))
+        ]
+        selected_edges = self._selected_custom_load_edges()
+        pressure = _safe_float(self.custom_pressure_pa.get(), 0.0)
+        line_load = _safe_float(self.custom_selected_edge_load_n_per_m.get(), 0.0)
+        added = 0
+        if selected_patches and abs(pressure) > 0.0:
+            self._custom_load_entries.append({
+                "type": "pressure",
+                "pressure_pa": float(pressure),
+                "patches": selected_patches,
+            })
+            added += 1
+        if selected_edges and abs(line_load) > 0.0:
+            self._custom_load_entries.append({
+                "type": "edge",
+                "line_load_n_per_m": float(line_load),
+                "edges": selected_edges,
+            })
+            added += 1
+        if added == 0:
+            self._write_status(
+                "Select at least one panel with non-zero pressure or right-click at least one edge with non-zero edge load before adding."
+            )
+            return
+        self.custom_load_bc_enabled.set(True)
+        self._sync_custom_load_payloads()
+        self._write_status(f"Added {added} custom load item(s) to the run list.")
+
+    def _delete_selected_custom_load(self) -> None:
+        tree = getattr(self, "_custom_load_tree", None)
+        if tree is None:
+            return
+        selected = tree.selection()
+        if not selected:
+            self._write_status("Select a pressure or edge load in the list before deleting.")
+            return
+        iid = selected[0]
+        if not iid.startswith("load:"):
+            self._write_status("Boundary-condition information cannot be deleted from the load list.")
+            return
+        try:
+            index = int(iid.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return
+        if 0 <= index < len(self._custom_load_entries):
+            del self._custom_load_entries[index]
+            self._sync_custom_load_payloads()
+            self._write_status("Deleted selected custom load from the run list.")
 
     def run(self) -> None:
         """Prepare/run the runtime FEM request and render Matplotlib results."""
@@ -3759,71 +4119,102 @@ class RuntimeFEMWindow:
 
         self.current_result = result
         self._display_base_geometry = False
-        self._set_slamming_selection_active(False, refresh=False)
+        self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
         self._set_display_modes(result)
         self._write_status(format_runtime_fem_result(result))
         self._refresh_figure()
 
-    def _set_slamming_selection_active(self, active: bool, refresh: bool = True) -> None:
-        self._slamming_selection_active = bool(active)
-        self._slamming_click_origin = None
-        if self._slamming_selection_button is not None:
-            self._slamming_selection_button.configure(
-                text="Finish selection" if self._slamming_selection_active else "Start selection"
+    def _set_custom_load_selection_active(self, active: bool, refresh: bool = True) -> None:
+        self._custom_load_selection_active = bool(active)
+        self._custom_load_click_origin = None
+        self._custom_load_edge_click_origin = None
+        if self._custom_load_selection_button is not None:
+            self._custom_load_selection_button.configure(
+                text="Finish selection" if self._custom_load_selection_active else "Start selection"
             )
         if self.result_canvas is not None:
             try:
                 self.result_canvas.canvas.configure(
-                    cursor="crosshair" if self._slamming_selection_active else ""
+                    cursor="crosshair" if self._custom_load_selection_active else ""
                 )
             except Exception:
                 pass
         if refresh:
             self._refresh_figure(preserve_view=True)
 
-    def _toggle_slamming_selection(self) -> None:
-        start_selection = not self._slamming_selection_active
+    def _toggle_custom_load_selection(self) -> None:
+        start_selection = not self._custom_load_selection_active
         if start_selection:
             self.use_interactive_3d.set(True)
             self._display_base_geometry = True
             self._force_fit_next_refresh = self.result_canvas is None
-            self._set_slamming_selection_active(True, refresh=False)
+            self._set_custom_load_selection_active(True, refresh=False)
             self._write_status(
-                "Slamming panel selection is active. Click a panel to select or clear it; drag to rotate the view."
+                "Custom load selection is active. Left-click panels for pressure; right-click edges for line loads; drag to rotate the view."
             )
         else:
-            self._set_slamming_selection_active(False, refresh=False)
-            self._write_status("Slamming panel selection finished.")
+            self._set_custom_load_selection_active(False, refresh=False)
+            self._write_status("Custom load selection finished.")
         self._refresh_figure(preserve_view=True)
 
-    def _bind_slamming_canvas_selection(self, canvas: Tkinter3DCanvas) -> None:
-        canvas.canvas.bind("<ButtonPress-1>", self._on_slamming_canvas_press, add="+")
-        canvas.canvas.bind("<ButtonRelease-1>", self._on_slamming_canvas_release, add="+")
+    def _bind_custom_load_canvas_selection(self, canvas: Tkinter3DCanvas) -> None:
+        canvas.canvas.bind("<ButtonPress-1>", self._on_custom_load_canvas_press, add="+")
+        canvas.canvas.bind("<ButtonRelease-1>", self._on_custom_load_canvas_release, add="+")
+        canvas.canvas.bind("<ButtonPress-3>", self._on_custom_load_edge_canvas_press, add="+")
+        canvas.canvas.bind("<ButtonRelease-3>", self._on_custom_load_edge_canvas_release, add="+")
 
-    def _on_slamming_canvas_press(self, event: Any) -> None:
-        if self._slamming_selection_active:
-            self._slamming_click_origin = (int(event.x), int(event.y))
+    def _on_custom_load_canvas_press(self, event: Any) -> None:
+        if self._custom_load_selection_active:
+            self._custom_load_click_origin = (int(event.x), int(event.y))
 
-    def _on_slamming_canvas_release(self, event: Any) -> None:
-        origin = self._slamming_click_origin
-        self._slamming_click_origin = None
-        if not self._slamming_selection_active or origin is None or self.result_canvas is None:
+    def _on_custom_load_canvas_release(self, event: Any) -> None:
+        origin = self._custom_load_click_origin
+        self._custom_load_click_origin = None
+        if not self._custom_load_selection_active or origin is None or self.result_canvas is None:
             return
         if math.hypot(float(event.x) - origin[0], float(event.y) - origin[1]) > 5.0:
             return
 
-        patch_index = self._pick_slamming_patch(self.result_canvas, float(event.x), float(event.y))
+        patch_index = self._pick_custom_load_patch(self.result_canvas, float(event.x), float(event.y))
         if patch_index is None:
-            self._write_status("Slamming selection: no panel was found at the clicked position.")
+            self._write_status("Custom load selection: no panel was found at the clicked position.")
             return
 
-        self._slamming_selected_index = patch_index
-        patch = self._slamming_patches[patch_index]
+        self._custom_load_selected_index = patch_index
+        patch = self._custom_load_patches[patch_index]
         patch["selected"] = not bool(patch.get("selected", False))
-        self._update_slamming_summary()
+        self._update_custom_load_summary()
         state = "selected" if patch["selected"] else "cleared"
-        self._write_status(f"Slamming panel {patch_index + 1} {state}.")
+        self._write_status(f"Custom load panel {patch_index + 1} {state}.")
+        self._refresh_figure(preserve_view=True)
+
+    def _on_custom_load_edge_canvas_press(self, event: Any) -> None:
+        if self._custom_load_selection_active:
+            self._custom_load_edge_click_origin = (int(event.x), int(event.y))
+
+    def _on_custom_load_edge_canvas_release(self, event: Any) -> None:
+        origin = self._custom_load_edge_click_origin
+        self._custom_load_edge_click_origin = None
+        if not self._custom_load_selection_active or origin is None or self.result_canvas is None:
+            return
+        if math.hypot(float(event.x) - origin[0], float(event.y) - origin[1]) > 5.0:
+            return
+
+        edge = self._pick_custom_load_edge(self.result_canvas, float(event.x), float(event.y))
+        if edge is None:
+            self._write_status("Custom load selection: no edge was found at the clicked position.")
+            return
+
+        key = self._custom_load_edge_key(*edge)
+        if key in self._custom_selected_edge_keys:
+            self._custom_selected_edge_keys.remove(key)
+            state = "cleared"
+        else:
+            self._custom_selected_edge_keys.add(key)
+            state = "selected"
+        self._update_custom_load_summary()
+        self._write_status(f"Custom load edge {state}.")
         self._refresh_figure(preserve_view=True)
 
     @staticmethod
@@ -3862,7 +4253,7 @@ class RuntimeFEMWindow:
             previous = current
         return inside
 
-    def _slamming_patch_boundary_points(
+    def _custom_load_patch_boundary_points(
             self,
             patch: dict[str, Any],
             surface_offset: float = 0.0,
@@ -3893,13 +4284,13 @@ class RuntimeFEMWindow:
             Point3D(min_a, max_b, surface_offset),
         ]
 
-    def _pick_slamming_patch(
+    def _pick_custom_load_patch(
             self,
             canvas: Tkinter3DCanvas,
             screen_x: float,
             screen_y: float,
     ) -> int | None:
-        if not self._slamming_patches:
+        if not self._custom_load_patches:
             return None
 
         try:
@@ -3917,10 +4308,10 @@ class RuntimeFEMWindow:
 
         best_index: int | None = None
         best_depth = float("inf")
-        for index, patch in enumerate(self._slamming_patches):
+        for index, patch in enumerate(self._custom_load_patches):
             projected: list[tuple[float, float]] = []
             depths: list[float] = []
-            for point in self._slamming_patch_boundary_points(patch):
+            for point in self._custom_load_patch_boundary_points(patch):
                 relative = point - position
                 depth = relative.dot(forward)
                 if depth <= canvas.camera.near or depth >= canvas.camera.far:
@@ -3940,7 +4331,39 @@ class RuntimeFEMWindow:
                     best_index = index
         return best_index
 
-    def _slamming_outline_edge_points(
+    def _project_custom_load_points(
+            self,
+            canvas: Tkinter3DCanvas,
+            points: list[Point3D],
+    ) -> list[tuple[float, float, float]]:
+        try:
+            plot_width = max(1, int(canvas._plot_width()))
+        except Exception:
+            plot_width = max(1, int(canvas.width))
+        height = max(1, int(canvas.height))
+        right, camera_up, forward = canvas.camera.basis()
+        position = canvas.camera.position
+        scale = 1.0 / math.tan(canvas.camera.fov / 2.0)
+        aspect = plot_width / height
+        x_scale = scale / aspect
+        half_width = 0.5 * plot_width
+        half_height = 0.5 * height
+        projected: list[tuple[float, float, float]] = []
+        for point in points:
+            relative = point - position
+            depth = relative.dot(forward)
+            if depth <= canvas.camera.near or depth >= canvas.camera.far:
+                return []
+            camera_x = relative.dot(right)
+            camera_y = relative.dot(camera_up)
+            projected.append((
+                (camera_x * x_scale / depth + 1.0) * half_width,
+                (1.0 - camera_y * scale / depth) * half_height,
+                float(depth),
+            ))
+        return projected
+
+    def _custom_load_outline_edge_points(
             self,
             varying_axis: str,
             fixed_coordinate: float,
@@ -4001,13 +4424,106 @@ class RuntimeFEMWindow:
             Point3D(fixed_coordinate, end_coordinate, surface_offset),
         ]
 
-    def _selected_slamming_boundary_edges(
+    @staticmethod
+    def _custom_load_edge_key(
+            varying_axis: str,
+            fixed_coordinate: float,
+            start_coordinate: float,
+            end_coordinate: float,
+    ) -> tuple[str, float, float, float]:
+        start = float(start_coordinate)
+        end = float(end_coordinate)
+        if end < start:
+            start, end = end, start
+        return (
+            str(varying_axis).lower(),
+            round(float(fixed_coordinate), 10),
+            round(start, 10),
+            round(end, 10),
+        )
+
+    @staticmethod
+    def _custom_load_edge_payload_from_key(
+            key: tuple[str, float, float, float],
+    ) -> dict[str, float | str]:
+        return {
+            "varying_axis": key[0],
+            "fixed_coordinate": float(key[1]),
+            "start_coordinate": float(key[2]),
+            "end_coordinate": float(key[3]),
+        }
+
+    def _all_custom_load_edges(self) -> list[tuple[str, float, float, float]]:
+        edges: dict[tuple[str, float, float, float], tuple[str, float, float, float]] = {}
+        for patch in getattr(self, "_custom_load_patches", ()):
+            min_a = _safe_float(patch.get("min_a"))
+            max_a = _safe_float(patch.get("max_a"))
+            min_b = _safe_float(patch.get("min_b"))
+            max_b = _safe_float(patch.get("max_b"))
+            candidates = (
+                ("a", min_b, min_a, max_a),
+                ("a", max_b, min_a, max_a),
+                ("b", min_a, min_b, max_b),
+                ("b", max_a, min_b, max_b),
+            )
+            for candidate in candidates:
+                key = self._custom_load_edge_key(*candidate)
+                edges[key] = candidate
+        return [edges[key] for key in sorted(edges)]
+
+    def _selected_custom_load_edges(self) -> list[dict[str, float | str]]:
+        all_keys = {self._custom_load_edge_key(*edge) for edge in self._all_custom_load_edges()}
+        self._custom_selected_edge_keys.intersection_update(all_keys)
+        return [
+            self._custom_load_edge_payload_from_key(key)
+            for key in sorted(self._custom_selected_edge_keys)
+        ]
+
+    def _pick_custom_load_edge(
+            self,
+            canvas: Tkinter3DCanvas,
+            screen_x: float,
+            screen_y: float,
+    ) -> tuple[str, float, float, float] | None:
+        best_edge: tuple[str, float, float, float] | None = None
+        best_distance = 9.0
+        best_depth = float("inf")
+        geometry = runtime_geometry_summary(self.snapshot)
+        surface_offset = (
+            max(_safe_float(geometry.get("radius_m"), 1.0) * 1.0e-3, 1.0e-5)
+            if self.snapshot.is_cylinder
+            else max(_safe_float(geometry.get("length_m"), 1.0), _safe_float(geometry.get("width_m"), 1.0)) * 1.0e-5
+        )
+        for edge in self._all_custom_load_edges():
+            points = self._custom_load_outline_edge_points(*edge, surface_offset=surface_offset)
+            projected = self._project_custom_load_points(canvas, points)
+            if len(projected) < 2:
+                continue
+            min_distance = min(
+                self._point_segment_distance_2d(
+                    screen_x,
+                    screen_y,
+                    projected[index][0],
+                    projected[index][1],
+                    projected[index + 1][0],
+                    projected[index + 1][1],
+                )
+                for index in range(len(projected) - 1)
+            )
+            mean_depth = sum(item[2] for item in projected) / len(projected)
+            if min_distance <= best_distance and mean_depth < best_depth:
+                best_distance = min_distance
+                best_depth = mean_depth
+                best_edge = edge
+        return best_edge
+
+    def _selected_custom_load_boundary_edges(
             self,
     ) -> list[tuple[str, float, float, float]]:
         # Return only the external boundary of the combined selected patch area.
         selected_patches = [
             patch
-            for patch in self._slamming_patches
+            for patch in self._custom_load_patches
             if bool(patch.get("selected", False))
         ]
         if not selected_patches:
@@ -4021,14 +4537,14 @@ class RuntimeFEMWindow:
         a_values = sorted(
             {
                 clean(patch.get(key))
-                for patch in self._slamming_patches
+                for patch in self._custom_load_patches
                 for key in ("min_a", "max_a")
             }
         )
         b_values = sorted(
             {
                 clean(patch.get(key))
-                for patch in self._slamming_patches
+                for patch in self._custom_load_patches
                 for key in ("min_b", "max_b")
             }
         )
@@ -4088,9 +4604,9 @@ class RuntimeFEMWindow:
 
         return edges
 
-    def _draw_slamming_patch_outlines(self, canvas: Tkinter3DCanvas) -> None:
+    def _draw_custom_load_patch_outlines(self, canvas: Tkinter3DCanvas) -> None:
         # Draw selectable panels, selected perimeter and user-created cuts.
-        if not self._slamming_patches:
+        if not self._custom_load_patches:
             return
 
         geometry = runtime_geometry_summary(self.snapshot)
@@ -4108,9 +4624,9 @@ class RuntimeFEMWindow:
                 * 1.0e-5
             )
 
-        if self._slamming_selection_active:
-            for patch in self._slamming_patches:
-                points = self._slamming_patch_boundary_points(
+        if self._custom_load_selection_active:
+            for patch in self._custom_load_patches:
+                points = self._custom_load_patch_boundary_points(
                     patch,
                     surface_offset=surface_offset,
                 )
@@ -4125,9 +4641,9 @@ class RuntimeFEMWindow:
                     )
 
         for varying_axis, fixed_coordinate, start_coordinate, end_coordinate in (
-                self._selected_slamming_boundary_edges()
+                self._selected_custom_load_boundary_edges()
         ):
-            points = self._slamming_outline_edge_points(
+            points = self._custom_load_outline_edge_points(
                 varying_axis,
                 fixed_coordinate,
                 start_coordinate,
@@ -4142,8 +4658,24 @@ class RuntimeFEMWindow:
                     width=4,
                 )
 
-        for cut in getattr(self, "_slamming_manual_cuts", ()):
-            points = self._slamming_outline_edge_points(
+        for edge in self._selected_custom_load_edges():
+            points = self._custom_load_outline_edge_points(
+                str(edge.get("varying_axis", "a")),
+                _safe_float(edge.get("fixed_coordinate")),
+                _safe_float(edge.get("start_coordinate")),
+                _safe_float(edge.get("end_coordinate")),
+                surface_offset,
+            )
+            for start, end in zip(points, points[1:]):
+                canvas.add_line(
+                    start,
+                    end,
+                    color="#16a34a",
+                    width=4,
+                )
+
+        for cut in getattr(self, "_custom_load_manual_cuts", ()):
+            points = self._custom_load_outline_edge_points(
                 str(cut.get("varying_axis", "a")),
                 _safe_float(cut.get("fixed_coordinate")),
                 _safe_float(cut.get("start_coordinate")),
@@ -4158,39 +4690,40 @@ class RuntimeFEMWindow:
                     width=3,
                 )
 
-    def _slamming_select_all(self) -> None:
-        if not hasattr(self, "_slamming_patches"): return
-        for f in self._slamming_patches: f["selected"] = True
-        self._update_slamming_summary()
+    def _custom_load_select_all(self) -> None:
+        if not hasattr(self, "_custom_load_patches"): return
+        for f in self._custom_load_patches: f["selected"] = True
+        self._update_custom_load_summary()
         self._refresh_figure()
 
-    def _slamming_clear_all(self) -> None:
+    def _custom_load_clear_all(self) -> None:
         # Remove the selection and restore the unsplit default panel layout.
-        self._slamming_manual_cuts.clear()
-        self._generate_default_slamming_patches()
-        self._slamming_selected_index = -1
+        self._custom_load_manual_cuts.clear()
+        self._custom_selected_edge_keys.clear()
+        self._generate_default_custom_load_patches()
+        self._custom_load_selected_index = -1
         self._display_base_geometry = True
         self._force_fit_next_refresh = False
-        self._update_slamming_summary()
+        self._update_custom_load_summary()
         self._write_status(
-            "Slamming selection and all manually created panel cuts were cleared."
+            "Custom load selection and all manually created panel cuts were cleared."
         )
         self._refresh_figure(preserve_view=True)
 
-    def _slamming_split_field(self, axis: str) -> None:
+    def _custom_load_split_field(self, axis: str) -> None:
         # Split the active selected panel exactly at its local midpoint.
-        if not self._slamming_patches:
+        if not self._custom_load_patches:
             return
         if (
-                self._slamming_selected_index < 0
-                or self._slamming_selected_index >= len(self._slamming_patches)
+                self._custom_load_selected_index < 0
+                or self._custom_load_selected_index >= len(self._custom_load_patches)
         ):
             self._write_status(
-                "Select a slamming panel before using Split A or Split B."
+                "Select a custom load panel before using Split A or Split B."
             )
             return
 
-        field = self._slamming_patches[self._slamming_selected_index]
+        field = self._custom_load_patches[self._custom_load_selected_index]
         if not bool(field.get("selected", False)):
             self._write_status(
                 "The active panel is not selected. Select it before cutting."
@@ -4230,7 +4763,7 @@ class RuntimeFEMWindow:
             }
             direction_label = "B"
         else:
-            raise ValueError(f"Unknown slamming split axis: {axis!r}")
+            raise ValueError(f"Unknown custom load split axis: {axis!r}")
 
         cut_key = (
             str(cut["varying_axis"]),
@@ -4245,34 +4778,34 @@ class RuntimeFEMWindow:
                 round(_safe_float(item.get("start_coordinate")), 10),
                 round(_safe_float(item.get("end_coordinate")), 10),
             )
-            for item in getattr(self, "_slamming_manual_cuts", ())
+            for item in getattr(self, "_custom_load_manual_cuts", ())
         }
         if cut_key not in existing_keys:
-            self._slamming_manual_cuts.append(cut)
+            self._custom_load_manual_cuts.append(cut)
 
-        index = self._slamming_selected_index
-        self._slamming_patches[index:index + 1] = [first, second]
-        self._slamming_selected_index = index
+        index = self._custom_load_selected_index
+        self._custom_load_patches[index:index + 1] = [first, second]
+        self._custom_load_selected_index = index
         self._display_base_geometry = True
         self._force_fit_next_refresh = False
-        self._update_slamming_summary()
+        self._update_custom_load_summary()
         self._write_status(
-            f"Selected slamming panel was split in local {direction_label} "
+            f"Selected custom load panel was split in local {direction_label} "
             "at its midpoint. Press Clear to remove all cuts."
         )
         self._refresh_figure(preserve_view=True)
 
-    def _update_slamming_summary(self) -> None:
-        if not hasattr(self, "_slamming_patches"): return
+    def _update_custom_load_summary(self) -> None:
+        if not hasattr(self, "_custom_load_patches"): return
         total = 0.0
-        for f in self._slamming_patches:
-            if f.get("selected", True):
+        for f in self._custom_load_patches:
+            if f.get("selected", False):
                 total += (f["max_a"] - f["min_a"]) * (f["max_b"] - f["min_b"])
-        if hasattr(self, "slamming_area_var") and self.slamming_area_var is not None:
-            self.slamming_area_var.set(f"Patch Area: {total:.3f} m²")
-        self.slamming_patches_json.set(json.dumps([f for f in self._slamming_patches if f.get("selected", True)]))
+        if hasattr(self, "custom_load_area_var") and self.custom_load_area_var is not None:
+            self.custom_load_area_var.set(f"Selected Area: {total:.3f} m2")
+        self._sync_custom_load_payloads()
 
-    def _generate_default_slamming_patches(self) -> None:
+    def _generate_default_custom_load_patches(self) -> None:
         geometry = runtime_geometry_summary(self.snapshot)
         is_cylinder = str(geometry.get("geometry", "")).lower() == "cylinder"
         if is_cylinder:
@@ -4325,18 +4858,18 @@ class RuntimeFEMWindow:
         a_breaks = sorted(set(a_breaks))
         b_breaks = sorted(set(b_breaks))
 
-        self._slamming_patches = []
-        self._slamming_selected_index = -1
+        self._custom_load_patches = []
+        self._custom_load_selected_index = -1
         for index_a in range(len(a_breaks) - 1):
             for index_b in range(len(b_breaks) - 1):
-                self._slamming_patches.append({
+                self._custom_load_patches.append({
                     "min_a": a_breaks[index_a],
                     "max_a": a_breaks[index_a + 1],
                     "min_b": b_breaks[index_b],
                     "max_b": b_breaks[index_b + 1],
                     "selected": False,
                 })
-        self._update_slamming_summary()
+        self._update_custom_load_summary()
 
     def _redraw_base_3d(self) -> None:
         self._display_base_geometry = True
@@ -4349,7 +4882,7 @@ class RuntimeFEMWindow:
             messagebox.showinfo("FEM results", "No solver results are available yet. Run FEM first.")
             return
         self._display_base_geometry = False
-        self._set_slamming_selection_active(False, refresh=False)
+        self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
         self._refresh_figure()
         self._write_status("Displaying the latest FEM results.")

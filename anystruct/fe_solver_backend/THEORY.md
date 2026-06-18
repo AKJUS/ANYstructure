@@ -41,8 +41,16 @@ stiffness of a fully integrated displacement Q4 without introducing the
 one-point reduced-shear hourglass mode.
 
 The 8-node shell uses full 3x3 membrane/bending integration and reduced 2x2
-transverse shear integration.  Both shell topologies include a small drilling
-stabilization strain:
+transverse shear integration.  When `ShellElement(..., reduced_integration=True)`
+is used for S8R/Q8R, membrane/bending, mass, geometric stiffness, and stress
+recovery are evaluated at the reduced 2x2 rule.  The S8R/Q8R path adds a small
+nullspace-projection hourglass stiffness: the reduced-integration free-element
+nullspace is computed, the six rigid-body modes are projected out, and the
+remaining modes receive a small positive stiffness scaled from the element
+stiffness.  The intent is to remove spurious zero-energy modes while keeping
+rigid motion and reduced-point patch behavior unchanged.  Broad production use
+still requires external benchmark coverage for representative distorted shell
+panels.  Both shell topologies include a small drilling stabilization strain:
 
 ```text
 theta_z - 0.5 * (dv/dx - du/dy)
