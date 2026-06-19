@@ -617,8 +617,9 @@ resource provenance:
   records whether displacement, stress and reaction recovery are requested.
 - `ResourceConfig` records requested solver/assembly/recovery thread counts,
   worker counts, deterministic mode and optional memory limits.  Recovery
-  threading is opt-in and measured; solver and assembly thread controls remain
-  deferred.
+  threading is opt-in and measured; nonlinear static assembly consumes
+  `assembly_threads` as a temporary Numba thread count; sparse solver thread
+  controls remain backend-dependent.
 - `MemoryEstimate` gives deterministic estimates for sparse CSR storage,
   right-hand sides, transient histories, eigenvectors and nonlinear state
   blocks.

@@ -100,7 +100,6 @@ def _beam_mass_points(model: "FEModel", element: BeamElement) -> List[Tuple[floa
             mass = float(material.density) * float(element._A) * length / 2.0 * float(weight)
             points.append((mass, np.asarray(N @ coords, dtype=float)))
         return points
-
     length = float(np.linalg.norm(coords[1] - coords[0]))
     xi_values = (-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0))
     points = []
@@ -168,3 +167,15 @@ def calculate_mass_properties(model: "FEModel", reference_point: Any = None) -> 
         skipped_elements=skipped,
         assembly_info=assembly_info,
     )
+
+
+# Import-time bootstrap is placed here because this module is imported by the
+# package after nonlinear_static is fully initialized.  This keeps existing
+# public solver entry points unchanged while allowing an environment-variable
+# opt-out for A/B benchmarks.
+from .nonlinear_performance_bootstrap import (  # noqa: E402
+    install_nonlinear_performance_optimizations as _install_nonlinear_performance_optimizations,
+)
+
+_install_nonlinear_performance_optimizations()
+del _install_nonlinear_performance_optimizations

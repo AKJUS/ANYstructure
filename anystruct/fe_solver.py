@@ -23,6 +23,8 @@ try:
     from anystruct.fe_solver_backend.material_curves import curve_from_properties as _backend_curve_from_properties
     from anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
     from anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
+    from anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
+    from anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
     from anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
@@ -34,6 +36,8 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.material_curves import curve_from_properties as _backend_curve_from_properties
         from ANYstructure.anystruct.fe_solver_backend.nonlinear import solve_nonlinear_load_stepping as _backend_solve_nonlinear_limit
         from ANYstructure.anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
+        from ANYstructure.anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
+        from ANYstructure.anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
         from ANYstructure.anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
@@ -44,6 +48,8 @@ except ModuleNotFoundError:
         _backend_curve_from_properties = None
         _backend_solve_nonlinear_limit = None
         _backend_solve_static_nonlinear = None
+        _backend_arc_length_control = None
+        _backend_solve_static_arc_length = None
         _backend_solve_transient_newmark = None
         _backend_load_case_resultant = None
 
@@ -65,6 +71,7 @@ class LightweightFEMConfig:
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
     beam_element_order: str = "B2"
+    member_model: str = "plates as shell, girders as beams"
     analysis_type: str = "linear eigenvalue"
     buckling_analysis_type: str = "linear eigenvalue"
     pressure_direction: str = "external"
@@ -86,6 +93,9 @@ class LightweightFEMConfig:
     nonlinear_max_iterations: int = 25
     nonlinear_tolerance: float = 1.0e-6
     nonlinear_layers: int = 5
+    nonlinear_solution_control: str = "newton force control"
+    nonlinear_convergence_profile: str = "auto"
+    nonlinear_assembly_threads: int = 0
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
     custom_use_nullspace_projection: bool = False
@@ -465,6 +475,10 @@ def _beam_section(thickness: float, reference: float, depth_factor: float) -> di
 
 def _section_or_default(section: object, thickness: float, reference: float, depth_factor: float) -> dict[str, float]:
     if isinstance(section, dict):
+        web_height = float(section.get("web_height") or section.get("web_h") or 0.0)
+        web_thickness = float(section.get("web_thickness") or section.get("web_thk") or 0.0)
+        flange_width = float(section.get("flange_width") or section.get("flange_w") or 0.0)
+        flange_thickness = float(section.get("flange_thickness") or section.get("flange_thk") or 0.0)
         try:
             area = float(section.get("area", section.get("A", 0.0)))
             iy = float(section.get("Iy", section.get("iy", 0.0)))
@@ -483,10 +497,41 @@ def _section_or_default(section: object, thickness: float, reference: float, dep
                 "J": max(j, 1.0e-12),
                 "shear_factor_y": float(section.get("shear_factor_y", 5.0 / 6.0)),
                 "shear_factor_z": float(section.get("shear_factor_z", 5.0 / 6.0)),
-                "web_height": float(section.get("web_height") or section.get("web_h") or 0.1),
-                "web_thickness": float(section.get("web_thickness") or section.get("web_thk") or 0.01),
-                "flange_width": float(section.get("flange_width") or section.get("flange_w") or 0.0),
-                "flange_thickness": float(section.get("flange_thickness") or section.get("flange_thk") or 0.0),
+                "web_height": web_height or 0.1,
+                "web_thickness": web_thickness or 0.01,
+                "flange_width": flange_width,
+                "flange_thickness": flange_thickness,
+            }
+            if section.get("label"):
+                result["label"] = str(section.get("label"))
+            return result
+        if web_height > 0.0 and web_thickness > 0.0:
+            web_area = web_height * web_thickness
+            flange_area = flange_width * flange_thickness if flange_width > 0.0 and flange_thickness > 0.0 else 0.0
+            total_area = web_area + flange_area
+            web_centroid = 0.5 * web_height
+            flange_centroid = web_height + 0.5 * flange_thickness if flange_area > 0.0 else 0.0
+            centroid = (
+                (web_area * web_centroid + flange_area * flange_centroid) / total_area
+                if total_area > 0.0
+                else web_centroid
+            )
+            iy = web_thickness * web_height ** 3 / 12.0 + web_area * (web_centroid - centroid) ** 2
+            iz = web_height * web_thickness ** 3 / 12.0
+            if flange_area > 0.0:
+                iy += flange_width * flange_thickness ** 3 / 12.0 + flange_area * (flange_centroid - centroid) ** 2
+                iz += flange_thickness * flange_width ** 3 / 12.0
+            result = {
+                "area": total_area,
+                "Iy": max(iy, 1.0e-12),
+                "Iz": max(iz, 1.0e-12),
+                "J": max(iy + iz, 1.0e-12),
+                "shear_factor_y": float(section.get("shear_factor_y", 5.0 / 6.0)),
+                "shear_factor_z": float(section.get("shear_factor_z", 5.0 / 6.0)),
+                "web_height": web_height,
+                "web_thickness": web_thickness,
+                "flange_width": flange_width,
+                "flange_thickness": flange_thickness,
             }
             if section.get("label"):
                 result["label"] = str(section.get("label"))
@@ -758,6 +803,125 @@ def _section_with_runtime_options(
     return result
 
 
+def _member_model(config: LightweightFEMConfig) -> str:
+    text = _normalized_choice(config.member_model, "beams")
+    if "all" in text and "shell" in text:
+        return "all_shell"
+    if "web" in text and "shell" in text:
+        return "web_shell_flange_beam"
+    return "beams"
+
+
+def _member_webs_as_shells(config: LightweightFEMConfig) -> bool:
+    return _member_model(config) in {"web_shell_flange_beam", "all_shell"}
+
+
+def _member_flanges_as_shells(config: LightweightFEMConfig) -> bool:
+    return _member_model(config) == "all_shell"
+
+
+def _member_flanges_as_beams(config: LightweightFEMConfig) -> bool:
+    return _member_model(config) == "web_shell_flange_beam"
+
+
+def _node_cache_from_nodes(nodes: list[dict[str, object]]) -> dict[tuple[float, float, float], int]:
+    cache: dict[tuple[float, float, float], int] = {}
+    for node in nodes:
+        coords = node.get("coords", [])
+        if len(coords) >= 3:
+            cache[(round(float(coords[0]), 12), round(float(coords[1]), 12), round(float(coords[2]), 12))] = int(node["id"])
+    return cache
+
+
+def _add_cached_node(
+        nodes: list[dict[str, object]],
+        cache: dict[tuple[float, float, float], int],
+        coords: tuple[float, float, float],
+) -> int:
+    key = (round(float(coords[0]), 12), round(float(coords[1]), 12), round(float(coords[2]), 12))
+    existing = cache.get(key)
+    if existing is not None:
+        return existing
+    node_id = max((int(node["id"]) for node in nodes), default=0) + 1
+    nodes.append({"id": node_id, "coords": [float(coords[0]), float(coords[1]), float(coords[2])]})
+    cache[key] = node_id
+    return node_id
+
+
+def _member_section_dimension(section: dict[str, float], key: str, fallback: float = 0.0) -> float:
+    try:
+        return max(float(section.get(key, fallback) or 0.0), 0.0)
+    except (TypeError, ValueError):
+        return max(float(fallback), 0.0)
+
+
+def _flange_beam_section(section: dict[str, float], fallback_thickness: float) -> dict[str, float]:
+    width = _member_section_dimension(section, "flange_width")
+    thickness = _member_section_dimension(section, "flange_thickness", fallback_thickness)
+    if width <= 0.0 or thickness <= 0.0:
+        return {}
+    area = width * thickness
+    return {
+        "area": area,
+        "Iy": width * thickness ** 3 / 12.0,
+        "Iz": thickness * width ** 3 / 12.0,
+        "J": width * thickness * (width ** 2 + thickness ** 2) / 12.0,
+        "web_height": thickness,
+        "web_thickness": width,
+        "flange_width": 0.0,
+        "flange_thickness": 0.0,
+        "label": "flange " + str(section.get("label", "")).strip(),
+    }
+
+
+def _append_member_shell(
+        shells: list[dict[str, object]],
+        element_id: int,
+        node_ids: list[int],
+        thickness: float,
+        role: str,
+) -> int:
+    if len({int(node_id) for node_id in node_ids}) < 4 or thickness <= 0.0:
+        return element_id
+    shells.append(
+        {
+            "id": element_id,
+            "node_ids": [int(node_id) for node_id in node_ids],
+            "thickness": float(thickness),
+            "material": "steel",
+            "role": role,
+        }
+    )
+    return element_id + 1
+
+
+def _intersection_height_levels(
+        intersection_heights: dict[float, list[float]] | None,
+        coordinate: float,
+        own_height: float,
+) -> list[float]:
+    if not intersection_heights:
+        return []
+    levels = []
+    for height in intersection_heights.get(round(float(coordinate), 12), []):
+        try:
+            level = min(float(height), float(own_height))
+        except (TypeError, ValueError):
+            continue
+        if 1.0e-9 < level < float(own_height) - 1.0e-9:
+            levels.append(level)
+    return levels
+
+
+def _member_web_depth_levels(own_height: float, *endpoint_levels: list[float]) -> list[float]:
+    levels = {0.0, round(float(own_height), 12)}
+    for values in endpoint_levels:
+        for value in values:
+            if 1.0e-9 < float(value) < float(own_height) - 1.0e-9:
+                levels.add(round(float(value), 12))
+    return sorted(levels)
+
+
 def _support_choice_from_any(value: object) -> str:
     text = _normalized_choice(value, "simply supported")
     if text in {"c", "cl", "clamped", "fixed", "continuous"}:
@@ -784,6 +948,128 @@ def _flat_edge_node_ids(node_id, rows: int, cols: int) -> dict[str, list[int]]:
         "y0": [node_id(row, 0) for row in range(rows)],
         "y1": [node_id(row, cols - 1) for row in range(rows)],
     }
+
+
+def _flat_shell_edge_node_ids(
+        nodes: list[dict[str, object]],
+        shells: list[dict[str, object]],
+        length: float,
+        width: float,
+) -> dict[str, list[int]]:
+    shell_node_ids = {int(node_id) for shell in shells for node_id in shell.get("node_ids", [])}
+    tol = max(float(length), float(width), 1.0) * 1.0e-8
+    edge_nodes = {"x0": [], "x1": [], "y0": [], "y1": []}
+    for node in nodes:
+        node_id = int(node.get("id", 0) or 0)
+        if node_id not in shell_node_ids:
+            continue
+        coords = node.get("coords", [0.0, 0.0, 0.0])
+        x = float(coords[0])
+        y = float(coords[1])
+        if abs(x) <= tol:
+            edge_nodes["x0"].append(node_id)
+        if abs(x - length) <= tol:
+            edge_nodes["x1"].append(node_id)
+        if abs(y) <= tol:
+            edge_nodes["y0"].append(node_id)
+        if abs(y - width) <= tol:
+            edge_nodes["y1"].append(node_id)
+    return {key: sorted(set(value)) for key, value in edge_nodes.items()}
+
+
+def _add_flat_member_shell_model(
+        nodes: list[dict[str, object]],
+        shells: list[dict[str, object]],
+        beams: list[dict[str, object]],
+        node_cache: dict[tuple[float, float, float], int],
+        element_id: int,
+        beam_id: int,
+        node_id,
+        x_breaks: list[float],
+        y_breaks: list[float],
+        position: float,
+        section: dict[str, float],
+        role: str,
+        direction: str,
+        config: LightweightFEMConfig,
+        intersection_heights: dict[float, list[float]] | None = None,
+) -> tuple[int, int]:
+    web_height = _member_section_dimension(section, "web_height")
+    web_thickness = _member_section_dimension(section, "web_thickness")
+    flange_width = _member_section_dimension(section, "flange_width")
+    flange_thickness = _member_section_dimension(section, "flange_thickness")
+    if web_height <= 0.0 or web_thickness <= 0.0:
+        return element_id, beam_id
+
+    flange_section = _flange_beam_section(section, web_thickness)
+    if direction == "x":
+        col = _index_of_break(y_breaks, position)
+        for row in range(len(x_breaks) - 1):
+            x0 = float(x_breaks[row])
+            x1 = float(x_breaks[row + 1])
+            base0 = node_id(row, col)
+            base1 = node_id(row + 1, col)
+            left_levels = _intersection_height_levels(intersection_heights, x0, web_height)
+            right_levels = _intersection_height_levels(intersection_heights, x1, web_height)
+            z_levels = _member_web_depth_levels(web_height, left_levels, right_levels)
+
+            def web_node(x: float, base_node: int, z: float) -> int:
+                if abs(float(z)) <= 1.0e-12:
+                    return base_node
+                return _add_cached_node(nodes, node_cache, (x, position, float(z)))
+
+            for lower, upper in zip(z_levels[:-1], z_levels[1:]):
+                lower0 = web_node(x0, base0, lower)
+                lower1 = web_node(x1, base1, lower)
+                upper0 = web_node(x0, base0, upper)
+                upper1 = web_node(x1, base1, upper)
+                element_id = _append_member_shell(shells, element_id, [lower0, lower1, upper1, upper0], web_thickness, role + "_web")
+            top0 = web_node(x0, base0, web_height)
+            top1 = web_node(x1, base1, web_height)
+            if _member_flanges_as_beams(config) and flange_section:
+                beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
+                beam_id += 1
+            elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
+                left0 = _add_cached_node(nodes, node_cache, (x0, position - 0.5 * flange_width, web_height))
+                left1 = _add_cached_node(nodes, node_cache, (x1, position - 0.5 * flange_width, web_height))
+                right0 = _add_cached_node(nodes, node_cache, (x0, position + 0.5 * flange_width, web_height))
+                right1 = _add_cached_node(nodes, node_cache, (x1, position + 0.5 * flange_width, web_height))
+                element_id = _append_member_shell(shells, element_id, [left0, left1, right1, right0], flange_thickness, role + "_flange")
+        return element_id, beam_id
+
+    row = _index_of_break(x_breaks, position)
+    for col in range(len(y_breaks) - 1):
+        y0 = float(y_breaks[col])
+        y1 = float(y_breaks[col + 1])
+        base0 = node_id(row, col)
+        base1 = node_id(row, col + 1)
+        lower_levels = _intersection_height_levels(intersection_heights, y0, web_height)
+        upper_levels = _intersection_height_levels(intersection_heights, y1, web_height)
+        z_levels = _member_web_depth_levels(web_height, lower_levels, upper_levels)
+
+        def web_node(y: float, base_node: int, z: float) -> int:
+            if abs(float(z)) <= 1.0e-12:
+                return base_node
+            return _add_cached_node(nodes, node_cache, (position, y, float(z)))
+
+        for lower, upper in zip(z_levels[:-1], z_levels[1:]):
+            lower0 = web_node(y0, base0, lower)
+            lower1 = web_node(y1, base1, lower)
+            upper0 = web_node(y0, base0, upper)
+            upper1 = web_node(y1, base1, upper)
+            element_id = _append_member_shell(shells, element_id, [lower0, lower1, upper1, upper0], web_thickness, role + "_web")
+        top0 = web_node(y0, base0, web_height)
+        top1 = web_node(y1, base1, web_height)
+        if _member_flanges_as_beams(config) and flange_section:
+            beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
+            beam_id += 1
+        elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
+            left0 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y0, web_height))
+            left1 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y1, web_height))
+            right0 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y0, web_height))
+            right1 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y1, web_height))
+            element_id = _append_member_shell(shells, element_id, [left0, left1, right1, right0], flange_thickness, role + "_flange")
+    return element_id, beam_id
 
 
 def _flat_edge_supports(edge_nodes: dict[str, list[int]], choices: dict[str, object], node_id, rows: int) -> list[dict[str, object]]:
@@ -819,11 +1105,12 @@ def _flat_supports(
     cols: int,
     config: LightweightFEMConfig,
     geometry: dict | None = None,
+    edge_nodes: dict[str, list[int]] | None = None,
 ) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
     if mode in {"auto", "free", "none", "nullspace", "nullspace projection"}:
         choices = _normalize_plate_edge_supports((geometry or {}).get("plate_edge_supports"))
-        return _flat_edge_supports(_flat_edge_node_ids(node_id, rows, cols), choices, node_id, rows)
+        return _flat_edge_supports(edge_nodes or _flat_edge_node_ids(node_id, rows, cols), choices, node_id, rows)
     if mode in {"simply supported", "simple", "ss"}:
         return [
             {"name": "simple_panel_boundary", "node_ids": boundary_nodes, "constraints": {"uz": 0.0}},
@@ -860,14 +1147,21 @@ def _support_constraints(choice: object, geometry: str = "flat") -> dict[str, fl
     return {}
 
 
-def _custom_flat_supports(node_id, rows: int, cols: int, config: LightweightFEMConfig) -> list[dict[str, object]]:
+def _custom_flat_supports(
+        node_id,
+        rows: int,
+        cols: int,
+        config: LightweightFEMConfig,
+        edge_nodes: dict[str, list[int]] | None = None,
+) -> list[dict[str, object]]:
     if config.custom_use_nullspace_projection:
         return []
+    edge_nodes = edge_nodes or _flat_edge_node_ids(node_id, rows, cols)
     edges = (
-        ("x0", [node_id(0, col) for col in range(cols)], config.plate_edge_x0_support),
-        ("x1", [node_id(rows - 1, col) for col in range(cols)], config.plate_edge_x1_support),
-        ("y0", [node_id(row, 0) for row in range(rows)], config.plate_edge_y0_support),
-        ("y1", [node_id(row, cols - 1) for row in range(rows)], config.plate_edge_y1_support),
+        ("x0", edge_nodes["x0"], config.plate_edge_x0_support),
+        ("x1", edge_nodes["x1"], config.plate_edge_x1_support),
+        ("y0", edge_nodes["y0"], config.plate_edge_y0_support),
+        ("y1", edge_nodes["y1"], config.plate_edge_y1_support),
     )
     supports = []
     for edge_name, node_ids, choice in edges:
@@ -883,13 +1177,20 @@ def _custom_flat_supports(node_id, rows: int, cols: int, config: LightweightFEMC
     return supports
 
 
-def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConfig) -> list[dict[str, object]]:
+def _cylinder_supports(
+        rows: int,
+        cols: int,
+        node_id,
+        config: LightweightFEMConfig,
+        lower_ring: list[int] | None = None,
+        upper_ring: list[int] | None = None,
+) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
     if mode in {"free", "none", "nullspace", "nullspace projection"}:
         return []
     if mode in {"clamped", "fixed", "fixed ends"}:
-        bottom = [node_id(0, col) for col in range(cols)]
-        top = [node_id(rows - 1, col) for col in range(cols)]
+        bottom = lower_ring or [node_id(0, col) for col in range(cols)]
+        top = upper_ring or [node_id(rows - 1, col) for col in range(cols)]
         return [
             {
                 "name": "clamped_cylinder_ends",
@@ -901,6 +1202,23 @@ def _cylinder_supports(rows: int, cols: int, node_id, config: LightweightFEMConf
         {"name": "rigid_body_anchor", "node_ids": [node_id(0, 0)], "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0}},
         {"name": "rigid_body_spin_anchor", "node_ids": [node_id(0, cols // 4)], "constraints": {"ux": 0.0}},
         {"name": "rigid_body_tilt_anchor", "node_ids": [node_id(1, 0)], "constraints": {"uy": 0.0}},
+    ]
+
+
+def _cylinder_lid_boundary_supports(
+        lower_center_nodes: list[int],
+        upper_center_nodes: list[int],
+        config: LightweightFEMConfig,
+) -> list[dict[str, object]]:
+    mode = _normalized_choice(config.boundary_condition)
+    if mode not in {"clamped", "fixed", "fixed ends"}:
+        return []
+    return [
+        {
+            "name": "clamped_cylinder_lid_references",
+            "node_ids": sorted(set(int(node) for node in lower_center_nodes + upper_center_nodes)),
+            "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+        }
     ]
 
 
@@ -922,6 +1240,146 @@ def _custom_cylinder_supports(lower_ring: list[int], upper_ring: list[int], conf
                 }
             )
     return supports
+
+
+def _cylinder_lid_reference_support_constraints(choice: object) -> dict[str, float]:
+    mode = _normalized_choice(choice, "free")
+    if mode in {"free", "none", "off", "nullspace", "nullspace projection"}:
+        return {}
+    if mode in {"simple", "simply", "simply supported", "ss"}:
+        return {"uz": 0.0, "rx": 0.0, "ry": 0.0}
+    if mode in {"fixed", "clamped"}:
+        return {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+    return {}
+
+
+def _custom_cylinder_lid_reference_supports(
+        lower_center_nodes: list[int],
+        upper_center_nodes: list[int],
+        config: LightweightFEMConfig,
+) -> list[dict[str, object]]:
+    if config.custom_use_nullspace_projection:
+        return []
+    supports = []
+    for name, center_nodes, choice in (
+        ("lower", lower_center_nodes, config.cylinder_lower_support),
+        ("upper", upper_center_nodes, config.cylinder_upper_support),
+    ):
+        constraints = _cylinder_lid_reference_support_constraints(choice)
+        if constraints:
+            supports.append(
+                {
+                    "name": "custom_cylinder_" + name + "_" + _normalized_choice(choice, "free").replace(" ", "_"),
+                    "node_ids": sorted(set(int(node) for node in center_nodes)),
+                    "constraints": constraints,
+                }
+            )
+    return supports
+
+
+def _cylinder_point(radius: float, theta: float, z: float) -> tuple[float, float, float]:
+    return (radius * math.cos(theta), radius * math.sin(theta), float(z))
+
+
+def _add_cylinder_member_shell_model(
+        nodes: list[dict[str, object]],
+        shells: list[dict[str, object]],
+        beams: list[dict[str, object]],
+        node_cache: dict[tuple[float, float, float], int],
+        element_id: int,
+        beam_id: int,
+        node_id,
+        z_breaks: list[float],
+        cols: int,
+        radius: float,
+        section: dict[str, float],
+        role: str,
+        index: int,
+        config: LightweightFEMConfig,
+        intersection_heights: dict[float, list[float]] | None = None,
+) -> tuple[int, int]:
+    web_height = _member_section_dimension(section, "web_height")
+    web_thickness = _member_section_dimension(section, "web_thickness")
+    flange_width = _member_section_dimension(section, "flange_width")
+    flange_thickness = _member_section_dimension(section, "flange_thickness")
+    if web_height <= 0.0 or web_thickness <= 0.0:
+        return element_id, beam_id
+    inner_radius = max(radius - web_height, 1.0e-6)
+    flange_section = _flange_beam_section(section, web_thickness)
+
+    if role == "stiffener":
+        col = int(index) % max(cols, 1)
+        theta = 2.0 * math.pi * col / max(cols, 1)
+        dtheta = 0.5 * flange_width / inner_radius if inner_radius > 0.0 else 0.0
+        for row in range(len(z_breaks) - 1):
+            z0 = float(z_breaks[row])
+            z1 = float(z_breaks[row + 1])
+            base0 = node_id(row, col)
+            base1 = node_id(row + 1, col)
+            start_levels = _intersection_height_levels(intersection_heights, z0, web_height)
+            end_levels = _intersection_height_levels(intersection_heights, z1, web_height)
+            depth_levels = _member_web_depth_levels(web_height, start_levels, end_levels)
+
+            def web_node(z: float, base_node: int, depth: float) -> int:
+                if abs(float(depth)) <= 1.0e-12:
+                    return base_node
+                return _add_cached_node(nodes, node_cache, _cylinder_point(max(radius - float(depth), 1.0e-6), theta, z))
+
+            for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
+                outer0 = web_node(z0, base0, outer_depth)
+                outer1 = web_node(z1, base1, outer_depth)
+                inner0 = web_node(z0, base0, inner_depth)
+                inner1 = web_node(z1, base1, inner_depth)
+                element_id = _append_member_shell(shells, element_id, [outer0, outer1, inner1, inner0], web_thickness, role + "_web")
+            top0 = web_node(z0, base0, web_height)
+            top1 = web_node(z1, base1, web_height)
+            if _member_flanges_as_beams(config) and flange_section:
+                beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
+                beam_id += 1
+            elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
+                left0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta - dtheta, z0))
+                left1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta - dtheta, z1))
+                right0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta + dtheta, z0))
+                right1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta + dtheta, z1))
+                element_id = _append_member_shell(shells, element_id, [left0, left1, right1, right0], flange_thickness, role + "_flange")
+        return element_id, beam_id
+
+    row = int(index)
+    z = float(z_breaks[row])
+    for col in range(cols):
+        theta0 = 2.0 * math.pi * col / max(cols, 1)
+        theta1 = 2.0 * math.pi * (col + 1) / max(cols, 1)
+        base0 = node_id(row, col)
+        base1 = node_id(row, col + 1)
+        start_levels = _intersection_height_levels(intersection_heights, float(col % max(cols, 1)), web_height)
+        end_levels = _intersection_height_levels(intersection_heights, float((col + 1) % max(cols, 1)), web_height)
+        depth_levels = _member_web_depth_levels(web_height, start_levels, end_levels)
+
+        def web_node(theta: float, base_node: int, depth: float) -> int:
+            if abs(float(depth)) <= 1.0e-12:
+                return base_node
+            return _add_cached_node(nodes, node_cache, _cylinder_point(max(radius - float(depth), 1.0e-6), theta, z))
+
+        for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
+            outer0 = web_node(theta0, base0, outer_depth)
+            outer1 = web_node(theta1, base1, outer_depth)
+            inner0 = web_node(theta0, base0, inner_depth)
+            inner1 = web_node(theta1, base1, inner_depth)
+            element_id = _append_member_shell(shells, element_id, [outer0, outer1, inner1, inner0], web_thickness, role + "_web")
+        top0 = web_node(theta0, base0, web_height)
+        top1 = web_node(theta1, base1, web_height)
+        if _member_flanges_as_beams(config) and flange_section:
+            beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
+            beam_id += 1
+        elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
+            z_minus = z - 0.5 * flange_width
+            z_plus = z + 0.5 * flange_width
+            lower0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta0, z_minus))
+            lower1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta1, z_minus))
+            upper0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta0, z_plus))
+            upper1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta1, z_plus))
+            element_id = _append_member_shell(shells, element_id, [lower0, lower1, upper1, upper0], flange_thickness, role + "_flange")
+    return element_id, beam_id
 
 
 def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
@@ -1026,9 +1484,11 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
 
     beams = []
     beam_id = 20_001
+    node_cache = _node_cache_from_nodes(nodes)
+    stiffener_sections: dict[float, dict[str, float]] = {}
+    girder_sections: dict[float, dict[str, float]] = {}
     for stiffener_y in stiffener_positions:
-        mid_col = _index_of_break(y_breaks, stiffener_y)
-        section = _section_with_runtime_options(
+        stiffener_sections[float(stiffener_y)] = _section_with_runtime_options(
             geometry.get("stiffener_section"),
             thickness,
             width,
@@ -1036,6 +1496,45 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             config.stiffener_eccentricity_m,
             orientation,
         )
+    for girder_x in girder_positions:
+        girder_sections[float(girder_x)] = _section_with_runtime_options(
+            geometry.get("girder_section"),
+            thickness,
+            length,
+            0.10,
+            config.girder_eccentricity_m,
+            orientation,
+        )
+    stiffener_web_intersections = {
+        round(float(girder_x), 12): [_member_section_dimension(section, "web_height")]
+        for girder_x, section in girder_sections.items()
+    }
+    girder_web_intersections = {
+        round(float(stiffener_y), 12): [_member_section_dimension(section, "web_height")]
+        for stiffener_y, section in stiffener_sections.items()
+    }
+    for stiffener_y in stiffener_positions:
+        mid_col = _index_of_break(y_breaks, stiffener_y)
+        section = stiffener_sections[float(stiffener_y)]
+        if _member_webs_as_shells(config):
+            element_id, beam_id = _add_flat_member_shell_model(
+                nodes,
+                shells,
+                beams,
+                node_cache,
+                element_id,
+                beam_id,
+                node_id,
+                x_breaks,
+                y_breaks,
+                stiffener_y,
+                section,
+                "stiffener",
+                "x",
+                config,
+                intersection_heights=stiffener_web_intersections,
+            )
+            continue
         row_range = range(0, rows - 2, 2) if _wants_b3(config) else range(rows - 1)
         for row in row_range:
             beam_nodes = (
@@ -1055,14 +1554,26 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             beam_id += 1
     for girder_x in girder_positions:
         mid_row = _index_of_break(x_breaks, girder_x)
-        section = _section_with_runtime_options(
-            geometry.get("girder_section"),
-            thickness,
-            length,
-            0.10,
-            config.girder_eccentricity_m,
-            orientation,
-        )
+        section = girder_sections[float(girder_x)]
+        if _member_webs_as_shells(config):
+            element_id, beam_id = _add_flat_member_shell_model(
+                nodes,
+                shells,
+                beams,
+                node_cache,
+                element_id,
+                beam_id,
+                node_id,
+                x_breaks,
+                y_breaks,
+                girder_x,
+                section,
+                "girder",
+                "y",
+                config,
+                intersection_heights=girder_web_intersections,
+            )
+            continue
         col_range = range(0, cols - 2, 2) if _wants_b3(config) else range(cols - 1)
         for col in col_range:
             beam_nodes = (
@@ -1091,18 +1602,12 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         config,
         lambda _node_id, _coord: np.array([0.0, 0.0, 1.0], dtype=float),
     )
-    boundary_nodes = sorted(
-        {
-            node_id(row, col)
-            for row in range(rows)
-            for col in range(cols)
-            if row in (0, rows - 1) or col in (0, cols - 1)
-        }
-    )
+    edge_nodes = _flat_shell_edge_node_ids(nodes, shells, length, width)
+    boundary_nodes = sorted({node for values in edge_nodes.values() for node in values})
     if config.custom_load_bc_enabled:
-        supports = _custom_flat_supports(node_id, rows, cols, config)
+        supports = _custom_flat_supports(node_id, rows, cols, config, edge_nodes=edge_nodes)
     else:
-        supports = _flat_supports(boundary_nodes, node_id, rows, cols, config, geometry)
+        supports = _flat_supports(boundary_nodes, node_id, rows, cols, config, geometry, edge_nodes=edge_nodes)
         supports.extend(_symmetry_supports(nodes, config))
         supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
@@ -1220,6 +1725,9 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
 
     beams = []
     beam_id = 20_001
+    node_cache = _node_cache_from_nodes(nodes)
+    stiffener_columns: list[int] = []
+    stiffener_sections: dict[int, dict[str, float]] = {}
     if config.include_stiffeners and geometry.get("has_stiffener"):
         base_section = _section_with_runtime_options(
             geometry.get("stiffener_section"),
@@ -1236,6 +1744,51 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             if _normalized_choice(orientation) == "radial":
                 theta = 2.0 * math.pi * col / cols
                 section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
+            stiffener_columns.append(col)
+            stiffener_sections[col] = section
+    ring_rows: list[int] = []
+    girder_base_section: dict[str, float] = {}
+    if config.include_girders and geometry.get("has_girder"):
+        girder_base_section = _section_with_runtime_options(
+            geometry.get("girder_section"),
+            thickness,
+            radius,
+            0.12,
+            config.girder_eccentricity_m,
+            orientation,
+        )
+        ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
+    stiffener_web_intersections = {
+        round(float(z_breaks[row]), 12): [_member_section_dimension(girder_base_section, "web_height")]
+        for row in ring_rows
+        if girder_base_section
+    }
+    girder_web_intersections = {
+        round(float(col), 12): [_member_section_dimension(section, "web_height")]
+        for col, section in stiffener_sections.items()
+    }
+    if stiffener_columns:
+        for col in stiffener_columns:
+            section = stiffener_sections[col]
+            if _member_webs_as_shells(config):
+                element_id, beam_id = _add_cylinder_member_shell_model(
+                    nodes,
+                    shells,
+                    beams,
+                    node_cache,
+                    element_id,
+                    beam_id,
+                    node_id,
+                    z_breaks,
+                    cols,
+                    radius,
+                    section,
+                    "stiffener",
+                    col,
+                    config,
+                    intersection_heights=stiffener_web_intersections,
+                )
+                continue
             row_range = range(0, axial_div - 1, 2) if _wants_b3(config) else range(axial_div)
             for row in row_range:
                 beam_nodes = (
@@ -1253,20 +1806,31 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     }
                 )
                 beam_id += 1
-    if config.include_girders and geometry.get("has_girder"):
-        base_section = _section_with_runtime_options(
-            geometry.get("girder_section"),
-            thickness,
-            radius,
-            0.12,
-            config.girder_eccentricity_m,
-            orientation,
-        )
-        ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
+    if ring_rows:
         for row in ring_rows:
+            if _member_webs_as_shells(config):
+                section = dict(girder_base_section)
+                element_id, beam_id = _add_cylinder_member_shell_model(
+                    nodes,
+                    shells,
+                    beams,
+                    node_cache,
+                    element_id,
+                    beam_id,
+                    node_id,
+                    z_breaks,
+                    cols,
+                    radius,
+                    section,
+                    "girder",
+                    row,
+                    config,
+                    intersection_heights=girder_web_intersections,
+                )
+                continue
             col_range = range(0, cols, 2) if _wants_b3(config) else range(cols)
             for col in col_range:
-                section = dict(base_section)
+                section = dict(girder_base_section)
                 if _normalized_choice(orientation) == "radial":
                     theta = 2.0 * math.pi * (col + 0.5) / cols
                     section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
@@ -1310,7 +1874,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         if abs(float(coord[2]) - length) <= z_tol
     )
     rigid_lids = []
-    supports = _cylinder_supports(rows, cols, node_id, config)
+    supports = _cylinder_supports(rows, cols, node_id, config, lower_ring=start_ring, upper_ring=end_ring)
     custom_lid_support_nodes: tuple[list[int], list[int]] | None = None
     if config.include_end_lids:
         next_node_id = max(_node_lookup(nodes), default=0) + 1
@@ -1339,10 +1903,16 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     )
     if config.custom_load_bc_enabled:
         if custom_lid_support_nodes is not None:
-            supports = _custom_cylinder_supports(custom_lid_support_nodes[0], custom_lid_support_nodes[1], config)
+            supports = _custom_cylinder_lid_reference_supports(
+                custom_lid_support_nodes[0],
+                custom_lid_support_nodes[1],
+                config,
+            )
         else:
             supports = _custom_cylinder_supports(start_ring, end_ring, config)
     else:
+        if custom_lid_support_nodes is not None:
+            supports.extend(_cylinder_lid_boundary_supports(custom_lid_support_nodes[0], custom_lid_support_nodes[1], config))
         supports.extend(_symmetry_supports(nodes, config))
         supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
     return {
@@ -1800,10 +2370,12 @@ def _resource_config(config: LightweightFEMConfig):
     if _full_backend is None or not hasattr(_full_backend, "ResourceConfig"):
         return None
     recovery_threads = int(config.recovery_threads or 0)
+    assembly_threads = int(config.nonlinear_assembly_threads or 0)
     memory_limit_mb = float(config.memory_limit_mb or 0.0)
-    if recovery_threads <= 0 and memory_limit_mb <= 0.0:
+    if recovery_threads <= 0 and assembly_threads <= 0 and memory_limit_mb <= 0.0:
         return None
     return _full_backend.ResourceConfig(
+        assembly_threads=assembly_threads if assembly_threads > 0 else None,
         recovery_threads=recovery_threads if recovery_threads > 0 else None,
         memory_limit_bytes=int(memory_limit_mb * 1024.0 * 1024.0) if memory_limit_mb > 0.0 else None,
         deterministic=True,
@@ -1843,6 +2415,32 @@ def _wants_static_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
         "geom + material nonlinear static",
         "geometric and material nonlinear static",
     }
+
+
+def _nonlinear_solution_control(config: LightweightFEMConfig) -> str:
+    choice = _normalized_choice(config.nonlinear_solution_control, "newton force control")
+    if choice in {"arc", "arc length", "arc-length", "arc length continuation", "crisfield arc length"}:
+        return "arc length"
+    return "newton force control"
+
+
+def _arc_length_control(config: LightweightFEMConfig):
+    if _backend_arc_length_control is None:
+        return None
+    max_load = max(float(config.nonlinear_max_load_factor or 1.0), 1.0e-9)
+    steps = _positive_int(config.nonlinear_steps, 12)
+    initial_increment = max(max_load / float(steps), 1.0e-6)
+    minimum_increment = max(initial_increment / 64.0, 1.0e-8)
+    maximum_increment = max(initial_increment * 4.0, initial_increment)
+    return _backend_arc_length_control(
+        initial_load_increment=initial_increment,
+        minimum_load_increment=minimum_increment,
+        maximum_load_increment=maximum_increment,
+        maximum_absolute_load_factor=max_load,
+        max_steps=max(steps * 4, steps + 4),
+        target_iterations=max(3, min(_positive_int(config.nonlinear_max_iterations, 25) // 3, 10)),
+        preload_steps=max(steps, 1),
+    )
 
 
 def _wants_material_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
@@ -2650,6 +3248,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         solver_type=_solver_type(config),
         stress_percentile=min(max(float(config.stress_percentile), 0.0), 100.0),
         add_inplane_edge_loads=False,
+        auto_idealize_member_plates_as_beams=not _member_webs_as_shells(config),
+        exclude_idealized_member_plates=not _member_webs_as_shells(config),
         require_idealized_member_beams=False,
         elastic_modulus=effective_elastic_modulus,
         poisson_ratio=config.poisson_ratio,
@@ -2657,7 +3257,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     )
     diagnostics = [
         "ANYstructure production FE mesh backend.",
-        "Generated shells and stiffener/girder beams from active-line geometry.",
+        (
+            "Generated shells and selected stiffener/girder shell member parts from active-line geometry."
+            if _member_webs_as_shells(config)
+            else "Generated shells and stiffener/girder beams from active-line geometry."
+        ),
     ]
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
@@ -2672,6 +3276,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     if _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
         diagnostics.append(f"Generated {elem_type} shell elements with shared midside nodes.")
+    if _member_webs_as_shells(config):
+        if _member_flanges_as_shells(config):
+            diagnostics.append("Member modelling: plate, web and flange parts are generated as shell elements.")
+        else:
+            diagnostics.append("Member modelling: webs are generated as shell elements and flanges as beam elements.")
     if _normalized_choice(config.symmetry_mode) == "cyclic":
         diagnostics.append("Cyclic symmetry requested; generated runtime geometry is a full 360-degree model, so no sector coupling was added.")
     elif _normalized_choice(config.symmetry_mode) not in {"none", "off"}:
@@ -2876,6 +3485,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                     nonlinear_max_iterations=_positive_int(config.nonlinear_max_iterations, 25),
                     nonlinear_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                     nonlinear_num_layers=_nonlinear_layer_count(config.nonlinear_layers),
+                    nonlinear_convergence_settings=str(config.nonlinear_convergence_profile or "auto"),
+                    nonlinear_resource_config=_resource_config(config),
                     mesh_min_elements_per_half_wave=_positive_int(config.capacity_mesh_min_elements_per_half_wave, 4),
                     copy_model=True,
                 )
@@ -2905,6 +3516,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 prestress_summary["nonlinear_static_load_factor"] = nonlinear_static_factor
                 prestress_summary["nonlinear_static_steps"] = float(len(nonlinear_static_result.steps))
                 prestress_summary["nonlinear_static_total_iterations"] = float((nonlinear_static_result.info or {}).get("total_newton_iterations", 0.0))
+                _nl_info = nonlinear_static_result.info or {}
+                _nl_settings = _nl_info.get("convergence_settings", {}) if isinstance(_nl_info, dict) else {}
+                prestress_summary["nonlinear_static_convergence_profile"] = str(_nl_settings.get("profile", config.nonlinear_convergence_profile)) if isinstance(_nl_settings, dict) else str(config.nonlinear_convergence_profile)
+                prestress_summary["nonlinear_static_assembly_threads"] = float(int(config.nonlinear_assembly_threads or 0))
                 prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
                 if nonlinear_static_result.steps:
                     prestress_summary["nonlinear_static_max_plastic_strain"] = float(
@@ -2925,32 +3540,65 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 diagnostics.append("ANYintelligent capacity workflow failed: " + str(exc))
 
     if _wants_static_nonlinear_analysis(config) and capacity_workflow_result is None:
-        if status_callback: status_callback("Solving nonlinear static system...")
-        if _backend_solve_static_nonlinear is None:
-            diagnostics.append("Incremental geometric/material nonlinear static solver is unavailable in this backend.")
+        nonlinear_control = _nonlinear_solution_control(config)
+        if status_callback: status_callback("Solving nonlinear static system (" + nonlinear_control + ")...")
+        if nonlinear_control == "arc length":
+            solver_available = _backend_solve_static_arc_length is not None
+            unavailable_message = "Arc-length nonlinear static solver is unavailable in this backend."
+        else:
+            solver_available = _backend_solve_static_nonlinear is not None
+            unavailable_message = "Incremental geometric/material nonlinear static solver is unavailable in this backend."
+        if not solver_available:
+            diagnostics.append(unavailable_message)
         else:
             try:
-                nonlinear_static_result = _backend_solve_static_nonlinear(
-                    model,
-                    load_case,
-                    max_load_factor=max(float(config.nonlinear_max_load_factor), 1.0e-9),
-                    num_steps=_positive_int(config.nonlinear_steps, 12),
-                    max_iterations=_positive_int(config.nonlinear_max_iterations, 25),
-                    tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
-                    num_layers=_nonlinear_layer_count(config.nonlinear_layers),
-                )
+                if nonlinear_control == "arc length":
+                    nonlinear_static_result = _backend_solve_static_arc_length(
+                        model,
+                        load_case,
+                        control=_arc_length_control(config),
+                        max_iterations=_positive_int(config.nonlinear_max_iterations, 25),
+                        tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
+                        arc_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
+                        num_layers=_nonlinear_layer_count(config.nonlinear_layers),
+                    )
+                else:
+                    nonlinear_static_result = _backend_solve_static_nonlinear(
+                        model,
+                        load_case,
+                        max_load_factor=max(float(config.nonlinear_max_load_factor), 1.0e-9),
+                        num_steps=_positive_int(config.nonlinear_steps, 12),
+                        max_iterations=_positive_int(config.nonlinear_max_iterations, 25),
+                        tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
+                        num_layers=_nonlinear_layer_count(config.nonlinear_layers),
+                        convergence_settings=str(config.nonlinear_convergence_profile or "auto"),
+                        resource_config=_resource_config(config),
+                    )
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
+                prestress_summary["nonlinear_static_control"] = nonlinear_control
                 prestress_summary["nonlinear_static_status"] = str(nonlinear_static_result.status)
                 prestress_summary["nonlinear_static_load_factor"] = nonlinear_static_factor
                 prestress_summary["nonlinear_static_steps"] = float(len(nonlinear_static_result.steps))
                 prestress_summary["nonlinear_static_total_iterations"] = float((nonlinear_static_result.info or {}).get("total_newton_iterations", 0.0))
+                _nl_info = nonlinear_static_result.info or {}
+                _nl_settings = _nl_info.get("convergence_settings", {}) if isinstance(_nl_info, dict) else {}
+                prestress_summary["nonlinear_static_convergence_profile"] = str(_nl_settings.get("profile", config.nonlinear_convergence_profile)) if isinstance(_nl_settings, dict) else str(config.nonlinear_convergence_profile)
+                prestress_summary["nonlinear_static_assembly_threads"] = float(int(config.nonlinear_assembly_threads or 0))
                 prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
+                if nonlinear_control == "arc length":
+                    prestress_summary["nonlinear_static_peak_load_factor"] = float(getattr(nonlinear_static_result, "peak_load_factor", nonlinear_static_factor))
+                    peak_step = getattr(nonlinear_static_result, "peak_step_index", None)
+                    if peak_step is not None:
+                        prestress_summary["nonlinear_static_peak_step"] = float(peak_step)
+                    arc_settings = _nl_info.get("control", {}) if isinstance(_nl_info, dict) else {}
+                    if isinstance(arc_settings, dict):
+                        prestress_summary["nonlinear_static_initial_arc_increment"] = float(arc_settings.get("initial_load_increment", 0.0) or 0.0)
                 if nonlinear_static_result.steps:
                     prestress_summary["nonlinear_static_max_plastic_strain"] = float(
                         max(step.max_equivalent_plastic_strain for step in nonlinear_static_result.steps)
                     )
                 plastic_strain_by_node = _nodal_engineering_plastic_strain(model, nonlinear_static_result.element_states)
-                diagnostics.append("Ran incremental geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
+                diagnostics.append("Ran " + nonlinear_control + " geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
                 if nonlinear_static_result.converged:
                     displacements = np.asarray(nonlinear_static_result.displacements, dtype=float)
                     prestress_states, recovered = _full_backend.recover_prestress_from_static_result(model, displacements)

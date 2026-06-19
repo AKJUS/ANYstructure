@@ -711,12 +711,15 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.boundary_condition = tk.StringVar(value=\"auto\")" in source
     assert "self.shell_element_order = tk.StringVar(value=\"S4\")" in source
     assert "self.beam_element_order = tk.StringVar(value=\"B2\")" in source
+    assert "self.member_model = tk.StringVar(value=\"plates as shell, girders as beams\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
     assert "self.pressure_direction = tk.StringVar(value=\"external\")" in source
     assert "self.axial_force_n = tk.DoubleVar(value=0.0)" in source
     assert "self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)" in source
+    assert "self.plate_alpha_vis = tk.StringVar(value=\"0.99\")" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
+    assert "member_model=str(self.member_model.get())" in source
     assert "elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9" in source
     assert "self.progress_bar.start(12)" in source
     assert "threading.Thread(target=worker, daemon=True)" in source
@@ -736,15 +739,26 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()" in source
     assert "self.deformation_scale = tk.StringVar(value=\"0.0\")" in source
     assert "custom = ttk.LabelFrame(tab_advanced, text=\"Custom loads and boundary conditions\")" in source
+    assert "selection = ttk.LabelFrame(custom, text=\"Panel and edge selection\")" in source
     assert "load_list = ttk.LabelFrame(tab_advanced, text=\"Loads to run\")" in source
     assert "ttk.Button(actions, text=\"Add load\", command=self._add_custom_load_from_selection)" in source
     assert "ttk.Button(actions, text=\"Delete load\", command=self._delete_selected_custom_load)" in source
     assert "self._custom_load_tree = ttk.Treeview(" in source
     assert "canvas.canvas.bind(\"<ButtonRelease-3>\", self._on_custom_load_edge_canvas_release, add=\"+\")" in source
+    assert "def _custom_load_selection_visual_offset(self) -> float:" in source
+    assert "draw_overlay=True" in source
     assert "custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get())" in source
     assert "custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get())" in source
     assert "custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0)" in source
     assert "custom_loads_json=str(self.custom_loads_json.get())" in source
+    assert "self._add_entry_row(time_domain, 2, \"custom_pressure_pa\"" not in source
+    assert "ttk.Button(view_actions, text=\"ISO\", command=lambda: self._set_runtime_3d_view(\"iso\"))" in source
+    assert "ttk.Button(view_actions, text=\"Front\", command=lambda: self._set_runtime_3d_view(\"front\"))" in source
+    assert "ttk.Button(view_actions, text=\"Top\", command=lambda: self._set_runtime_3d_view(\"top\"))" in source
+    assert "def _set_runtime_3d_view(self, view_name: str) -> None:" in source
+    assert "self._add_option_row(" in source and "\"member_model\"" in source
+    assert "\"webs as shells, flanges as beams\"" in source
+    assert "\"all shell\"" in source
     assert "plate_edge_x0_support=str(self.plate_edge_x0_support.get())" in source
     assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
     assert "\"nullspace_projection\"" in source
@@ -1024,6 +1038,256 @@ def test_runtime_generated_mesh_supports_b2_and_b3_beam_elements():
     assert fe_solver._mesh_size_diagnostics(b3)["beam_order"] == "B3"
 
 
+def test_runtime_generated_mesh_supports_member_shell_modelling_modes():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": 0.5,
+        "girder_spacing_m": 1.0,
+        "stiffener_section": {
+            "web_height": 0.2,
+            "web_thickness": 0.01,
+            "flange_width": 0.08,
+            "flange_thickness": 0.012,
+        },
+        "girder_section": {
+            "web_height": 0.3,
+            "web_thickness": 0.012,
+            "flange_width": 0.12,
+            "flange_thickness": 0.014,
+        },
+    }
+
+    current = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", member_model="plates as shell, girders as beams"),
+    )
+    mixed = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", member_model="webs as shells, flanges as beams"),
+    )
+    all_shell = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", member_model="all shell"),
+    )
+
+    assert len(mixed["shells"]) > len(current["shells"])
+    assert any(str(shell.get("role", "")).endswith("_web") for shell in mixed["shells"])
+    assert any(str(beam.get("role", "")).endswith("_flange") for beam in mixed["beams"])
+    assert len(all_shell["shells"]) > len(mixed["shells"])
+    assert not all_shell["beams"]
+    assert any(str(shell.get("role", "")).endswith("_flange") for shell in all_shell["shells"])
+    node_by_id = {int(node["id"]): node for node in mixed["nodes"]}
+    web_roles_by_node: dict[int, set[str]] = {}
+    for shell in mixed["shells"]:
+        role = str(shell.get("role", ""))
+        if role in {"stiffener_web", "girder_web"}:
+            for node_id in shell["node_ids"]:
+                web_roles_by_node.setdefault(int(node_id), set()).add(role)
+    shared_above_plate = [
+        node_id
+        for node_id, roles in web_roles_by_node.items()
+        if {"stiffener_web", "girder_web"} <= roles
+        and abs(float(node_by_id[node_id]["coords"][2])) > 1.0e-9
+    ]
+    assert shared_above_plate
+
+    if fe_solver._full_backend is not None:
+        for member_model in ("webs as shells, flanges as beams", "all shell"):
+            result = fe_solver.run_production_fem(
+                geometry,
+                fe_solver.LightweightFEMConfig(
+                    mesh_fidelity="coarse",
+                    pressure_pa=1000.0,
+                    member_model=member_model,
+                    runtime_solver="static only",
+                    boundary_condition="fixed",
+                ),
+            )
+            assert result.status == "ok"
+            assert any("Member modelling:" in item for item in result.diagnostics)
+
+
+def test_cylinder_member_shell_web_crossings_share_connection_nodes():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 2.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": math.pi / 2.0,
+        "girder_spacing_m": 1.0,
+        "stiffener_section": {
+            "web_height": 0.2,
+            "web_thickness": 0.01,
+            "flange_width": 0.08,
+            "flange_thickness": 0.012,
+        },
+        "girder_section": {
+            "web_height": 0.35,
+            "web_thickness": 0.012,
+            "flange_width": 0.12,
+            "flange_thickness": 0.014,
+        },
+    }
+
+    generated = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", member_model="webs as shells, flanges as beams"),
+    )
+
+    node_by_id = {int(node["id"]): node for node in generated["nodes"]}
+    web_roles_by_node: dict[int, set[str]] = {}
+    for shell in generated["shells"]:
+        role = str(shell.get("role", ""))
+        if role in {"stiffener_web", "girder_web"}:
+            for node_id in shell["node_ids"]:
+                web_roles_by_node.setdefault(int(node_id), set()).add(role)
+    shared_inside_shell = []
+    for node_id, roles in web_roles_by_node.items():
+        if not {"stiffener_web", "girder_web"} <= roles:
+            continue
+        x, y, _z = (float(value) for value in node_by_id[node_id]["coords"])
+        if math.hypot(x, y) < 1.0 - 1.0e-9:
+            shared_inside_shell.append(node_id)
+
+    assert shared_inside_shell
+
+
+def test_flat_member_shell_boundary_conditions_include_generated_edge_shell_nodes():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": 0.5,
+        "girder_spacing_m": 1.0,
+        "stiffener_section": {
+            "web_height": 0.2,
+            "web_thickness": 0.01,
+            "flange_width": 0.08,
+            "flange_thickness": 0.012,
+        },
+        "girder_section": {
+            "web_height": 0.3,
+            "web_thickness": 0.012,
+            "flange_width": 0.12,
+            "flange_thickness": 0.014,
+        },
+    }
+    configs = (
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            member_model="all shell",
+            boundary_condition="fixed",
+        ),
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            member_model="all shell",
+            custom_load_bc_enabled=True,
+            plate_edge_x0_support="fixed",
+            plate_edge_x1_support="fixed",
+            plate_edge_y0_support="fixed",
+            plate_edge_y1_support="fixed",
+        ),
+    )
+
+    for config in configs:
+        generated = fe_solver.build_generated_geometry(geometry, config)
+        support_nodes = {int(node_id) for support in generated["supports"] for node_id in support["node_ids"]}
+        shell_nodes = {int(node_id) for shell in generated["shells"] for node_id in shell["node_ids"]}
+        node_by_id = {int(node["id"]): node for node in generated["nodes"]}
+        edge_shell_nodes = {
+            node_id
+            for node_id in shell_nodes
+            if abs(float(node_by_id[node_id]["coords"][0])) <= 1.0e-8
+            or abs(float(node_by_id[node_id]["coords"][0]) - geometry["length_m"]) <= 1.0e-8
+            or abs(float(node_by_id[node_id]["coords"][1])) <= 1.0e-8
+            or abs(float(node_by_id[node_id]["coords"][1]) - geometry["width_m"]) <= 1.0e-8
+        }
+
+        assert edge_shell_nodes
+        assert edge_shell_nodes <= support_nodes
+
+
+def test_cylinder_member_shell_boundary_conditions_cover_generated_end_shell_nodes():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 2.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": math.pi / 2.0,
+        "girder_spacing_m": 1.0,
+        "stiffener_section": {
+            "web_height": 0.2,
+            "web_thickness": 0.01,
+            "flange_width": 0.08,
+            "flange_thickness": 0.012,
+        },
+        "girder_section": {
+            "web_height": 0.35,
+            "web_thickness": 0.012,
+            "flange_width": 0.12,
+            "flange_thickness": 0.014,
+        },
+    }
+
+    no_lid = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            member_model="all shell",
+            boundary_condition="fixed",
+            include_end_lids=False,
+        ),
+    )
+    support_nodes = {int(node_id) for support in no_lid["supports"] for node_id in support["node_ids"]}
+    node_by_id = {int(node["id"]): node for node in no_lid["nodes"]}
+    end_shell_nodes = {
+        int(node_id)
+        for shell in no_lid["shells"]
+        for node_id in shell["node_ids"]
+        if abs(float(node_by_id[int(node_id)]["coords"][2])) <= 1.0e-8
+        or abs(float(node_by_id[int(node_id)]["coords"][2]) - geometry["length_m"]) <= 1.0e-8
+    }
+
+    assert end_shell_nodes
+    assert end_shell_nodes <= support_nodes
+
+    with_lid = fe_solver.build_generated_geometry(
+        geometry,
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            member_model="all shell",
+            boundary_condition="fixed",
+            include_end_lids=True,
+        ),
+    )
+    node_by_id = {int(node["id"]): node for node in with_lid["nodes"]}
+    end_shell_nodes = {
+        int(node_id)
+        for shell in with_lid["shells"]
+        for node_id in shell["node_ids"]
+        if abs(float(node_by_id[int(node_id)]["coords"][2])) <= 1.0e-8
+        or abs(float(node_by_id[int(node_id)]["coords"][2]) - geometry["length_m"]) <= 1.0e-8
+    }
+    lid_ring_nodes = {int(node_id) for lid in with_lid["rigid_lids"] for node_id in lid["ring_node_ids"]}
+    support_nodes = {int(node_id) for support in with_lid["supports"] for node_id in support["node_ids"]}
+    lid_reference_nodes = {int(lid["center_node_id"]) for lid in with_lid["rigid_lids"]}
+
+    assert end_shell_nodes <= lid_ring_nodes
+    assert support_nodes == lid_reference_nodes
+
+
 def test_custom_plate_supports_and_edge_loads_are_applied():
     geometry = {
         "geometry": "flat panel",
@@ -1171,7 +1435,7 @@ def test_custom_nullspace_boundary_balances_free_body_loads():
     assert any("automatic generalized load balancing" in item.lower() for item in result.diagnostics)
 
 
-def test_custom_cylinder_lid_support_and_edge_loads_are_applied_to_reference_node():
+def test_custom_cylinder_lid_support_and_edge_loads_constrain_reference_node_kinematics():
     geometry = {
         "geometry": "cylinder",
         "radius_m": 1.0,
@@ -1195,8 +1459,40 @@ def test_custom_cylinder_lid_support_and_edge_loads_are_applied_to_reference_nod
     assert len(generated["supports"]) == 1
     assert generated["supports"][0]["name"] == "custom_cylinder_upper_simply_supported"
     assert generated["supports"][0]["node_ids"] == [generated["rigid_lids"][1]["center_node_id"]]
+    assert generated["supports"][0]["constraints"] == {"uz": 0.0, "rx": 0.0, "ry": 0.0}
     assert result.status == "ok"
     assert result.load_resultant["force_n"][2] == pytest.approx(-2.0 * math.pi * 1.0 * 500.0)
+
+
+def test_custom_cylinder_single_fixed_lid_constrains_reference_rotations():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 2.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        include_end_lids=True,
+        custom_load_bc_enabled=True,
+        cylinder_lower_support="fixed",
+        cylinder_upper_support="free",
+    )
+
+    generated = fe_solver.build_generated_geometry(geometry, config)
+
+    assert len(generated["supports"]) == 1
+    assert generated["supports"][0]["name"] == "custom_cylinder_lower_fixed"
+    assert generated["supports"][0]["node_ids"] == [generated["rigid_lids"][0]["center_node_id"]]
+    assert generated["supports"][0]["constraints"] == {
+        "ux": 0.0,
+        "uy": 0.0,
+        "uz": 0.0,
+        "rx": 0.0,
+        "ry": 0.0,
+        "rz": 0.0,
+    }
 
 
 def test_cylinder_generated_mesh_forces_edges_at_stiffener_spacing_when_mesh_is_coarse():

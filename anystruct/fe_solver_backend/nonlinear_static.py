@@ -37,12 +37,14 @@ from scipy import sparse
 from .assembly import build_constraint_transformation
 from .cases import make_result_case
 from .linalg import MatrixClass, factorize
+from .jit_compiler import numba_thread_scope
 from .matrix_assembly import (
     _scatter_element_matrix,
     _triplets_to_csr,
     assemble_load_vector,
     assemble_stiffness_matrix,
 )
+from .recovery import ResourceConfig
 
 if TYPE_CHECKING:
     from .boundary import LoadCase
@@ -129,6 +131,119 @@ class DisplacementControl:
         if float(np.linalg.norm(row)) <= 0.0:
             raise ValueError("Displacement control row is empty")
         return row
+
+
+@dataclass(frozen=True)
+class NonlinearConvergenceSettings:
+    """Automatic convergence controls for force-control nonlinear static solves.
+
+    The settings do not change element theory.  They tune globalization and load
+    increment adaptation: line-search usage, step growth after fast convergence,
+    and cutback after difficult increments.
+    """
+
+    profile: str = "auto"
+    line_search: str = "auto"
+    fast_iterations: int = 4
+    slow_iterations: int = 9
+    growth_factor: float = 1.5
+    cutback_factor: float = 0.5
+    max_step_factor: float = 2.0
+    min_step_fraction: Optional[float] = None
+    max_line_search_cuts: int = 16
+    line_search_reduction: float = 0.5
+
+    def __post_init__(self) -> None:
+        profile = str(self.profile).lower()
+        line_search = str(self.line_search).lower()
+        if profile not in {"legacy", "auto", "balanced", "fast", "robust"}:
+            raise ValueError("profile must be one of 'legacy', 'auto', 'balanced', 'fast', or 'robust'")
+        if line_search not in {"never", "rescue", "auto", "always"}:
+            raise ValueError("line_search must be one of 'never', 'rescue', 'auto', or 'always'")
+        if self.fast_iterations <= 0 or self.slow_iterations <= 0:
+            raise ValueError("iteration thresholds must be positive")
+        if self.growth_factor < 1.0:
+            raise ValueError("growth_factor must be at least 1.0")
+        if not (0.0 < self.cutback_factor < 1.0):
+            raise ValueError("cutback_factor must be between 0 and 1")
+        if self.max_step_factor <= 0.0:
+            raise ValueError("max_step_factor must be positive")
+        if self.min_step_fraction is not None and self.min_step_fraction <= 0.0:
+            raise ValueError("min_step_fraction must be positive when supplied")
+        if self.max_line_search_cuts <= 0:
+            raise ValueError("max_line_search_cuts must be positive")
+        if not (0.0 < self.line_search_reduction < 1.0):
+            raise ValueError("line_search_reduction must be between 0 and 1")
+
+    @staticmethod
+    def for_profile(profile: str) -> "NonlinearConvergenceSettings":
+        name = str(profile).lower()
+        if name in {"auto", "balanced"}:
+            return NonlinearConvergenceSettings(profile=name)
+        if name == "fast":
+            return NonlinearConvergenceSettings(
+                profile="fast",
+                line_search="auto",
+                fast_iterations=3,
+                slow_iterations=8,
+                growth_factor=2.0,
+                cutback_factor=0.5,
+                max_step_factor=4.0,
+                max_line_search_cuts=10,
+            )
+        if name == "robust":
+            return NonlinearConvergenceSettings(
+                profile="robust",
+                line_search="always",
+                fast_iterations=5,
+                slow_iterations=7,
+                growth_factor=1.25,
+                cutback_factor=0.5,
+                max_step_factor=1.0,
+                max_line_search_cuts=20,
+            )
+        if name == "legacy":
+            return NonlinearConvergenceSettings(
+                profile="legacy",
+                line_search="rescue",
+                fast_iterations=5,
+                slow_iterations=25,
+                growth_factor=2.0,
+                cutback_factor=0.5,
+                max_step_factor=1.0,
+                max_line_search_cuts=16,
+            )
+        raise ValueError("Unknown nonlinear convergence profile")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "profile": self.profile,
+            "line_search": self.line_search,
+            "fast_iterations": int(self.fast_iterations),
+            "slow_iterations": int(self.slow_iterations),
+            "growth_factor": float(self.growth_factor),
+            "cutback_factor": float(self.cutback_factor),
+            "max_step_factor": float(self.max_step_factor),
+            "min_step_fraction": self.min_step_fraction,
+            "max_line_search_cuts": int(self.max_line_search_cuts),
+            "line_search_reduction": float(self.line_search_reduction),
+        }
+
+
+def _coerce_convergence_settings(value: Optional[Union[str, Mapping[str, Any], NonlinearConvergenceSettings]]) -> NonlinearConvergenceSettings:
+    if value is None:
+        return NonlinearConvergenceSettings.for_profile("auto")
+    if isinstance(value, NonlinearConvergenceSettings):
+        return value
+    if isinstance(value, str):
+        return NonlinearConvergenceSettings.for_profile(value)
+    if isinstance(value, Mapping):
+        data = dict(value)
+        profile = str(data.pop("profile", "auto")).lower()
+        base = NonlinearConvergenceSettings.for_profile(profile).to_dict()
+        base.update(data)
+        return NonlinearConvergenceSettings(**base)
+    raise TypeError("convergence_settings must be None, a profile string, a mapping, or NonlinearConvergenceSettings")
 
 
 @dataclass
@@ -458,6 +573,7 @@ def _solve_static_displacement_control(
     tolerance: float,
     info: Dict[str, Any],
     start_time: float,
+    resource_config: Optional[ResourceConfig] = None,
 ) -> NonlinearStaticResult:
     """Displacement-control Newton solve with load factor as an unknown."""
     if load_program is not None:
@@ -502,88 +618,90 @@ def _solve_static_displacement_control(
     target_total = float(displacement_control.target_displacement)
     target_scale = max(abs(target_total), 1.0e-9)
 
-    for step_index in range(1, num_steps + 1):
-        target = target_total * step_index / num_steps
-        residual_norm = float("inf")
-        constraint_error = float("inf")
-        states_new = committed_states
+    assembly_threads = None if resource_config is None else resource_config.assembly_threads
+    with numba_thread_scope(assembly_threads):
+        for step_index in range(1, num_steps + 1):
+            target = target_total * step_index / num_steps
+            residual_norm = float("inf")
+            constraint_error = float("inf")
+            states_new = committed_states
 
-        for iteration in range(1, max_iterations + 1):
-            total_iterations += 1
+            for iteration in range(1, max_iterations + 1):
+                total_iterations += 1
+                u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
+                F_int, K_T, trial_states = _assemble_nonlinear_system(
+                    model, u, committed_states, num_layers
+                )
+                residual = np.asarray(T.T @ (F_const_dc + lam * F_prop_dc - F_int), dtype=float).reshape(-1)
+                residual_norm = float(np.linalg.norm(residual))
+                current = float(row_red @ q + row_u0)
+                constraint = target - current
+                constraint_error = abs(constraint)
+                reference = max(float(np.linalg.norm(np.asarray(T.T @ (F_const_dc + max(abs(lam), 1.0) * F_prop_dc), dtype=float))), 1.0)
+
+                if residual_norm <= tolerance * reference and constraint_error <= tolerance * target_scale:
+                    states_new = trial_states
+                    break
+
+                K_red = (T.T @ K_T @ T).tocsr()
+                aug = sparse.bmat(
+                    [
+                        [K_red, sparse.csr_matrix((-F_prop_red).reshape(-1, 1))],
+                        [sparse.csr_matrix(row_red.reshape(1, -1)), sparse.csr_matrix((1, 1))],
+                    ],
+                    format="csr",
+                )
+                rhs = np.concatenate([residual, np.array([constraint], dtype=float)])
+                try:
+                    with np.errstate(all="ignore"):
+                        handle = factorize(
+                            aug,
+                            MatrixClass.SYMMETRIC_INDEFINITE,
+                            signature=f"nonlinear.displacement_control:{step_index}:{iteration}",
+                        )
+                        delta = np.asarray(handle.solve(rhs), dtype=float).reshape(-1)
+                except Exception:
+                    failure_reason = "singular_augmented_tangent"
+                    break
+                if np.any(~np.isfinite(delta)):
+                    failure_reason = "nonfinite_augmented_solution"
+                    break
+                q += delta[:-1]
+                lam += float(delta[-1])
+            else:
+                failure_reason = "maximum_iterations_reached"
+
+            if failure_reason is not None:
+                status = "stopped_at_limit" if steps else "diverged"
+                break
+
+            committed_states = states_new
             u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
-            F_int, K_T, trial_states = _assemble_nonlinear_system(
-                model, u, committed_states, num_layers
-            )
-            residual = np.asarray(T.T @ (F_const_dc + lam * F_prop_dc - F_int), dtype=float).reshape(-1)
-            residual_norm = float(np.linalg.norm(residual))
             current = float(row_red @ q + row_u0)
-            constraint = target - current
-            constraint_error = abs(constraint)
-            reference = max(float(np.linalg.norm(np.asarray(T.T @ (F_const_dc + max(abs(lam), 1.0) * F_prop_dc), dtype=float))), 1.0)
-
-            if residual_norm <= tolerance * reference and constraint_error <= tolerance * target_scale:
-                states_new = trial_states
-                break
-
-            K_red = (T.T @ K_T @ T).tocsr()
-            aug = sparse.bmat(
-                [
-                    [K_red, sparse.csr_matrix((-F_prop_red).reshape(-1, 1))],
-                    [sparse.csr_matrix(row_red.reshape(1, -1)), sparse.csr_matrix((1, 1))],
-                ],
-                format="csr",
+            steps.append(
+                NonlinearStaticStep(
+                    step_index=step_index,
+                    load_factor=float(lam),
+                    iterations=iteration,
+                    residual_norm=residual_norm,
+                    displacement_norm=float(np.linalg.norm(u)),
+                    max_equivalent_plastic_strain=_max_plastic_strain(committed_states),
+                    control_value=current,
+                    active_stage=active_stage,
+                )
             )
-            rhs = np.concatenate([residual, np.array([constraint], dtype=float)])
-            try:
-                with np.errstate(all="ignore"):
-                    handle = factorize(
-                        aug,
-                        MatrixClass.SYMMETRIC_INDEFINITE,
-                        signature=f"nonlinear.displacement_control:{step_index}:{iteration}",
-                    )
-                    delta = np.asarray(handle.solve(rhs), dtype=float).reshape(-1)
-            except Exception:
-                failure_reason = "singular_augmented_tangent"
-                break
-            if np.any(~np.isfinite(delta)):
-                failure_reason = "nonfinite_augmented_solution"
-                break
-            q += delta[:-1]
-            lam += float(delta[-1])
-        else:
-            failure_reason = "maximum_iterations_reached"
-
-        if failure_reason is not None:
-            status = "stopped_at_limit" if steps else "diverged"
-            break
-
-        committed_states = states_new
-        u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
-        current = float(row_red @ q + row_u0)
-        steps.append(
-            NonlinearStaticStep(
-                step_index=step_index,
-                load_factor=float(lam),
-                iterations=iteration,
-                residual_norm=residual_norm,
-                displacement_norm=float(np.linalg.norm(u)),
-                max_equivalent_plastic_strain=_max_plastic_strain(committed_states),
-                control_value=current,
-                active_stage=active_stage,
+            history.append(
+                {
+                    "step_index": step_index,
+                    "load_factor": float(lam),
+                    "control_value": current,
+                    "target_displacement": target,
+                    "residual_norm": residual_norm,
+                    "constraint_error": constraint_error,
+                    "iterations": iteration,
+                    "active_stage": active_stage,
+                }
             )
-        )
-        history.append(
-            {
-                "step_index": step_index,
-                "load_factor": float(lam),
-                "control_value": current,
-                "target_displacement": target,
-                "residual_norm": residual_norm,
-                "constraint_error": constraint_error,
-                "iterations": iteration,
-                "active_stage": active_stage,
-            }
-        )
 
     u_final = np.asarray(T @ q + u0, dtype=float).reshape(-1)
     info["failure_reason"] = failure_reason
@@ -620,6 +738,8 @@ def solve_static_nonlinear(
     control: str = "force",
     displacement_control: Optional[DisplacementControl] = None,
     initial_element_states: Optional[Mapping[int, Any]] = None,
+    convergence_settings: Optional[Union[str, Mapping[str, Any], NonlinearConvergenceSettings]] = None,
+    resource_config: Optional[ResourceConfig] = None,
 ) -> NonlinearStaticResult:
     """Incremental nonlinear static solve with adaptive load stepping.
 
@@ -633,6 +753,8 @@ def solve_static_nonlinear(
         raise ValueError("num_steps must be positive")
     if max_load_factor <= 0.0:
         raise ValueError("max_load_factor must be positive")
+    settings = _coerce_convergence_settings(convergence_settings)
+    effective_min_step_fraction = settings.min_step_fraction if settings.min_step_fraction is not None else min_step_fraction
 
     start_time = time.time()
     if imperfection is not None:
@@ -673,6 +795,8 @@ def solve_static_nonlinear(
         "total_dofs": model.mesh.dof_manager.total_dofs,
         "reduced_dofs": int(T.shape[1]),
         "control": str(control),
+        "convergence_settings": settings.to_dict(),
+        "resource_config": None if resource_config is None else resource_config.to_dict(),
     }
     if imperfection is not None:
         info["imperfection"] = getattr(model, "imperfection_metadata", [])
@@ -732,10 +856,12 @@ def solve_static_nonlinear(
             tolerance=tolerance,
             info=info,
             start_time=start_time,
+            resource_config=resource_config,
         )
 
     base_step = target_load_factor / num_steps
-    min_step = max(min_step_fraction * base_step, 1.0e-12)
+    min_step = max(float(effective_min_step_fraction) * base_step, 1.0e-12)
+    max_step = max(base_step * settings.max_step_factor, min_step)
     step_size = base_step
     lam = 0.0
     step_index = 0
@@ -793,7 +919,7 @@ def solve_static_nonlinear(
             # Rejected trials skip the tangent assembly (residual only).
             accepted = False
             scale = 1.0
-            for trial in range(16):
+            for trial in range(settings.max_line_search_cuts):
                 q_candidate = q_trial + scale * dq
                 u = np.asarray(T @ q_candidate + u0, dtype=float).reshape(-1)
                 with_tangent = trial == 0
@@ -814,71 +940,120 @@ def solve_static_nonlinear(
                     residual, residual_norm = r_c, rn_c
                     accepted = True
                     break
-                scale *= 0.5
+                scale *= settings.line_search_reduction
             if not accepted:
                 return False, q_start, committed_states, residual_norm, iteration
 
         return False, q_start, committed_states, residual_norm, max_iterations
 
     force_displacement_history: List[Dict[str, Any]] = []
+    convergence_adaptation: List[Dict[str, Any]] = []
+    force_line_search_next = False
 
-    while lam < target_load_factor - 1.0e-12:
-        lam_trial = min(lam + step_size, target_load_factor)
-        F_ext, stage_factors, active_stage = external_load_at(lam_trial)
-        F_ext_red = np.asarray(T.T @ F_ext, dtype=float).reshape(-1)
-        reference = max(float(np.linalg.norm(F_ext_red)), 1.0)
+    assembly_threads = None if resource_config is None else resource_config.assembly_threads
+    with numba_thread_scope(assembly_threads):
+        while lam < target_load_factor - 1.0e-12:
+            step_size = min(step_size, max(target_load_factor - lam, min_step))
+            lam_trial = min(lam + step_size, target_load_factor)
+            attempted_step_size = lam_trial - lam
+            F_ext, stage_factors, active_stage = external_load_at(lam_trial)
+            F_ext_red = np.asarray(T.T @ F_ext, dtype=float).reshape(-1)
+            reference = max(float(np.linalg.norm(F_ext_red)), 1.0)
 
-        converged, q_new, states_new, residual_norm, iterations_used = newton_increment(
-            q, F_ext_red, reference, line_search=False
-        )
-        if not converged:
-            # Rescue retry with globalized (line-search) Newton before
-            # cutting the load increment.
-            converged, q_new, states_new, residual_norm, extra = newton_increment(
-                q, F_ext_red, reference, line_search=True
+            policy = settings.line_search
+            line_search_first = policy == "always" or (
+                policy == "auto" and (force_line_search_next or attempted_step_size > base_step * 1.000001)
             )
-            iterations_used += extra
-
-        if converged:
-            q = q_new
-            lam = lam_trial
-            committed_states = states_new
-            step_index += 1
-            u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
-            control_value = float(np.linalg.norm(u))
-            steps.append(
-                NonlinearStaticStep(
-                    step_index=step_index,
-                    load_factor=float(lam),
-                    iterations=iterations_used,
-                    residual_norm=residual_norm,
-                    displacement_norm=float(np.linalg.norm(u)),
-                    max_equivalent_plastic_strain=_max_plastic_strain(committed_states),
-                    control_value=control_value,
-                    active_stage=active_stage,
+            converged, q_new, states_new, residual_norm, iterations_used = newton_increment(
+                q, F_ext_red, reference, line_search=line_search_first
+            )
+            line_search_used = bool(line_search_first)
+            if not converged and not line_search_first and policy in {"rescue", "auto", "always"}:
+                # Rescue retry with globalized (line-search) Newton before
+                # cutting the load increment.
+                converged, q_new, states_new, residual_norm, extra = newton_increment(
+                    q, F_ext_red, reference, line_search=True
                 )
-            )
-            force_displacement_history.append(
-                {
-                    "step_index": step_index,
-                    "load_factor": float(lam),
-                    "control_value": control_value,
-                    "displacement_norm": float(np.linalg.norm(u)),
-                    "residual_norm": residual_norm,
-                    "iterations": iterations_used,
-                    "stage_factors": stage_factors,
-                    "active_stage": active_stage,
-                }
-            )
-            # Grow the step again after a fast increment.
-            if iterations_used <= 5 and step_size < base_step:
-                step_size = min(step_size * 2.0, base_step)
-        else:
-            step_size *= 0.5
-            if step_size < min_step:
-                status = "stopped_at_limit" if steps else "diverged"
-                info["failure_reason"] = "minimum_load_increment_reached"
-                break
+                iterations_used += extra
+                line_search_used = True
+
+            if converged:
+                q = q_new
+                lam = lam_trial
+                committed_states = states_new
+                force_line_search_next = False
+                step_index += 1
+                u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
+                control_value = float(np.linalg.norm(u))
+                steps.append(
+                    NonlinearStaticStep(
+                        step_index=step_index,
+                        load_factor=float(lam),
+                        iterations=iterations_used,
+                        residual_norm=residual_norm,
+                        displacement_norm=float(np.linalg.norm(u)),
+                        max_equivalent_plastic_strain=_max_plastic_strain(committed_states),
+                        control_value=control_value,
+                        active_stage=active_stage,
+                    )
+                )
+                force_displacement_history.append(
+                    {
+                        "step_index": step_index,
+                        "load_factor": float(lam),
+                        "control_value": control_value,
+                        "displacement_norm": float(np.linalg.norm(u)),
+                        "residual_norm": residual_norm,
+                        "iterations": iterations_used,
+                        "step_size": float(attempted_step_size),
+                        "line_search_used": line_search_used,
+                        "stage_factors": stage_factors,
+                        "active_stage": active_stage,
+                    }
+                )
+                next_step = step_size
+                action = "keep"
+                if iterations_used <= settings.fast_iterations and step_size < max_step:
+                    next_step = min(step_size * settings.growth_factor, max_step)
+                    action = "grow"
+                elif iterations_used >= settings.slow_iterations:
+                    next_step = max(step_size * settings.cutback_factor, min_step)
+                    action = "shrink_after_slow_convergence"
+                    if policy == "auto":
+                        force_line_search_next = True
+                convergence_adaptation.append(
+                    {
+                        "step_index": step_index,
+                        "load_factor": float(lam),
+                        "iterations": int(iterations_used),
+                        "line_search_used": line_search_used,
+                        "attempted_step_size": float(attempted_step_size),
+                        "next_step_size": float(next_step),
+                        "action": action,
+                    }
+                )
+                step_size = next_step
+            else:
+                previous_step_size = step_size
+                step_size *= 0.5
+                force_line_search_next = True
+                convergence_adaptation.append(
+                    {
+                        "step_index": step_index + 1,
+                        "load_factor": float(lam_trial),
+                        "iterations": int(iterations_used),
+                        "line_search_used": line_search_used,
+                        "attempted_step_size": float(attempted_step_size),
+                        "next_step_size": float(step_size),
+                        "action": "cutback_after_nonconvergence",
+                        "previous_step_size": float(previous_step_size),
+                        "residual_norm": float(residual_norm),
+                    }
+                )
+                if step_size < min_step:
+                    status = "stopped_at_limit" if steps else "diverged"
+                    info["failure_reason"] = "minimum_load_increment_reached"
+                    break
 
     u_final = np.asarray(T @ q + u0, dtype=float).reshape(-1)
     if "failure_reason" not in info and status == "completed":
@@ -886,6 +1061,7 @@ def solve_static_nonlinear(
     info["last_converged_load_factor"] = float(lam)
     info["peak_load_factor"] = max((step.load_factor for step in steps), default=float(lam))
     info["force_displacement_history"] = force_displacement_history
+    info["convergence_adaptation"] = convergence_adaptation
     info["strain_summary"] = _nonlinear_state_summary(committed_states)
     if load_program is not None:
         info["load_program_stage_factors"] = load_program.stage_factors(lam)
@@ -903,6 +1079,7 @@ def solve_static_nonlinear(
             "max_load_factor": max_load_factor,
             "num_steps": num_steps,
             "num_layers": num_layers,
+            "convergence_settings": settings.to_dict(),
         },
     ).to_dict()
     return NonlinearStaticResult(steps, status, u_final, float(lam), committed_states, info)

@@ -188,6 +188,7 @@ from .imperfections import (
 )
 from .nonlinear_static import (
     DisplacementControl,
+    NonlinearConvergenceSettings,
     NonlinearLoadProgram,
     NonlinearLoadStage,
     NonlinearStaticResult,
@@ -222,6 +223,7 @@ from .assembly import (
     solve_nonlinear,
 )
 from .linalg import (
+    AutoSparseSolverBackend,
     FactorizationCache,
     FactorizationHandle,
     MatrixClass,
@@ -439,6 +441,7 @@ __all__ = [
     "standard_member_bow",
     "standard_plate_mode",
     "DisplacementControl",
+    "NonlinearConvergenceSettings",
     "NonlinearLoadProgram",
     "NonlinearLoadStage",
     "NonlinearStaticResult",
@@ -468,6 +471,7 @@ __all__ = [
     "solve_linear_many",
     "solve_nonlinear",
     "MatrixClass",
+    "AutoSparseSolverBackend",
     "SparseSolverBackend",
     "FactorizationCache",
     "FactorizationHandle",

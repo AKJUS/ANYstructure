@@ -143,7 +143,7 @@ def generate_recovery_policy_report() -> Dict[str, Any]:
             "history_memory_reduction_fraction": float(memory_reduction),
         },
         "known_limits": [
-            "ResourceConfig is enforced only for opt-in recovery threading in this batch; solver and assembly thread control remain future work.",
+            "ResourceConfig controls opt-in recovery threading and nonlinear Numba assembly threads; sparse solver thread control remains backend-dependent.",
             "Measured threaded recovery is informational and may be slower than serial for small models.",
             "Transient full history arrays are retained for API compatibility; selected/envelope storage is a later optimization.",
         ],

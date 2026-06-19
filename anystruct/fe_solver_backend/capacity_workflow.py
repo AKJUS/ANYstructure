@@ -26,7 +26,13 @@ import numpy as np
 from .assembly import solve_linear
 from .buckling import BucklingResult, solve_eigenvalue_buckling
 from .imperfections import EigenmodeImperfection, ImperfectionField, apply_imperfection, to_imperfection_field
-from .nonlinear_static import NonlinearLoadProgram, NonlinearStaticResult, solve_static_nonlinear
+from .nonlinear_static import (
+    NonlinearConvergenceSettings,
+    NonlinearLoadProgram,
+    NonlinearStaticResult,
+    solve_static_nonlinear,
+)
+from .recovery import ResourceConfig
 
 if TYPE_CHECKING:
     from .boundary import LoadCase
@@ -49,6 +55,8 @@ class CapacityWorkflowConfig:
     nonlinear_max_iterations: int = 25
     nonlinear_tolerance: float = 1.0e-6
     nonlinear_num_layers: int = 5
+    nonlinear_convergence_settings: Optional[NonlinearConvergenceSettings | str | Mapping[str, Any]] = None
+    nonlinear_resource_config: Optional[ResourceConfig] = None
     mesh_min_elements_per_half_wave: int = 4
     copy_model: bool = True
 
@@ -264,6 +272,8 @@ def run_nonlinear_capacity_workflow(
             max_iterations=config.nonlinear_max_iterations,
             tolerance=config.nonlinear_tolerance,
             num_layers=config.nonlinear_num_layers,
+            convergence_settings=config.nonlinear_convergence_settings,
+            resource_config=config.nonlinear_resource_config,
         )
     else:
         nonlinear_result = solve_static_nonlinear(
@@ -274,6 +284,8 @@ def run_nonlinear_capacity_workflow(
             max_iterations=config.nonlinear_max_iterations,
             tolerance=config.nonlinear_tolerance,
             num_layers=config.nonlinear_num_layers,
+            convergence_settings=config.nonlinear_convergence_settings,
+            resource_config=config.nonlinear_resource_config,
         )
 
     status = "completed" if nonlinear_result.converged else "nonlinear_not_converged"

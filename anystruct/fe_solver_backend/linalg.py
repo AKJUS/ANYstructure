@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
+import os
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
@@ -37,6 +38,18 @@ except ImportError:
         return wrapper
     prange = range
     _HAS_NUMBA = False
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return int(default)
+    try:
+        parsed = int(value)
+    except ValueError:
+        return int(default)
+    return parsed if parsed > 0 else int(default)
+
 
 class MatrixClass(str, Enum):
     """Declared numerical class of a sparse matrix."""
@@ -200,8 +213,8 @@ class AutoSparseSolverBackend:
     ):
         self.scipy_backend = scipy_backend or SparseSolverBackend()
         self.pardiso_backend = (pardiso_backend or PyPardisoSolverBackend()) if _HAS_PYPARDISO else None
-        self.pypardiso_min_dimension = int(pypardiso_min_dimension)
-        self.pypardiso_min_nnz = int(pypardiso_min_nnz)
+        self.pypardiso_min_dimension = _env_int("FE_SOLVER_PYPARDISO_MIN_DIMENSION", int(pypardiso_min_dimension))
+        self.pypardiso_min_nnz = _env_int("FE_SOLVER_PYPARDISO_MIN_NNZ", int(pypardiso_min_nnz))
 
     def _use_pypardiso(self, matrix: sparse.spmatrix, options: Mapping[str, Any]) -> bool:
         requested = str(options.get("backend", options.get("solver", "auto"))).lower()
@@ -227,16 +240,22 @@ class AutoSparseSolverBackend:
         if not self._use_pypardiso(matrix, options_dict):
             handle = self.scipy_backend.factorize(matrix, matrix_class, signature=signature, options=options_dict)
             handle.metadata.setdefault("auto_backend_policy", "scipy_small_matrix")
+            handle.metadata.setdefault("pypardiso_min_dimension", self.pypardiso_min_dimension)
+            handle.metadata.setdefault("pypardiso_min_nnz", self.pypardiso_min_nnz)
             return handle
 
         assert self.pardiso_backend is not None
         handle = self.pardiso_backend.factorize(matrix, matrix_class, signature=signature, options=options_dict)
         handle.metadata.setdefault("auto_backend_policy", "pypardiso_large_matrix")
+        handle.metadata.setdefault("pypardiso_min_dimension", self.pypardiso_min_dimension)
+        handle.metadata.setdefault("pypardiso_min_nnz", self.pypardiso_min_nnz)
         if handle.status == "ok":
             return handle
 
         fallback = self.scipy_backend.factorize(matrix, matrix_class, signature=signature, options=options_dict)
         fallback.metadata["auto_backend_policy"] = "scipy_after_pypardiso_failure"
+        fallback.metadata["pypardiso_min_dimension"] = self.pypardiso_min_dimension
+        fallback.metadata["pypardiso_min_nnz"] = self.pypardiso_min_nnz
         fallback.metadata["fallback_from_backend"] = handle.backend_name
         fallback.metadata["fallback_failure_reason"] = handle.failure_reason
         return fallback

@@ -76,6 +76,7 @@ class RuntimeFEMOptions:
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
     beam_element_order: str = "B2"
+    member_model: str = "plates as shell, girders as beams"
     analysis_type: str = "linear eigenvalue"
     buckling_analysis_type: str = "linear eigenvalue"
     pressure_direction: str = "external"
@@ -97,6 +98,9 @@ class RuntimeFEMOptions:
     nonlinear_max_iterations: int = 25
     nonlinear_tolerance: float = 1.0e-6
     nonlinear_layers: int = 5
+    nonlinear_solution_control: str = "newton force control"
+    nonlinear_convergence_profile: str = "auto"
+    nonlinear_assembly_threads: int = 0
     deformation_scale: float = 0.0
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
@@ -519,6 +523,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         symmetry_mode=options.symmetry_mode,
         shell_element_order=options.shell_element_order,
         beam_element_order=options.beam_element_order,
+        member_model=options.member_model,
         analysis_type=options.analysis_type,
         buckling_analysis_type=options.buckling_analysis_type,
         pressure_direction=options.pressure_direction,
@@ -540,6 +545,9 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         nonlinear_max_iterations=options.nonlinear_max_iterations,
         nonlinear_tolerance=options.nonlinear_tolerance,
         nonlinear_layers=options.nonlinear_layers,
+        nonlinear_solution_control=options.nonlinear_solution_control,
+        nonlinear_convergence_profile=options.nonlinear_convergence_profile,
+        nonlinear_assembly_threads=options.nonlinear_assembly_threads,
         custom_loads_add_to_imported=options.custom_loads_add_to_imported,
         custom_use_nullspace_projection=options.custom_use_nullspace_projection,
         custom_pressure_pa=options.custom_pressure_pa,
@@ -613,6 +621,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "symmetry_mode": str(options.symmetry_mode),
         "shell_element_order": str(options.shell_element_order),
         "beam_element_order": str(options.beam_element_order),
+        "member_model": str(options.member_model),
         "analysis_type": str(options.analysis_type),
         "buckling_analysis_type": str(options.buckling_analysis_type),
         "pressure_direction": str(options.pressure_direction),
@@ -634,6 +643,9 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "nonlinear_max_iterations": int(options.nonlinear_max_iterations),
         "nonlinear_tolerance": float(options.nonlinear_tolerance),
         "nonlinear_layers": int(options.nonlinear_layers),
+        "nonlinear_solution_control": str(options.nonlinear_solution_control),
+        "nonlinear_convergence_profile": str(options.nonlinear_convergence_profile),
+        "nonlinear_assembly_threads": int(options.nonlinear_assembly_threads),
         "deformation_scale": float(options.deformation_scale),
         "custom_load_bc_enabled": bool(options.custom_load_bc_enabled),
         "custom_loads_add_to_imported": bool(options.custom_loads_add_to_imported),
@@ -1334,6 +1346,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Mesh fidelity: " + str(summary.get("mesh_fidelity", "")),
         "Shell element: " + str(summary.get("shell_element_order", "")),
         "Beam element: " + str(summary.get("beam_element_order", "")),
+        "Member model: " + str(summary.get("member_model", "")),
         "Boundary condition: " + str(summary.get("boundary_condition", "")),
         "Symmetry: " + str(summary.get("symmetry_mode", "")),
         "Analysis type: " + str(summary.get("analysis_type", "")),
@@ -1367,6 +1380,9 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         + str(_safe_int(summary.get("nonlinear_layers"), 0))
         + " / "
         + str(_safe_int(summary.get("nonlinear_max_iterations"), 0)),
+        "Nonlinear solution control: " + str(summary.get("nonlinear_solution_control", "newton force control")),
+        "Nonlinear convergence profile: " + str(summary.get("nonlinear_convergence_profile", "auto")),
+        "Nonlinear assembly threads: " + ("auto" if _safe_int(summary.get("nonlinear_assembly_threads"), 0) <= 0 else str(_safe_int(summary.get("nonlinear_assembly_threads"), 0))),
         "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(
             round(_safe_float(summary.get("deformation_scale")), 3))),
         "Recovery history: " + str(summary.get("recovery_history_mode", "full")),
@@ -1518,8 +1534,12 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "hardening_n",
         }
         nonlinear_static_keys = {
+            "nonlinear_static_control",
             "nonlinear_static_status",
             "nonlinear_static_load_factor",
+            "nonlinear_static_peak_load_factor",
+            "nonlinear_static_peak_step",
+            "nonlinear_static_initial_arc_increment",
             "nonlinear_static_steps",
             "nonlinear_static_total_iterations",
             "nonlinear_static_layers",
@@ -1618,9 +1638,15 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         nonlinear_static_status = str(prestress.get("nonlinear_static_status", "") or "")
         if nonlinear_static_status:
             lines.extend(["", "Incremental nonlinear static solve:"])
+            control_mode = str(prestress.get("nonlinear_static_control", summary.get("nonlinear_solution_control", "newton force control")))
+            lines.append(" - control: " + control_mode)
             lines.append(" - status: " + nonlinear_static_status.replace("_", " "))
             lines.append(" - last converged load factor: " + str(
                 round(_safe_float(prestress.get("nonlinear_static_load_factor")), 4)))
+            if _safe_float(prestress.get("nonlinear_static_peak_load_factor"), 0.0) > 0.0:
+                lines.append(" - peak load factor: " + str(round(_safe_float(prestress.get("nonlinear_static_peak_load_factor")), 4)))
+            if _safe_float(prestress.get("nonlinear_static_peak_step"), -1.0) >= 0.0:
+                lines.append(" - peak step: " + str(_safe_int(prestress.get("nonlinear_static_peak_step"), 0)))
             lines.append(" - completed steps: " + str(_safe_int(prestress.get("nonlinear_static_steps"), 0)))
             lines.append(
                 " - Newton iterations: " + str(_safe_int(prestress.get("nonlinear_static_total_iterations"), 0)))
@@ -2083,6 +2109,27 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Affects plastic strain, bending capacity and nonlinear static runtime.",
         "caution": "Five layers is a practical default. More layers cost more but can improve plastic bending resolution.",
     },
+    "nonlinear_solution_control": {
+        "title": "Nonlinear Solution Control",
+        "purpose": "Chooses the nonlinear static path-following method.",
+        "use": "Newton force control is the default proportional load-step solve. Arc length uses bounded Crisfield-style continuation to trace through a limit point and report the peak load factor.",
+        "output": "Changes nonlinear static control mode and result interpretation; it does not change element formulation or loads.",
+        "caution": "Arc length is more expensive and intended for collapse/path-following checks. Keep Newton for ordinary target-load verification.",
+    },
+    "nonlinear_convergence_profile": {
+        "title": "Nonlinear Convergence Profile",
+        "purpose": "Selects automatic Newton globalization and adaptive load-step behavior for nonlinear static runs.",
+        "use": "Auto is the default. Fast grows smooth increments more aggressively, robust uses stronger line search for difficult plastic or near-limit cases, and legacy keeps the previous behavior.",
+        "output": "Changes convergence speed and robustness only; it does not change element theory or loads.",
+        "caution": "Fast is best for well-behaved cases. Use robust when convergence stalls or near collapse.",
+    },
+    "nonlinear_assembly_threads": {
+        "title": "Nonlinear Assembly Threads",
+        "purpose": "Caps the backend assembly worker thread count used during nonlinear tangent/internal-force assembly.",
+        "use": "Use 0 for backend/default behavior, or a positive integer to cap the parallel assembly work.",
+        "output": "Can reduce nonlinear runtime on larger models when measured threading is beneficial.",
+        "caution": "Too many threads can slow small models or compete with sparse factorization threads.",
+    },
     "display_choice": {
         "title": "Display",
         "purpose": "Chooses which result visualization is shown after a run.",
@@ -2209,6 +2256,7 @@ class RuntimeFEMWindow:
         self.symmetry_mode = tk.StringVar(value="none")
         self.shell_element_order = tk.StringVar(value="S4")
         self.beam_element_order = tk.StringVar(value="B2")
+        self.member_model = tk.StringVar(value="plates as shell, girders as beams")
         self.analysis_type = tk.StringVar(value="linear eigenvalue")
         self.buckling_analysis_type = tk.StringVar(value="linear eigenvalue")
         self.pressure_direction = tk.StringVar(value="external")
@@ -2230,6 +2278,9 @@ class RuntimeFEMWindow:
         self.nonlinear_max_iterations = tk.IntVar(value=25)
         self.nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.nonlinear_layers = tk.IntVar(value=5)
+        self.nonlinear_solution_control = tk.StringVar(value="newton force control")
+        self.nonlinear_convergence_profile = tk.StringVar(value="auto")
+        self.nonlinear_assembly_threads = tk.IntVar(value=0)
         self.deformation_scale = tk.StringVar(value="0.0")
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
@@ -2321,7 +2372,7 @@ class RuntimeFEMWindow:
         self.show_plate_vis = tk.BooleanVar(value=True)
         self.show_stiffener_vis = tk.BooleanVar(value=True)
         self.show_girder_vis = tk.BooleanVar(value=True)
-        self.plate_alpha_vis = tk.StringVar(value="1.0")
+        self.plate_alpha_vis = tk.StringVar(value="0.99")
         self.member_alpha_vis = tk.StringVar(value="0.95")
         self.colormap_vis = tk.StringVar(value="jet")
         self.upper_result_frame = None
@@ -2675,6 +2726,12 @@ class RuntimeFEMWindow:
         self._add_entry_row(solver_options, 8, "nonlinear_max_iterations", "NL iterations",
                             self.nonlinear_max_iterations, width=8)
         self._add_entry_row(solver_options, 9, "nonlinear_tolerance", "NL tolerance", self.nonlinear_tolerance)
+        self._add_option_row(solver_options, 10, "nonlinear_solution_control", "NL control",
+                             self.nonlinear_solution_control, ("newton force control", "arc length"))
+        self._add_option_row(solver_options, 11, "nonlinear_convergence_profile", "NL profile",
+                             self.nonlinear_convergence_profile, ("auto", "fast", "robust", "balanced", "legacy"))
+        self._add_entry_row(solver_options, 12, "nonlinear_assembly_threads", "NL threads",
+                            self.nonlinear_assembly_threads, width=8)
 
         buckling_validity = ttk.LabelFrame(tab_general, text="Buckling validity and resources")
         buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -2704,9 +2761,21 @@ class RuntimeFEMWindow:
         members = ttk.LabelFrame(tab_properties, text="Member modelling")
         members.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(members)
-        self._add_entry_row(members, 0, "stiffener_eccentricity_m", "Stf. ecc. [m]", self.stiffener_eccentricity_m)
-        self._add_entry_row(members, 1, "girder_eccentricity_m", "Girder ecc. [m]", self.girder_eccentricity_m)
-        self._add_option_row(members, 2, "member_orientation", "Member orient.", self.member_orientation,
+        self._add_option_row(
+            members,
+            0,
+            "member_model",
+            "Member model",
+            self.member_model,
+            (
+                "plates as shell, girders as beams",
+                "webs as shells, flanges as beams",
+                "all shell",
+            ),
+        )
+        self._add_entry_row(members, 1, "stiffener_eccentricity_m", "Stf. ecc. [m]", self.stiffener_eccentricity_m)
+        self._add_entry_row(members, 2, "girder_eccentricity_m", "Girder ecc. [m]", self.girder_eccentricity_m)
+        self._add_option_row(members, 3, "member_orientation", "Member orient.", self.member_orientation,
                              ("auto", "global Y", "global Z", "radial"))
 
         material = ttk.LabelFrame(tab_properties, text="Material and recovery")
@@ -2756,56 +2825,9 @@ class RuntimeFEMWindow:
         self._add_check_row(time_domain, 0, "custom_time_domain_enabled", "Run custom load in time domain", self.custom_time_domain_enabled)
         self._add_check_row(time_domain, 1, "custom_time_domain_include_static_load", "Include static load in time domain",
                             self.custom_time_domain_include_static_load)
-        self._add_entry_row(time_domain, 2, "custom_pressure_pa", "Pressure [Pa]", self.custom_pressure_pa)
-        self._add_entry_row(time_domain, 3, "custom_time_domain_duration_s", "Duration [s]", self.custom_time_domain_duration_s)
-        self._add_entry_row(time_domain, 4, "custom_time_domain_total_time_s", "Total time [s]", self.custom_time_domain_total_time_s)
-        self._add_entry_row(time_domain, 5, "custom_time_domain_dt_s", "dt [s]", self.custom_time_domain_dt_s)
-
-        self.custom_load_area_var = tk.StringVar(value="Patch Area: 0.00 mÂ²")
-        ttk.Label(time_domain, textvariable=self.custom_load_area_var).grid(row=6, column=0, sticky=tk.W, padx=8, pady=4)
-
-        self._custom_load_selection_button = ttk.Button(
-            time_domain,
-            text="Start selection",
-            command=self._toggle_custom_load_selection,
-        )
-        self._custom_load_selection_button.grid(row=6, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(time_domain, text="Select All", command=self._custom_load_select_all).grid(
-            row=6, column=2, sticky=tk.EW, padx=(0, 4), pady=4
-        )
-        ttk.Button(time_domain, text="Clear", command=self._custom_load_clear_all).grid(
-            row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4
-        )
-
-        btn_frame = ttk.Frame(time_domain)
-        btn_frame.grid(
-            row=7,
-            column=0,
-            columnspan=4,
-            sticky=tk.EW,
-            padx=8,
-            pady=4,
-        )
-        ttk.Button(
-            btn_frame,
-            text="Split A (Z/X)",
-            command=lambda: self._custom_load_split_field("a"),
-        ).pack(
-            side=tk.LEFT,
-            expand=True,
-            fill=tk.X,
-            padx=(0, 2),
-        )
-        ttk.Button(
-            btn_frame,
-            text="Split B (Arc/Y)",
-            command=lambda: self._custom_load_split_field("b"),
-        ).pack(
-            side=tk.LEFT,
-            expand=True,
-            fill=tk.X,
-            padx=(2, 0),
-        )
+        self._add_entry_row(time_domain, 2, "custom_time_domain_duration_s", "Duration [s]", self.custom_time_domain_duration_s)
+        self._add_entry_row(time_domain, 3, "custom_time_domain_total_time_s", "Total time [s]", self.custom_time_domain_total_time_s)
+        self._add_entry_row(time_domain, 4, "custom_time_domain_dt_s", "dt [s]", self.custom_time_domain_dt_s)
 
         time_domain.columnconfigure(3, weight=1)
 
@@ -2819,7 +2841,39 @@ class RuntimeFEMWindow:
                             self.custom_use_nullspace_projection)
         self._add_check_row(custom, 3, "allow_unbalanced_free_free", "Allow unbalanced free-free loads",
                             self.allow_unbalanced_free_free)
-        self._add_entry_row(custom, 4, "custom_pressure_pa", "Manual pressure [Pa]", self.custom_pressure_pa)
+        selection = ttk.LabelFrame(custom, text="Panel and edge selection")
+        selection.grid(row=4, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 8))
+        self._configure_option_grid(selection)
+        self._add_entry_row(selection, 0, "custom_pressure_pa", "Pressure [Pa]", self.custom_pressure_pa)
+        self._add_entry_row(selection, 1, "custom_selected_edge_load", "Selected edges [N/m]",
+                            self.custom_selected_edge_load_n_per_m)
+        self.custom_load_area_var = tk.StringVar(value="Selected Area: 0.000 m2")
+        ttk.Label(selection, textvariable=self.custom_load_area_var).grid(row=2, column=0, sticky=tk.W, padx=8, pady=4)
+        self._custom_load_selection_button = ttk.Button(
+            selection,
+            text="Start selection",
+            command=self._toggle_custom_load_selection,
+        )
+        self._custom_load_selection_button.grid(row=2, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection, text="Select All", command=self._custom_load_select_all).grid(
+            row=2, column=2, sticky=tk.EW, padx=(0, 4), pady=4
+        )
+        ttk.Button(selection, text="Clear", command=self._custom_load_clear_all).grid(
+            row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4
+        )
+        split_actions = ttk.Frame(selection)
+        split_actions.grid(row=3, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=4)
+        ttk.Button(
+            split_actions,
+            text="Split A (Z/X)",
+            command=lambda: self._custom_load_split_field("a"),
+        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        ttk.Button(
+            split_actions,
+            text="Split B (Arc/Y)",
+            command=lambda: self._custom_load_split_field("b"),
+        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        selection.columnconfigure(3, weight=1)
         self._add_option_row(custom, 5, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support,
                              ("free", "simply supported", "fixed"))
         self._add_option_row(custom, 6, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support,
@@ -2843,8 +2897,6 @@ class RuntimeFEMWindow:
         ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3,
                                                                                              sticky=tk.EW, padx=(0, 8),
                                                                                              pady=4)
-        self._add_entry_row(custom, 11, "custom_selected_edge_load", "Selected edges [N/m]",
-                            self.custom_selected_edge_load_n_per_m)
         custom.columnconfigure(3, weight=1)
 
         load_list = ttk.LabelFrame(tab_advanced, text="Loads to run")
@@ -2897,6 +2949,14 @@ class RuntimeFEMWindow:
         vis_actions.grid(row=6, column=0, columnspan=3, sticky=tk.W, padx=8, pady=4)
         ttk.Button(vis_actions, text="Redraw base 3D", command=self._redraw_base_3d).pack(side=tk.LEFT)
         ttk.Button(vis_actions, text="Show results", command=self._show_results).pack(side=tk.LEFT, padx=(6, 0))
+        view_actions = ttk.Frame(vis_group)
+        view_actions.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
+        ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(view_actions, text="ISO", command=lambda: self._set_runtime_3d_view("iso")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(view_actions, text="Front", command=lambda: self._set_runtime_3d_view("front")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(view_actions, text="Side", command=lambda: self._set_runtime_3d_view("side")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(view_actions, text="Top", command=lambda: self._set_runtime_3d_view("top")).pack(side=tk.LEFT)
 
         self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
         self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -3445,12 +3505,19 @@ class RuntimeFEMWindow:
         if show_plate and plate_alpha > 0.0:
             R = len(x)
             C = len(x[0]) if R > 0 else 0
+            point_grid = [
+                [
+                    Point3D(x[row_index][col_index], y[row_index][col_index], z[row_index][col_index])
+                    for col_index in range(C)
+                ]
+                for row_index in range(R)
+            ]
             for i in range(R - 1):
                 for j in range(C - 1):
-                    p1 = Point3D(x[i][j], y[i][j], z[i][j])
-                    p2 = Point3D(x[i + 1][j], y[i + 1][j], z[i + 1][j])
-                    p3 = Point3D(x[i + 1][j + 1], y[i + 1][j + 1], z[i + 1][j + 1])
-                    p4 = Point3D(x[i][j + 1], y[i][j + 1], z[i][j + 1])
+                    p1 = point_grid[i][j]
+                    p2 = point_grid[i + 1][j]
+                    p3 = point_grid[i + 1][j + 1]
+                    p4 = point_grid[i][j + 1]
 
                     avg_val = 0.25 * (
                                 color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
@@ -3599,7 +3666,6 @@ class RuntimeFEMWindow:
                     stipple=member_stipple,
                 )
 
-        self._draw_custom_load_patch_outlines(canvas)
         canvas.set_thickness_legend(
             values=all_vals,
             unit=colorbar_label,
@@ -3788,6 +3854,7 @@ class RuntimeFEMWindow:
             symmetry_mode=str(self.symmetry_mode.get()),
             shell_element_order=str(self.shell_element_order.get()),
             beam_element_order=str(self.beam_element_order.get()),
+            member_model=str(self.member_model.get()),
             analysis_type=str(self.analysis_type.get()),
             buckling_analysis_type=str(self.buckling_analysis_type.get()),
             pressure_direction=str(self.pressure_direction.get()),
@@ -3809,6 +3876,9 @@ class RuntimeFEMWindow:
             nonlinear_max_iterations=max(_safe_int(self.nonlinear_max_iterations.get(), 25), 1),
             nonlinear_tolerance=max(_safe_float(self.nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             nonlinear_layers=_nearest_nonlinear_layer_count(self.nonlinear_layers.get()),
+            nonlinear_solution_control=str(self.nonlinear_solution_control.get()),
+            nonlinear_convergence_profile=str(self.nonlinear_convergence_profile.get()),
+            nonlinear_assembly_threads=max(_safe_int(self.nonlinear_assembly_threads.get(), 0), 0),
             deformation_scale=max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
             custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
@@ -4479,6 +4549,15 @@ class RuntimeFEMWindow:
             for key in sorted(self._custom_selected_edge_keys)
         ]
 
+    def _custom_load_selection_visual_offset(self) -> float:
+        geometry = runtime_geometry_summary(self.snapshot)
+        if self.snapshot.is_cylinder:
+            return max(_safe_float(geometry.get("radius_m"), 1.0) * 2.0e-3, 2.0e-4)
+        return max(
+            _safe_float(geometry.get("length_m"), 1.0),
+            _safe_float(geometry.get("width_m"), 1.0),
+        ) * 2.0e-4
+
     def _pick_custom_load_edge(
             self,
             canvas: Tkinter3DCanvas,
@@ -4488,12 +4567,7 @@ class RuntimeFEMWindow:
         best_edge: tuple[str, float, float, float] | None = None
         best_distance = 9.0
         best_depth = float("inf")
-        geometry = runtime_geometry_summary(self.snapshot)
-        surface_offset = (
-            max(_safe_float(geometry.get("radius_m"), 1.0) * 1.0e-3, 1.0e-5)
-            if self.snapshot.is_cylinder
-            else max(_safe_float(geometry.get("length_m"), 1.0), _safe_float(geometry.get("width_m"), 1.0)) * 1.0e-5
-        )
+        surface_offset = self._custom_load_selection_visual_offset()
         for edge in self._all_custom_load_edges():
             points = self._custom_load_outline_edge_points(*edge, surface_offset=surface_offset)
             projected = self._project_custom_load_points(canvas, points)
@@ -4609,20 +4683,7 @@ class RuntimeFEMWindow:
         if not self._custom_load_patches:
             return
 
-        geometry = runtime_geometry_summary(self.snapshot)
-        if self.snapshot.is_cylinder:
-            surface_offset = max(
-                _safe_float(geometry.get("radius_m"), 1.0) * 1.0e-3,
-                1.0e-5,
-            )
-        else:
-            surface_offset = (
-                max(
-                    _safe_float(geometry.get("length_m"), 1.0),
-                    _safe_float(geometry.get("width_m"), 1.0),
-                )
-                * 1.0e-5
-            )
+        surface_offset = self._custom_load_selection_visual_offset()
 
         if self._custom_load_selection_active:
             for patch in self._custom_load_patches:
@@ -4638,6 +4699,7 @@ class RuntimeFEMWindow:
                         end,
                         color="#94a3b8",
                         width=1,
+                        draw_overlay=True,
                     )
 
         for varying_axis, fixed_coordinate, start_coordinate, end_coordinate in (
@@ -4656,6 +4718,7 @@ class RuntimeFEMWindow:
                     end,
                     color="#dc2626",
                     width=4,
+                    draw_overlay=True,
                 )
 
         for edge in self._selected_custom_load_edges():
@@ -4672,6 +4735,7 @@ class RuntimeFEMWindow:
                     end,
                     color="#16a34a",
                     width=4,
+                    draw_overlay=True,
                 )
 
         for cut in getattr(self, "_custom_load_manual_cuts", ()):
@@ -4688,6 +4752,7 @@ class RuntimeFEMWindow:
                     end,
                     color="#f59e0b",
                     width=3,
+                    draw_overlay=True,
                 )
 
     def _custom_load_select_all(self) -> None:
@@ -4886,6 +4951,31 @@ class RuntimeFEMWindow:
         self._force_fit_next_refresh = True
         self._refresh_figure()
         self._write_status("Displaying the latest FEM results.")
+
+    def _set_runtime_3d_view(self, view_name: str) -> None:
+        self.use_interactive_3d.set(True)
+        if self.result_canvas is None:
+            self._force_fit_next_refresh = True
+            self._refresh_figure(preserve_view=False)
+        canvas = self.result_canvas
+        if canvas is None:
+            return
+        view = str(view_name).lower()
+        if view == "fit":
+            canvas.fit_to_scene()
+        elif view == "reset":
+            canvas.reset_camera()
+        elif view == "iso":
+            canvas.set_iso_view()
+        elif view == "front":
+            canvas.set_front_view()
+        elif view == "side":
+            canvas.set_side_view()
+        elif view == "top":
+            canvas.set_top_view()
+        else:
+            return
+        self._write_status("3D view set to " + view + ".")
 
 
 def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:

@@ -664,9 +664,13 @@ class Tkinter3DCanvas(tk.Frame):
         self.height = max(1, self.canvas.winfo_height())
         self._clear_canvas_only()
 
-        quality = "fast" if self._interactive_render else "full"
+        interactive = self._interactive_render
+        quality = "fast" if interactive else "full"
         primitives = self._get_world_primitives(quality)
-        opaque_cylinder_occluders = self._collect_opaque_cylinder_occluders()
+        # Hidden-member ray checks and stipple/legend drawing are restored on
+        # mouse release.  Skipping them while dragging keeps orbiting responsive
+        # on dense cylinder models without changing the final rendered view.
+        opaque_cylinder_occluders = [] if interactive else self._collect_opaque_cylinder_occluders()
 
         right, camera_up, forward = self.camera.basis()
         position = self.camera.position
@@ -706,6 +710,12 @@ class Tkinter3DCanvas(tk.Frame):
             return result
 
         render_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
+        overlay_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
+        offscreen_margin = 20.0
+        min_screen_x = -offscreen_margin
+        max_screen_x = float(plot_width) + offscreen_margin
+        min_screen_y = -offscreen_margin
+        max_screen_y = float(self.height) + offscreen_margin
 
         for primitive in primitives:
             if self._primitive_hidden_by_opaque_cylinder(
@@ -733,6 +743,13 @@ class Tkinter3DCanvas(tk.Frame):
                 end = project(primitive["end"])
                 if start is None or end is None:
                     continue
+                if (
+                        max(start[0], end[0]) < min_screen_x
+                        or min(start[0], end[0]) > max_screen_x
+                        or max(start[1], end[1]) < min_screen_y
+                        or min(start[1], end[1]) > max_screen_y
+                ):
+                    continue
                 depth = 0.5 * (start[2] + end[2])
                 coords = (start[0], start[1], end[0], end[1])
             else:
@@ -746,21 +763,40 @@ class Tkinter3DCanvas(tk.Frame):
                     projected.append(point_2d)
                 if clipped or len(projected) < 3:
                     continue
-
-                depth = sum(item[2] for item in projected) / len(projected)
+                depth_total = 0.0
+                min_x = float("inf")
+                max_x = float("-inf")
+                min_y = float("inf")
+                max_y = float("-inf")
                 flat: List[float] = []
-                for screen_x, screen_y, _point_depth in projected:
+                for screen_x, screen_y, point_depth in projected:
+                    depth_total += point_depth
+                    min_x = min(min_x, screen_x)
+                    max_x = max(max_x, screen_x)
+                    min_y = min(min_y, screen_y)
+                    max_y = max(max_y, screen_y)
                     flat.extend((screen_x, screen_y))
+                if (
+                        max_x < min_screen_x
+                        or min_x > max_screen_x
+                        or max_y < min_screen_y
+                        or min_y > max_screen_y
+                ):
+                    continue
+
+                depth = depth_total / len(projected)
                 coords = tuple(flat)
 
-            render_items.append(
-                (
-                    depth,
-                    int(primitive.get("layer", 0)),
-                    primitive,
-                    coords,
-                )
+            item = (
+                depth,
+                int(primitive.get("layer", 0)),
+                primitive,
+                coords,
             )
+            if primitive.get("draw_overlay"):
+                overlay_items.append(item)
+                continue
+            render_items.append(item)
 
         # Layer is only a near-coplanar tie-breaker.  The old far/near-based
         # bias was large enough to draw internal members through an opaque shell.
@@ -768,7 +804,6 @@ class Tkinter3DCanvas(tk.Frame):
         layer_epsilon = max(1.0e-9, scene_scale * 1.0e-7)
         render_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
 
-        interactive = self._interactive_render
         for _depth, _layer, primitive, coords in render_items:
             if primitive["kind"] == "line":
                 self.canvas.create_line(
@@ -782,7 +817,7 @@ class Tkinter3DCanvas(tk.Frame):
                     "fill": primitive["color"],
                     "outline": outline,
                     "width": primitive["width"],
-                    "stipple": primitive.get("stipple", ""),
+                    "stipple": "" if interactive else primitive.get("stipple", ""),
                 }
                 if primitive.get("tags"):
                     kwargs["tags"] = primitive.get("tags")
@@ -791,7 +826,17 @@ class Tkinter3DCanvas(tk.Frame):
                     **kwargs
                 )
 
-        self._draw_thickness_legend()
+        overlay_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
+        for _depth, _layer, primitive, coords in overlay_items:
+            if primitive["kind"] == "line":
+                self.canvas.create_line(
+                    *coords,
+                    fill=primitive["color"],
+                    width=primitive["width"],
+                )
+
+        if not interactive:
+            self._draw_thickness_legend()
 
     def _get_world_primitives(self, quality: str) -> List[Dict[str, Any]]:
         cached = self._world_primitive_cache.get(quality)
@@ -865,6 +910,7 @@ class Tkinter3DCanvas(tk.Frame):
         color: str,
         width: int,
         layer: int = 30,
+        draw_overlay: bool = False,
     ) -> Dict[str, Any]:
         return {
             "kind": "line",
@@ -873,6 +919,7 @@ class Tkinter3DCanvas(tk.Frame):
             "color": color,
             "width": width,
             "layer": layer,
+            "draw_overlay": bool(draw_overlay),
         }
 
     def _object_to_primitives(
@@ -888,6 +935,8 @@ class Tkinter3DCanvas(tk.Frame):
                     obj["end"],
                     obj.get("color", "black"),
                     int(obj.get("width", 1)),
+                    layer=int(obj.get("layer", 30)),
+                    draw_overlay=bool(obj.get("draw_overlay", False)),
                 )
             ]
         elif object_type == "polygon":
@@ -1586,6 +1635,8 @@ class Tkinter3DCanvas(tk.Frame):
         end: Point3D,
         color: str = "black",
         width: int = 1,
+        layer: int = 30,
+        draw_overlay: bool = False,
     ) -> None:
         self.objects.append(
             {
@@ -1594,6 +1645,8 @@ class Tkinter3DCanvas(tk.Frame):
                 "end": end,
                 "color": color,
                 "width": width,
+                "layer": int(layer),
+                "draw_overlay": bool(draw_overlay),
             }
         )
         self._invalidate_geometry_cache()
