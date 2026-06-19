@@ -248,6 +248,18 @@ class Camera3D:
         if factor > 0.0:
             self.set_orbit(distance=max(self.near * 2.0, self.distance * factor))
 
+    def pan_view_pixels(self, delta_x: float, delta_y: float, width: int, height: int) -> None:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        right, camera_up, _forward = self.basis()
+        visible_height = 2.0 * self.distance * math.tan(self.fov / 2.0)
+        visible_width = visible_height * float(width) / float(height)
+        world_dx = -float(delta_x) * visible_width / float(width)
+        world_dy = float(delta_y) * visible_height / float(height)
+        offset = right * world_dx + camera_up * world_dy
+        self.target = self.target + offset
+        self._update_position()
+
     def set_target(self, target: Point3D) -> None:
         self.target = Point3D(target.x, target.y, target.z)
         self._update_position()
@@ -338,7 +350,9 @@ class Tkinter3DCanvas(tk.Frame):
         self._last_mouse_x = 0
         self._last_mouse_y = 0
         self._is_dragging = False
+        self._drag_mode = ""
         self._interactive_render = False
+        self._fast_polygon_target = 1800
 
         self._redraw_after_id: Optional[str] = None
         self._finish_interaction_after_id: Optional[str] = None
@@ -347,9 +361,12 @@ class Tkinter3DCanvas(tk.Frame):
         self._world_primitive_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         self.canvas.bind("<Configure>", self._on_resize, add="+")
-        self.canvas.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
+        self.canvas.bind("<ButtonPress-1>", lambda event: self._on_mouse_down(event, "pan"), add="+")
         self.canvas.bind("<B1-Motion>", self._on_mouse_drag, add="+")
         self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up, add="+")
+        self.canvas.bind("<ButtonPress-3>", lambda event: self._on_mouse_down(event, "rotate"), add="+")
+        self.canvas.bind("<B3-Motion>", self._on_mouse_drag, add="+")
+        self.canvas.bind("<ButtonRelease-3>", self._on_mouse_up, add="+")
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel, add="+")
         self.canvas.bind("<Button-4>", self._on_mouse_wheel, add="+")
         self.canvas.bind("<Button-5>", self._on_mouse_wheel, add="+")
@@ -561,15 +578,17 @@ class Tkinter3DCanvas(tk.Frame):
         self.height = new_height
         self._request_redraw()
 
-    def _on_mouse_down(self, event: tk.Event) -> None:
+    def _on_mouse_down(self, event: tk.Event, mode: str) -> None:
         self._last_mouse_x = int(event.x)
         self._last_mouse_y = int(event.y)
         self._is_dragging = True
+        self._drag_mode = str(mode)
         self._interactive_render = True
         self.canvas.focus_set()
 
     def _on_mouse_up(self, _event: tk.Event) -> None:
         self._is_dragging = False
+        self._drag_mode = ""
         self._interactive_render = False
         self._cancel_scheduled_redraw()
         self._request_redraw()
@@ -583,10 +602,13 @@ class Tkinter3DCanvas(tk.Frame):
         self._last_mouse_x = int(event.x)
         self._last_mouse_y = int(event.y)
 
-        self.camera.orbit(
-            delta_azimuth=-dx * 0.008,
-            delta_elevation=dy * 0.008,
-        )
+        if self._drag_mode == "rotate":
+            self.camera.orbit(
+                delta_azimuth=-dx * 0.008,
+                delta_elevation=dy * 0.008,
+            )
+        else:
+            self.camera.pan_view_pixels(dx, dy, self._plot_width(), self.height)
         self._interactive_render = True
         self._request_redraw(interactive=True)
 
@@ -851,7 +873,17 @@ class Tkinter3DCanvas(tk.Frame):
             return cached
 
         primitives: List[Dict[str, Any]] = []
+        polygon_stride = 1
+        if quality == "fast":
+            polygon_count = sum(1 for obj in self.objects if obj.get("type") == "polygon")
+            if polygon_count > self._fast_polygon_target:
+                polygon_stride = max(1, math.ceil(polygon_count / float(self._fast_polygon_target)))
+        polygon_index = 0
         for obj in self.objects:
+            if quality == "fast" and obj.get("type") == "polygon":
+                polygon_index += 1
+                if polygon_stride > 1 and not obj.get("tags") and (polygon_index - 1) % polygon_stride:
+                    continue
             primitives.extend(self._object_to_primitives(obj, quality))
 
         self._world_primitive_cache[quality] = primitives
@@ -2023,7 +2055,7 @@ def _add_controls(parent: tk.Misc, canvas_3d: Tkinter3DCanvas) -> tk.Frame:
 
     tk.Label(
         controls,
-        text="Drag with left mouse button to orbit; use the wheel to zoom.",
+        text="Right-drag to rotate; left-drag to move; use the wheel to zoom.",
     ).pack(side=tk.RIGHT, padx=6)
     return controls
 

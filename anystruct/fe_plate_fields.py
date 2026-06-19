@@ -2698,11 +2698,12 @@ def detect_cylinder_geometry(
 def infer_cylinder_fields(
     model: FeShellModel,
     geometry: CylinderGeometry | None = None,
+    members: Sequence[CylinderMember] | None = None,
 ) -> list[CylinderField]:
     """Infer cylindrical bays, longitudinal stiffeners, and ring frames."""
 
     geometry = detect_cylinder_geometry(model) if geometry is None else geometry
-    members = _infer_cylinder_members(model, geometry)
+    members = tuple(_infer_cylinder_members(model, geometry) if members is None else members)
     longitudinals = sorted(
         (member for member in members if member.role == "longitudinal_stiffener"),
         key=lambda member: member.station,
@@ -3417,6 +3418,175 @@ def cylinder_geometry_from_runtime_result(runtime_result: Any, model: FeShellMod
     )
 
 
+def cylinder_members_from_runtime_result(
+    runtime_result: Any,
+    geometry: CylinderGeometry,
+) -> tuple[CylinderMember, ...]:
+    """Return runtime beam stiffeners/girders as cylinder member boundaries."""
+
+    payload = _runtime_fea_payload(runtime_result)
+    members: list[CylinderMember] = []
+    seen: set[tuple[str, int]] = set()
+    for item in payload.get("runtime_members", ()) or ():
+        role_text = str(item.get("role", "")).lower()
+        if "flange" in role_text:
+            continue
+        if "stiffener" in role_text:
+            role = "longitudinal_stiffener"
+        elif "girder" in role_text or "frame" in role_text:
+            role = "ring_frame"
+        else:
+            continue
+        try:
+            points = [tuple(float(value) for value in point) for point in item.get("points", ()) or ()]
+        except (TypeError, ValueError):
+            continue
+        if len(points) < 2:
+            continue
+        section = item.get("section", {}) or {}
+        centroid = _mean_point(points)
+        if role == "longitudinal_stiffener":
+            station = _cylinder_angle(centroid, geometry)
+            direction = geometry.axis_direction
+        else:
+            station = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+            radial = _normalise(_radial_vector(centroid, geometry.axis_origin, geometry.axis_direction))
+            direction = _normalise(_cross(geometry.axis_direction, radial))
+        key = (role, int(round(station * 1.0e7)))
+        if key in seen:
+            continue
+        seen.add(key)
+        web_height = max(_safe_float(section.get("web_height")) or 0.0, 0.0)
+        web_thickness = max(_safe_float(section.get("web_thickness")) or 0.0, 0.0)
+        flange_width = max(_safe_float(section.get("flange_width")) or 0.0, 0.0)
+        flange_thickness = max(_safe_float(section.get("flange_thickness")) or 0.0, 0.0)
+        section_type = "T" if flange_width > 0.0 and flange_thickness > 0.0 else "FB"
+        members.append(
+            CylinderMember(
+                member_id=f"runtime_{role}_{len(members) + 1:03d}",
+                role=role,
+                section_type=section_type,
+                web_element_ids=(),
+                flange_element_ids=(int(item.get("id", 0) or 0),) if section_type == "T" else (),
+                station=station,
+                direction=direction,
+                web_height_m=web_height,
+                flange_width_m=flange_width if flange_width > 0.0 else None,
+                web_thickness_m=web_thickness if web_thickness > 0.0 else None,
+                flange_thickness_m=flange_thickness if flange_thickness > 0.0 else None,
+                confidence=1.0,
+                diagnostics=("runtime beam member used as cylinder bay boundary",),
+            )
+        )
+    return tuple(sorted(members, key=lambda member: (member.role, member.station)))
+
+
+def _runtime_payload_has_member_web_shells(payload: dict[str, Any]) -> bool:
+    for shell in payload.get("shells", ()) or ():
+        role = str(shell.get("role", shell.get("elset", ""))).lower()
+        if "stiffener_web" in role or "girder_web" in role or "frame_web" in role:
+            return True
+    return False
+
+
+def _runtime_flange_beams_by_station(
+    runtime_result: Any,
+    geometry: CylinderGeometry,
+) -> dict[str, list[tuple[float, dict[str, Any], int]]]:
+    payload = _runtime_fea_payload(runtime_result)
+    flanges: dict[str, list[tuple[float, dict[str, Any], int]]] = {
+        "longitudinal_stiffener": [],
+        "ring_stiffener": [],
+        "ring_frame": [],
+    }
+    for item in payload.get("runtime_members", ()) or ():
+        role_text = str(item.get("role", "")).lower()
+        if "flange" not in role_text:
+            continue
+        try:
+            points = [tuple(float(value) for value in point) for point in item.get("points", ()) or ()]
+        except (TypeError, ValueError):
+            continue
+        if len(points) < 2:
+            continue
+        centroid = _mean_point(points)
+        if "stiffener" in role_text:
+            role = "longitudinal_stiffener"
+            station = _cylinder_angle(centroid, geometry)
+        elif "girder" in role_text or "frame" in role_text:
+            role = "ring_frame"
+            station = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+        else:
+            continue
+        flanges.setdefault(role, []).append((station, dict(item.get("section") or {}), int(item.get("id", 0) or 0)))
+    return flanges
+
+
+def _runtime_flange_dimensions(section: dict[str, Any]) -> tuple[float | None, float | None]:
+    width = _safe_float(section.get("web_thickness"))
+    thickness = _safe_float(section.get("web_height"))
+    if width is None or width <= 0.0:
+        width = _safe_float(section.get("flange_width"))
+    if thickness is None or thickness <= 0.0:
+        thickness = _safe_float(section.get("flange_thickness"))
+    return width, thickness
+
+
+def _augment_cylinder_members_with_runtime_flange_beams(
+    members: Sequence[CylinderMember],
+    runtime_result: Any,
+    geometry: CylinderGeometry,
+) -> tuple[CylinderMember, ...]:
+    flanges_by_role = _runtime_flange_beams_by_station(runtime_result, geometry)
+    if not any(flanges_by_role.values()):
+        return tuple(members)
+    axial_tol = max((geometry.axial_bounds[1] - geometry.axial_bounds[0]) * 1.0e-5, 1.0e-7)
+    angular_tol = max(axial_tol / max(geometry.radius_m, 1.0e-12), 1.0e-5)
+    augmented: list[CylinderMember] = []
+    for member in members:
+        matched_role = member.role
+        candidates = flanges_by_role.get(member.role, [])
+        if not candidates and member.role == "ring_stiffener":
+            candidates = flanges_by_role.get("ring_frame", [])
+            if candidates:
+                matched_role = "ring_frame"
+        best: tuple[float, dict[str, Any], int] | None = None
+        for station, section, beam_id in candidates:
+            if member.role == "longitudinal_stiffener":
+                distance = abs(_wrapped_angle_difference(station, member.station))
+                tolerance = angular_tol
+            else:
+                distance = abs(station - member.station)
+                tolerance = axial_tol
+            if distance <= tolerance and (best is None or distance < best[0]):
+                best = (distance, section, beam_id)
+        if best is None:
+            augmented.append(member)
+            continue
+        flange_width, flange_thickness = _runtime_flange_dimensions(best[1])
+        if not flange_width or not flange_thickness:
+            augmented.append(member)
+            continue
+        augmented.append(
+            CylinderMember(
+                member_id=member.member_id,
+                role=matched_role,
+                section_type="T",
+                web_element_ids=member.web_element_ids,
+                flange_element_ids=tuple(sorted(set(member.flange_element_ids + ((best[2],) if best[2] else ())))),
+                station=member.station,
+                direction=member.direction,
+                web_height_m=member.web_height_m,
+                flange_width_m=flange_width,
+                web_thickness_m=member.web_thickness_m,
+                flange_thickness_m=flange_thickness,
+                confidence=member.confidence,
+                diagnostics=member.diagnostics + ("runtime flange beam supplied flange dimensions",),
+            )
+        )
+    return tuple(augmented)
+
+
 def _runtime_frd_summary(payload: dict[str, Any], stress: FrdStressResult | None) -> dict[str, Any]:
     return {
         "source": str(payload.get("source", "runtime FEM result")),
@@ -3537,6 +3707,7 @@ def _create_cylinder_fea_buckling_session_from_model(
     frd_stress: FrdStressResult | None = None,
     *,
     geometry: CylinderGeometry | None = None,
+    members: Sequence[CylinderMember] | None = None,
     inp_path: str = "runtime FEM result",
     frd_path: str | None = None,
     frd_summary: dict[str, Any] | None = None,
@@ -3552,7 +3723,7 @@ def _create_cylinder_fea_buckling_session_from_model(
     stress_reduction_method: str | None = None,
 ) -> FeaCylinderSession:
     geometry = detect_cylinder_geometry(model) if geometry is None else geometry
-    fields = tuple(infer_cylinder_fields(model, geometry))
+    fields = tuple(infer_cylinder_fields(model, geometry, members=members))
     diagnostics: list[str] = []
     reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     diagnostics.append(f"stress reduction method: {reduction_method}")
@@ -3657,10 +3828,22 @@ def create_runtime_fea_buckling_session(
     if geometry_choice not in {"auto", "flat", "cylinder"}:
         raise ValueError("geometry_type must be 'auto', 'flat', or 'cylinder'")
     if geometry_choice == "cylinder":
+        runtime_geometry = cylinder_geometry_from_runtime_result(payload, model)
+        runtime_members = None
+        if runtime_geometry is not None:
+            if _runtime_payload_has_member_web_shells(payload):
+                runtime_members = _augment_cylinder_members_with_runtime_flange_beams(
+                    _infer_cylinder_members(model, runtime_geometry),
+                    payload,
+                    runtime_geometry,
+                )
+            else:
+                runtime_members = cylinder_members_from_runtime_result(payload, runtime_geometry)
         return _create_cylinder_fea_buckling_session_from_model(
             model,
             frd_stress,
-            geometry=cylinder_geometry_from_runtime_result(payload, model),
+            geometry=runtime_geometry,
+            members=runtime_members,
             inp_path=source,
             frd_path=source,
             frd_summary=frd_summary,
@@ -3677,10 +3860,22 @@ def create_runtime_fea_buckling_session(
         )
 
     if str(payload.get("geometry_type", "")).strip().lower() == "cylinder" or is_cylindrical_shell_model(model):
+        runtime_geometry = cylinder_geometry_from_runtime_result(payload, model)
+        runtime_members = None
+        if runtime_geometry is not None:
+            if _runtime_payload_has_member_web_shells(payload):
+                runtime_members = _augment_cylinder_members_with_runtime_flange_beams(
+                    _infer_cylinder_members(model, runtime_geometry),
+                    payload,
+                    runtime_geometry,
+                )
+            else:
+                runtime_members = cylinder_members_from_runtime_result(payload, runtime_geometry)
         return _create_cylinder_fea_buckling_session_from_model(
             model,
             frd_stress,
-            geometry=cylinder_geometry_from_runtime_result(payload, model),
+            geometry=runtime_geometry,
+            members=runtime_members,
             inp_path=source,
             frd_path=source,
             frd_summary=frd_summary,

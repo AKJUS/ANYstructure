@@ -298,8 +298,9 @@ def _axis_breaks(
     max_element_size = _positive(max_element_size, 0.0)
     if max_element_size > 0.0:
         divisions = max(divisions, int(math.ceil(length / max_element_size)))
-    values = [length * idx / divisions for idx in range(divisions + 1)]
     tol = max(length * 1.0e-9, 1.0e-9)
+    mandatory_keys: set[float] = {0.0, round(length, 12)}
+    values = [length * idx / divisions for idx in range(divisions + 1)]
     for value in mandatory:
         try:
             value = float(value)
@@ -307,6 +308,7 @@ def _axis_breaks(
             continue
         if tol < value < length - tol:
             values.append(value)
+            mandatory_keys.add(round(value, 12))
     clean = []
     for value in sorted(values):
         value = min(max(float(value), 0.0), length)
@@ -314,6 +316,27 @@ def _axis_breaks(
             clean.append(value)
     clean[0] = 0.0
     clean[-1] = length
+    target_spacing = length / max(divisions, 1)
+    min_spacing = 0.25 * target_spacing
+    if min_spacing > tol and len(clean) > 2:
+        changed = True
+        while changed and len(clean) > 2:
+            changed = False
+            for index in range(1, len(clean)):
+                if clean[index] - clean[index - 1] >= min_spacing:
+                    continue
+                left_key = round(clean[index - 1], 12)
+                right_key = round(clean[index], 12)
+                left_mandatory = left_key in mandatory_keys or index - 1 == 0
+                right_mandatory = right_key in mandatory_keys or index == len(clean) - 1
+                if left_mandatory and right_mandatory:
+                    continue
+                if right_mandatory and not left_mandatory:
+                    del clean[index - 1]
+                else:
+                    del clean[index]
+                changed = True
+                break
     return clean
 
 
@@ -825,6 +848,66 @@ def _member_flanges_as_beams(config: LightweightFEMConfig) -> bool:
     return _member_model(config) == "web_shell_flange_beam"
 
 
+def _member_shell_length_cap(geometry: dict, config: LightweightFEMConfig, thickness: float) -> float:
+    """Target in-plane mesh length when member webs/flanges are meshed as shells."""
+
+    if not _member_webs_as_shells(config):
+        return 0.0
+    candidates: list[float] = []
+
+    def add_section_cap(section: object, reference: float, depth_factor: float) -> None:
+        data = _section_or_default(section, thickness, reference, depth_factor)
+        web_height = _member_section_dimension(data, "web_height")
+        flange_width = _member_section_dimension(data, "flange_width")
+        if web_height > 0.0:
+            candidates.append(5.0 * web_height / max(_minimum_member_web_depth_segments(config), 1))
+        if _member_flanges_as_shells(config) and flange_width > 0.0:
+            candidates.append(2.5 * flange_width)
+
+    if config.include_stiffeners and geometry.get("has_stiffener"):
+        add_section_cap(
+            geometry.get("stiffener_section"),
+            _positive(geometry.get("stiffener_spacing_m", 0.0), 1.0),
+            0.08,
+        )
+    if config.include_girders and geometry.get("has_girder"):
+        add_section_cap(
+            geometry.get("girder_section"),
+            _positive(geometry.get("girder_spacing_m", 0.0), 1.0),
+            0.12,
+        )
+    return min([value for value in candidates if value > 1.0e-9], default=0.0)
+
+
+def _generated_shell_role(shell: dict[str, object]) -> str:
+    return str(shell.get("role", "skin") or "skin").strip().lower()
+
+
+def _generated_skin_shell_ids(generated_geometry: dict) -> set[int]:
+    return {
+        int(shell["id"])
+        for shell in generated_geometry.get("shells", []) or []
+        if shell.get("id") is not None and _generated_shell_role(shell) in {"", "skin"}
+    }
+
+
+def _generated_non_skin_shell_count(generated_geometry: dict) -> int:
+    return sum(
+        1
+        for shell in generated_geometry.get("shells", []) or []
+        if shell.get("id") is not None and _generated_shell_role(shell) not in {"", "skin"}
+    )
+
+
+def _skin_shell_element_ids(model, generated_geometry: dict) -> tuple[int, ...]:
+    shell_ids = _shell_element_ids(model)
+    skin_ids = _generated_skin_shell_ids(generated_geometry)
+    if not skin_ids:
+        return shell_ids
+    selected = tuple(element_id for element_id in shell_ids if int(element_id) in skin_ids)
+    return selected or shell_ids
+
+
 def _node_cache_from_nodes(nodes: list[dict[str, object]]) -> dict[tuple[float, float, float], int]:
     cache: dict[tuple[float, float, float], int] = {}
     for node in nodes:
@@ -914,8 +997,24 @@ def _intersection_height_levels(
     return levels
 
 
-def _member_web_depth_levels(own_height: float, *endpoint_levels: list[float]) -> list[float]:
+def _minimum_member_web_depth_segments(config: LightweightFEMConfig) -> int:
+    if not _member_flanges_as_shells(config):
+        return 1
+    return max(1, _fidelity_refinement(config.mesh_fidelity))
+
+
+def _member_web_section_depth_levels(section: dict[str, float], config: LightweightFEMConfig) -> list[float]:
+    web_height = _member_section_dimension(section, "web_height")
+    if web_height <= 0.0:
+        return []
+    return _member_web_depth_levels(web_height, _minimum_member_web_depth_segments(config))
+
+
+def _member_web_depth_levels(own_height: float, min_segments: int = 1, *endpoint_levels: list[float]) -> list[float]:
     levels = {0.0, round(float(own_height), 12)}
+    segments = max(int(min_segments), 1)
+    for index in range(1, segments):
+        levels.add(round(float(own_height) * float(index) / float(segments), 12))
     for values in endpoint_levels:
         for value in values:
             if 1.0e-9 < float(value) < float(own_height) - 1.0e-9:
@@ -1012,7 +1111,12 @@ def _add_flat_member_shell_model(
             base1 = node_id(row + 1, col)
             left_levels = _intersection_height_levels(intersection_heights, x0, web_height)
             right_levels = _intersection_height_levels(intersection_heights, x1, web_height)
-            z_levels = _member_web_depth_levels(web_height, left_levels, right_levels)
+            z_levels = _member_web_depth_levels(
+                web_height,
+                _minimum_member_web_depth_segments(config),
+                left_levels,
+                right_levels,
+            )
 
             def web_node(x: float, base_node: int, z: float) -> int:
                 if abs(float(z)) <= 1.0e-12:
@@ -1035,7 +1139,8 @@ def _add_flat_member_shell_model(
                 left1 = _add_cached_node(nodes, node_cache, (x1, position - 0.5 * flange_width, web_height))
                 right0 = _add_cached_node(nodes, node_cache, (x0, position + 0.5 * flange_width, web_height))
                 right1 = _add_cached_node(nodes, node_cache, (x1, position + 0.5 * flange_width, web_height))
-                element_id = _append_member_shell(shells, element_id, [left0, left1, right1, right0], flange_thickness, role + "_flange")
+                element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
+                element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
         return element_id, beam_id
 
     row = _index_of_break(x_breaks, position)
@@ -1046,7 +1151,12 @@ def _add_flat_member_shell_model(
         base1 = node_id(row, col + 1)
         lower_levels = _intersection_height_levels(intersection_heights, y0, web_height)
         upper_levels = _intersection_height_levels(intersection_heights, y1, web_height)
-        z_levels = _member_web_depth_levels(web_height, lower_levels, upper_levels)
+        z_levels = _member_web_depth_levels(
+            web_height,
+            _minimum_member_web_depth_segments(config),
+            lower_levels,
+            upper_levels,
+        )
 
         def web_node(y: float, base_node: int, z: float) -> int:
             if abs(float(z)) <= 1.0e-12:
@@ -1069,7 +1179,8 @@ def _add_flat_member_shell_model(
             left1 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y1, web_height))
             right0 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y0, web_height))
             right1 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y1, web_height))
-            element_id = _append_member_shell(shells, element_id, [left0, left1, right1, right0], flange_thickness, role + "_flange")
+            element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
+            element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
     return element_id, beam_id
 
 
@@ -1319,7 +1430,12 @@ def _add_cylinder_member_shell_model(
             base1 = node_id(row + 1, col)
             start_levels = _intersection_height_levels(intersection_heights, z0, web_height)
             end_levels = _intersection_height_levels(intersection_heights, z1, web_height)
-            depth_levels = _member_web_depth_levels(web_height, start_levels, end_levels)
+            depth_levels = _member_web_depth_levels(
+                web_height,
+                _minimum_member_web_depth_segments(config),
+                start_levels,
+                end_levels,
+            )
 
             def web_node(z: float, base_node: int, depth: float) -> int:
                 if abs(float(depth)) <= 1.0e-12:
@@ -1342,7 +1458,8 @@ def _add_cylinder_member_shell_model(
                 left1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta - dtheta, z1))
                 right0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta + dtheta, z0))
                 right1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta + dtheta, z1))
-                element_id = _append_member_shell(shells, element_id, [left0, left1, right1, right0], flange_thickness, role + "_flange")
+                element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
+                element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
         return element_id, beam_id
 
     row = int(index)
@@ -1354,7 +1471,12 @@ def _add_cylinder_member_shell_model(
         base1 = node_id(row, col + 1)
         start_levels = _intersection_height_levels(intersection_heights, float(col % max(cols, 1)), web_height)
         end_levels = _intersection_height_levels(intersection_heights, float((col + 1) % max(cols, 1)), web_height)
-        depth_levels = _member_web_depth_levels(web_height, start_levels, end_levels)
+        depth_levels = _member_web_depth_levels(
+            web_height,
+            _minimum_member_web_depth_segments(config),
+            start_levels,
+            end_levels,
+        )
 
         def web_node(theta: float, base_node: int, depth: float) -> int:
             if abs(float(depth)) <= 1.0e-12:
@@ -1379,7 +1501,8 @@ def _add_cylinder_member_shell_model(
             lower1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta1, z_minus))
             upper0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta0, z_plus))
             upper1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta1, z_plus))
-            element_id = _append_member_shell(shells, element_id, [lower0, lower1, upper1, upper0], flange_thickness, role + "_flange")
+            element_id = _append_member_shell(shells, element_id, [lower0, lower1, top1, top0], flange_thickness, role + "_flange")
+            element_id = _append_member_shell(shells, element_id, [top0, top1, upper1, upper0], flange_thickness, role + "_flange")
     return element_id, beam_id
 
 
@@ -1407,6 +1530,9 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         [value for value in (active_stiffener_spacing, active_girder_spacing) if value > 0.0],
         default=0.0,
     )
+    member_shell_cap = _member_shell_length_cap(geometry, config, thickness)
+    if member_shell_cap > 0.0:
+        member_spacing_cap = min([value for value in (member_spacing_cap, member_shell_cap) if value > 0.0], default=member_shell_cap)
     stiffener_positions = (
         _centered_member_positions(width, stiffener_spacing, fallback_midpoint=True)
         if config.include_stiffeners and geometry.get("has_stiffener")
@@ -1419,8 +1545,11 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     )
     div_x = _line_divisions(length, config, base_div, member_spacing_cap)
     div_y = _line_divisions(width, config, base_div, member_spacing_cap)
-    x_breaks = _axis_breaks(length, div_x, girder_positions, member_spacing_cap)
-    y_breaks = _axis_breaks(width, div_y, stiffener_positions, member_spacing_cap)
+    custom_x_breaks = _custom_patch_axis_breaks(config, "a", length)
+    custom_y_breaks = _custom_patch_axis_breaks(config, "b", width)
+    x_breaks = _axis_breaks(length, div_x, tuple(girder_positions) + custom_x_breaks, member_spacing_cap)
+    y_breaks = _axis_breaks(width, div_y, tuple(stiffener_positions) + custom_y_breaks, member_spacing_cap)
+    mesh_generation: dict[str, object] = {}
 
     def add_breakpoint(values: list[float], value: object, limit: float) -> list[float]:
         coordinate = float(value or 0.0)
@@ -1429,11 +1558,8 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         return sorted(set(round(float(item), 12) for item in values))
 
     if config.custom_load_bc_enabled:
-        for patch in _custom_pressure_patches(config):
-            x_breaks = add_breakpoint(x_breaks, patch.get("min_a"), length)
-            x_breaks = add_breakpoint(x_breaks, patch.get("max_a"), length)
-            y_breaks = add_breakpoint(y_breaks, patch.get("min_b"), width)
-            y_breaks = add_breakpoint(y_breaks, patch.get("max_b"), width)
+        if custom_x_breaks or custom_y_breaks:
+            mesh_generation["pressure_patch_boundary_breaks"] = "flat_exact"
         for segment in _custom_edge_segments(config):
             if str(segment.get("varying_axis", "a")).lower() == "a":
                 y_breaks = add_breakpoint(y_breaks, segment.get("fixed_coordinate"), width)
@@ -1507,11 +1633,11 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             orientation,
         )
     stiffener_web_intersections = {
-        round(float(girder_x), 12): [_member_section_dimension(section, "web_height")]
+        round(float(girder_x), 12): _member_web_section_depth_levels(section, config)
         for girder_x, section in girder_sections.items()
     }
     girder_web_intersections = {
-        round(float(stiffener_y), 12): [_member_section_dimension(section, "web_height")]
+        round(float(stiffener_y), 12): _member_web_section_depth_levels(section, config)
         for stiffener_y, section in stiffener_sections.items()
     }
     for stiffener_y in stiffener_positions:
@@ -1629,6 +1755,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         ],
         "plot_grid": [[node_id(row, col) for col in range(cols)] for row in range(rows)],
         "plot_type": "flat",
+        "mesh_generation": mesh_generation,
     }
 
 
@@ -1661,14 +1788,28 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         [value for value in (active_stiffener_spacing, girder_spacing) if value > 0.0],
         default=0.0,
     )
+    mesh_generation: dict[str, object] = {}
+    member_shell_cap = _member_shell_length_cap(geometry, config, thickness)
+    if member_shell_cap > 0.0:
+        mesh_size_cap = min([value for value in (mesh_size_cap, member_shell_cap) if value > 0.0], default=member_shell_cap)
+    patch_width_a = _custom_patch_min_width(config, "a")
+    patch_width_b = _custom_patch_min_width(config, "b")
+    if patch_width_a > 0.0:
+        mesh_size_cap = min([value for value in (mesh_size_cap, 0.5 * patch_width_a) if value > 0.0], default=0.5 * patch_width_a)
+        mesh_generation["pressure_patch_min_axial_width_m"] = patch_width_a
+    if patch_width_b > 0.0 and circumference > 0.0:
+        circumferential_div = max(8, int(math.ceil(circumference / max(0.5 * patch_width_b, 1.0e-9))))
+        mesh_generation["pressure_patch_min_circumferential_width_m"] = patch_width_b
+    else:
+        circumferential_div = 0
     if mesh_size > 0.0:
         if mesh_size_cap > 0.0 and mesh_size > mesh_size_cap:
             mesh_size = mesh_size_cap
-        circumferential_div = max(int(math.ceil(circumference / mesh_size)), 8)
+        circumferential_div = max(circumferential_div, int(math.ceil(circumference / mesh_size)), 8)
         axial_div = max(int(math.ceil(length / mesh_size)), 2)
     else:
         base_div = _production_divisions(config.mesh_fidelity)
-        circumferential_div = max(base_div * 2, 8)
+        circumferential_div = max(circumferential_div, base_div * 2, 8)
         axial_div = max(int(length / max(radius, 1.0e-9) * circumferential_div / 4), 2)
         if mesh_size_cap > 0.0:
             target_size = mesh_size_cap / max(_fidelity_refinement(config.mesh_fidelity), 1)
@@ -1687,7 +1828,10 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 pos += girder_spacing
         else:
             girder_positions = [length / 2.0]
-    z_breaks = _axis_breaks(length, axial_div, tuple(girder_positions))
+    axial_mandatory_breaks = tuple(girder_positions) + _custom_patch_axis_breaks(config, "a", length)
+    z_breaks = _axis_breaks(length, axial_div, axial_mandatory_breaks)
+    if _custom_patch_axis_breaks(config, "a", length) or patch_width_b > 0.0:
+        mesh_generation["pressure_patch_boundary_breaks"] = "cylinder_axial_exact_circumferential_refined"
     if _wants_b3(config) and config.include_stiffeners and geometry.get("has_stiffener"):
         z_breaks = _refined_midpoint_breaks(z_breaks)
     rows = len(z_breaks)
@@ -1760,12 +1904,12 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         )
         ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
     stiffener_web_intersections = {
-        round(float(z_breaks[row]), 12): [_member_section_dimension(girder_base_section, "web_height")]
+        round(float(z_breaks[row]), 12): _member_web_section_depth_levels(girder_base_section, config)
         for row in ring_rows
         if girder_base_section
     }
     girder_web_intersections = {
-        round(float(col), 12): [_member_section_dimension(section, "web_height")]
+        round(float(col), 12): _member_web_section_depth_levels(section, config)
         for col, section in stiffener_sections.items()
     }
     if stiffener_columns:
@@ -1938,6 +2082,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         "radius_m": radius,
         "bottom_ring_node_ids": start_ring,
         "top_ring_node_ids": end_ring,
+        "mesh_generation": mesh_generation,
     }
 
 
@@ -2144,6 +2289,28 @@ def _fea_result_import_payload(
     }
 
     cylinder_geometry = None
+    runtime_members = []
+    for beam in generated_geometry.get("beams", []) or []:
+        role = str(beam.get("role", "member") or "member")
+        if not any(token in role.lower() for token in ("stiffener", "girder", "frame")):
+            continue
+        node_ids = tuple(int(node_id) for node_id in beam.get("node_ids", ()) or ())
+        points = []
+        for node_id in node_ids:
+            node = model.mesh.get_node(node_id)
+            if node is not None:
+                points.append((float(node.x), float(node.y), float(node.z)))
+        if len(points) < 2:
+            continue
+        runtime_members.append(
+            {
+                "id": int(beam.get("id", len(runtime_members) + 1) or len(runtime_members) + 1),
+                "role": role,
+                "node_ids": node_ids,
+                "points": tuple(points),
+                "section": dict(beam.get("section") or {}),
+            }
+        )
     if str(generated_geometry.get("plot_type", "")).lower() == "cylinder":
         skin_shell_ids = tuple(
             int(shell["id"])
@@ -2190,6 +2357,7 @@ def _fea_result_import_payload(
         "nodal_stress_pa": nodal_stress,
         "units": "Pa",
         "cylinder_geometry": cylinder_geometry,
+        "runtime_members": tuple(runtime_members),
     }
 
 
@@ -2285,6 +2453,66 @@ def _visualization_member_lines(
             }
         )
     return tuple(lines)
+
+
+def _visualization_shell_surfaces(
+    generated_geometry: dict,
+    model,
+    displacements: np.ndarray,
+    fields: dict[str, dict[int, float]],
+) -> tuple[dict[str, object], ...]:
+    surfaces: list[dict[str, object]] = []
+    if displacements is None:
+        return ()
+    shell_lookup = {
+        int(shell.get("id", 0)): shell
+        for shell in generated_geometry.get("shells", []) or []
+        if shell.get("id") is not None
+    }
+    for shell_id, shell in sorted(shell_lookup.items()):
+        role = str(shell.get("role", "skin") or "skin")
+        if role.lower() in {"", "skin"}:
+            continue
+        node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
+        if len(node_ids) < 3:
+            continue
+        points = []
+        displaced_points = []
+        disp_values = {"disp_x": [], "disp_y": [], "disp_z": [], "disp_mag": []}
+        for node_id in node_ids:
+            node = model.mesh.get_node(node_id)
+            if node is None:
+                break
+            base = np.asarray(node.coords(), dtype=float)
+            translation = np.asarray(displacements[node.dofs[:3]], dtype=float)
+            moved = base + translation
+            points.append(tuple(float(value) for value in base))
+            displaced_points.append(tuple(float(value) for value in moved))
+            disp_values["disp_x"].append(float(translation[0]))
+            disp_values["disp_y"].append(float(translation[1]))
+            disp_values["disp_z"].append(float(translation[2]))
+            disp_values["disp_mag"].append(float(np.linalg.norm(translation)))
+        if len(points) != len(node_ids):
+            continue
+        field_values: dict[str, float] = {}
+        for field_name, by_node in fields.items():
+            values = [float(by_node[node_id]) for node_id in node_ids if node_id in by_node]
+            if values:
+                field_values[field_name] = float(sum(values) / len(values))
+        for field_name, values in disp_values.items():
+            if values:
+                field_values[field_name] = float(sum(values) / len(values))
+        surfaces.append(
+            {
+                "id": shell_id,
+                "role": role,
+                "node_ids": tuple(node_ids),
+                "points": tuple(points),
+                "displaced_points": tuple(displaced_points),
+                "field_values": field_values,
+            }
+        )
+    return tuple(surfaces)
 
 
 def _visualization_from_full_result(
@@ -2411,6 +2639,7 @@ def _visualization_from_full_result(
         "stress_pa": tuple(field_grids.get("custom_scalar", field_grids.get("von_mises_pa", w_grid))),
         "scalar_label": scalar_label,
         "member_lines": _visualization_member_lines(generated_geometry, model, displacements, stresses_by_element),
+        "shell_surfaces": _visualization_shell_surfaces(generated_geometry, model, displacements, fields),
     }
     return result
 
@@ -2539,6 +2768,45 @@ def _buckling_solver_kwargs(config: LightweightFEMConfig) -> dict[str, object]:
     if load_range is not None:
         kwargs["load_factor_range"] = load_range
     return kwargs
+
+
+def _record_buckling_mesh_adequacy(
+        model,
+        buckling_result,
+        config: LightweightFEMConfig,
+        prestress_summary: dict[str, object],
+        diagnostics: list[str],
+) -> None:
+    if _full_backend is None or not hasattr(_full_backend, "evaluate_mode_mesh_adequacy"):
+        return
+    if buckling_result is None or not getattr(buckling_result, "modes", None):
+        return
+    try:
+        mode_number = _positive_int(config.capacity_buckling_mode_number, 1)
+        adequacy = _full_backend.evaluate_mode_mesh_adequacy(
+            model,
+            buckling_result,
+            mode_number=mode_number,
+            min_elements_per_half_wave=_positive_int(config.capacity_mesh_min_elements_per_half_wave, 4),
+        )
+    except Exception as exc:
+        diagnostics.append("Buckling mode mesh adequacy check failed: " + str(exc))
+        return
+    prestress_summary["buckling_mesh_status"] = str(getattr(adequacy, "status", "unknown"))
+    prestress_summary["buckling_mesh_active_nodes"] = float(getattr(adequacy, "active_node_count", 0) or 0)
+    prestress_summary["buckling_mesh_active_elements"] = float(getattr(adequacy, "active_element_count", 0) or 0)
+    prestress_summary["buckling_mesh_estimated_half_waves"] = float(getattr(adequacy, "estimated_half_waves", 0) or 0)
+    prestress_summary["buckling_mesh_elements_per_half_wave"] = float(getattr(adequacy, "elements_per_half_wave", 0.0) or 0.0)
+    if str(getattr(adequacy, "status", "ok")) != "ok":
+        diagnostics.append(
+            "Buckling mode mesh adequacy "
+            + str(getattr(adequacy, "status", "unknown"))
+            + " for mode "
+            + str(mode_number)
+            + "."
+        )
+    for warning in getattr(adequacy, "warnings", ()) or ():
+        diagnostics.append(str(warning))
 
 
 def _wants_capacity_workflow(config: LightweightFEMConfig) -> bool:
@@ -2882,13 +3150,49 @@ def _custom_pressure_patches(config: LightweightFEMConfig) -> list[dict[str, flo
     return _normalised_custom_pressure_patches(raw_patches)
 
 
+def _custom_patch_axis_breaks(config: LightweightFEMConfig, axis: str, limit: float) -> tuple[float, ...]:
+    """Return custom pressure-patch boundaries in local generated-geometry coordinates."""
+
+    if not config.custom_load_bc_enabled:
+        return ()
+    keys = ("min_a", "max_a") if axis == "a" else ("min_b", "max_b")
+    values: list[float] = []
+    tol = max(float(limit) * 1.0e-9, 1.0e-9)
+    for patch in _custom_pressure_patches(config):
+        for key in keys:
+            try:
+                value = float(patch.get(key, 0.0))
+            except (TypeError, ValueError):
+                continue
+            if tol < value < float(limit) - tol:
+                values.append(value)
+    return tuple(sorted(set(round(value, 12) for value in values)))
+
+
+def _custom_patch_min_width(config: LightweightFEMConfig, axis: str, fallback: float = 0.0) -> float:
+    if not config.custom_load_bc_enabled:
+        return 0.0
+    min_width = 0.0
+    keys = ("min_a", "max_a") if axis == "a" else ("min_b", "max_b")
+    for patch in _custom_pressure_patches(config):
+        try:
+            width = float(patch.get(keys[1], 0.0)) - float(patch.get(keys[0], 0.0))
+        except (TypeError, ValueError):
+            continue
+        if width > 1.0e-9:
+            min_width = width if min_width <= 0.0 else min(min_width, width)
+    if min_width <= 0.0:
+        min_width = float(fallback or 0.0)
+    return min_width if min_width > 1.0e-9 else 0.0
+
+
 def _custom_pressure_patch_element_ids_from_patches(
         model,
         generated_geometry: dict,
         geometry: dict,
         patches: list[dict[str, float]],
 ) -> tuple[int, ...]:
-    shell_ids = _shell_element_ids(model)
+    shell_ids = _skin_shell_element_ids(model, generated_geometry)
     if not shell_ids:
         return ()
 
@@ -2951,6 +3255,24 @@ def _custom_pressure_patch_element_ids_from_patches(
         if in_patch:
             selected.append(int(element_id))
     return tuple(selected) or shell_ids
+
+
+def _filter_load_case_pressure_to_skin_shells(load_case, generated_geometry: dict) -> tuple[int, int]:
+    pressure_loads = getattr(load_case, "pressure_loads", None)
+    if not isinstance(pressure_loads, dict) or not pressure_loads:
+        return (0, 0)
+    before = len(pressure_loads)
+    if _generated_non_skin_shell_count(generated_geometry) <= 0:
+        return (before, before)
+    skin_ids = _generated_skin_shell_ids(generated_geometry)
+    if not skin_ids:
+        return (before, before)
+    load_case.pressure_loads = {
+        int(element_id): float(pressure)
+        for element_id, pressure in pressure_loads.items()
+        if int(element_id) in skin_ids
+    }
+    return (before, len(load_case.pressure_loads))
 
 
 def _custom_pressure_patch_element_ids(
@@ -3049,11 +3371,116 @@ def _run_custom_time_domain_response(
     }
 
 
+def _mesh_quality_diagnostics(
+    generated_geometry: dict,
+    nodes: dict[int, tuple[float, float, float]] | None = None,
+) -> dict[str, float | int | str]:
+    """Return bounded shell mesh quality metrics for runtime diagnostics."""
+
+    if nodes is None:
+        nodes = {
+            int(node["id"]): tuple(float(value) for value in node["coords"])
+            for node in generated_geometry.get("nodes", [])
+        }
+    aspect_ratios: list[float] = []
+    skew_degrees: list[float] = []
+    warps: list[float] = []
+    areas: list[float] = []
+    invalid_count = 0
+    role_counts: collections.Counter[str] = collections.Counter()
+
+    for shell in generated_geometry.get("shells", []) or []:
+        node_ids = [int(node_id) for node_id in shell.get("node_ids", [])[:4]]
+        role_counts[_generated_shell_role(shell)] += 1
+        if len(node_ids) != 4 or any(node_id not in nodes for node_id in node_ids):
+            invalid_count += 1
+            continue
+        coords = np.asarray([nodes[node_id] for node_id in node_ids], dtype=float)
+        if not np.all(np.isfinite(coords)):
+            invalid_count += 1
+            continue
+        edges = [coords[(index + 1) % 4] - coords[index] for index in range(4)]
+        lengths = [float(np.linalg.norm(edge)) for edge in edges]
+        min_length = min(lengths) if lengths else 0.0
+        max_length = max(lengths) if lengths else 0.0
+        if min_length <= 1.0e-15:
+            invalid_count += 1
+            continue
+        aspect_ratios.append(max_length / min_length)
+
+        angle_deviation = 0.0
+        for index in range(4):
+            a = -edges[index - 1]
+            b = edges[index]
+            denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+            if denom <= 1.0e-15:
+                angle_deviation = 90.0
+                break
+            cosine = float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
+            angle = math.degrees(math.acos(cosine))
+            angle_deviation = max(angle_deviation, abs(90.0 - angle))
+        skew_degrees.append(angle_deviation)
+
+        triangle_area_1 = 0.5 * float(np.linalg.norm(np.cross(coords[1] - coords[0], coords[2] - coords[0])))
+        triangle_area_2 = 0.5 * float(np.linalg.norm(np.cross(coords[2] - coords[0], coords[3] - coords[0])))
+        area = triangle_area_1 + triangle_area_2
+        if area <= 1.0e-18:
+            invalid_count += 1
+            continue
+        areas.append(area)
+
+        normal = np.cross(coords[1] - coords[0], coords[2] - coords[0])
+        normal_norm = float(np.linalg.norm(normal))
+        if normal_norm > 1.0e-15:
+            normal /= normal_norm
+            out_of_plane = abs(float(np.dot(coords[3] - coords[0], normal)))
+            warps.append(out_of_plane / max(sum(lengths) / 4.0, 1.0e-15))
+        else:
+            warps.append(0.0)
+
+    shell_count = sum(role_counts.values())
+    skin_count = role_counts.get("skin", 0) + role_counts.get("", 0)
+    diagnostics: dict[str, float | int | str] = {
+        "shell_quality_count": int(shell_count),
+        "skin_shells": int(skin_count),
+        "member_shells": int(shell_count - skin_count),
+        "invalid_shell_quality_count": int(invalid_count),
+    }
+    if aspect_ratios:
+        diagnostics["max_shell_aspect_ratio"] = float(max(aspect_ratios))
+        diagnostics["mean_shell_aspect_ratio"] = float(sum(aspect_ratios) / len(aspect_ratios))
+    if skew_degrees:
+        diagnostics["max_shell_skew_deg"] = float(max(skew_degrees))
+    if warps:
+        diagnostics["max_shell_warp"] = float(max(warps))
+    if areas:
+        diagnostics["min_shell_area_m2"] = float(min(areas))
+
+    warnings: list[str] = []
+    if invalid_count:
+        warnings.append(f"{invalid_count} invalid shell element(s)")
+    if float(diagnostics.get("max_shell_aspect_ratio", 1.0)) > 5.0:
+        warnings.append("high shell aspect ratio")
+    if float(diagnostics.get("max_shell_skew_deg", 0.0)) > 30.0:
+        warnings.append("high shell skew")
+    if float(diagnostics.get("max_shell_warp", 0.0)) > 0.05:
+        warnings.append("warped shell element")
+    if warnings:
+        diagnostics["mesh_quality_warnings"] = "; ".join(warnings)
+    return diagnostics
+
+
 def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | str]:
     nodes = {int(node["id"]): tuple(float(value) for value in node["coords"]) for node in generated_geometry.get("nodes", [])}
     grid = generated_geometry.get("plot_grid") or []
     diagnostics: dict[str, float | int | str] = {"shell_order": _shell_order_from_geometry(generated_geometry)}
     diagnostics["beam_order"] = _beam_order_from_geometry(generated_geometry)
+    diagnostics.update(_mesh_quality_diagnostics(generated_geometry, nodes))
+    mesh_generation = generated_geometry.get("mesh_generation") or {}
+    if isinstance(mesh_generation, dict):
+        for key, value in mesh_generation.items():
+            if isinstance(value, (int, float, str)):
+                diagnostics["mesh_" + str(key)] = value
     if not grid:
         return diagnostics
     if generated_geometry.get("plot_type") == "cylinder":
@@ -3545,6 +3972,13 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             diagnostics.append("Imperfection input was not applied: " + str(imperfection_info.get("reason", imperfection_info.get("status", "unknown"))))
         if abs(float(symmetric_pressure)) > 0.0:
             load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
+            pressure_before, pressure_after = _filter_load_case_pressure_to_skin_shells(load_case, generated_geometry)
+            if pressure_before > pressure_after:
+                diagnostics.append(
+                    "Applied generated pressure to plating skin only; skipped "
+                    + str(pressure_before - pressure_after)
+                    + " internal member shell pressure load(s)."
+                )
         else:
             load_case = _full_backend.LoadCase("custom_fem_loads" if config.custom_load_bc_enabled else "anystructure_symmetric_load")
         selected_pressure_shells = _add_custom_panel_pressure_loads(model, load_case, generated_geometry, geometry, config)
@@ -3871,6 +4305,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             if pressure_buckling_result.modes:
                 buckling_result = pressure_buckling_result
                 diagnostics.append("Buckling modes use equivalent external-pressure membrane prestress because the full mixed prestress returned no positive modes.")
+    if capacity_workflow_result is None:
+        _record_buckling_mesh_adequacy(model, buckling_result, config, prestress_summary, diagnostics)
     if _wants_nonlinear_buckling(config) and nonlinear_static_factor is not None and float(nonlinear_static_factor) > 0.0:
         buckling_factors = (float(nonlinear_static_factor),)
         diagnostics.append("Buckling factors report the incremental nonlinear static load-factor estimate for the selected buckling mode.")

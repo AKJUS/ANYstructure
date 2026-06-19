@@ -27,6 +27,7 @@ import numpy as np
 from matplotlib import cm, colormaps, colors as mcolors
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -933,6 +934,44 @@ def _member_component_value(line: dict[str, Any], component: str, *, is_mode: bo
     return _safe_float(line.get("von_mises"), 0.0) / 1.0e6
 
 
+def _shell_surface_component_value(surface: dict[str, Any], component: str, *, is_mode: bool) -> float:
+    values = surface.get("field_values", {}) or {}
+    if is_mode:
+        return _safe_float(values.get(component), _safe_float(values.get("disp_mag"), 0.0))
+    value = _safe_float(values.get(component))
+    if value is None:
+        value = _safe_float(values.get("von_mises_pa"), 0.0)
+    if component.endswith("_pa"):
+        return value / 1.0e6
+    if "disp" in component:
+        return value * 1000.0
+    return value
+
+
+def _shell_surface_role_visible(surface: dict[str, Any], show_stiffeners: bool, show_girders: bool) -> bool:
+    role = str(surface.get("role", "member")).lower()
+    if "stiffener" in role and not show_stiffeners:
+        return False
+    if ("girder" in role or "frame" in role) and not show_girders:
+        return False
+    return True
+
+
+def _shell_surface_points(surface: dict[str, Any], scale: float) -> list[tuple[float, float, float]]:
+    points = list(surface.get("points") or ())
+    displaced = list(surface.get("displaced_points") or ())
+    result: list[tuple[float, float, float]] = []
+    for index, point in enumerate(points):
+        try:
+            base = np.asarray(point, dtype=float)
+            moved = np.asarray(displaced[index], dtype=float) if index < len(displaced) else base
+        except Exception:
+            continue
+        plotted = base + (moved - base) * float(scale)
+        result.append((float(plotted[0]), float(plotted[1]), float(plotted[2])))
+    return result
+
+
 def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, component: str = "von_mises_pa") -> tuple[
     dict[str, Any], str, bool]:
     def _zero_scalar_like(vis: dict[str, Any]) -> tuple[Any, ...]:
@@ -1035,6 +1074,17 @@ def _plot_visualization_surface(
             colorbar_label = str(visualization.get("scalar_label", component))
     facecolors, norm, cmap = _surface_facecolors(color_grid, colormap)
     scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
+    shell_polygons = []
+    shell_colors = []
+    for surface in visualization.get("shell_surfaces") or ():
+        if member_alpha <= 0.0 or not _shell_surface_role_visible(surface, show_stiffeners, show_girders):
+            continue
+        polygon = _shell_surface_points(surface, scale)
+        if len(polygon) < 3:
+            continue
+        value = _shell_surface_component_value(surface, component, is_mode=is_mode)
+        shell_polygons.append(polygon)
+        shell_colors.append(cmap(norm(value)))
 
     if visualization.get("type") == "cylinder":
         axial = _plot_grid_values(visualization.get("axial_m"))
@@ -1089,6 +1139,15 @@ def _plot_visualization_surface(
                 shade=False,
                 alpha=plate_alpha,
             )
+        if shell_polygons:
+            collection = Poly3DCollection(
+                shell_polygons,
+                facecolors=shell_colors,
+                edgecolors="#111827",
+                linewidths=0.35,
+                alpha=member_alpha,
+            )
+            axis.add_collection3d(collection)
         axis.set_xlabel("x [m]")
         axis.set_ylabel("y [m]")
         axis.set_zlabel("height [m]")
@@ -1116,6 +1175,15 @@ def _plot_visualization_surface(
                 shade=False,
                 alpha=_clamped_alpha(plate_alpha, 1.0),
             )
+        if shell_polygons:
+            collection = Poly3DCollection(
+                shell_polygons,
+                facecolors=shell_colors,
+                edgecolors="#111827",
+                linewidths=0.35,
+                alpha=member_alpha,
+            )
+            axis.add_collection3d(collection)
         axis.set_xlabel("length [m]")
         axis.set_ylabel("width [m]")
         axis.set_zlabel("w x" + str(round(scale, 1)))
@@ -1582,6 +1650,30 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         for key in ("max_x_edge_m", "max_y_edge_m", "max_circumferential_edge_m", "max_axial_edge_m"):
             if key in mesh_info:
                 lines.append(" - " + key + ": " + str(round(_safe_float(mesh_info.get(key)), 4)))
+        for key in (
+                "skin_shells",
+                "member_shells",
+                "invalid_shell_quality_count",
+                "max_shell_aspect_ratio",
+                "mean_shell_aspect_ratio",
+                "max_shell_skew_deg",
+                "max_shell_warp",
+                "min_shell_area_m2",
+        ):
+            if key in mesh_info:
+                lines.append(" - " + key + ": " + str(round(_safe_float(mesh_info.get(key)), 6)))
+        if mesh_info.get("mesh_quality_warnings"):
+            lines.append(" - mesh_quality_warnings: " + str(mesh_info.get("mesh_quality_warnings")))
+        for key in (
+                "mesh_pressure_patch_boundary_breaks",
+                "mesh_pressure_patch_min_axial_width_m",
+                "mesh_pressure_patch_min_circumferential_width_m",
+        ):
+            if key in mesh_info:
+                value = mesh_info.get(key)
+                if isinstance(value, (int, float)):
+                    value = round(_safe_float(value), 6)
+                lines.append(" - " + key + ": " + str(value))
     prestress = summary.get("prestress_summary") or {}
     if prestress:
         constraint_method = str(prestress.get("constraint_method", "") or "")
@@ -1650,6 +1742,11 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "buckling_min_load_factor",
             "buckling_max_load_factor",
             "buckling_allow_dense_fallback",
+            "buckling_mesh_status",
+            "buckling_mesh_active_nodes",
+            "buckling_mesh_active_elements",
+            "buckling_mesh_estimated_half_waves",
+            "buckling_mesh_elements_per_half_wave",
             "capacity_workflow_status",
             "capacity_workflow_capacity_factor",
             "capacity_workflow_critical_load_factor",
@@ -1698,6 +1795,11 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 prestress.get("recovery_history_mode", summary.get("recovery_history_mode", "full"))))
             if _safe_float(prestress.get("memory_limit_mb"), 0.0) > 0.0:
                 lines.append(" - memory limit [MB]: " + str(round(_safe_float(prestress.get("memory_limit_mb")), 1)))
+            if prestress.get("buckling_mesh_status"):
+                lines.append(" - mode mesh adequacy: " + str(prestress.get("buckling_mesh_status", "")))
+                lines.append(" - active elements per estimated half-wave: " + str(
+                    round(_safe_float(prestress.get("buckling_mesh_elements_per_half_wave")), 3)))
+                lines.append(" - estimated half-waves: " + str(_safe_int(prestress.get("buckling_mesh_estimated_half_waves"), 0)))
         capacity_status = str(prestress.get("capacity_workflow_status", "") or "")
         if capacity_status:
             lines.extend(["", "ANYintelligent capacity workflow:"])
@@ -3513,7 +3615,8 @@ class RuntimeFEMWindow:
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
         _configure_tk_canvas_colormap(str(self.colormap_vis.get()))
-        if self.snapshot.is_cylinder and plate_alpha >= 0.94:
+        has_member_shell_surfaces = bool(((self.current_result.visualization if self.current_result is not None else {}) or {}).get("shell_surfaces"))
+        if self.snapshot.is_cylinder and plate_alpha >= 0.94 and not has_member_shell_surfaces:
             set_occluder = getattr(canvas, "set_opaque_cylinder_occluder", None)
             if callable(set_occluder):
                 set_occluder(
@@ -3559,6 +3662,10 @@ class RuntimeFEMWindow:
                 all_vals.append(_member_component_value(line, component, is_mode=is_mode, flange=False))
                 if _safe_float(line.get("flange_width"), 0.0) > 0.0:
                     all_vals.append(_member_component_value(line, component, is_mode=is_mode, flange=True))
+            for surface in visualization.get("shell_surfaces") or ():
+                if not _shell_surface_role_visible(surface, show_stiffeners_for_range, show_girders_for_range):
+                    continue
+                all_vals.append(_shell_surface_component_value(surface, component, is_mode=is_mode))
         if all_vals:
             vmin = min(all_vals)
             vmax = max(all_vals)
@@ -3652,6 +3759,24 @@ class RuntimeFEMWindow:
         show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True
         show_girders_var = getattr(self, "show_girder_vis", None)
         show_girders = show_girders_var.get() if show_girders_var is not None else True
+
+        if member_alpha > 0.0:
+            for surface in visualization.get("shell_surfaces") or ():
+                if not _shell_surface_role_visible(surface, show_stiffeners, show_girders):
+                    continue
+                polygon = _shell_surface_points(surface, scale)
+                if len(polygon) < 3:
+                    continue
+                value = _shell_surface_component_value(surface, component, is_mode=is_mode)
+                color = _interpolate_thickness_color(value, vmin, vmax)
+                canvas.add_polygon(
+                    [Point3D(x, y, z) for x, y, z in polygon],
+                    color=color,
+                    outline="#111827",
+                    width=2,
+                    layer=11,
+                    stipple=member_stipple,
+                )
 
         for line in visualization.get("member_lines") or ():
             role = str(line.get("role", "member")).lower()
@@ -4335,7 +4460,7 @@ class RuntimeFEMWindow:
             self._force_fit_next_refresh = self.result_canvas is None
             self._set_custom_load_selection_active(True, refresh=False)
             self._write_status(
-                "Custom load selection is active. Left-click panels for pressure; right-click edges for line loads; drag to rotate the view."
+                "Custom load selection is active. Left-click panels for pressure; right-click edges for line loads; right-drag rotates, left-drag moves, wheel zooms."
             )
         else:
             self._set_custom_load_selection_active(False, refresh=False)

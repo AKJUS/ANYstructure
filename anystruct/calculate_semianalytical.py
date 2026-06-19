@@ -18,9 +18,15 @@ covered assumptions instead of presenting this reduced model as PULS parity.
 
 from __future__ import annotations
 
+import argparse
+import csv
+import json
 import math
+import random
+import statistics
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Mapping, MutableMapping, Sequence
 
 import numpy as np
 
@@ -44,6 +50,31 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
 SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
+CSV_SAMPLE_METHOD_FIRST_N = "first-n"
+CSV_SAMPLE_METHOD_STRATIFIED = "stratified-shuffle"
+CSV_SAMPLE_METHOD_FULL = "full"
+DEFAULT_CSV_SAMPLE_SIZE = 1200
+DEFAULT_CSV_FIXTURE_SAMPLE_SIZE = 64
+DEFAULT_CSV_SAMPLE_SEED = 128
+DEFAULT_CSV_MODE_CONVERGENCE_SAMPLE_SIZE = 200
+CSV_STRATIFICATION_KEYS = (
+    "target_validity",
+    "stiffener_type",
+    "support",
+    "stiffener_boundary",
+    "pressure_state",
+    "pressure_band",
+    "usage_region",
+)
+DEFAULT_SHIP_SECTION_INPUTS = (
+    r"C:\Github\ANYstructure\anystruct\ship_section_example.txt",
+    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA side section.txt",
+    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA mid section.txt",
+    r"C:\Users\AudunArnesenNyhus\OneDrive - Cefront\Documents\OKEA transversal section.txt",
+)
+DEFAULT_RELIABILITY_BASELINE = Path("reports/puls_reliability_baseline.json")
+DEFAULT_CSR_SP_TRAINING_CSV = Path("Processed CSV 20211019-113209_SP_inc_CSR.csv")
+DEFAULT_CSR_UP_TRAINING_CSV = Path("Processed CSV 20211019-133434_UP_inc_CSR.csv")
 PULS_MANUAL_S3_LIMITS = {
     "source": r"C:\Program Files\DNV\NauticusHull 20.36.2508\Manuals\UserManual PULS.pdf",
     "manual_file_date": "2025-08-05",
@@ -856,37 +887,6 @@ def _anystructure_corrosion_addition_mm(
     return max(float(default_mm), 0.0)
 
 
-
-def _csr_dimension_mm(value: float | None) -> float | None:
-    parsed = _optional_float(value)
-    if parsed is None:
-        return None
-    if abs(parsed) < EPS:
-        return 0.0
-    return parsed * 1000.0 if abs(parsed) < 10.0 else parsed
-
-
-def _anystructure_csr_panel_input(panel: S3PanelInput | U3PanelInput) -> S3PanelInput | U3PanelInput:
-    """Return a CSR-check panel with ANYstructure metre-like dimensions in mm."""
-
-    if isinstance(panel, S3PanelInput):
-        return replace(
-            panel,
-            length=_csr_dimension_mm(panel.length),
-            stiffener_spacing=_csr_dimension_mm(panel.stiffener_spacing),
-            plate_thickness=_csr_dimension_mm(panel.plate_thickness),
-            stiffener_height=_csr_dimension_mm(panel.stiffener_height),
-            web_thickness=_csr_dimension_mm(panel.web_thickness),
-            flange_width=_csr_dimension_mm(panel.flange_width),
-            flange_thickness=_csr_dimension_mm(panel.flange_thickness),
-        )
-    return replace(
-        panel,
-        length=_csr_dimension_mm(panel.length),
-        width=_csr_dimension_mm(panel.width),
-        plate_thickness=_csr_dimension_mm(panel.plate_thickness),
-    )
-
 def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
     if sigma_x1 * sigma_x2 >= 0:
         return sigma_x1 if abs(sigma_x1) > abs(sigma_x2) else sigma_x2
@@ -998,7 +998,7 @@ def solve_anystructure_panel(
 
     panel_family = "S3" if isinstance(panel, S3PanelInput) else "U3"
     solved = solve_s3_panel(panel, config) if panel_family == "S3" else solve_u3_panel(panel, config)
-    csr_requirement = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
+    csr_requirement = calculate_csr_requirement(panel)
     valid_prediction = (
         solved.valid
         and solved.buckling_usage_factor is not None
@@ -1046,7 +1046,7 @@ def predict_anystructure_csr_requirement(
             "unknown": [],
         }
         return [0, 0, 0, 0], "red", diagnostics
-    diagnostics = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
+    diagnostics = calculate_csr_requirement(panel)
     color = "green" if diagnostics["within_csr_proportions"] else "red"
     return list(diagnostics["csr_vector"]), color, diagnostics
 
@@ -6181,3 +6181,3029 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         solve_u3_panel,
         validation_reasons,
     )
+
+
+def _percentile(values: Sequence[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _absolute_distribution_summary(values: Sequence[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "count": 0,
+            "mean_absolute_error": None,
+            "median_absolute_error": None,
+            "p95_absolute_error": None,
+            "max_absolute_error": None,
+        }
+    absolute_values = [abs(value) for value in values]
+    return {
+        "count": len(absolute_values),
+        "mean_absolute_error": statistics.fmean(absolute_values),
+        "median_absolute_error": statistics.median(absolute_values),
+        "p95_absolute_error": _percentile(absolute_values, 0.95),
+        "max_absolute_error": max(absolute_values),
+    }
+
+
+def _error_summary(pairs: Sequence[tuple[float, float]]) -> dict[str, float | int | None]:
+    if not pairs:
+        return {
+            "count": 0,
+            "mean_absolute_error": None,
+            "median_absolute_error": None,
+            "p95_absolute_error": None,
+            "mean_relative_error": None,
+            "max_absolute_error": None,
+        }
+    absolute_errors = [abs(predicted - expected) for expected, predicted in pairs]
+    relative_errors = [
+        abs(predicted - expected) / max(abs(expected), EPS)
+        for expected, predicted in pairs
+    ]
+    return {
+        "count": len(pairs),
+        "mean_absolute_error": statistics.fmean(absolute_errors),
+        "median_absolute_error": statistics.median(absolute_errors),
+        "p95_absolute_error": _percentile(absolute_errors, 0.95),
+        "mean_relative_error": statistics.fmean(relative_errors),
+        "max_absolute_error": max(absolute_errors),
+    }
+
+
+def _directional_error_summaries(
+    pairs: Sequence[tuple[float, float]],
+) -> tuple[dict[str, float | int | None], dict[str, float | int | None]]:
+    """Return conservative and nonconservative usage-factor error summaries."""
+
+    signed_errors = [predicted - expected for expected, predicted in pairs]
+    conservative = [error for error in signed_errors if error >= 0.0]
+    nonconservative = [error for error in signed_errors if error < 0.0]
+    conservative_summary = _absolute_distribution_summary(conservative)
+    nonconservative_summary = _absolute_distribution_summary(nonconservative)
+    nonconservative_summary["p95_nonconservative_error"] = nonconservative_summary[
+        "p95_absolute_error"
+    ]
+    return conservative_summary, nonconservative_summary
+
+
+def _usage_region(usage_factor: float | None) -> str:
+    if usage_factor is None:
+        return "invalid-target"
+    if usage_factor <= 0.87:
+        return "<=0.87"
+    if usage_factor <= 0.91:
+        return "0.87..0.91"
+    if usage_factor < 1.0:
+        return "0.91..1.0"
+    return ">=1.0"
+
+
+def _dominant_failure_family_share_key(result: S3Result) -> str:
+    if not result.valid:
+        return f"invalid:{result.invalid_reason or 'unknown'}"
+    modeled_families = result.diagnostics.get("buckling", {}).get("modeled_failure_families", {})
+    if not modeled_families:
+        return "none"
+    family, summary = max(
+        modeled_families.items(),
+        key=lambda item: float(item[1].get("usage_share_percent", 0.0)),
+    )
+    share = float(summary.get("usage_share_percent", 0.0))
+    if share >= 75.0:
+        band = ">=75%"
+    elif share >= 50.0:
+        band = "50..75%"
+    else:
+        band = "<50%"
+    return f"{family}:{band}"
+
+
+def _web_local_coverage_key(result: S3Result) -> str:
+    if not result.valid:
+        return f"invalid:{result.invalid_reason or 'unknown'}"
+    buckling = result.diagnostics.get("buckling", {})
+    if buckling.get("critical_failure_family") != "web-local":
+        return "not-critical"
+    web_factor = buckling.get("stiffener_web_local") or {}
+    return str(web_factor.get("coverage") or "unknown")
+
+
+def _local_interaction_coverage_key(result: S3Result) -> str:
+    if not result.valid:
+        return f"invalid:{result.invalid_reason or 'unknown'}"
+    buckling = result.diagnostics.get("buckling", {})
+    if buckling.get("critical_failure_family") != "plate-web-local-interaction":
+        return "not-critical"
+    interaction = buckling.get("local_plate_web_interaction") or {}
+    return str(interaction.get("coverage") or "unknown")
+
+
+def _puls_manual_limit_key(result: S3Result) -> str:
+    if not result.valid:
+        return f"invalid:{result.invalid_reason or 'unknown'}"
+    manual = (
+        result.diagnostics
+        .get("validation_domain", {})
+        .get("puls_manual_reference", {})
+    )
+    failed = manual.get("failed") or []
+    if not failed:
+        return "within-manual-reference"
+    return "+".join(str(item) for item in failed)
+
+
+def _buckling_strength_control_key(result: S3Result) -> str:
+    if not result.valid:
+        return f"invalid:{result.invalid_reason or 'unknown'}"
+    buckling_strength = result.diagnostics.get("buckling_strength") or {}
+    return str(buckling_strength.get("controlling_limit") or "unknown")
+
+
+@dataclass
+class _Slice:
+    rows: int = 0
+    target_valid: int = 0
+    predicted_valid: int = 0
+    buckling_pairs: list[tuple[float, float]] = field(default_factory=list)
+    ultimate_pairs: list[tuple[float, float]] = field(default_factory=list)
+
+    def add(
+        self,
+        target_valid: bool,
+        predicted_valid: bool,
+        buckling_pair: tuple[float, float] | None,
+        ultimate_pair: tuple[float, float] | None,
+    ) -> None:
+        self.rows += 1
+        self.target_valid += int(target_valid)
+        self.predicted_valid += int(predicted_valid)
+        if buckling_pair is not None:
+            self.buckling_pairs.append(buckling_pair)
+        if ultimate_pair is not None:
+            self.ultimate_pairs.append(ultimate_pair)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rows": self.rows,
+            "target_valid": self.target_valid,
+            "predicted_valid": self.predicted_valid,
+            "buckling": _error_summary(self.buckling_pairs),
+            "ultimate": _error_summary(self.ultimate_pairs),
+        }
+
+
+@dataclass
+class _ResidualCluster:
+    rows: int = 0
+    target_valid: int = 0
+    predicted_valid: int = 0
+    buckling_signed_errors: list[float] = field(default_factory=list)
+    ultimate_signed_errors: list[float] = field(default_factory=list)
+    max_buckling_abs_error: float = 0.0
+    max_buckling_row: int | None = None
+
+    def add(
+        self,
+        target_valid: bool,
+        predicted_valid: bool,
+        row_index: int,
+        buckling_pair: tuple[float, float] | None,
+        ultimate_pair: tuple[float, float] | None,
+    ) -> None:
+        self.rows += 1
+        self.target_valid += int(target_valid)
+        self.predicted_valid += int(predicted_valid)
+        if buckling_pair is not None:
+            signed_error = buckling_pair[1] - buckling_pair[0]
+            self.buckling_signed_errors.append(signed_error)
+            absolute_error = abs(signed_error)
+            if absolute_error >= self.max_buckling_abs_error:
+                self.max_buckling_abs_error = absolute_error
+                self.max_buckling_row = row_index
+        if ultimate_pair is not None:
+            self.ultimate_signed_errors.append(ultimate_pair[1] - ultimate_pair[0])
+
+    def to_dict(self) -> dict[str, Any]:
+        buckling_abs = [abs(value) for value in self.buckling_signed_errors]
+        ultimate_abs = [abs(value) for value in self.ultimate_signed_errors]
+        return {
+            "rows": self.rows,
+            "target_valid": self.target_valid,
+            "predicted_valid": self.predicted_valid,
+            "buckling_mae": statistics.fmean(buckling_abs) if buckling_abs else None,
+            "buckling_bias": statistics.fmean(self.buckling_signed_errors)
+            if self.buckling_signed_errors
+            else None,
+            "ultimate_mae": statistics.fmean(ultimate_abs) if ultimate_abs else None,
+            "ultimate_bias": statistics.fmean(self.ultimate_signed_errors)
+            if self.ultimate_signed_errors
+            else None,
+            "max_buckling_abs_error": self.max_buckling_abs_error if buckling_abs else None,
+            "max_buckling_row": self.max_buckling_row,
+        }
+
+
+@dataclass
+class BenchmarkReport:
+    rows: int
+    target_numeric_rows: int
+    predicted_valid_rows: int
+    validity_confusion: dict[str, int]
+    invalid_reason_counts: dict[str, int]
+    target_invalid_reason_counts: dict[str, int]
+    buckling: dict[str, float | int | None]
+    elastic_buckling: dict[str, float | int | None]
+    ultimate: dict[str, float | int | None]
+    slices: dict[str, dict[str, dict[str, Any]]]
+    worst_buckling_rows: list[dict[str, Any]]
+    title: str = "Reduced S3 benchmark report"
+    passed: bool | None = None
+    acceptance: dict[str, Any] = field(default_factory=dict)
+    baseline: dict[str, Any] = field(default_factory=dict)
+    uf_order_violations: int = 0
+    confidence_counts: dict[str, int] = field(default_factory=dict)
+    mode_convergence_summary: dict[str, Any] = field(default_factory=dict)
+    sample_manifest: dict[str, Any] = field(default_factory=dict)
+    conservative_error_summary: dict[str, Any] = field(default_factory=dict)
+    nonconservative_error_summary: dict[str, Any] = field(default_factory=dict)
+    residual_clusters: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def format_text(self) -> str:
+        lines = [
+            self.title,
+            f"Rows: {self.rows}",
+            f"Target numeric rows: {self.target_numeric_rows}",
+            f"Predicted valid rows: {self.predicted_valid_rows}",
+            f"Validity confusion: {self.validity_confusion}",
+            f"Buckling Strength UF errors: {self.buckling}",
+            f"Elastic buckling UF diagnostic errors: {self.elastic_buckling}",
+            f"Ultimate UF errors: {self.ultimate}",
+            f"Predicted invalid reasons: {self.invalid_reason_counts}",
+            f"Target invalid reasons: {self.target_invalid_reason_counts}",
+            f"UF order violations: {self.uf_order_violations}",
+            f"Confidence counts: {self.confidence_counts}",
+            f"Mode convergence summary: {self.mode_convergence_summary}",
+            f"Conservative errors: {self.conservative_error_summary}",
+            f"Nonconservative errors: {self.nonconservative_error_summary}",
+        ]
+        if self.passed is not None:
+            lines.append(f"Acceptance passed: {self.passed}")
+            lines.append(f"Acceptance: {self.acceptance}")
+        for family, family_slices in self.slices.items():
+            lines.append(f"{family} slices:")
+            for key, summary in sorted(family_slices.items()):
+                buckling = summary["buckling"]
+                lines.append(
+                    f"  {key}: rows={summary['rows']} target_valid={summary['target_valid']} "
+                    f"predicted_valid={summary['predicted_valid']} "
+                    f"buckling_mae={buckling['mean_absolute_error']}"
+                )
+        if self.worst_buckling_rows:
+            lines.append("Worst buckling UF rows:")
+            for row in self.worst_buckling_rows:
+                lines.append(f"  {row}")
+        return "\n".join(lines)
+
+
+def _benchmark_rows(
+    rows: Iterable[tuple[int, Mapping[str, Any]]],
+    config: S3SolverConfig,
+    input_mapper: Any = row_to_s3_input,
+    solver: Any = solve_s3_panel,
+    title: str = "Reduced S3 benchmark report",
+    sample_manifest: Mapping[str, Any] | None = None,
+    mode_convergence_sample_size: int | None = None,
+) -> BenchmarkReport:
+    buckling_pairs: list[tuple[float, float]] = []
+    elastic_buckling_pairs: list[tuple[float, float]] = []
+    ultimate_pairs: list[tuple[float, float]] = []
+    worst_rows: list[dict[str, Any]] = []
+    validity = {"true_positive": 0, "false_positive": 0, "true_negative": 0, "false_negative": 0}
+    invalid_reasons: dict[str, int] = {}
+    target_invalid_reasons: dict[str, int] = {}
+    confidence_counts: dict[str, int] = {}
+    mode_convergence_drifts: list[float] = []
+    mode_convergence_enabled = 0
+    mode_convergence_low = 0
+    uf_order_violations = 0
+    residual_cluster_accumulators: dict[str, dict[str, _ResidualCluster]] = {
+        "failure_family": {},
+        "stiffener_type": {},
+        "support": {},
+        "pressure": {},
+        "load_family": {},
+        "puls_manual_reference": {},
+        "combined": {},
+    }
+    slices: dict[str, dict[str, _Slice]] = {
+        "support": {},
+        "stiffener_type": {},
+        "pressure": {},
+        "usage_region": {},
+        "predicted_failure_family": {},
+        "dominant_failure_family_share": {},
+        "web_local_coverage": {},
+        "local_interaction_coverage": {},
+        "puls_manual_reference": {},
+        "buckling_strength_control": {},
+    }
+    row_count = 0
+    target_numeric_rows = 0
+    predicted_valid_rows = 0
+
+    for row_index, row in rows:
+        row_count += 1
+        expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
+        expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
+        target_valid = expected_buckling is not None and expected_ultimate is not None
+        target_numeric_rows += int(target_valid)
+
+        row_config = config
+        if (
+            mode_convergence_sample_size is not None
+            and config.check_mode_convergence
+            and row_count > mode_convergence_sample_size
+        ):
+            row_config = replace(config, check_mode_convergence=False)
+
+        try:
+            result = solver(input_mapper(row), row_config)
+        except (TypeError, ValueError) as exc:
+            result = _invalid_result("csv-row-error", {"error": str(exc)})
+
+        predicted_valid = (
+            result.valid
+            and result.buckling_usage_factor is not None
+            and result.ultimate_usage_factor is not None
+        )
+        predicted_valid_rows += int(predicted_valid)
+        confidence_counts[result.confidence] = confidence_counts.get(result.confidence, 0) + 1
+        mode_convergence = result.diagnostics.get("mode_convergence", {})
+        if mode_convergence.get("enabled"):
+            mode_convergence_enabled += 1
+            drift = _optional_float(mode_convergence.get("max_relative_drift"))
+            if drift is not None:
+                mode_convergence_drifts.append(drift)
+                if drift > config.medium_confidence_drift_limit:
+                    mode_convergence_low += 1
+        if target_valid and predicted_valid:
+            validity["true_positive"] += 1
+        elif target_valid and not predicted_valid:
+            validity["false_negative"] += 1
+        elif not target_valid and predicted_valid:
+            validity["false_positive"] += 1
+        else:
+            validity["true_negative"] += 1
+
+        if not predicted_valid:
+            reason = result.invalid_reason or "invalid-without-reason"
+            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
+        if not target_valid:
+            target_reason = str(row.get("output cl str buc", "") or "invalid-without-reason").strip()
+            target_invalid_reasons[target_reason] = target_invalid_reasons.get(target_reason, 0) + 1
+
+        buckling_pair = None
+        ultimate_pair = None
+        if target_valid and predicted_valid:
+            buckling_pair = (expected_buckling, float(result.buckling_usage_factor))
+            ultimate_pair = (expected_ultimate, float(result.ultimate_usage_factor))
+            if ultimate_pair[1] > buckling_pair[1] + EPS:
+                uf_order_violations += 1
+            buckling_pairs.append(buckling_pair)
+            if result.elastic_buckling_usage_factor is not None:
+                elastic_buckling_pairs.append(
+                    (expected_buckling, float(result.elastic_buckling_usage_factor))
+                )
+            ultimate_pairs.append(ultimate_pair)
+            absolute_error = abs(buckling_pair[1] - buckling_pair[0])
+            modeled_families = result.diagnostics["buckling"]["modeled_failure_families"]
+            family_shares = {
+                family: summary["usage_share_percent"]
+                for family, summary in modeled_families.items()
+            }
+            worst_rows.append(
+                {
+                    "row_index": row_index,
+                    "source": row.get("_source_file", ""),
+                    "ship_line": row.get("_ship_line", ""),
+                    "expected_buckling": buckling_pair[0],
+                    "predicted_buckling": buckling_pair[1],
+                    "absolute_error": absolute_error,
+                    "support": row.get("In-plane support", ""),
+                    "stiffener_type": row.get("Stiffener type", row.get("Panel family", "")),
+                    "pressure": row.get("Pressure (fixed)", ""),
+                    "predicted_failure_family": result.diagnostics["buckling"]["critical_failure_family"],
+                    "failure_family_shares": family_shares,
+                }
+            )
+            worst_rows.sort(key=lambda item: item["absolute_error"], reverse=True)
+            del worst_rows[10:]
+
+        failure_family = (
+            result.diagnostics["buckling"]["critical_failure_family"]
+            if predicted_valid
+            else f"invalid:{result.invalid_reason or 'unknown'}"
+        )
+        pressure_key = "nonzero" if (_optional_float(row.get("Pressure (fixed)")) or 0.0) > 0.0 else "zero"
+        load_family = (
+            result.diagnostics.get("validation_domain", {}).get("load_family", "unknown")
+            if result.valid
+            else f"invalid:{result.invalid_reason or 'unknown'}"
+        )
+        cluster_keys = {
+            "failure_family": failure_family,
+            "stiffener_type": str(row.get("Stiffener type", row.get("Panel family", "")) or "missing"),
+            "support": str(row.get("In-plane support", "") or "missing"),
+            "pressure": pressure_key,
+            "load_family": str(load_family),
+            "puls_manual_reference": _puls_manual_limit_key(result),
+            "combined": "|".join(
+                (
+                    failure_family,
+                    str(row.get("Stiffener type", row.get("Panel family", "")) or "missing"),
+                    str(row.get("In-plane support", "") or "missing"),
+                    pressure_key,
+                    str(load_family),
+                )
+            ),
+        }
+        for cluster_family, cluster_key in cluster_keys.items():
+            residual_cluster_accumulators[cluster_family].setdefault(
+                cluster_key,
+                _ResidualCluster(),
+            ).add(target_valid, predicted_valid, row_index, buckling_pair, ultimate_pair)
+
+        keys = {
+            "support": str(row.get("In-plane support", "") or "missing"),
+            "stiffener_type": str(row.get("Stiffener type", row.get("Panel family", "")) or "missing"),
+            "pressure": pressure_key,
+            "usage_region": _usage_region(expected_buckling),
+            "predicted_failure_family": (
+                failure_family
+            ),
+            "dominant_failure_family_share": _dominant_failure_family_share_key(result),
+            "web_local_coverage": _web_local_coverage_key(result),
+            "local_interaction_coverage": _local_interaction_coverage_key(result),
+            "puls_manual_reference": _puls_manual_limit_key(result),
+            "buckling_strength_control": _buckling_strength_control_key(result),
+        }
+        for family, key in keys.items():
+            slice_accumulator = slices[family].setdefault(key, _Slice())
+            slice_accumulator.add(target_valid, predicted_valid, buckling_pair, ultimate_pair)
+
+    conservative_buckling, nonconservative_buckling = _directional_error_summaries(buckling_pairs)
+    conservative_ultimate, nonconservative_ultimate = _directional_error_summaries(ultimate_pairs)
+    residual_clusters = {}
+    for cluster_family, cluster_values in residual_cluster_accumulators.items():
+        ordered = sorted(
+            ((key, value.to_dict()) for key, value in cluster_values.items()),
+            key=lambda item: (
+                item[1]["buckling_mae"] is None,
+                -(item[1]["buckling_mae"] or 0.0),
+                item[0],
+            ),
+        )
+        residual_clusters[cluster_family] = dict(ordered[:50])
+
+    return BenchmarkReport(
+        rows=row_count,
+        target_numeric_rows=target_numeric_rows,
+        predicted_valid_rows=predicted_valid_rows,
+        validity_confusion=validity,
+        invalid_reason_counts=dict(sorted(invalid_reasons.items())),
+        target_invalid_reason_counts=dict(sorted(target_invalid_reasons.items())),
+        buckling=_error_summary(buckling_pairs),
+        elastic_buckling=_error_summary(elastic_buckling_pairs),
+        ultimate=_error_summary(ultimate_pairs),
+        slices={
+            family: {key: value.to_dict() for key, value in family_slices.items()}
+            for family, family_slices in slices.items()
+        },
+        worst_buckling_rows=worst_rows,
+        title=title,
+        uf_order_violations=uf_order_violations,
+        confidence_counts=dict(sorted(confidence_counts.items())),
+        mode_convergence_summary={
+            "enabled_rows": mode_convergence_enabled,
+            "low_convergence_rows": mode_convergence_low,
+            "max_relative_drift": max(mode_convergence_drifts) if mode_convergence_drifts else None,
+            "median_relative_drift": statistics.median(mode_convergence_drifts) if mode_convergence_drifts else None,
+            "p95_relative_drift": _percentile(mode_convergence_drifts, 0.95),
+        },
+        sample_manifest=dict(sample_manifest or {}),
+        conservative_error_summary={
+            "buckling": conservative_buckling,
+            "ultimate": conservative_ultimate,
+        },
+        nonconservative_error_summary={
+            "buckling": nonconservative_buckling,
+            "ultimate": nonconservative_ultimate,
+        },
+        residual_clusters=residual_clusters,
+    )
+
+
+def _summary_metric(report: BenchmarkReport, metric_path: str) -> float | None:
+    current: Any = report.to_dict()
+    for part in metric_path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return _optional_float(current)
+
+
+def _baseline_metric(baseline: Mapping[str, Any] | None, benchmark_name: str, metric_path: str) -> float | None:
+    if not baseline:
+        return None
+    current: Any = baseline.get(benchmark_name, baseline)
+    for part in metric_path.split("."):
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return _optional_float(current)
+
+
+def apply_acceptance_gates(
+    report: BenchmarkReport,
+    benchmark_name: str,
+    thresholds: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None = None,
+) -> BenchmarkReport:
+    """Attach pass/fail acceptance diagnostics to a benchmark report."""
+
+    checks: dict[str, dict[str, Any]] = {}
+
+    def add_check(name: str, actual: Any, limit: Any, passed: bool) -> None:
+        checks[name] = {
+            "actual": actual,
+            "limit": limit,
+            "passed": bool(passed),
+        }
+
+    if "max_buckling_mae" in thresholds:
+        actual = _summary_metric(report, "buckling.mean_absolute_error")
+        limit = float(thresholds["max_buckling_mae"])
+        add_check("max_buckling_mae", actual, limit, actual is not None and actual <= limit)
+    if "max_ultimate_mae" in thresholds:
+        actual = _summary_metric(report, "ultimate.mean_absolute_error")
+        limit = float(thresholds["max_ultimate_mae"])
+        add_check("max_ultimate_mae", actual, limit, actual is not None and actual <= limit)
+    if "max_validity_mismatches" in thresholds:
+        actual = report.validity_confusion.get("false_positive", 0) + report.validity_confusion.get(
+            "false_negative",
+            0,
+        )
+        limit = int(thresholds["max_validity_mismatches"])
+        add_check("max_validity_mismatches", actual, limit, actual <= limit)
+    if "max_uf_order_violations" in thresholds:
+        actual = report.uf_order_violations
+        limit = int(thresholds["max_uf_order_violations"])
+        add_check("max_uf_order_violations", actual, limit, actual <= limit)
+
+    if "baseline_buckling_mae_delta" in thresholds:
+        actual = _summary_metric(report, "buckling.mean_absolute_error")
+        baseline_value = _baseline_metric(baseline, benchmark_name, "buckling.mean_absolute_error")
+        delta_limit = float(thresholds["baseline_buckling_mae_delta"])
+        limit = None if baseline_value is None else baseline_value + delta_limit
+        add_check(
+            "baseline_buckling_mae_delta",
+            actual,
+            {
+                "baseline": baseline_value,
+                "allowed_delta": delta_limit,
+                "limit": limit,
+            },
+            actual is not None and limit is not None and actual <= limit,
+        )
+    if "baseline_ultimate_mae_delta" in thresholds:
+        actual = _summary_metric(report, "ultimate.mean_absolute_error")
+        baseline_value = _baseline_metric(baseline, benchmark_name, "ultimate.mean_absolute_error")
+        delta_limit = float(thresholds["baseline_ultimate_mae_delta"])
+        limit = None if baseline_value is None else baseline_value + delta_limit
+        add_check(
+            "baseline_ultimate_mae_delta",
+            actual,
+            {
+                "baseline": baseline_value,
+                "allowed_delta": delta_limit,
+                "limit": limit,
+            },
+            actual is not None and limit is not None and actual <= limit,
+        )
+    if "baseline_validity_mismatch_delta" in thresholds:
+        actual = report.validity_confusion.get("false_positive", 0) + report.validity_confusion.get(
+            "false_negative",
+            0,
+        )
+        baseline_false_positive = _baseline_metric(
+            baseline,
+            benchmark_name,
+            "validity_confusion.false_positive",
+        )
+        baseline_false_negative = _baseline_metric(
+            baseline,
+            benchmark_name,
+            "validity_confusion.false_negative",
+        )
+        if baseline_false_positive is None or baseline_false_negative is None:
+            baseline_mismatches = None
+            limit = None
+        else:
+            baseline_mismatches = int(baseline_false_positive + baseline_false_negative)
+            limit = baseline_mismatches + int(thresholds["baseline_validity_mismatch_delta"])
+        add_check(
+            "baseline_validity_mismatch_delta",
+            actual,
+            {
+                "baseline": baseline_mismatches,
+                "allowed_delta": int(thresholds["baseline_validity_mismatch_delta"]),
+                "limit": limit,
+            },
+            limit is not None and actual <= limit,
+        )
+    if "baseline_buckling_relative_mae_factor" in thresholds:
+        actual = _summary_metric(report, "buckling.mean_relative_error")
+        baseline_value = _baseline_metric(baseline, benchmark_name, "buckling.mean_relative_error")
+        factor = float(thresholds["baseline_buckling_relative_mae_factor"])
+        limit = None if baseline_value is None else baseline_value * factor
+        add_check(
+            "baseline_buckling_relative_mae_factor",
+            actual,
+            {
+                "baseline": baseline_value,
+                "factor": factor,
+                "limit": limit,
+            },
+            actual is not None and limit is not None and actual <= limit,
+        )
+
+    report.acceptance = {"benchmark": benchmark_name, "checks": checks}
+    report.baseline = dict(baseline.get(benchmark_name, {})) if isinstance(baseline, Mapping) else {}
+    report.passed = all(check["passed"] for check in checks.values()) if checks else True
+    return report
+
+
+@dataclass(frozen=True)
+class CsvSampleSelection:
+    row_indices: list[int] | None
+    manifest: dict[str, Any]
+
+
+def _csv_sampling_filter_active(
+    target_valid_only: bool,
+    target_uf_min: float | None,
+    target_uf_max: float | None,
+) -> bool:
+    return target_valid_only or target_uf_min is not None or target_uf_max is not None
+
+
+def _csv_sampling_filter_manifest(
+    target_valid_only: bool,
+    target_uf_min: float | None,
+    target_uf_max: float | None,
+    select_filtered_out: bool,
+) -> dict[str, Any]:
+    return {
+        "target_valid_only": target_valid_only,
+        "target_buckling_uf_min": target_uf_min,
+        "target_buckling_uf_max": target_uf_max,
+        "filter_mode": "filtered-out-monitor" if select_filtered_out else "included",
+    }
+
+
+def _csv_sampling_filter_reason(
+    row: Mapping[str, Any],
+    *,
+    target_valid_only: bool,
+    target_uf_min: float | None,
+    target_uf_max: float | None,
+) -> str:
+    expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
+    expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
+    target_valid = expected_buckling is not None and expected_ultimate is not None
+    if target_valid_only and not target_valid:
+        return "invalid-target"
+    if target_uf_min is not None or target_uf_max is not None:
+        if not target_valid:
+            return "invalid-target"
+        assert expected_buckling is not None
+        if target_uf_min is not None and expected_buckling < target_uf_min:
+            return "below-uf-window"
+        if target_uf_max is not None and expected_buckling > target_uf_max:
+            return "above-uf-window"
+    return "included"
+
+
+def _csv_row_selected_by_filter(
+    row: Mapping[str, Any],
+    *,
+    target_valid_only: bool,
+    target_uf_min: float | None,
+    target_uf_max: float | None,
+    select_filtered_out: bool,
+) -> tuple[bool, str]:
+    reason = _csv_sampling_filter_reason(
+        row,
+        target_valid_only=target_valid_only,
+        target_uf_min=target_uf_min,
+        target_uf_max=target_uf_max,
+    )
+    if select_filtered_out:
+        return reason != "included", reason
+    return reason == "included", reason
+
+
+def _csv_pressure_band(pressure: float | None) -> str:
+    if pressure is None or pressure <= EPS:
+        return "zero"
+    if pressure <= 0.05:
+        return "0..0.05"
+    if pressure <= 0.15:
+        return "0.05..0.15"
+    if pressure <= 0.30:
+        return "0.15..0.30"
+    return ">0.30"
+
+
+def _csv_stratification_fields(row: Mapping[str, Any]) -> dict[str, str]:
+    pressure = _optional_float(row.get("Pressure (fixed)"))
+    expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
+    expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
+    target_valid = expected_buckling is not None and expected_ultimate is not None
+    pressure_value = pressure or 0.0
+    return {
+        "target_validity": "numeric" if target_valid else "invalid",
+        "stiffener_type": str(row.get("Stiffener type", "") or "missing"),
+        "support": str(row.get("In-plane support", "") or "missing"),
+        "stiffener_boundary": str(row.get("Stiffener boundary", "") or "missing"),
+        "pressure_state": "nonzero" if pressure_value > EPS else "zero",
+        "pressure_band": _csv_pressure_band(pressure),
+        "usage_region": _usage_region(expected_buckling),
+    }
+
+
+def _csv_stratum_key(row: Mapping[str, Any]) -> tuple[str, ...]:
+    fields = _csv_stratification_fields(row)
+    return tuple(fields[key] for key in CSV_STRATIFICATION_KEYS)
+
+
+def _sample_manifest(
+    *,
+    method: str,
+    seed: int,
+    requested_sample_size: int | None,
+    row_count: int,
+    selected_indices: Sequence[int] | None,
+    eligible_row_count: int | None = None,
+    filter_counts: Mapping[str, int] | None = None,
+    filter_manifest: Mapping[str, Any] | None = None,
+    stratum_total_counts: Mapping[tuple[str, ...], int] | None = None,
+) -> dict[str, Any]:
+    stratum_total_counts = stratum_total_counts or {}
+    selected_set = set(selected_indices or [])
+    selected_stratum_counts: dict[tuple[str, ...], int] = {}
+    if selected_set and stratum_total_counts:
+        # Filled by select_csv_sample_indices for stratified samples.
+        selected_stratum_counts = {}
+    return {
+        "method": method,
+        "seed": seed,
+        "requested_sample_size": requested_sample_size,
+        "row_count": row_count,
+        "eligible_row_count": row_count if eligible_row_count is None else eligible_row_count,
+        "selected_count": row_count if selected_indices is None else len(selected_indices),
+        "selected_row_indices": list(selected_indices or []) if selected_indices is not None else None,
+        "filter": dict(filter_manifest or {}),
+        "filter_counts": dict(sorted((filter_counts or {}).items())),
+        "stratification_keys": list(CSV_STRATIFICATION_KEYS),
+        "stratum_counts": {
+            "|".join(key): count for key, count in sorted(stratum_total_counts.items())
+        },
+        "selected_stratum_counts": {
+            "|".join(key): count for key, count in sorted(selected_stratum_counts.items())
+        },
+    }
+
+
+def select_csv_sample_indices(
+    csv_path: str | Path,
+    sample_method: str = CSV_SAMPLE_METHOD_STRATIFIED,
+    sample_size: int | None = DEFAULT_CSV_SAMPLE_SIZE,
+    seed: int = DEFAULT_CSV_SAMPLE_SEED,
+    target_valid_only: bool = False,
+    target_uf_min: float | None = None,
+    target_uf_max: float | None = None,
+    select_filtered_out: bool = False,
+) -> CsvSampleSelection:
+    """Return deterministic CSV row indices and a manifest for benchmark sampling."""
+
+    if sample_method not in {
+        CSV_SAMPLE_METHOD_FIRST_N,
+        CSV_SAMPLE_METHOD_STRATIFIED,
+        CSV_SAMPLE_METHOD_FULL,
+    }:
+        raise ValueError(f"Unsupported CSV sample method: {sample_method}")
+
+    path = Path(csv_path)
+    filter_active = _csv_sampling_filter_active(target_valid_only, target_uf_min, target_uf_max)
+    filter_manifest = _csv_sampling_filter_manifest(
+        target_valid_only,
+        target_uf_min,
+        target_uf_max,
+        select_filtered_out,
+    )
+    if sample_method == CSV_SAMPLE_METHOD_FULL:
+        if not filter_active and not select_filtered_out:
+            row_count = sum(1 for _ in iter_csv_rows(path))
+            return CsvSampleSelection(
+                None,
+                _sample_manifest(
+                    method=sample_method,
+                    seed=seed,
+                    requested_sample_size=None,
+                    row_count=row_count,
+                    selected_indices=None,
+                    filter_manifest=filter_manifest,
+                ),
+            )
+        indices: list[int] = []
+        filter_counts: dict[str, int] = {}
+        row_count = 0
+        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+            for row_index, row in enumerate(csv.DictReader(handle)):
+                row_count += 1
+                selected, reason = _csv_row_selected_by_filter(
+                    row,
+                    target_valid_only=target_valid_only,
+                    target_uf_min=target_uf_min,
+                    target_uf_max=target_uf_max,
+                    select_filtered_out=select_filtered_out,
+                )
+                filter_counts[reason] = filter_counts.get(reason, 0) + 1
+                if selected:
+                    indices.append(row_index)
+        return CsvSampleSelection(
+            indices,
+            _sample_manifest(
+                method=sample_method,
+                seed=seed,
+                requested_sample_size=None,
+                row_count=row_count,
+                selected_indices=indices,
+                eligible_row_count=len(indices),
+                filter_counts=filter_counts,
+                filter_manifest=filter_manifest,
+            ),
+        )
+
+    if sample_size is None or sample_size <= 0:
+        raise ValueError("CSV sample size must be a positive integer")
+
+    if sample_method == CSV_SAMPLE_METHOD_FIRST_N:
+        indices: list[int] = []
+        filter_counts: dict[str, int] = {}
+        row_count = 0
+        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+            for row_index, row in enumerate(csv.DictReader(handle)):
+                row_count += 1
+                selected, reason = _csv_row_selected_by_filter(
+                    row,
+                    target_valid_only=target_valid_only,
+                    target_uf_min=target_uf_min,
+                    target_uf_max=target_uf_max,
+                    select_filtered_out=select_filtered_out,
+                )
+                filter_counts[reason] = filter_counts.get(reason, 0) + 1
+                if selected and len(indices) < sample_size:
+                    indices.append(row_index)
+        return CsvSampleSelection(
+            indices,
+            _sample_manifest(
+                method=sample_method,
+                seed=seed,
+                requested_sample_size=sample_size,
+                row_count=row_count,
+                selected_indices=indices,
+                eligible_row_count=sum(
+                    count
+                    for reason, count in filter_counts.items()
+                    if (reason != "included") == select_filtered_out
+                    or (reason == "included" and not select_filtered_out)
+                ),
+                filter_counts=filter_counts,
+                filter_manifest=filter_manifest,
+            ),
+        )
+
+    rng = random.Random(seed)
+    groups: dict[tuple[str, ...], list[int]] = {}
+    dimension_values: dict[str, set[str]] = {key: set() for key in CSV_STRATIFICATION_KEYS}
+    filter_counts: dict[str, int] = {}
+    row_count = 0
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        for row_index, row in enumerate(csv.DictReader(handle)):
+            row_count += 1
+            selected, reason = _csv_row_selected_by_filter(
+                row,
+                target_valid_only=target_valid_only,
+                target_uf_min=target_uf_min,
+                target_uf_max=target_uf_max,
+                select_filtered_out=select_filtered_out,
+            )
+            filter_counts[reason] = filter_counts.get(reason, 0) + 1
+            if not selected:
+                continue
+            fields = _csv_stratification_fields(row)
+            for key, value in fields.items():
+                dimension_values[key].add(value)
+            groups.setdefault(tuple(fields[key] for key in CSV_STRATIFICATION_KEYS), []).append(row_index)
+
+    eligible_row_count = sum(len(indices) for indices in groups.values())
+    if eligible_row_count == 0:
+        return CsvSampleSelection(
+            [],
+            _sample_manifest(
+                method=sample_method,
+                seed=seed,
+                requested_sample_size=sample_size,
+                row_count=row_count,
+                selected_indices=[],
+                eligible_row_count=0,
+                filter_counts=filter_counts,
+                filter_manifest=filter_manifest,
+            ),
+        )
+
+    for indices in groups.values():
+        rng.shuffle(indices)
+
+    selected: list[int] = []
+    selected_set: set[int] = set()
+
+    def add_index(index: int) -> None:
+        if len(selected) >= min(sample_size, eligible_row_count) or index in selected_set:
+            return
+        selected.append(index)
+        selected_set.add(index)
+
+    # Guarantee broad coverage for each stratification dimension before the
+    # proportional allocation fills the rest of the sample.
+    for key_position, key_name in enumerate(CSV_STRATIFICATION_KEYS):
+        for value in sorted(dimension_values[key_name]):
+            candidate_groups = [
+                (len(indices), stratum_key, indices)
+                for stratum_key, indices in groups.items()
+                if stratum_key[key_position] == value
+            ]
+            rng.shuffle(candidate_groups)
+            candidate_groups.sort(key=lambda item: item[0], reverse=True)
+            for _, _, indices in candidate_groups:
+                candidate = next((index for index in indices if index not in selected_set), None)
+                if candidate is not None:
+                    add_index(candidate)
+                    break
+
+    remaining_capacity = min(sample_size, eligible_row_count) - len(selected)
+    stratum_total_counts = {key: len(indices) for key, indices in groups.items()}
+    if remaining_capacity > 0:
+        quotas: list[tuple[float, tuple[str, ...], int]] = []
+        allocated: dict[tuple[str, ...], int] = {}
+        for stratum_key, indices in groups.items():
+            available = len([index for index in indices if index not in selected_set])
+            if available <= 0:
+                continue
+            exact = remaining_capacity * len(indices) / eligible_row_count
+            base = min(available, int(math.floor(exact)))
+            allocated[stratum_key] = base
+            quotas.append((exact - base, stratum_key, available))
+
+        for stratum_key, count in allocated.items():
+            for index in groups[stratum_key]:
+                if count <= 0:
+                    break
+                if index in selected_set:
+                    continue
+                add_index(index)
+                count -= 1
+
+        while len(selected) < min(sample_size, eligible_row_count):
+            progressed = False
+            rng.shuffle(quotas)
+            quotas.sort(key=lambda item: item[0], reverse=True)
+            for _, stratum_key, _ in quotas:
+                candidate = next(
+                    (index for index in groups[stratum_key] if index not in selected_set),
+                    None,
+                )
+                if candidate is None:
+                    continue
+                add_index(candidate)
+                progressed = True
+                if len(selected) >= min(sample_size, eligible_row_count):
+                    break
+            if not progressed:
+                break
+
+    rng.shuffle(selected)
+    selected_stratum_counts: dict[tuple[str, ...], int] = {}
+    index_to_stratum: dict[int, tuple[str, ...]] = {}
+    for stratum_key, indices in groups.items():
+        for index in indices:
+            index_to_stratum[index] = stratum_key
+    for index in selected:
+        stratum_key = index_to_stratum[index]
+        selected_stratum_counts[stratum_key] = selected_stratum_counts.get(stratum_key, 0) + 1
+    manifest = {
+        "method": sample_method,
+        "seed": seed,
+        "requested_sample_size": sample_size,
+        "row_count": row_count,
+        "eligible_row_count": eligible_row_count,
+        "selected_count": len(selected),
+        "selected_row_indices": selected,
+        "filter": filter_manifest,
+        "filter_counts": dict(sorted(filter_counts.items())),
+        "stratification_keys": list(CSV_STRATIFICATION_KEYS),
+        "dimension_counts": {
+            key: {value: 0 for value in sorted(values)}
+            for key, values in dimension_values.items()
+        },
+        "stratum_counts": {
+            "|".join(key): count for key, count in sorted(stratum_total_counts.items())
+        },
+        "selected_stratum_counts": {
+            "|".join(key): count for key, count in sorted(selected_stratum_counts.items())
+        },
+    }
+    for stratum_key, count in stratum_total_counts.items():
+        for key_name, value in zip(CSV_STRATIFICATION_KEYS, stratum_key):
+            manifest["dimension_counts"][key_name][value] += count
+    return CsvSampleSelection(selected, manifest)
+
+
+def iter_csv_rows(
+    csv_path: str | Path,
+    limit: int | None = None,
+    fixture: bool = False,
+    sample_indices: Sequence[int] | None = None,
+) -> Iterator[tuple[int, Mapping[str, str]]]:
+    """Yield indexed CSV rows deterministically without loading the full file."""
+
+    if fixture:
+        selection = select_csv_sample_indices(
+            csv_path,
+            sample_method=CSV_SAMPLE_METHOD_STRATIFIED,
+            sample_size=DEFAULT_CSV_FIXTURE_SAMPLE_SIZE,
+            seed=DEFAULT_CSV_SAMPLE_SEED,
+        )
+        sample_indices = selection.row_indices
+    if sample_indices is not None:
+        selected_positions = {row_index: position for position, row_index in enumerate(sample_indices)}
+        selected_rows: dict[int, tuple[int, Mapping[str, str]]] = {}
+        with Path(csv_path).open("r", newline="", encoding="utf-8-sig") as handle:
+            for row_index, row in enumerate(csv.DictReader(handle)):
+                position = selected_positions.get(row_index)
+                if position is not None:
+                    selected_rows[position] = (row_index, row)
+                    if len(selected_rows) >= len(selected_positions):
+                        break
+        for position in range(len(sample_indices)):
+            if position in selected_rows:
+                yield selected_rows[position]
+        return
+
+    emitted = 0
+    with Path(csv_path).open("r", newline="", encoding="utf-8-sig") as handle:
+        for row_index, row in enumerate(csv.DictReader(handle)):
+            yield row_index, row
+            emitted += 1
+            if limit is not None and emitted >= limit:
+                break
+
+
+def iter_ship_section_rows(
+    path: str | Path,
+    limit: int | None = None,
+) -> Iterator[tuple[int, Mapping[str, Any]]]:
+    """Yield stiffened S3-like records from an ANYstructure ship-section export."""
+
+    source_path = Path(path)
+    with source_path.open("r", encoding="utf-8-sig") as handle:
+        payload = json.load(handle)
+    puls_results = payload.get("PULS results", {})
+    emitted = 0
+    for row_index, record in enumerate(puls_results.values()):
+        if not isinstance(record, Mapping):
+            continue
+        if "Plate geometry" not in record or "Primary stiffeners" not in record:
+            continue
+        row = ship_section_record_to_csv_row(record)
+        row["_source_file"] = source_path.name
+        yield row_index, row
+        emitted += 1
+        if limit is not None and emitted >= limit:
+            break
+
+
+def iter_ship_section_u3_rows(
+    path: str | Path,
+    limit: int | None = None,
+) -> Iterator[tuple[int, Mapping[str, Any]]]:
+    """Yield unstiffened U3-like records from an ANYstructure ship-section export."""
+
+    source_path = Path(path)
+    with source_path.open("r", encoding="utf-8-sig") as handle:
+        payload = json.load(handle)
+    puls_results = payload.get("PULS results", {})
+    emitted = 0
+    for row_index, record in enumerate(puls_results.values()):
+        if not isinstance(record, Mapping):
+            continue
+        if "Geometry" not in record or "Primary stiffeners" in record:
+            continue
+        row = ship_section_record_to_u3_row(record)
+        row["_source_file"] = source_path.name
+        yield row_index, row
+        emitted += 1
+        if limit is not None and emitted >= limit:
+            break
+
+
+def iter_ship_section_file_rows(
+    paths: Sequence[str | Path],
+    limit: int | None = None,
+) -> Iterator[tuple[int, Mapping[str, Any]]]:
+    emitted = 0
+    for path in paths:
+        for _, row in iter_ship_section_rows(path):
+            yield emitted, row
+            emitted += 1
+            if limit is not None and emitted >= limit:
+                return
+
+
+def iter_ship_section_u3_file_rows(
+    paths: Sequence[str | Path],
+    limit: int | None = None,
+) -> Iterator[tuple[int, Mapping[str, Any]]]:
+    emitted = 0
+    for path in paths:
+        for _, row in iter_ship_section_u3_rows(path):
+            yield emitted, row
+            emitted += 1
+            if limit is not None and emitted >= limit:
+                return
+
+
+def benchmark_csv(
+    csv_path: str | Path,
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+    fixture: bool = False,
+    sample_method: str | None = None,
+    sample_size: int | None = None,
+    sample_seed: int = DEFAULT_CSV_SAMPLE_SEED,
+    mode_convergence_sample_size: int | None = None,
+    title: str = "Reduced S3 benchmark report",
+    target_valid_only: bool = False,
+    target_uf_min: float | None = None,
+    target_uf_max: float | None = None,
+) -> BenchmarkReport:
+    config = config or S3SolverConfig()
+    if fixture:
+        sample_method = CSV_SAMPLE_METHOD_STRATIFIED
+        sample_size = DEFAULT_CSV_FIXTURE_SAMPLE_SIZE if sample_size is None else sample_size
+    if sample_method is None:
+        if limit is not None:
+            sample_method = CSV_SAMPLE_METHOD_FIRST_N
+            sample_size = limit
+        else:
+            sample_method = CSV_SAMPLE_METHOD_FULL
+    if sample_method == CSV_SAMPLE_METHOD_FULL:
+        selection = select_csv_sample_indices(
+            csv_path,
+            sample_method=CSV_SAMPLE_METHOD_FULL,
+            seed=sample_seed,
+            target_valid_only=target_valid_only,
+            target_uf_min=target_uf_min,
+            target_uf_max=target_uf_max,
+        )
+        row_iterator = (
+            iter_csv_rows(csv_path)
+            if selection.row_indices is None
+            else iter_csv_rows(csv_path, sample_indices=selection.row_indices)
+        )
+    else:
+        selection = select_csv_sample_indices(
+            csv_path,
+            sample_method=sample_method,
+            sample_size=sample_size,
+            seed=sample_seed,
+            target_valid_only=target_valid_only,
+            target_uf_min=target_uf_min,
+            target_uf_max=target_uf_max,
+        )
+        row_iterator = iter_csv_rows(csv_path, sample_indices=selection.row_indices)
+    return _benchmark_rows(
+        row_iterator,
+        config,
+        title=title,
+        sample_manifest=selection.manifest,
+        mode_convergence_sample_size=mode_convergence_sample_size,
+    )
+
+
+def benchmark_ship_section(
+    path: str | Path,
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> BenchmarkReport:
+    return _benchmark_rows(iter_ship_section_rows(path, limit=limit), config or S3SolverConfig())
+
+
+def benchmark_ship_sections(
+    paths: Sequence[str | Path],
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> BenchmarkReport:
+    return _benchmark_rows(iter_ship_section_file_rows(paths, limit=limit), config or S3SolverConfig())
+
+
+def benchmark_u3_ship_section(
+    path: str | Path,
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> BenchmarkReport:
+    return _benchmark_rows(
+        iter_ship_section_u3_rows(path, limit=limit),
+        config or S3SolverConfig(),
+        input_mapper=row_to_u3_input,
+        solver=solve_u3_panel,
+        title="Reduced U3 benchmark report",
+    )
+
+
+def benchmark_u3_ship_sections(
+    paths: Sequence[str | Path],
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> BenchmarkReport:
+    return _benchmark_rows(
+        iter_ship_section_u3_file_rows(paths, limit=limit),
+        config or S3SolverConfig(),
+        input_mapper=row_to_u3_input,
+        solver=solve_u3_panel,
+        title="Reduced U3 benchmark report",
+    )
+
+
+def _capacity_stress_from_factor(applied_stress: float, factor: Any) -> float | None:
+    parsed_factor = _optional_float(factor)
+    if parsed_factor is None:
+        return None
+    if abs(applied_stress) <= EPS:
+        return None
+    return abs(applied_stress) * parsed_factor
+
+
+def _comparison_value(value: float | None) -> float | str:
+    return "" if value is None else value
+
+
+def _comparison_abs_error(solver_value: float | None, puls_value: Any) -> float | str:
+    parsed_puls = _optional_float(puls_value)
+    if solver_value is None or parsed_puls is None:
+        return ""
+    return abs(solver_value - parsed_puls)
+
+
+def _s3_ship_section_intermediate_comparison(
+    row: Mapping[str, Any],
+    panel: S3PanelInput | None,
+    result: S3Result,
+) -> dict[str, Any]:
+    """Return solver/PULS intermediate elastic-stress comparison columns.
+
+    ANYstructure ship-section exports often include the PULS local/global
+    elastic buckling stresses and failure-mode percentages.  The reduced
+    solver stores factors, so stresses are reconstructed from the proportional
+    applied load components.  Global stresses use the uncoupled global-strip
+    elastic factor when available because that is closest to the exported
+    PULS "Global elastic buckling" block.
+    """
+
+    puls_targets = {
+        "global_axial": row.get("PULS global axial stress", ""),
+        "global_trans": row.get("PULS global trans stress", ""),
+        "global_shear": row.get("PULS global shear stress", ""),
+        "local_axial": row.get("PULS local axial stress", ""),
+        "local_trans": row.get("PULS local trans stress", ""),
+        "local_shear": row.get("PULS local shear stress", ""),
+    }
+    puls_failures = {
+        "plate_buckling": row.get("PULS failure plate buckling percent", ""),
+        "global_stiffener_buckling": row.get("PULS failure global stiffener buckling percent", ""),
+        "torsional_stiffener_buckling": row.get("PULS failure torsional stiffener buckling percent", ""),
+        "web_stiffener_buckling": row.get("PULS failure web stiffener buckling percent", ""),
+    }
+    output: dict[str, Any] = {
+        "puls_global_axial_stress": puls_targets["global_axial"],
+        "solver_global_axial_stress": "",
+        "global_axial_stress_abs_error": "",
+        "puls_global_trans_stress": puls_targets["global_trans"],
+        "solver_global_trans_stress": "",
+        "global_trans_stress_abs_error": "",
+        "puls_global_shear_stress": puls_targets["global_shear"],
+        "solver_global_shear_stress": "",
+        "global_shear_stress_abs_error": "",
+        "puls_local_axial_stress": puls_targets["local_axial"],
+        "solver_local_axial_stress": "",
+        "local_axial_stress_abs_error": "",
+        "puls_local_trans_stress": puls_targets["local_trans"],
+        "solver_local_trans_stress": "",
+        "local_trans_stress_abs_error": "",
+        "puls_local_shear_stress": puls_targets["local_shear"],
+        "solver_local_shear_stress": "",
+        "local_shear_stress_abs_error": "",
+        "solver_global_factor": "",
+        "solver_global_uncoupled_factor": "",
+        "solver_local_plate_factor": "",
+        "solver_local_shear_factor": "",
+        "puls_failure_plate_buckling_percent": puls_failures["plate_buckling"],
+        "solver_failure_plate_buckling_percent": "",
+        "failure_plate_buckling_percent_abs_error": "",
+        "puls_failure_global_stiffener_buckling_percent": puls_failures["global_stiffener_buckling"],
+        "solver_failure_global_stiffener_buckling_percent": "",
+        "failure_global_stiffener_buckling_percent_abs_error": "",
+        "puls_failure_torsional_stiffener_buckling_percent": puls_failures["torsional_stiffener_buckling"],
+        "solver_failure_torsional_stiffener_buckling_percent": "",
+        "failure_torsional_stiffener_buckling_percent_abs_error": "",
+        "puls_failure_web_stiffener_buckling_percent": puls_failures["web_stiffener_buckling"],
+        "solver_failure_web_stiffener_buckling_percent": "",
+        "failure_web_stiffener_buckling_percent_abs_error": "",
+    }
+    if panel is None or not result.valid:
+        return output
+
+    buckling = result.diagnostics.get("buckling", {})
+    modeled = buckling.get("modeled_failure_families", {})
+    global_family = modeled.get("global-stiffened-strip", {})
+    column_family = modeled.get("global-stiffener-cutoff", {})
+    plate_family = modeled.get("plate", {})
+    plate_shear_family = modeled.get("plate-shear", {})
+    torsional_family = modeled.get("torsional-stiffener", {})
+    web_family = modeled.get("web-local", {})
+
+    def _family_uncoupled(family: Mapping[str, Any]) -> float | None:
+        uncoupled = _optional_float(family.get("uncoupled_factor"))
+        if uncoupled is not None:
+            return uncoupled
+        return _optional_float(family.get("critical_factor"))
+
+    # PULS reports one GEB; the reduced model carries two global candidates
+    # (orthotropic strip mode and the wide-panel cylindrical column limit), so
+    # the comparison channel takes the governing minimum.
+    global_candidates = [
+        value
+        for value in (
+            _optional_float(global_family.get("critical_factor")),
+            _optional_float(column_family.get("critical_factor")),
+        )
+        if value is not None
+    ]
+    global_factor = min(global_candidates) if global_candidates else None
+    uncoupled_candidates = [
+        value
+        for value in (
+            _family_uncoupled(global_family),
+            _family_uncoupled(column_family),
+        )
+        if value is not None
+    ]
+    global_uncoupled_factor = min(uncoupled_candidates) if uncoupled_candidates else None
+    if global_uncoupled_factor is None:
+        global_uncoupled_factor = global_factor
+    local_plate_factor = _optional_float(plate_family.get("critical_factor"))
+    local_shear_factor = _optional_float(plate_shear_family.get("critical_factor"))
+
+    output["solver_global_factor"] = _comparison_value(global_factor)
+    output["solver_global_uncoupled_factor"] = _comparison_value(global_uncoupled_factor)
+    output["solver_local_plate_factor"] = _comparison_value(local_plate_factor)
+    output["solver_local_shear_factor"] = _comparison_value(local_shear_factor)
+
+    # PULS reports GEB with the local-buckling reduced (secant) stiffness
+    # coefficients applied, so the comparison channel uses the coupled factor.
+    stress_pairs = {
+        "global_axial": _capacity_stress_from_factor(panel.axial_stress, global_factor),
+        "global_trans": _capacity_stress_from_factor(panel.mean_transverse_stress, global_factor),
+        "global_shear": _capacity_stress_from_factor(panel.shear_stress, global_factor),
+        "local_axial": _capacity_stress_from_factor(panel.axial_stress, local_plate_factor),
+        "local_trans": _capacity_stress_from_factor(panel.mean_transverse_stress, local_plate_factor),
+        "local_shear": _capacity_stress_from_factor(panel.shear_stress, local_shear_factor),
+    }
+    for name, solver_value in stress_pairs.items():
+        output[f"solver_{name}_stress"] = _comparison_value(solver_value)
+        output[f"{name}_stress_abs_error"] = _comparison_abs_error(
+            solver_value,
+            puls_targets[name],
+        )
+
+    family_to_failure_output = {
+        "plate_buckling": plate_family,
+        "global_stiffener_buckling": global_family,
+        "torsional_stiffener_buckling": torsional_family,
+        "web_stiffener_buckling": web_family,
+    }
+    for name, family in family_to_failure_output.items():
+        solver_percent = _optional_float(family.get("usage_share_percent"))
+        output[f"solver_failure_{name}_percent"] = _comparison_value(solver_percent)
+        output[f"failure_{name}_percent_abs_error"] = _comparison_abs_error(
+            solver_percent,
+            puls_failures[name],
+        )
+    return output
+
+
+def _summary_percentile(values: Sequence[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = int(math.ceil((percentile / 100.0) * len(ordered))) - 1
+    index = min(max(index, 0), len(ordered) - 1)
+    return ordered[index]
+
+
+def _numeric_summary(values: Sequence[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "count": 0,
+            "mean": None,
+            "median": None,
+            "p95": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "count": len(values),
+        "mean": statistics.fmean(values),
+        "median": statistics.median(values),
+        "p95": _summary_percentile(values, 95.0),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+def _s3_ship_intermediate_channel_summary(
+    rows: Sequence[Mapping[str, str]],
+    channel: str,
+    group_key: str | None = None,
+) -> dict[str, Any]:
+    signed_errors: list[float] = []
+    absolute_errors: list[float] = []
+    ratios: list[float] = []
+    grouped_rows: dict[str, list[Mapping[str, str]]] = {}
+    puls_key = f"puls_{channel}"
+    solver_key = f"solver_{channel}"
+    error_key = f"{channel}_abs_error"
+    for row in rows:
+        puls = _optional_float(row.get(puls_key))
+        solver = _optional_float(row.get(solver_key))
+        absolute_error = _optional_float(row.get(error_key))
+        if puls is None or solver is None:
+            continue
+        signed_errors.append(solver - puls)
+        if absolute_error is None:
+            absolute_error = abs(solver - puls)
+        absolute_errors.append(absolute_error)
+        if abs(puls) > EPS:
+            ratios.append(solver / puls)
+        if group_key is not None:
+            grouped_rows.setdefault(row.get(group_key, "") or "missing", []).append(row)
+
+    summary = {
+        "count": len(signed_errors),
+        "signed_error": _numeric_summary(signed_errors),
+        "absolute_error": _numeric_summary(absolute_errors),
+        "solver_to_puls_ratio": _numeric_summary(ratios),
+    }
+    if group_key is not None:
+        summary["by_" + group_key] = {
+            group: _s3_ship_intermediate_channel_summary(group_rows, channel)
+            for group, group_rows in sorted(grouped_rows.items())
+        }
+    return summary
+
+
+def summarize_s3_ship_intermediate_report(report_path: str | Path) -> dict[str, Any]:
+    """Summarize PULS intermediate stress and failure-mode residuals.
+
+    This keeps the real-world ship-section intermediate blocks visible in the
+    machine-readable verification report without changing solver acceptance
+    gates.  The row-level CSV remains the source for detailed investigation.
+    """
+
+    path = Path(report_path)
+    if not path.exists():
+        return {"available": False, "reason": "missing-report"}
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    stress_channels = [
+        "global_axial_stress",
+        "global_trans_stress",
+        "global_shear_stress",
+        "local_axial_stress",
+        "local_trans_stress",
+        "local_shear_stress",
+    ]
+    failure_channels = [
+        "failure_plate_buckling_percent",
+        "failure_global_stiffener_buckling_percent",
+        "failure_torsional_stiffener_buckling_percent",
+        "failure_web_stiffener_buckling_percent",
+    ]
+    return {
+        "available": True,
+        "row_count": len(rows),
+        "elastic_stress": {
+            channel: _s3_ship_intermediate_channel_summary(rows, channel, group_key="support")
+            for channel in stress_channels
+        },
+        "failure_mode_percent": {
+            channel: _s3_ship_intermediate_channel_summary(rows, channel, group_key="support")
+            for channel in failure_channels
+        },
+    }
+
+
+def write_ship_section_comparison_csv(
+    paths: Sequence[str | Path],
+    output_path: str | Path,
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> Path:
+    """Write row-level S3/PULS comparison for ANYstructure section exports."""
+
+    config = config or S3SolverConfig()
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    intermediate_fieldnames = [
+        "puls_global_axial_stress",
+        "solver_global_axial_stress",
+        "global_axial_stress_abs_error",
+        "puls_global_trans_stress",
+        "solver_global_trans_stress",
+        "global_trans_stress_abs_error",
+        "puls_global_shear_stress",
+        "solver_global_shear_stress",
+        "global_shear_stress_abs_error",
+        "puls_local_axial_stress",
+        "solver_local_axial_stress",
+        "local_axial_stress_abs_error",
+        "puls_local_trans_stress",
+        "solver_local_trans_stress",
+        "local_trans_stress_abs_error",
+        "puls_local_shear_stress",
+        "solver_local_shear_stress",
+        "local_shear_stress_abs_error",
+        "solver_global_factor",
+        "solver_global_uncoupled_factor",
+        "solver_local_plate_factor",
+        "solver_local_shear_factor",
+        "puls_failure_plate_buckling_percent",
+        "solver_failure_plate_buckling_percent",
+        "failure_plate_buckling_percent_abs_error",
+        "puls_failure_global_stiffener_buckling_percent",
+        "solver_failure_global_stiffener_buckling_percent",
+        "failure_global_stiffener_buckling_percent_abs_error",
+        "puls_failure_torsional_stiffener_buckling_percent",
+        "solver_failure_torsional_stiffener_buckling_percent",
+        "failure_torsional_stiffener_buckling_percent_abs_error",
+        "puls_failure_web_stiffener_buckling_percent",
+        "solver_failure_web_stiffener_buckling_percent",
+        "failure_web_stiffener_buckling_percent_abs_error",
+    ]
+    fieldnames = [
+        "row_index",
+        "source",
+        "ship_line",
+        "stiffener_type",
+        "support",
+        "pressure",
+        "axial_stress",
+        "transverse_stress_1",
+        "transverse_stress_2",
+        "shear_stress",
+        "length",
+        "spacing",
+        "plate_thickness",
+        "puls_buckling_uf",
+        "solver_buckling_uf",
+        "solver_elastic_buckling_uf",
+        "buckling_abs_error",
+        "puls_ultimate_uf",
+        "solver_ultimate_uf",
+        "ultimate_abs_error",
+        "raw_first_yield_ultimate_uf",
+        "ultimate_lifted_to_buckling_strength",
+        "valid",
+        "invalid_reason",
+        "buckling_strength_control",
+        "pressure_dominated_yield_limit",
+        "ultimate_included_in_buckling_strength",
+        "pressure_preload_yield_max",
+        "final_yield_max",
+        "collapse_state",
+        "elastic_failure_family",
+        "confidence",
+        "confidence_reasons",
+        "mode_convergence_max_relative_drift",
+        "load_family",
+    ] + intermediate_fieldnames
+    rows: list[dict[str, Any]] = []
+    for row_index, row in iter_ship_section_file_rows(paths, limit=limit):
+        try:
+            panel = row_to_s3_input(row)
+            result = solve_s3_panel(panel, config)
+        except (TypeError, ValueError) as exc:
+            result = _invalid_result("ship-section-row-error", {"error": str(exc)})
+        expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
+        expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
+        buckling_strength = result.diagnostics.get("buckling_strength", {}) if result.valid else {}
+        buckling = result.diagnostics.get("buckling", {}) if result.valid else {}
+        pressure_yield = (
+            result.diagnostics.get("pressure_preload_yield_utilization", {})
+            if result.valid
+            else result.diagnostics.get("pressure_preload_response", {}).get("yield_utilization", {})
+        )
+        final_yield = result.diagnostics.get("final_yield_utilization", {}) if result.valid else {}
+        solver_buckling = result.buckling_usage_factor
+        solver_ultimate = result.ultimate_usage_factor
+        intermediate_comparison = _s3_ship_section_intermediate_comparison(row, panel, result)
+        rows.append(
+            {
+                "row_index": row_index,
+                "source": row.get("_source_file", ""),
+                "ship_line": row.get("_ship_line", ""),
+                "stiffener_type": row.get("Stiffener type", ""),
+                "support": row.get("In-plane support", ""),
+                "pressure": row.get("Pressure (fixed)", ""),
+                "axial_stress": row.get("Axial stress", ""),
+                "transverse_stress_1": row.get("Trans. stress 1", ""),
+                "transverse_stress_2": row.get("Trans. stress 2", ""),
+                "shear_stress": row.get("Shear stress", ""),
+                "length": row.get("Length of panel", ""),
+                "spacing": row.get("Stiffener spacing", ""),
+                "plate_thickness": row.get("Plate thick.", ""),
+                "puls_buckling_uf": "" if expected_buckling is None else expected_buckling,
+                "solver_buckling_uf": "" if solver_buckling is None else solver_buckling,
+                "solver_elastic_buckling_uf": (
+                    "" if result.elastic_buckling_usage_factor is None else result.elastic_buckling_usage_factor
+                ),
+                "buckling_abs_error": (
+                    ""
+                    if expected_buckling is None or solver_buckling is None
+                    else abs(solver_buckling - expected_buckling)
+                ),
+                "puls_ultimate_uf": "" if expected_ultimate is None else expected_ultimate,
+                "solver_ultimate_uf": "" if solver_ultimate is None else solver_ultimate,
+                "ultimate_abs_error": (
+                    ""
+                    if expected_ultimate is None or solver_ultimate is None
+                    else abs(solver_ultimate - expected_ultimate)
+                ),
+                "raw_first_yield_ultimate_uf": buckling_strength.get("raw_ultimate_usage_factor", ""),
+                "ultimate_lifted_to_buckling_strength": buckling_strength.get(
+                    "ultimate_lifted_to_buckling_strength",
+                    "",
+                ),
+                "valid": result.valid,
+                "invalid_reason": result.invalid_reason or "",
+                "buckling_strength_control": buckling_strength.get("controlling_limit", ""),
+                "pressure_dominated_yield_limit": buckling_strength.get("pressure_dominated_yield_limit", ""),
+                "ultimate_included_in_buckling_strength": buckling_strength.get("ultimate_included", ""),
+                "pressure_preload_yield_max": pressure_yield.get("max", ""),
+                "final_yield_max": final_yield.get("max", ""),
+                "collapse_state": result.diagnostics.get("collapse_state", "") if result.valid else "",
+                "elastic_failure_family": buckling.get("critical_failure_family", ""),
+                "confidence": result.confidence,
+                "confidence_reasons": ";".join(result.confidence_reasons),
+                "mode_convergence_max_relative_drift": result.diagnostics.get(
+                    "mode_convergence",
+                    {},
+                ).get("max_relative_drift", ""),
+                "load_family": result.diagnostics.get("validation_domain", {}).get("load_family", ""),
+                **intermediate_comparison,
+            }
+        )
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return output
+
+
+def write_u3_ship_section_comparison_csv(
+    paths: Sequence[str | Path],
+    output_path: str | Path,
+    config: S3SolverConfig | None = None,
+    limit: int | None = None,
+) -> Path:
+    """Write row-level U3/PULS comparison for ANYstructure section exports."""
+
+    config = config or S3SolverConfig()
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "row_index",
+        "source",
+        "ship_line",
+        "support",
+        "rotational_support",
+        "rotational_support_2",
+        "pressure",
+        "length",
+        "width",
+        "plate_thickness",
+        "axial_stress",
+        "axial_stress_2",
+        "transverse_stress_1",
+        "transverse_stress_2",
+        "shear_stress",
+        "puls_buckling_uf",
+        "solver_buckling_uf",
+        "solver_elastic_buckling_uf",
+        "buckling_abs_error",
+        "puls_ultimate_uf",
+        "solver_ultimate_uf",
+        "ultimate_abs_error",
+        "raw_first_yield_ultimate_uf",
+        "ultimate_lifted_to_buckling_strength",
+        "valid",
+        "invalid_reason",
+        "buckling_strength_control",
+        "pressure_preload_yield_max",
+        "final_yield_max",
+        "collapse_state",
+        "elastic_failure_family",
+        "confidence",
+        "confidence_reasons",
+        "mode_convergence_max_relative_drift",
+        "load_family",
+    ]
+    rows: list[dict[str, Any]] = []
+    for row_index, row in iter_ship_section_u3_file_rows(paths, limit=limit):
+        try:
+            panel = row_to_u3_input(row)
+            result = solve_u3_panel(panel, config)
+        except (TypeError, ValueError) as exc:
+            result = _invalid_u3_result("ship-section-row-error", {"error": str(exc)})
+        expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
+        expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
+        buckling_strength = result.diagnostics.get("buckling_strength", {}) if result.valid else {}
+        buckling = result.diagnostics.get("buckling", {}) if result.valid else {}
+        pressure_yield = (
+            result.diagnostics.get("pressure_preload_yield_utilization", {})
+            if result.valid
+            else result.diagnostics.get("pressure_preload_response", {}).get("yield_utilization", {})
+        )
+        final_yield = result.diagnostics.get("final_yield_utilization", {}) if result.valid else {}
+        solver_buckling = result.buckling_usage_factor
+        solver_ultimate = result.ultimate_usage_factor
+        rows.append(
+            {
+                "row_index": row_index,
+                "source": row.get("_source_file", ""),
+                "ship_line": row.get("_ship_line", ""),
+                "support": row.get("In-plane support", ""),
+                "rotational_support": row.get("Rotational support", ""),
+                "rotational_support_2": row.get("Rotational support 2", ""),
+                "pressure": row.get("Pressure (fixed)", ""),
+                "length": row.get("Plate length", ""),
+                "width": row.get("Plate width", ""),
+                "plate_thickness": row.get("Plate thick.", ""),
+                "axial_stress": row.get("Axial stress", ""),
+                "axial_stress_2": row.get("Axial stress 2", ""),
+                "transverse_stress_1": row.get("Trans. stress 1", ""),
+                "transverse_stress_2": row.get("Trans. stress 2", ""),
+                "shear_stress": row.get("Shear stress", ""),
+                "puls_buckling_uf": "" if expected_buckling is None else expected_buckling,
+                "solver_buckling_uf": "" if solver_buckling is None else solver_buckling,
+                "solver_elastic_buckling_uf": (
+                    "" if result.elastic_buckling_usage_factor is None else result.elastic_buckling_usage_factor
+                ),
+                "buckling_abs_error": (
+                    ""
+                    if expected_buckling is None or solver_buckling is None
+                    else abs(solver_buckling - expected_buckling)
+                ),
+                "puls_ultimate_uf": "" if expected_ultimate is None else expected_ultimate,
+                "solver_ultimate_uf": "" if solver_ultimate is None else solver_ultimate,
+                "ultimate_abs_error": (
+                    ""
+                    if expected_ultimate is None or solver_ultimate is None
+                    else abs(solver_ultimate - expected_ultimate)
+                ),
+                "raw_first_yield_ultimate_uf": buckling_strength.get("raw_ultimate_usage_factor", ""),
+                "ultimate_lifted_to_buckling_strength": buckling_strength.get(
+                    "ultimate_lifted_to_buckling_strength",
+                    "",
+                ),
+                "valid": result.valid,
+                "invalid_reason": result.invalid_reason or "",
+                "buckling_strength_control": buckling_strength.get("controlling_limit", ""),
+                "pressure_preload_yield_max": pressure_yield.get("max", ""),
+                "final_yield_max": final_yield.get("max", ""),
+                "collapse_state": result.diagnostics.get("collapse_state", "") if result.valid else "",
+                "elastic_failure_family": buckling.get("critical_failure_family", ""),
+                "confidence": result.confidence,
+                "confidence_reasons": ";".join(result.confidence_reasons),
+                "mode_convergence_max_relative_drift": result.diagnostics.get(
+                    "mode_convergence",
+                    {},
+                ).get("max_relative_drift", ""),
+                "load_family": result.diagnostics.get("validation_domain", {}).get("load_family", ""),
+            }
+        )
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return output
+
+
+def write_row_comparison_csv(
+    rows: Iterable[tuple[int, Mapping[str, Any]]],
+    output_path: str | Path,
+    config: S3SolverConfig,
+    input_mapper: Any = row_to_s3_input,
+    solver: Any = solve_s3_panel,
+    mode_convergence_sample_size: int | None = None,
+) -> Path:
+    """Write a compact generic row-level PULS/solver comparison CSV."""
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "row_index",
+        "source",
+        "ship_line",
+        "panel_family",
+        "support",
+        "stiffener_type",
+        "pressure",
+        "puls_buckling_uf",
+        "solver_buckling_uf",
+        "solver_elastic_buckling_uf",
+        "buckling_signed_error",
+        "buckling_abs_error",
+        "puls_ultimate_uf",
+        "solver_ultimate_uf",
+        "ultimate_signed_error",
+        "ultimate_abs_error",
+        "valid",
+        "invalid_reason",
+        "buckling_strength_control",
+        "elastic_failure_family",
+        "confidence",
+        "confidence_reasons",
+        "mode_convergence_max_relative_drift",
+        "load_family",
+        "puls_manual_reference",
+        "residual_cluster",
+    ]
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for emitted_index, (row_index, row) in enumerate(rows, start=1):
+            row_config = config
+            if (
+                mode_convergence_sample_size is not None
+                and config.check_mode_convergence
+                and emitted_index > mode_convergence_sample_size
+            ):
+                row_config = replace(config, check_mode_convergence=False)
+            try:
+                result = solver(input_mapper(row), row_config)
+            except (TypeError, ValueError) as exc:
+                result = _invalid_result("row-error", {"error": str(exc)})
+            expected_buckling = _optional_float(row.get("Buckling Actual usage Factor inc NaN"))
+            expected_ultimate = _optional_float(row.get("Ultimate Actual usage Factor inc NaN"))
+            buckling = result.diagnostics.get("buckling", {}) if result.valid else {}
+            buckling_strength = result.diagnostics.get("buckling_strength", {}) if result.valid else {}
+            solver_buckling = result.buckling_usage_factor
+            solver_ultimate = result.ultimate_usage_factor
+            buckling_signed_error = (
+                None
+                if expected_buckling is None or solver_buckling is None
+                else solver_buckling - expected_buckling
+            )
+            ultimate_signed_error = (
+                None
+                if expected_ultimate is None or solver_ultimate is None
+                else solver_ultimate - expected_ultimate
+            )
+            failure_family = buckling.get("critical_failure_family", "")
+            pressure_key = "nonzero" if (_optional_float(row.get("Pressure (fixed)")) or 0.0) > 0.0 else "zero"
+            load_family = result.diagnostics.get("validation_domain", {}).get("load_family", "")
+            manual_key = _puls_manual_limit_key(result)
+            writer.writerow(
+                {
+                "row_index": row_index,
+                "source": row.get("_source_file", ""),
+                "ship_line": row.get("_ship_line", ""),
+                "panel_family": row.get("Panel family", "S3"),
+                "support": row.get("In-plane support", ""),
+                "stiffener_type": row.get("Stiffener type", row.get("Panel family", "")),
+                "pressure": row.get("Pressure (fixed)", ""),
+                "puls_buckling_uf": "" if expected_buckling is None else expected_buckling,
+                "solver_buckling_uf": "" if solver_buckling is None else solver_buckling,
+                "solver_elastic_buckling_uf": (
+                    "" if result.elastic_buckling_usage_factor is None else result.elastic_buckling_usage_factor
+                ),
+                "buckling_signed_error": "" if buckling_signed_error is None else buckling_signed_error,
+                "buckling_abs_error": (
+                    ""
+                    if buckling_signed_error is None
+                    else abs(buckling_signed_error)
+                ),
+                "puls_ultimate_uf": "" if expected_ultimate is None else expected_ultimate,
+                "solver_ultimate_uf": "" if solver_ultimate is None else solver_ultimate,
+                "ultimate_signed_error": "" if ultimate_signed_error is None else ultimate_signed_error,
+                "ultimate_abs_error": (
+                    ""
+                    if ultimate_signed_error is None
+                    else abs(ultimate_signed_error)
+                ),
+                "valid": result.valid,
+                "invalid_reason": result.invalid_reason or "",
+                "buckling_strength_control": buckling_strength.get("controlling_limit", ""),
+                "elastic_failure_family": failure_family,
+                "confidence": result.confidence,
+                "confidence_reasons": ";".join(result.confidence_reasons),
+                "mode_convergence_max_relative_drift": result.diagnostics.get(
+                    "mode_convergence",
+                    {},
+                ).get("max_relative_drift", ""),
+                "load_family": load_family,
+                "puls_manual_reference": manual_key,
+                "residual_cluster": "|".join(
+                    (
+                        str(failure_family),
+                        str(row.get("Stiffener type", row.get("Panel family", "")) or "missing"),
+                        str(row.get("In-plane support", "") or "missing"),
+                        pressure_key,
+                        str(load_family),
+                    )
+                ),
+                }
+            )
+    return output
+
+
+def _load_baseline(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    baseline_path = Path(path)
+    if not baseline_path.exists():
+        return {}
+    with baseline_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _baseline_from_reports(reports: Mapping[str, BenchmarkReport]) -> dict[str, Any]:
+    return {
+        name: {
+            "buckling": report.buckling,
+            "ultimate": report.ultimate,
+            "elastic_buckling": report.elastic_buckling,
+            "validity_confusion": report.validity_confusion,
+            "uf_order_violations": report.uf_order_violations,
+            "confidence_counts": report.confidence_counts,
+            "mode_convergence_summary": report.mode_convergence_summary,
+            "sample_manifest": report.sample_manifest,
+            "conservative_error_summary": report.conservative_error_summary,
+            "nonconservative_error_summary": report.nonconservative_error_summary,
+            "residual_clusters": report.residual_clusters,
+        }
+        for name, report in reports.items()
+    }
+
+
+def _write_json(path: str | Path, payload: Mapping[str, Any]) -> Path:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return output
+
+
+def _csr_label(value: Any) -> int | None:
+    parsed = _optional_float(value)
+    if parsed is not None:
+        return 1 if parsed == 1.0 else 0
+    text = str(value or "").strip().lower()
+    if text == "ok":
+        return 1
+    if text == "not ok":
+        return 0
+    return None
+
+
+def _csr_update_confusion(confusion: dict[str, int], predicted: int | None, target: int | None) -> None:
+    if target is None:
+        confusion["unknown_target"] += 1
+    elif predicted is None:
+        confusion["unknown_predicted"] += 1
+    elif predicted == 1 and target == 1:
+        confusion["true_positive"] += 1
+    elif predicted == 1 and target == 0:
+        confusion["false_positive"] += 1
+    elif predicted == 0 and target == 1:
+        confusion["false_negative"] += 1
+    else:
+        confusion["true_negative"] += 1
+
+
+def _csr_confusion_summary(confusion: Mapping[str, int]) -> dict[str, Any]:
+    tp = int(confusion.get("true_positive", 0))
+    tn = int(confusion.get("true_negative", 0))
+    fp = int(confusion.get("false_positive", 0))
+    fn = int(confusion.get("false_negative", 0))
+    n = tp + tn + fp + fn
+    return {
+        **{key: int(value) for key, value in confusion.items()},
+        "rows_with_known_labels": n,
+        "accuracy": (tp + tn) / n if n else None,
+        "false_positive_rate": fp / (fp + tn) if fp + tn else None,
+        "false_negative_rate": fn / (fn + tp) if fn + tp else None,
+    }
+
+
+def _u3_training_row_to_input(row: Mapping[str, Any]) -> U3PanelInput:
+    return U3PanelInput(
+        length=_float_from_row(row, "Length of panel"),
+        width=_float_from_row(row, "Stiffener spacing"),
+        plate_thickness=_float_from_row(row, "Plate thick."),
+        yield_stress_plate=_float_from_row(row, "Yield stress plate"),
+        axial_stress_1=_float_from_row(row, "Axial stress"),
+        axial_stress_2=_float_from_row(row, "Axial stress"),
+        transverse_stress_1=_float_from_row(row, "Trans. stress 1"),
+        transverse_stress_2=_float_from_row(row, "Trans. stress 2"),
+        shear_stress=_float_from_row(row, "Shear stress"),
+        pressure=_float_from_row(row, "Pressure (fixed)"),
+        in_plane_support=str(row.get("In-plane support", "")).strip(),
+    )
+
+
+def _csr_mismatch_example(
+    row: Mapping[str, Any],
+    component: str,
+    predicted: int | None,
+    target: int | None,
+    diagnostics: Mapping[str, Any],
+) -> dict[str, Any]:
+    values = diagnostics.get("values", {})
+    return {
+        "row_index": row.get("", ""),
+        "component": component,
+        "stiffener_type": row.get("Stiffener type", "U3"),
+        "target": target,
+        "predicted": predicted,
+        "length": row.get("Length of panel", ""),
+        "width_or_spacing": row.get("Stiffener spacing", ""),
+        "plate_thickness": row.get("Plate thick.", ""),
+        "yield_stress_plate": row.get("Yield stress plate", ""),
+        "stiffener_height": row.get("Stiff. Height", ""),
+        "web_thickness": row.get("Web thick.", ""),
+        "flange_width": row.get("Flange width", ""),
+        "flange_thickness": row.get("Flange thick.", ""),
+        "values": values,
+    }
+
+
+def compare_csr_training_sets(
+    sp_csv: str | Path = DEFAULT_CSR_SP_TRAINING_CSV,
+    up_csv: str | Path = DEFAULT_CSR_UP_TRAINING_CSV,
+    output_dir: str | Path | None = "reports",
+    max_examples_per_component: int = 25,
+) -> dict[str, Any]:
+    """Compare equation-based CSR diagnostics with recorded PULS CSR training labels."""
+
+    components = {
+        "plate": (0, "CSR plate cl"),
+        "web": (1, "CSR web cl"),
+        "web_flange": (2, "CSR web flange cl"),
+        "flange": (3, "CSR flange cl"),
+    }
+    summary: dict[str, Any] = {
+        "sp_csv": str(sp_csv),
+        "up_csv": str(up_csv),
+        "basis": {
+            "source": CSR_RULE_REFERENCE["source"],
+            "note": "training labels are recorded PULS CSR-Tank requirement outputs; equations are not ML fitted",
+        },
+        "components": {},
+        "mismatch_examples": [],
+    }
+    raw_confusions = {
+        name: {
+            "true_positive": 0,
+            "true_negative": 0,
+            "false_positive": 0,
+            "false_negative": 0,
+            "unknown_target": 0,
+            "unknown_predicted": 0,
+        }
+        for name in ("sp_plate", "sp_web", "sp_web_flange", "sp_flange", "up_plate")
+    }
+    examples_seen: dict[str, int] = {name: 0 for name in raw_confusions}
+
+    with Path(sp_csv).open(newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            panel = row_to_s3_input(row)
+            diagnostics = calculate_csr_requirement(panel)
+            vector = diagnostics["csr_vector"]
+            for component, (index, target_column) in components.items():
+                key = f"sp_{component}"
+                value = vector[index]
+                predicted = None if value == float("inf") else int(value)
+                target = _csr_label(row.get(target_column))
+                _csr_update_confusion(raw_confusions[key], predicted, target)
+                if (
+                    predicted is not None
+                    and target is not None
+                    and predicted != target
+                    and examples_seen[key] < max_examples_per_component
+                ):
+                    summary["mismatch_examples"].append(
+                        _csr_mismatch_example(row, key, predicted, target, diagnostics)
+                    )
+                    examples_seen[key] += 1
+
+    with Path(up_csv).open(newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            panel = _u3_training_row_to_input(row)
+            diagnostics = calculate_csr_requirement(panel)
+            predicted = int(diagnostics["csr_vector"][0])
+            target = _csr_label(row.get("CSR-Tank req cl"))
+            _csr_update_confusion(raw_confusions["up_plate"], predicted, target)
+            if (
+                predicted is not None
+                and target is not None
+                and predicted != target
+                and examples_seen["up_plate"] < max_examples_per_component
+            ):
+                summary["mismatch_examples"].append(
+                    _csr_mismatch_example(row, "up_plate", predicted, target, diagnostics)
+                )
+                examples_seen["up_plate"] += 1
+
+    summary["components"] = {
+        name: _csr_confusion_summary(confusion)
+        for name, confusion in raw_confusions.items()
+    }
+    known_total = sum(component["rows_with_known_labels"] for component in summary["components"].values())
+    error_total = sum(
+        component["false_positive"] + component["false_negative"]
+        for component in summary["components"].values()
+    )
+    summary["overall"] = {
+        "known_component_labels": known_total,
+        "component_errors": error_total,
+        "component_accuracy": 1.0 - error_total / known_total if known_total else None,
+    }
+
+    if output_dir is not None:
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        _write_json(output / "csr_training_comparison_summary.json", summary)
+        examples_path = output / "csr_training_mismatch_examples.csv"
+        fieldnames = [
+            "row_index",
+            "component",
+            "stiffener_type",
+            "target",
+            "predicted",
+            "length",
+            "width_or_spacing",
+            "plate_thickness",
+            "yield_stress_plate",
+            "stiffener_height",
+            "web_thickness",
+            "flange_width",
+            "flange_thickness",
+            "values",
+        ]
+        with examples_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for example in summary["mismatch_examples"]:
+                writer.writerow({**example, "values": json.dumps(example["values"], sort_keys=True)})
+
+    return summary
+
+
+def run_verification_suite(
+    output_dir: str | Path = "reports",
+    baseline_path: str | Path | None = DEFAULT_RELIABILITY_BASELINE,
+    update_baseline: bool = False,
+    check_mode_convergence: bool = True,
+    csv_path: str | Path = "PULSforChatGPT.csv",
+    ship_section_paths: Sequence[str | Path] = DEFAULT_SHIP_SECTION_INPUTS,
+    csv_sample_method: str = CSV_SAMPLE_METHOD_STRATIFIED,
+    csv_sample_size: int = DEFAULT_CSV_SAMPLE_SIZE,
+    csv_sample_seed: int = DEFAULT_CSV_SAMPLE_SEED,
+    csv_full: bool = False,
+    csv_mode_convergence_sample_size: int = DEFAULT_CSV_MODE_CONVERGENCE_SAMPLE_SIZE,
+    csv_target_valid_only: bool = False,
+    csv_target_uf_min: float | None = None,
+    csv_target_uf_max: float | None = None,
+    csv_outlier_sample_size: int = 200,
+) -> dict[str, Any]:
+    """Run the combined S3/U3 verification suite and write reports."""
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    baseline = _load_baseline(baseline_path)
+    config = S3SolverConfig(check_mode_convergence=check_mode_convergence)
+    reports: dict[str, BenchmarkReport] = {}
+
+    reports["s3_ship_sections"] = benchmark_ship_sections(ship_section_paths, config=config)
+    s3_ship_report_path = output / "verify_all_s3_ship_sections.csv"
+    write_ship_section_comparison_csv(
+        ship_section_paths,
+        s3_ship_report_path,
+        config=config,
+    )
+
+    reports["u3_ship_sections"] = benchmark_u3_ship_sections(ship_section_paths, config=config)
+    write_u3_ship_section_comparison_csv(
+        ship_section_paths,
+        output / "verify_all_u3_ship_sections.csv",
+        config=config,
+    )
+
+    selected_csv_method = CSV_SAMPLE_METHOD_FULL if csv_full else csv_sample_method
+    csv_selection = select_csv_sample_indices(
+        csv_path,
+        sample_method=selected_csv_method,
+        sample_size=None if csv_full else csv_sample_size,
+        seed=csv_sample_seed,
+        target_valid_only=csv_target_valid_only,
+        target_uf_min=csv_target_uf_min,
+        target_uf_max=csv_target_uf_max,
+    )
+    csv_rows = (
+        iter_csv_rows(csv_path)
+        if csv_selection.row_indices is None
+        else iter_csv_rows(csv_path, sample_indices=csv_selection.row_indices)
+    )
+    reports["s3_csv_stratified"] = _benchmark_rows(
+        csv_rows,
+        config,
+        title="Reduced S3 stratified CSV benchmark report",
+        sample_manifest=csv_selection.manifest,
+        mode_convergence_sample_size=csv_mode_convergence_sample_size,
+    )
+    write_row_comparison_csv(
+        iter_csv_rows(csv_path)
+        if csv_selection.row_indices is None
+        else iter_csv_rows(csv_path, sample_indices=csv_selection.row_indices),
+        output / "verify_all_s3_csv_stratified.csv",
+        config=config,
+        mode_convergence_sample_size=csv_mode_convergence_sample_size,
+    )
+
+    csv_filter_active = _csv_sampling_filter_active(
+        csv_target_valid_only,
+        csv_target_uf_min,
+        csv_target_uf_max,
+    )
+    if csv_filter_active and csv_outlier_sample_size > 0 and not csv_full:
+        outlier_selection = select_csv_sample_indices(
+            csv_path,
+            sample_method=CSV_SAMPLE_METHOD_STRATIFIED,
+            sample_size=csv_outlier_sample_size,
+            seed=csv_sample_seed,
+            target_valid_only=csv_target_valid_only,
+            target_uf_min=csv_target_uf_min,
+            target_uf_max=csv_target_uf_max,
+            select_filtered_out=True,
+        )
+        reports["s3_csv_outliers"] = _benchmark_rows(
+            iter_csv_rows(csv_path, sample_indices=outlier_selection.row_indices),
+            config,
+            title="Reduced S3 stratified CSV outlier monitor report",
+            sample_manifest=outlier_selection.manifest,
+            mode_convergence_sample_size=min(
+                csv_mode_convergence_sample_size,
+                csv_outlier_sample_size,
+            ),
+        )
+        write_row_comparison_csv(
+            iter_csv_rows(csv_path, sample_indices=outlier_selection.row_indices),
+            output / "verify_all_s3_csv_outliers.csv",
+            config=config,
+            mode_convergence_sample_size=min(
+                csv_mode_convergence_sample_size,
+                csv_outlier_sample_size,
+            ),
+        )
+
+    fixture_selection = select_csv_sample_indices(
+        csv_path,
+        sample_method=CSV_SAMPLE_METHOD_STRATIFIED,
+        sample_size=DEFAULT_CSV_FIXTURE_SAMPLE_SIZE,
+        seed=csv_sample_seed,
+    )
+    reports["s3_csv_fixture"] = _benchmark_rows(
+        iter_csv_rows(csv_path, sample_indices=fixture_selection.row_indices),
+        config,
+        title="Reduced S3 stratified fixture CSV benchmark report",
+        sample_manifest=fixture_selection.manifest,
+        mode_convergence_sample_size=min(
+            csv_mode_convergence_sample_size,
+            DEFAULT_CSV_FIXTURE_SAMPLE_SIZE,
+        ),
+    )
+    write_row_comparison_csv(
+        iter_csv_rows(csv_path, sample_indices=fixture_selection.row_indices),
+        output / "verify_all_s3_csv_fixture.csv",
+        config=config,
+        mode_convergence_sample_size=min(
+            csv_mode_convergence_sample_size,
+            DEFAULT_CSV_FIXTURE_SAMPLE_SIZE,
+        ),
+    )
+
+    baseline_available = bool(baseline)
+    acceptance_thresholds: dict[str, dict[str, Any]] = {
+        "u3_ship_sections": {
+            "max_buckling_mae": 0.03,
+            "max_ultimate_mae": 0.04,
+            "max_validity_mismatches": 0,
+            "max_uf_order_violations": 0,
+        },
+        "s3_ship_sections": {
+            "max_uf_order_violations": 0,
+        },
+        "s3_csv_stratified": {
+            "max_uf_order_violations": 0,
+        },
+        "s3_csv_fixture": {
+            "max_uf_order_violations": 0,
+        },
+    }
+    if "s3_csv_outliers" in reports:
+        acceptance_thresholds["s3_csv_outliers"] = {
+            "max_uf_order_violations": 0,
+        }
+    if baseline_available:
+        if "u3_ship_sections" in baseline:
+            acceptance_thresholds["u3_ship_sections"].update(
+                {
+                    "baseline_buckling_mae_delta": 1.0e-9,
+                    "baseline_ultimate_mae_delta": 1.0e-9,
+                }
+            )
+        if "s3_ship_sections" in baseline:
+            acceptance_thresholds["s3_ship_sections"].update(
+                {
+                    "baseline_buckling_mae_delta": 0.005,
+                    "baseline_ultimate_mae_delta": 0.005,
+                    "baseline_validity_mismatch_delta": 0,
+                }
+            )
+        if "s3_csv_stratified" in baseline:
+            acceptance_thresholds["s3_csv_stratified"].update(
+                {
+                    "baseline_buckling_relative_mae_factor": 1.05,
+                }
+            )
+
+    for name, report in reports.items():
+        apply_acceptance_gates(
+            report,
+            name,
+            acceptance_thresholds.get(name, {}),
+            baseline,
+        )
+
+    summary = {
+        "passed": all(report.passed for report in reports.values()),
+        "baseline_path": str(baseline_path) if baseline_path is not None else None,
+        "baseline_available": baseline_available,
+        "mode_convergence_enabled": check_mode_convergence,
+        "csv_sample_method": selected_csv_method,
+        "csv_sample_size": None if csv_full else csv_sample_size,
+        "csv_sample_seed": csv_sample_seed,
+        "csv_mode_convergence_sample_size": csv_mode_convergence_sample_size,
+        "csv_target_valid_only": csv_target_valid_only,
+        "csv_target_buckling_uf_min": csv_target_uf_min,
+        "csv_target_buckling_uf_max": csv_target_uf_max,
+        "csv_outlier_sample_size": csv_outlier_sample_size,
+        "s3_ship_intermediate_comparison": summarize_s3_ship_intermediate_report(s3_ship_report_path),
+        "reports": {name: report.to_dict() for name, report in reports.items()},
+    }
+    _write_json(output / "verify_all_summary.json", summary)
+    if update_baseline and baseline_path is not None:
+        _write_json(baseline_path, _baseline_from_reports(reports))
+    return summary
+
+
+def run_full_csv_verification(
+    csv_path: str | Path = "PULSforChatGPT.csv",
+    output_dir: str | Path = "reports",
+    baseline_path: str | Path | None = Path("reports/puls_full_csv_baseline.json"),
+    update_baseline: bool = True,
+) -> dict[str, Any]:
+    """Run the full S3 CSV benchmark with mode convergence disabled."""
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    config = S3SolverConfig(check_mode_convergence=False)
+    selection = select_csv_sample_indices(csv_path, sample_method=CSV_SAMPLE_METHOD_FULL)
+    report = _benchmark_rows(
+        iter_csv_rows(csv_path),
+        config,
+        title="Reduced S3 full CSV benchmark report",
+        sample_manifest=selection.manifest,
+        mode_convergence_sample_size=0,
+    )
+    apply_acceptance_gates(report, "s3_csv_full", {"max_uf_order_violations": 0}, {})
+    write_row_comparison_csv(
+        iter_csv_rows(csv_path),
+        output / "verify_csv_full_rows.csv",
+        config=config,
+        mode_convergence_sample_size=0,
+    )
+    summary = {
+        "passed": report.passed,
+        "csv_path": str(csv_path),
+        "mode_convergence_enabled": False,
+        "reports": {"s3_csv_full": report.to_dict()},
+    }
+    _write_json(output / "verify_csv_full_summary.json", summary)
+    if update_baseline and baseline_path is not None:
+        _write_json(baseline_path, {"s3_csv_full": report.to_dict()})
+    return summary
+
+
+def run_speed_benchmark(
+    csv_path: str | Path = "PULSforChatGPT.csv",
+    iterations: int = 100,
+) -> dict[str, Any]:
+    """Return small local timing diagnostics for the runtime solver."""
+
+    clock = __import__("time").perf_counter
+    s3_panel = None
+    for _, row in iter_csv_rows(csv_path, limit=500):
+        try:
+            candidate = row_to_s3_input(row)
+            if solve_s3_panel(candidate, S3SolverConfig(check_mode_convergence=False)).valid:
+                s3_panel = candidate
+                break
+        except Exception:
+            continue
+    if s3_panel is None:
+        raise RuntimeError("no valid S3 panel found for speed benchmark")
+
+    u3_panel = U3PanelInput(
+        length=3000.0,
+        width=750.0,
+        plate_thickness=12.0,
+        yield_stress_plate=355.0,
+        axial_stress_1=100.0,
+        axial_stress_2=100.0,
+        transverse_stress_1=80.0,
+        transverse_stress_2=80.0,
+        shear_stress=20.0,
+        pressure=0.1,
+        in_plane_support="Integrated",
+        rotational_support_1="SS",
+        rotational_support_2="SS",
+    )
+    configs = {
+        "full": S3SolverConfig(check_mode_convergence=False),
+        "minimal": S3SolverConfig(
+            check_mode_convergence=False,
+            include_solver_diagnostics=False,
+        ),
+    }
+
+    class _SpeedAnyStructurePart:
+        def __init__(self, axial_stress: float = 60.0, method: str = "buckling") -> None:
+            self.span = s3_panel.length / 1000.0
+            self.spacing = s3_panel.stiffener_spacing
+            self.t = s3_panel.plate_thickness
+            self.hw = s3_panel.stiffener_height
+            self.tw = s3_panel.web_thickness
+            self.b = s3_panel.flange_width
+            self.tf = s3_panel.flange_thickness
+            self.mat_yield = s3_panel.yield_stress_plate * 1.0e6
+            self.sigma_x1 = axial_stress
+            self.sigma_x2 = axial_stress
+            self.sigma_y1 = s3_panel.transverse_stress_1
+            self.sigma_y2 = s3_panel.transverse_stress_2
+            self.tau_xy = s3_panel.shear_stress
+            self.mat_factor = 1.15
+            self.corrosion_addition_mm = 0.0
+            self._method = method
+
+        def get_puls_sp_or_up(self) -> str:
+            return "SP"
+
+        def get_puls_boundary(self) -> str:
+            return {
+                "Integrated": "Int",
+                "Girder - long": "GL",
+                "Girder - trans": "GT",
+            }.get(s3_panel.in_plane_support, "Int")
+
+        def get_stiffener_type(self) -> str:
+            return {
+                "T-bar": "T",
+                "Angle": "L",
+                "Flatbar": "FB",
+            }.get(s3_panel.stiffener_type, s3_panel.stiffener_type)
+
+        def get_puls_stf_end(self) -> str:
+            return "C" if s3_panel.stiffener_boundary == "Cont" else "S"
+
+        def get_puls_method(self) -> str:
+            return self._method
+
+    class _SpeedAnyStructure:
+        def __init__(self, axial_stress: float = 60.0, method: str = "buckling") -> None:
+            self.Plate = _SpeedAnyStructurePart(axial_stress=axial_stress, method=method)
+            self.Stiffener = _SpeedAnyStructurePart(axial_stress=axial_stress, method=method)
+            self.E = s3_panel.elastic_modulus * 1.0e6
+            self.v = s3_panel.poisson_ratio
+
+    anystructure_full = _SpeedAnyStructure(axial_stress=max(s3_panel.axial_stress, 60.0), method="ultimate")
+    anystructure_reject = _SpeedAnyStructure(axial_stress=900.0, method="buckling")
+    anystructure_batch = [
+        (anystructure_reject, None, 0.0),
+        (anystructure_reject, None, 0.0),
+        (anystructure_full, None, 0.0),
+        (anystructure_full, None, 0.0),
+    ] * 5
+
+    def measure(label: str, fn: Any) -> dict[str, float | int | str]:
+        for _ in range(5):
+            fn()
+        samples = []
+        for _ in range(iterations):
+            start = clock()
+            fn()
+            samples.append(clock() - start)
+        return {
+            "label": label,
+            "iterations": iterations,
+            "mean_seconds": statistics.mean(samples),
+            "median_seconds": statistics.median(samples),
+            "p95_seconds": _percentile(samples, 0.95),
+            "min_seconds": min(samples),
+            "max_seconds": max(samples),
+        }
+
+    return {
+        "s3_full": measure("s3_full", lambda: solve_s3_panel(s3_panel, configs["full"])),
+        "s3_minimal": measure("s3_minimal", lambda: solve_s3_panel(s3_panel, configs["minimal"])),
+        "u3_full": measure("u3_full", lambda: solve_u3_panel(u3_panel, configs["full"])),
+        "u3_minimal": measure("u3_minimal", lambda: solve_u3_panel(u3_panel, configs["minimal"])),
+        "anystructure_s3_full_vector": measure(
+            "anystructure_s3_full_vector",
+            lambda: predict_anystructure_uf_with_acceptance(
+                anystructure_full,
+                selected_method="ultimate",
+            ),
+        ),
+        "anystructure_s3_buckling_early_reject": measure(
+            "anystructure_s3_buckling_early_reject",
+            lambda: predict_anystructure_uf_with_acceptance(
+                anystructure_reject,
+                selected_method="buckling",
+            ),
+        ),
+        "anystructure_s3_batch_mixed_20": measure(
+            "anystructure_s3_batch_mixed_20",
+            lambda: predict_anystructure_uf_batch(anystructure_batch, cache={}),
+        ),
+    }
+
+
+def _benchmark_command(args: argparse.Namespace) -> int:
+    config = S3SolverConfig(
+        max_load_factor=args.max_load_factor,
+        use_effective_stiffener_width=args.effective_stiffener_width,
+    )
+    report = benchmark_csv(
+        args.csv,
+        config=config,
+        limit=args.limit,
+        fixture=args.fixture,
+        sample_method=args.csv_sample_method,
+        sample_size=args.csv_sample_size,
+        sample_seed=args.csv_sample_seed,
+        target_valid_only=args.csv_target_valid_only,
+        target_uf_min=args.csv_target_uf_min,
+        target_uf_max=args.csv_target_uf_max,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.format_text())
+    return 0
+
+
+def _ship_section_command(args: argparse.Namespace) -> int:
+    config = S3SolverConfig(
+        max_load_factor=args.max_load_factor,
+        use_effective_stiffener_width=args.effective_stiffener_width,
+    )
+    report = benchmark_ship_sections(args.input, config=config, limit=args.limit)
+    if args.output_csv:
+        write_ship_section_comparison_csv(
+            args.input,
+            args.output_csv,
+            config=config,
+            limit=args.limit,
+        )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.format_text())
+    return 0
+
+
+def _u3_ship_section_command(args: argparse.Namespace) -> int:
+    config = S3SolverConfig(
+        max_load_factor=args.max_load_factor,
+    )
+    report = benchmark_u3_ship_sections(args.input, config=config, limit=args.limit)
+    if args.output_csv:
+        write_u3_ship_section_comparison_csv(
+            args.input,
+            args.output_csv,
+            config=config,
+            limit=args.limit,
+        )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.format_text())
+    return 0
+
+
+def _verify_all_command(args: argparse.Namespace) -> int:
+    summary = run_verification_suite(
+        output_dir=args.output_dir,
+        baseline_path=args.baseline,
+        update_baseline=args.update_baseline,
+        check_mode_convergence=not args.no_mode_convergence,
+        csv_path=args.csv,
+        ship_section_paths=args.input,
+        csv_sample_method=args.csv_sample_method,
+        csv_sample_size=args.csv_sample_size,
+        csv_sample_seed=args.csv_sample_seed,
+        csv_full=args.csv_full,
+        csv_mode_convergence_sample_size=args.csv_mode_convergence_sample_size,
+        csv_target_valid_only=args.csv_target_valid_only,
+        csv_target_uf_min=args.csv_target_uf_min,
+        csv_target_uf_max=args.csv_target_uf_max,
+        csv_outlier_sample_size=args.csv_outlier_sample_size,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print(f"Verification passed: {summary['passed']}")
+        print(f"Summary JSON: {Path(args.output_dir) / 'verify_all_summary.json'}")
+        for name, report in summary["reports"].items():
+            print(
+                f"{name}: passed={report['passed']} "
+                f"buckling_mae={report['buckling']['mean_absolute_error']} "
+                f"ultimate_mae={report['ultimate']['mean_absolute_error']} "
+                f"confidence={report['confidence_counts']}"
+            )
+    return 0 if summary["passed"] else 1
+
+
+def _verify_csv_full_command(args: argparse.Namespace) -> int:
+    summary = run_full_csv_verification(
+        csv_path=args.csv,
+        output_dir=args.output_dir,
+        baseline_path=args.baseline,
+        update_baseline=not args.no_update_baseline,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        report = summary["reports"]["s3_csv_full"]
+        print(f"Full CSV verification passed: {summary['passed']}")
+        print(f"Summary JSON: {Path(args.output_dir) / 'verify_csv_full_summary.json'}")
+        print(
+            "s3_csv_full: "
+            f"buckling_mae={report['buckling']['mean_absolute_error']} "
+            f"ultimate_mae={report['ultimate']['mean_absolute_error']} "
+            f"rows={report['rows']}"
+        )
+    return 0 if summary["passed"] else 1
+
+
+def _speed_benchmark_command(args: argparse.Namespace) -> int:
+    result = run_speed_benchmark(args.csv, iterations=args.iterations)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _verify_csr_training_command(args: argparse.Namespace) -> int:
+    summary = compare_csr_training_sets(
+        sp_csv=args.sp_csv,
+        up_csv=args.up_csv,
+        output_dir=args.output_dir,
+        max_examples_per_component=args.max_examples,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print("CSR training comparison")
+        print(f"Summary JSON: {Path(args.output_dir) / 'csr_training_comparison_summary.json'}")
+        print(f"Mismatch examples CSV: {Path(args.output_dir) / 'csr_training_mismatch_examples.csv'}")
+        print(
+            "Overall: "
+            f"accuracy={summary['overall']['component_accuracy']:.6f} "
+            f"errors={summary['overall']['component_errors']} "
+            f"labels={summary['overall']['known_component_labels']}"
+        )
+        for name, component in summary["components"].items():
+            print(
+                f"{name}: accuracy={component['accuracy']:.6f} "
+                f"fp={component['false_positive']} fn={component['false_negative']} "
+                f"known={component['rows_with_known_labels']}"
+            )
+    return 0
+
+
+def _build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Reduced semi-analytical PULS S3/U3 calculations")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    benchmark = subparsers.add_parser("benchmark", help="Compare S3 results with a PULS CSV export")
+    benchmark.add_argument("--csv", default="PULSforChatGPT.csv", help="PULS CSV path")
+    benchmark.add_argument("--limit", type=int, default=None, help="Read only the first N selected CSV rows")
+    benchmark.add_argument("--fixture", action="store_true", help="Use the deterministic stratified fixture sample")
+    benchmark.add_argument(
+        "--csv-sample-method",
+        choices=(CSV_SAMPLE_METHOD_FIRST_N, CSV_SAMPLE_METHOD_STRATIFIED, CSV_SAMPLE_METHOD_FULL),
+        default=None,
+        help="CSV row selection method",
+    )
+    benchmark.add_argument(
+        "--csv-sample-size",
+        type=int,
+        default=DEFAULT_CSV_SAMPLE_SIZE,
+        help="Number of rows for stratified CSV sampling",
+    )
+    benchmark.add_argument(
+        "--csv-sample-seed",
+        type=int,
+        default=DEFAULT_CSV_SAMPLE_SEED,
+        help="Seed for deterministic shuffled CSV sampling",
+    )
+    benchmark.add_argument(
+        "--csv-target-valid-only",
+        action="store_true",
+        help="Sample only CSV rows with numeric PULS buckling and ultimate UF targets",
+    )
+    benchmark.add_argument(
+        "--csv-target-uf-min",
+        type=float,
+        default=None,
+        help="Minimum target PULS buckling UF for sampled CSV rows",
+    )
+    benchmark.add_argument(
+        "--csv-target-uf-max",
+        type=float,
+        default=None,
+        help="Maximum target PULS buckling UF for sampled CSV rows",
+    )
+    benchmark.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
+    benchmark.add_argument(
+        "--effective-stiffener-width",
+        action="store_true",
+        help="Apply length-based effective attached-plate width in stiffener yield and column checks",
+    )
+    benchmark.add_argument(
+        "--max-load-factor",
+        type=float,
+        default=S3SolverConfig.max_load_factor,
+        help="Maximum continuation factor for the benchmark solve",
+    )
+    benchmark.set_defaults(run=_benchmark_command)
+
+    ship_section = subparsers.add_parser(
+        "ship-section",
+        help="Compare S3 results with an ANYstructure ship-section dictionary export",
+    )
+    ship_section.add_argument(
+        "--input",
+        nargs="+",
+        default=[r"C:\Github\ANYstructure\anystruct\ship_section_example.txt"],
+        help="ANYstructure ship-section export path(s)",
+    )
+    ship_section.add_argument("--limit", type=int, default=None, help="Read only the first N S3 rows")
+    ship_section.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
+    ship_section.add_argument("--output-csv", default=None, help="Write row-level comparison CSV")
+    ship_section.add_argument(
+        "--effective-stiffener-width",
+        action="store_true",
+        help="Apply length-based effective attached-plate width in stiffener yield and column checks",
+    )
+    ship_section.add_argument(
+        "--max-load-factor",
+        type=float,
+        default=S3SolverConfig.max_load_factor,
+        help="Maximum continuation factor for the benchmark solve",
+    )
+    ship_section.set_defaults(run=_ship_section_command)
+
+    u3_ship_section = subparsers.add_parser(
+        "u3-ship-section",
+        help="Compare U3 results with an ANYstructure ship-section dictionary export",
+    )
+    u3_ship_section.add_argument(
+        "--input",
+        nargs="+",
+        default=[r"C:\Github\ANYstructure\anystruct\ship_section_example.txt"],
+        help="ANYstructure ship-section export path(s)",
+    )
+    u3_ship_section.add_argument("--limit", type=int, default=None, help="Read only the first N U3 rows")
+    u3_ship_section.add_argument("--json", action="store_true", help="Print JSON instead of the text report")
+    u3_ship_section.add_argument("--output-csv", default=None, help="Write row-level comparison CSV")
+    u3_ship_section.add_argument(
+        "--max-load-factor",
+        type=float,
+        default=S3SolverConfig.max_load_factor,
+        help="Maximum continuation factor for the benchmark solve",
+    )
+    u3_ship_section.set_defaults(run=_u3_ship_section_command)
+
+    verify_all = subparsers.add_parser(
+        "verify-all",
+        help="Run S3/U3 verification, write row CSVs, and apply reliability acceptance gates",
+    )
+    verify_all.add_argument("--csv", default="PULSforChatGPT.csv", help="PULS CSV path")
+    verify_all.add_argument(
+        "--input",
+        nargs="+",
+        default=list(DEFAULT_SHIP_SECTION_INPUTS),
+        help="ANYstructure ship-section export path(s)",
+    )
+    verify_all.add_argument("--output-dir", default="reports", help="Directory for verification reports")
+    verify_all.add_argument(
+        "--baseline",
+        default=str(DEFAULT_RELIABILITY_BASELINE),
+        help="Baseline JSON used for regression gates",
+    )
+    verify_all.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Write the current verification metrics to the baseline JSON path",
+    )
+    verify_all.add_argument(
+        "--no-mode-convergence",
+        action="store_true",
+        help="Disable refined-basis mode convergence checks during verification",
+    )
+    verify_all.add_argument(
+        "--csv-sample-method",
+        choices=(CSV_SAMPLE_METHOD_STRATIFIED, CSV_SAMPLE_METHOD_FULL),
+        default=CSV_SAMPLE_METHOD_STRATIFIED,
+        help="CSV row selection method for the S3 CSV verification gate",
+    )
+    verify_all.add_argument(
+        "--csv-sample-size",
+        type=int,
+        default=DEFAULT_CSV_SAMPLE_SIZE,
+        help="Number of CSV rows for deterministic stratified sampling",
+    )
+    verify_all.add_argument(
+        "--csv-sample-seed",
+        type=int,
+        default=DEFAULT_CSV_SAMPLE_SEED,
+        help="Seed for deterministic shuffled CSV sampling",
+    )
+    verify_all.add_argument(
+        "--csv-full",
+        action="store_true",
+        help="Use all CSV rows in verify-all instead of the stratified sample",
+    )
+    verify_all.add_argument(
+        "--csv-mode-convergence-sample-size",
+        type=int,
+        default=DEFAULT_CSV_MODE_CONVERGENCE_SAMPLE_SIZE,
+        help="Number of sampled CSV rows that run refined-basis mode convergence checks",
+    )
+    verify_all.add_argument(
+        "--csv-target-valid-only",
+        action="store_true",
+        help="Sample only CSV rows with numeric PULS buckling and ultimate UF targets",
+    )
+    verify_all.add_argument(
+        "--csv-target-uf-min",
+        type=float,
+        default=None,
+        help="Minimum target PULS buckling UF for sampled CSV rows",
+    )
+    verify_all.add_argument(
+        "--csv-target-uf-max",
+        type=float,
+        default=None,
+        help="Maximum target PULS buckling UF for sampled CSV rows",
+    )
+    verify_all.add_argument(
+        "--csv-outlier-sample-size",
+        type=int,
+        default=200,
+        help="Additional stratified monitor sample from rows excluded by the CSV target UF filter",
+    )
+    verify_all.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
+    verify_all.set_defaults(run=_verify_all_command)
+
+    verify_csv_full = subparsers.add_parser(
+        "verify-csv-full",
+        help="Run the full S3 CSV benchmark with mode convergence disabled",
+    )
+    verify_csv_full.add_argument("--csv", default="PULSforChatGPT.csv", help="PULS CSV path")
+    verify_csv_full.add_argument("--output-dir", default="reports", help="Directory for verification reports")
+    verify_csv_full.add_argument(
+        "--baseline",
+        default="reports/puls_full_csv_baseline.json",
+        help="Full CSV baseline JSON path",
+    )
+    verify_csv_full.add_argument(
+        "--no-update-baseline",
+        action="store_true",
+        help="Do not write the full CSV baseline JSON",
+    )
+    verify_csv_full.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
+    verify_csv_full.set_defaults(run=_verify_csv_full_command)
+
+    speed = subparsers.add_parser(
+        "speed-benchmark",
+        help="Run a small local S3/U3 runtime speed benchmark",
+    )
+    speed.add_argument("--csv", default="PULSforChatGPT.csv", help="PULS CSV path for an S3 sample")
+    speed.add_argument("--iterations", type=int, default=100, help="Timing iterations per case")
+    speed.set_defaults(run=_speed_benchmark_command)
+
+    csr_training = subparsers.add_parser(
+        "verify-csr-training",
+        help="Compare equation-based CSR checks with recorded PULS CSR training labels",
+    )
+    csr_training.add_argument(
+        "--sp-csv",
+        default=str(DEFAULT_CSR_SP_TRAINING_CSV),
+        help="CSR-labeled stiffened-panel training CSV",
+    )
+    csr_training.add_argument(
+        "--up-csv",
+        default=str(DEFAULT_CSR_UP_TRAINING_CSV),
+        help="CSR-labeled unstiffened-panel training CSV",
+    )
+    csr_training.add_argument("--output-dir", default="reports", help="Directory for CSR comparison reports")
+    csr_training.add_argument(
+        "--max-examples",
+        type=int,
+        default=25,
+        help="Maximum mismatch examples to store per CSR component",
+    )
+    csr_training.add_argument("--json", action="store_true", help="Print JSON instead of the text summary")
+    csr_training.set_defaults(run=_verify_csr_training_command)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_argument_parser()
+    args = parser.parse_args(argv)
+    return args.run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
