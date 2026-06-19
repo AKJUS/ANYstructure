@@ -618,6 +618,9 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "text='FEM run'" in source
     assert "def on_open_runtime_fem_solver(self):" in source
     assert "fe_runtime_solver.open_runtime_fem_window(self._parent, self)" in source
+    assert "def import_runtime_fem_buckling_result(self, runtime_result):" in source
+    assert "fe_plate_fields.create_runtime_fea_buckling_session(" in source
+    assert "self._fea_last_runtime_result" in source
     assert "def _place_runtime_fem_button(self):" in source
     assert "getattr(self, '_experimental_mode_enabled', False)" in source
     assert "run_prop_3d_opensees_buckling" not in source

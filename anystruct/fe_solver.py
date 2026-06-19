@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import collections
 import json
 import math
+import re
 
 import numpy as np
 
@@ -2001,6 +2002,197 @@ def _nodal_scalar_fields(model, stresses_by_element: dict[int, object]) -> dict[
     return result
 
 
+def _mean_stress_value(value: object) -> float:
+    if value is None:
+        return 0.0
+    try:
+        array = np.asarray(value, dtype=float).reshape(-1)
+    except Exception:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return 0.0
+    return float(np.mean(array))
+
+
+def _shell_global_membrane_components(model, element, stress: object) -> tuple[float, float, float, float, float, float] | None:
+    if not isinstance(stress, dict):
+        return None
+    if not any(key in stress for key in ("membrane_xx", "membrane_yy", "membrane_xy")):
+        return None
+    try:
+        coords = element.get_node_coordinates(model.mesh)
+        _shape, dN_dxi, dN_deta = element.compute_shape_functions(0.0, 0.0)
+        local_frame, _dN_dx, _dN_dy, _det_j = element._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
+    except Exception:
+        return None
+    local_tensor = np.array(
+        [
+            [_mean_stress_value(stress.get("membrane_xx")), _mean_stress_value(stress.get("membrane_xy")), 0.0],
+            [_mean_stress_value(stress.get("membrane_xy")), _mean_stress_value(stress.get("membrane_yy")), 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    global_tensor = np.asarray(local_frame, dtype=float) @ local_tensor @ np.asarray(local_frame, dtype=float).T
+    return (
+        float(global_tensor[0, 0]),
+        float(global_tensor[1, 1]),
+        float(global_tensor[2, 2]),
+        float(global_tensor[0, 1]),
+        float(global_tensor[1, 2]),
+        float(global_tensor[2, 0]),
+    )
+
+
+def _safe_elset_name(prefix: str, role: object, thickness: object) -> str:
+    role_text = str(role or "skin").strip().lower()
+    role_text = re.sub(r"[^a-z0-9]+", "_", role_text).strip("_") or "skin"
+    try:
+        thickness_um = int(round(float(thickness or 0.0) * 1.0e6))
+    except (TypeError, ValueError):
+        thickness_um = 0
+    return f"{prefix}_{role_text}_{thickness_um}um"
+
+
+def _fea_result_import_payload(
+    generated_geometry: dict[str, object],
+    model,
+    stresses_by_element: dict[int, object] | None,
+) -> dict[str, object]:
+    """Return an INP/FRD-like shell result payload for the FE-results importer."""
+
+    nodes_payload = []
+    for node_id, node in sorted(model.mesh.nodes.items()):
+        nodes_payload.append(
+            {
+                "id": int(node_id),
+                "coords": (float(node.x), float(node.y), float(node.z)),
+            }
+        )
+
+    shell_by_id = {
+        int(shell.get("id", 0)): shell
+        for shell in generated_geometry.get("shells", []) or []
+        if shell.get("id") is not None
+    }
+    shell_payload = []
+    elsets: dict[str, list[int]] = collections.defaultdict(list)
+    section_meta: dict[str, dict[str, object]] = {}
+    for element_id, element in sorted(model.mesh.elements.items()):
+        if element.__class__.__name__ != "ShellElement":
+            continue
+        generated_shell = shell_by_id.get(int(element_id), {})
+        thickness = float(getattr(element, "thickness", generated_shell.get("thickness", 0.0)) or 0.0)
+        role = generated_shell.get("role", "skin")
+        material = str(generated_shell.get("material", getattr(element, "material_name", "steel")) or "steel")
+        elset = _safe_elset_name("runtime", role, thickness)
+        elsets[elset].append(int(element_id))
+        section_meta.setdefault(
+            elset,
+            {
+                "elset": elset,
+                "material": material,
+                "thickness_m": thickness,
+                "offset": None,
+            },
+        )
+        element_type = str(generated_shell.get("type", "S8" if len(element.node_ids) == 8 else "S4") or "")
+        shell_payload.append(
+            {
+                "id": int(element_id),
+                "node_ids": tuple(int(node_id) for node_id in element.node_ids),
+                "type": element_type,
+                "elset": elset,
+                "thickness_m": thickness,
+                "role": str(role or "skin"),
+            }
+        )
+    shell_node_ids = {
+        int(node_id)
+        for shell in shell_payload
+        for node_id in shell.get("node_ids", ())
+    }
+    nodes_payload = [
+        node
+        for node in nodes_payload
+        if int(node.get("id", 0)) in shell_node_ids
+    ]
+
+    stress_sums: dict[int, list[float]] = collections.defaultdict(lambda: [0.0] * 6)
+    stress_counts: dict[int, int] = collections.defaultdict(int)
+    for element_id, stress in (stresses_by_element or {}).items():
+        element = model.mesh.elements.get(int(element_id))
+        if element is None or element.__class__.__name__ != "ShellElement":
+            continue
+        components = _shell_global_membrane_components(model, element, stress)
+        if components is None:
+            continue
+        for node_id in element.node_ids:
+            nid = int(node_id)
+            for index, value in enumerate(components):
+                stress_sums[nid][index] += float(value)
+            stress_counts[nid] += 1
+
+    nodal_stress = {
+        int(node_id): tuple(total / max(stress_counts[node_id], 1) for total in values)
+        for node_id, values in stress_sums.items()
+        if stress_counts.get(node_id, 0) > 0
+    }
+
+    cylinder_geometry = None
+    if str(generated_geometry.get("plot_type", "")).lower() == "cylinder":
+        skin_shell_ids = tuple(
+            int(shell["id"])
+            for shell in shell_payload
+            if str(shell.get("role", "skin")).lower() in {"", "skin"}
+        )
+        skin_node_ids = {
+            int(node_id)
+            for shell in shell_payload
+            if int(shell["id"]) in skin_shell_ids
+            for node_id in shell.get("node_ids", ())
+        }
+        z_values = [
+            float(node.get("coords", (0.0, 0.0, 0.0))[2])
+            for node in nodes_payload
+            if int(node.get("id", 0)) in skin_node_ids
+        ]
+        skin_thickness_values = [
+            float(shell.get("thickness_m", 0.0) or 0.0)
+            for shell in shell_payload
+            if int(shell["id"]) in skin_shell_ids
+        ]
+        cylinder_geometry = {
+            "axis_origin": (0.0, 0.0, min(z_values) if z_values else 0.0),
+            "axis_direction": (0.0, 0.0, 1.0),
+            "radius_m": float(generated_geometry.get("radius_m", 0.0) or 0.0),
+            "axial_bounds": (min(z_values), max(z_values)) if z_values else (0.0, 0.0),
+            "skin_element_ids": skin_shell_ids,
+            "skin_thickness_m": float(np.median(skin_thickness_values)) if skin_thickness_values else None,
+            "radial_rms_error_m": 0.0,
+            "confidence": 1.0,
+            "diagnostics": ("runtime cylinder geometry metadata",),
+        }
+
+    return {
+        "format": "anystructure-runtime-fe-results-v1",
+        "source": "runtime FEM result",
+        "geometry_type": str(generated_geometry.get("plot_type", "flat") or "flat"),
+        "nodes": tuple(nodes_payload),
+        "shells": tuple(shell_payload),
+        "elsets": {name: tuple(sorted(set(ids))) for name, ids in elsets.items()},
+        "shell_sections": tuple(section_meta[name] for name in sorted(section_meta)),
+        "stress_components": ("SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"),
+        "nodal_stress_pa": nodal_stress,
+        "units": "Pa",
+        "cylinder_geometry": cylinder_geometry,
+    }
+
+
 def _nodal_engineering_plastic_strain(model, element_states: dict[int, object] | None) -> dict[int, float]:
     if not element_states:
         return {}
@@ -2101,13 +2293,15 @@ def _visualization_from_full_result(
     displacements: np.ndarray,
     scalar_by_node: dict[int, float] | None = None,
     scalar_label: str = "stress [Pa]",
+    stresses_by_element: dict[int, object] | None = None,
 ) -> dict[str, object]:
     grid = generated_geometry.get("plot_grid") or []
     if not grid or displacements is None:
         return {}
 
-    stresses_by_element = {}
-    if _backend_compute_stresses is not None:
+    if stresses_by_element is None:
+        stresses_by_element = {}
+    if not stresses_by_element and _backend_compute_stresses is not None:
         stresses_by_element = _backend_compute_stresses(model, displacements)
 
     fields = _nodal_scalar_fields(model, stresses_by_element)
@@ -3700,7 +3894,23 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         prestress_summary["buckling_max_load_factor"] = 0.0 if load_factor_range[1] is None else float(load_factor_range[1])
     prestress_summary["buckling_allow_dense_fallback"] = 1.0 if bool(config.buckling_allow_dense_fallback) else 0.0
     stress_stats = _stress_statistics_from_model(analysis_model, displacements, min(max(float(config.stress_percentile), 0.0), 100.0))
-    visualization = _visualization_from_full_result(generated_geometry, analysis_model, displacements)
+    runtime_stresses_by_element = (
+        _backend_compute_stresses(analysis_model, displacements)
+        if _backend_compute_stresses is not None
+        else {}
+    )
+    visualization = _visualization_from_full_result(
+        generated_geometry,
+        analysis_model,
+        displacements,
+        stresses_by_element=runtime_stresses_by_element,
+    )
+    if visualization:
+        visualization["fea_result_import"] = _fea_result_import_payload(
+            generated_geometry,
+            analysis_model,
+            runtime_stresses_by_element,
+        )
     if plastic_strain_by_node:
         plastic_visualization = _visualization_from_full_result(
             generated_geometry,

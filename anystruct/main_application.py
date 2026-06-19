@@ -338,6 +338,7 @@ class Application():
         self._fea_selected_panel_id = None
         self._fea_last_inp_path = None
         self._fea_last_frd_path = None
+        self._fea_last_runtime_result = None
         self._fea_panel_canvas_items = {}
         self._fea_3d_panel_artists = {}
         self._fea_buckling_created = []
@@ -2392,6 +2393,9 @@ class Application():
         """Re-read the last FEA files using current buckling options."""
         if not getattr(self, '_experimental_mode_enabled', False):
             return
+        if getattr(self, '_fea_last_runtime_result', None) is not None:
+            self.import_runtime_fem_buckling_result(self._fea_last_runtime_result)
+            return
         if not self._fea_last_inp_path:
             self.open_fea_buckling_files()
             return
@@ -2557,6 +2561,7 @@ class Application():
 
         self._fea_last_inp_path = str(inp_path)
         self._fea_last_frd_path = None if frd_path is None else str(frd_path)
+        self._fea_last_runtime_result = None
         self._rebuild_fea_panel_line_model()
         first_panel = self._fea_buckling_session.panels[0] if self._fea_buckling_session.panels else None
         self._fea_selected_panel_id = None if first_panel is None else first_panel.field_id
@@ -2571,6 +2576,48 @@ class Application():
         ]
         if warnings:
             messagebox.showwarning('FEA buckling method warning', '\n\n'.join(warnings))
+
+    def import_runtime_fem_buckling_result(self, runtime_result):
+        """Load an in-memory runtime FEM result into FEA-result buckling mode."""
+        if not getattr(self, '_experimental_mode_enabled', False):
+            return False
+        try:
+            self._fea_buckling_session = fe_plate_fields.create_runtime_fea_buckling_session(
+                runtime_result,
+                calculation_method=self._new_buckling_method.get(),
+                buckling_acceptance=self._new_puls_method.get(),
+                pressure_mpa=0.0,
+                material_yield_mpa=self._new_material.get(),
+                material_factor=self._new_material_factor.get(),
+                ml_algo=getattr(self, '_ML_buckling', None),
+                run_buckling=True,
+                stress_reduction_method=self._fea_stress_reduction_method.get(),
+            )
+        except Exception as err:
+            messagebox.showerror('Runtime FEA import error', str(err))
+            return False
+
+        self._fea_last_inp_path = None
+        self._fea_last_frd_path = None
+        self._fea_last_runtime_result = runtime_result
+        self._fea_buckling_mode = True
+        self._apply_fea_buckling_layout()
+        self._rebuild_fea_panel_line_model()
+        first_panel = self._fea_buckling_session.panels[0] if self._fea_buckling_session.panels else None
+        self._fea_selected_panel_id = None if first_panel is None else first_panel.field_id
+        if self._fea_selected_panel_id in self._fea_panel_line_by_field:
+            self._active_line = self._fea_panel_line_by_field[self._fea_selected_panel_id]
+            self._line_is_active = True
+        self._apply_selected_fea_panel_to_inputs()
+        self._refresh_fea_buckling_views(rebuild_3d=True)
+        self._place_runtime_fem_button()
+        warnings = [
+            str(item) for item in getattr(self._fea_buckling_session, 'diagnostics', ())
+            if str(item).startswith('WARNING:')
+        ]
+        if warnings:
+            messagebox.showwarning('FEA buckling method warning', '\n\n'.join(warnings))
+        return True
 
     def _apply_selected_fea_panel_to_inputs(self):
         """Copy the selected FE panel into the normal ANYstructure input variables."""

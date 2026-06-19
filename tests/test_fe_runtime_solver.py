@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from anystruct import fe_runtime_solver, fe_solver
+from anystruct import api, fe_plate_fields, fe_runtime_solver, fe_solver
 
 
 class _Plate:
@@ -169,6 +169,17 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
     assert result.summary["load_resultant"]
     assert result.visualization["type"] == "flat"
     assert result.visualization["stress_pa"]
+    import_payload = result.visualization["fea_result_import"]
+    assert import_payload["format"] == "anystructure-runtime-fe-results-v1"
+    assert len(import_payload["shells"]) == result.summary["mesh_info"]["shells"]
+    assert import_payload["stress_components"] == ("SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX")
+    assert import_payload["nodal_stress_pa"]
+    session = fe_plate_fields.create_runtime_fea_buckling_session(result, run_buckling=False, geometry_type="flat")
+    api_summary = api.analyze_runtime_fea_result_buckling(result, run_buckling=False, geometry_type="flat")
+    assert session.panel_count > 0
+    assert session.panels[0].stress is not None
+    assert session.panels[0].stress.sample_count > 0
+    assert api_summary["field_count"] == session.field_count
     assert result.stress_percentiles[0][0] == "p95"
     assert result.stress_percentiles[0][1] > 0.0
     assert result.buckling_factors == tuple(sorted(result.buckling_factors))
@@ -704,6 +715,10 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "def _populate_canvas_with_geometry(" in source
     assert "def _populate_canvas_with_results(" in source
     assert "self.run_button = ttk.Button(buttons, text=\"Run FEM\", command=self.run)" in source
+    assert "text=\"Use for buckling\"" in source
+    assert "command=self._send_results_to_fea_buckling" in source
+    assert "def _send_results_to_fea_buckling(self) -> None:" in source
+    assert "import_runtime_fem_buckling_result" in source
     assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
     assert "self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))" in source
     assert "self._add_check_row(contents, 2, \"include_end_lids\", \"Top/bottom lid\", self.include_end_lids)" in source

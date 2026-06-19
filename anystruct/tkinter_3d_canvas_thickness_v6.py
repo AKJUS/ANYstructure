@@ -424,11 +424,18 @@ class Tkinter3DCanvas(tk.Frame):
 
     @staticmethod
     def _format_legend_value(value: float) -> str:
-        if abs(value) >= 100.0:
+        magnitude = abs(float(value))
+        if magnitude >= 100.0:
             return f"{value:.0f}"
-        if abs(value) >= 10.0:
+        if magnitude >= 10.0:
             return f"{value:.1f}".rstrip("0").rstrip(".")
-        return f"{value:.2f}".rstrip("0").rstrip(".")
+        if magnitude >= 1.0:
+            return f"{value:.2f}".rstrip("0").rstrip(".")
+        if magnitude >= 1.0e-2:
+            return f"{value:.4f}".rstrip("0").rstrip(".")
+        if magnitude >= 1.0e-5 or magnitude == 0.0:
+            return f"{value:.6f}".rstrip("0").rstrip(".")
+        return f"{value:.3e}"
 
     def _draw_thickness_legend(self) -> None:
         legend = self._thickness_legend

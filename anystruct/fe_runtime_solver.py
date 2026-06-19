@@ -879,8 +879,80 @@ def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, 
     return list((result.visualization or {}).get("buckling_modes") or [])
 
 
+def _member_endpoint_displacements(line: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    points = list(line.get("points") or ())
+    displaced = list(line.get("displaced_points") or ())
+    if len(points) < 2 or len(displaced) < 2:
+        zero = np.zeros(3, dtype=float)
+        return zero, zero
+    try:
+        disp_a = np.asarray(displaced[0], dtype=float) - np.asarray(points[0], dtype=float)
+        disp_b = np.asarray(displaced[1], dtype=float) - np.asarray(points[1], dtype=float)
+    except Exception:
+        zero = np.zeros(3, dtype=float)
+        return zero, zero
+    return disp_a, disp_b
+
+
+def _member_component_value(line: dict[str, Any], component: str, *, is_mode: bool, flange: bool = False) -> float:
+    disp_a, disp_b = _member_endpoint_displacements(line)
+    if is_mode:
+        return 0.5 * (float(np.linalg.norm(disp_a)) + float(np.linalg.norm(disp_b)))
+    if component == "disp_mag":
+        return 500.0 * (float(np.linalg.norm(disp_a)) + float(np.linalg.norm(disp_b)))
+    if component == "disp_x":
+        return 500.0 * float(disp_a[0] + disp_b[0])
+    if component == "disp_y":
+        return 500.0 * float(disp_a[1] + disp_b[1])
+    if component == "disp_z":
+        return 500.0 * float(disp_a[2] + disp_b[2])
+    if component == "plastic_strain":
+        return 0.0
+
+    sig_axial = _safe_float(line.get("axial_stress"), 0.0)
+    sig_bend_y = _safe_float(line.get("bending_stress_y"), 0.0)
+    sig_bend_z = _safe_float(line.get("bending_stress_z"), 0.0)
+    tau_y = _safe_float(line.get("shear_stress_y"), 0.0)
+    tau_z = _safe_float(line.get("shear_stress_z"), 0.0)
+    tau_t = _safe_float(line.get("torsional_stress"), 0.0)
+    if component == "von_mises_pa":
+        if "von_mises" in line:
+            return _safe_float(line.get("von_mises"), 0.0) / 1.0e6
+        sig_x = sig_axial + (sig_bend_y if flange else 0.0)
+        return math.sqrt(max(sig_x * sig_x + 3.0 * (tau_y * tau_y + tau_z * tau_z + tau_t * tau_t), 0.0)) / 1.0e6
+    if component == "stress_x_membrane_pa":
+        return (sig_axial + (sig_bend_y if flange else 0.0)) / 1.0e6
+    if component == "stress_xy_membrane_pa":
+        return tau_y / 1.0e6
+    if component == "stress_y_membrane_pa":
+        return sig_bend_z / 1.0e6
+    if component == "strain_x_membrane":
+        return _safe_float(line.get("axial_strain"), 0.0)
+    if component in {"strain_y_membrane", "strain_xy_membrane"}:
+        return 0.0
+    return _safe_float(line.get("von_mises"), 0.0) / 1.0e6
+
+
 def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, component: str = "von_mises_pa") -> tuple[
     dict[str, Any], str, bool]:
+    def _zero_scalar_like(vis: dict[str, Any]) -> tuple[Any, ...]:
+        source = vis.get("stress_pa")
+        if not source:
+            fields = vis.get("fields", {})
+            source = next(iter(fields.values()), ()) if fields else ()
+        zeros = []
+        for grid in source or ():
+            try:
+                zeros.append(np.zeros_like(np.asarray(grid, dtype=float)).tolist())
+            except Exception:
+                zeros.append(grid)
+        return tuple(zeros)
+
+    def _set_unavailable_plastic(vis: dict[str, Any]) -> None:
+        vis["stress_pa"] = _zero_scalar_like(vis)
+        vis["scalar_label"] = "equiv. engineering plastic strain unavailable [-]"
+        vis["scalar_kind"] = "raw"
+
     if display_mode == "plastic":
         visualization = dict(result.visualization or {})
         if visualization.get("plastic_strain"):
@@ -889,14 +961,19 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 "plastic_strain_label") or "equiv. engineering plastic strain [-]"
             visualization["scalar_kind"] = "raw"
             return visualization, "Engineering plastic strain", False
+        _set_unavailable_plastic(visualization)
+        return visualization, "Engineering plastic strain unavailable", False
 
     def apply_component(vis: dict[str, Any], title: str) -> tuple[dict[str, Any], str]:
         fields = vis.get("fields", {})
         disps = vis.get("displacements", {})
-        if component == "plastic_strain" and vis.get("plastic_strain"):
-            vis["stress_pa"] = vis["plastic_strain"]
-            vis["scalar_label"] = vis.get("plastic_strain_label", "equiv. engineering plastic strain [-]")
-            vis["scalar_kind"] = "raw"
+        if component == "plastic_strain":
+            if vis.get("plastic_strain"):
+                vis["stress_pa"] = vis["plastic_strain"]
+                vis["scalar_label"] = vis.get("plastic_strain_label", "equiv. engineering plastic strain [-]")
+                vis["scalar_kind"] = "raw"
+            else:
+                _set_unavailable_plastic(vis)
         elif component in fields:
             vis["stress_pa"] = fields[component]
             vis["scalar_label"] = component.replace("_", " ")
@@ -2365,6 +2442,7 @@ class RuntimeFEMWindow:
         self.component_selector = None
         self.run_button = None
         self.cancel_button = None
+        self.use_for_buckling_button = None
         self._cancel_requested = False
         self.progress_bar = None
         self.result_canvas = None
@@ -2655,6 +2733,13 @@ class RuntimeFEMWindow:
         self.run_button.pack(side=tk.LEFT)
         self.cancel_button = ttk.Button(buttons, text="Stop", command=self.cancel_run, state=tk.DISABLED)
         self.cancel_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.use_for_buckling_button = ttk.Button(
+            buttons,
+            text="Use results for prescriptive buckling",
+            command=self._send_results_to_fea_buckling,
+            state=tk.DISABLED,
+        )
+        self.use_for_buckling_button.pack(side=tk.LEFT, padx=(4, 0))
         self.progress_bar = ttk.Progressbar(buttons, mode="indeterminate", length=140)
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
         ttk.Button(buttons, text="Close", command=self.window.destroy).pack(side=tk.RIGHT)
@@ -3195,9 +3280,8 @@ class RuntimeFEMWindow:
         return self.component_labels.get(str(self.component_choice.get()), "von_mises_pa")
 
     def _set_display_modes(self, result: RuntimeFEMRunResult) -> None:
+        has_plastic = bool((result.visualization or {}).get("plastic_strain"))
         labels = {"Static displacement/stress": "static"}
-        if (result.visualization or {}).get("plastic_strain"):
-            labels["Engineering plastic strain"] = "plastic"
         for mode in _buckling_mode_shapes(result):
             mode_number = int(mode.get("mode_number", 0))
             load_factor = _safe_float(mode.get("load_factor"))
@@ -3207,6 +3291,27 @@ class RuntimeFEMWindow:
         self.result_case_choice.set("Static displacement/stress")
         if self.result_case_selector is not None:
             self.result_case_selector.configure(values=tuple(labels))
+
+        component_labels = {
+            "Stress von Mises": "von_mises_pa",
+            "Displacement Magnitude": "disp_mag",
+            "Displacement X": "disp_x",
+            "Displacement Y": "disp_y",
+            "Displacement Z": "disp_z",
+            "Stress X (membrane)": "stress_x_membrane_pa",
+            "Stress Y (membrane)": "stress_y_membrane_pa",
+            "Stress XY (membrane)": "stress_xy_membrane_pa",
+            "Strain X (membrane)": "strain_x_membrane",
+            "Strain Y (membrane)": "strain_y_membrane",
+            "Strain XY (membrane)": "strain_xy_membrane",
+        }
+        if has_plastic:
+            component_labels["Equivalent Plastic Strain"] = "plastic_strain"
+        self.component_labels = component_labels
+        if self.component_choice.get() not in component_labels:
+            self.component_choice.set("Stress von Mises")
+        if self.component_selector is not None:
+            self.component_selector.configure(values=tuple(component_labels.keys()))
 
     def _get_shell_normal(self, p: np.ndarray, is_cylinder: bool) -> np.ndarray:
         if is_cylinder:
@@ -3442,6 +3547,18 @@ class RuntimeFEMWindow:
                 colorbar_label = str(visualization.get("scalar_label", component))
 
         all_vals = _all_grid_values(color_grid)
+        show_stiffeners_for_range = self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis", None) is not None else True
+        show_girders_for_range = self.show_girder_vis.get() if getattr(self, "show_girder_vis", None) is not None else True
+        if member_alpha > 0.0:
+            for line in visualization.get("member_lines") or ():
+                role = str(line.get("role", "member")).lower()
+                if role == "stiffener" and not show_stiffeners_for_range:
+                    continue
+                if role == "girder" and not show_girders_for_range:
+                    continue
+                all_vals.append(_member_component_value(line, component, is_mode=is_mode, flange=False))
+                if _safe_float(line.get("flange_width"), 0.0) > 0.0:
+                    all_vals.append(_member_component_value(line, component, is_mode=is_mode, flange=True))
         if all_vals:
             vmin = min(all_vals)
             vmax = max(all_vals)
@@ -3594,23 +3711,7 @@ class RuntimeFEMWindow:
                 q3 = Point3D(pBk1[0], pBk1[1], pBk1[2])
                 q4 = Point3D(pAk1[0], pAk1[1], pAk1[2])
 
-                if is_mode:
-                    baseA = np.asarray(points[0])
-                    dispA = np.asarray(displaced[0]) - baseA
-                    baseB = np.asarray(points[1])
-                    dispB = np.asarray(displaced[1]) - baseB
-                    val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
-                else:
-                    s_val = centroids[k]
-                    sig_axial = line.get("axial_stress", 0.0)
-                    sig_bend_y = line.get("bending_stress_y", 0.0)
-                    sig_x = sig_axial + (2.0 * s_val - 1.0) * sig_bend_y
-
-                    tau_y = line.get("shear_stress_y", 0.0)
-                    tau_z = line.get("shear_stress_z", 0.0)
-                    tau_t = line.get("torsional_stress", 0.0)
-
-                    val = np.sqrt(sig_x ** 2 + 3.0 * (tau_y ** 2 + tau_z ** 2 + tau_t ** 2)) / 1.0e6
+                val = _member_component_value(line, component, is_mode=is_mode, flange=False)
 
                 color = _interpolate_thickness_color(val, vmin, vmax)
                 canvas.add_polygon(
@@ -3639,22 +3740,7 @@ class RuntimeFEMWindow:
                 qf3 = Point3D(fB2[0], fB2[1], fB2[2])
                 qf4 = Point3D(fA2[0], fA2[1], fA2[2])
 
-                if is_mode:
-                    baseA = np.asarray(points[0])
-                    dispA = np.asarray(displaced[0]) - baseA
-                    baseB = np.asarray(points[1])
-                    dispB = np.asarray(displaced[1]) - baseB
-                    val = 0.5 * (np.linalg.norm(dispA) + np.linalg.norm(dispB))
-                else:
-                    sig_axial = line.get("axial_stress", 0.0)
-                    sig_bend_y = line.get("bending_stress_y", 0.0)
-                    sig_x = sig_axial + sig_bend_y
-
-                    tau_y = line.get("shear_stress_y", 0.0)
-                    tau_z = line.get("shear_stress_z", 0.0)
-                    tau_t = line.get("torsional_stress", 0.0)
-
-                    val = np.sqrt(sig_x ** 2 + 3.0 * (tau_y ** 2 + tau_z ** 2 + tau_t ** 2)) / 1.0e6
+                val = _member_component_value(line, component, is_mode=is_mode, flange=True)
 
                 color = _interpolate_thickness_color(val, vmin, vmax)
                 canvas.add_polygon(
@@ -3833,11 +3919,38 @@ class RuntimeFEMWindow:
             self.run_button.configure(state=tk.DISABLED if is_running else tk.NORMAL)
         if self.cancel_button is not None:
             self.cancel_button.configure(state=tk.NORMAL if is_running else tk.DISABLED)
+        self._update_buckling_handoff_button(is_running=is_running)
         if self.progress_bar is not None:
             if is_running:
                 self.progress_bar.start(12)
             else:
                 self.progress_bar.stop()
+
+    def _has_runtime_fea_import_payload(self) -> bool:
+        visualization = (self.current_result.visualization if self.current_result is not None else {}) or {}
+        return isinstance(visualization.get("fea_result_import"), dict)
+
+    def _update_buckling_handoff_button(self, is_running: bool = False) -> None:
+        if self.use_for_buckling_button is None:
+            return
+        enabled = (not is_running) and self.current_result is not None and self._has_runtime_fea_import_payload()
+        self.use_for_buckling_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+
+    def _send_results_to_fea_buckling(self) -> None:
+        if self.current_result is None or not self._has_runtime_fea_import_payload():
+            messagebox.showinfo("FEA result buckling", "No importable FEM result is available yet. Run FEM first.")
+            return
+        importer = getattr(self.app, "import_runtime_fem_buckling_result", None)
+        if importer is None:
+            messagebox.showerror("FEA result buckling", "The main application cannot receive runtime FEM results.")
+            return
+        try:
+            imported = bool(importer(self.current_result))
+        except Exception as error:
+            messagebox.showerror("FEA result buckling", str(error))
+            return
+        if imported:
+            self._write_status(format_runtime_fem_result(self.current_result) + "\n\nReturned FEM result to FEA-result buckling mode.")
 
     def _options(self) -> RuntimeFEMOptions:
         return RuntimeFEMOptions(
@@ -4194,6 +4307,7 @@ class RuntimeFEMWindow:
         self._set_display_modes(result)
         self._write_status(format_runtime_fem_result(result))
         self._refresh_figure()
+        self._update_buckling_handoff_button(is_running=False)
 
     def _set_custom_load_selection_active(self, active: bool, refresh: bool = True) -> None:
         self._custom_load_selection_active = bool(active)
