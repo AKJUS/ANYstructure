@@ -44,6 +44,7 @@ try:
     import anystruct.solid_export as solid_export
     import anystruct.fe_plate_fields as fe_plate_fields
     import anystruct.fe_runtime_solver as fe_runtime_solver
+    import anystruct.representation_geometry as representation_geometry
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -68,6 +69,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.solid_export as solid_export
     import ANYstructure.anystruct.fe_plate_fields as fe_plate_fields
     import ANYstructure.anystruct.fe_runtime_solver as fe_runtime_solver
+    import ANYstructure.anystruct.representation_geometry as representation_geometry
 
 
 @dataclass(frozen=True)
@@ -9085,40 +9087,13 @@ class Application():
 
     @staticmethod
     def _positions_from_length_and_spacing(length, spacing, include_ends=True, max_count=80):
-        """Create member positions with even end bays when boundary members are shown."""
-        try:
-            length = float(length)
-            spacing = float(spacing)
-        except Exception:
-            return [0.0]
-        if length <= 0.0:
-            return [0.0]
-        if spacing <= 1e-9:
-            return [0.0, length] if include_ends else [length / 2.0]
-
-        tol = 1e-9
-        if include_ends:
-            interval_count = max(1, int(math.ceil(length / spacing)))
-            interval_count = min(interval_count, max(1, int(max_count)))
-            return [float(length) * idx / interval_count for idx in range(interval_count + 1)]
-
-        positions = [0.0] if include_ends else []
-        next_pos = spacing
-        count_guard = 0
-        while next_pos < length - tol and count_guard < max_count:
-            positions.append(float(next_pos))
-            next_pos += spacing
-            count_guard += 1
-
-        if not positions:
-            positions = [length / 2.0]
-
-        clean_positions = []
-        for pos in sorted(float(p) for p in positions):
-            pos = min(max(pos, 0.0), float(length))
-            if not clean_positions or abs(pos - clean_positions[-1]) > max(10.0 * tol, 1.0e-9):
-                clean_positions.append(pos)
-        return clean_positions or [length / 2.0]
+        """Create repeated member positions with symmetric end compensation."""
+        return list(representation_geometry.centered_member_positions(
+            length,
+            spacing,
+            fallback_midpoint=True,
+            max_count=max_count,
+        ))
 
     @staticmethod
     def _support_positions_from_length_and_span(length, span, max_count=80):
@@ -9129,55 +9104,17 @@ class Application():
         not an exact multiple of the bay length, the full bays are centered so
         the cut length is shared symmetrically at both ends.
         """
-        try:
-            length = float(length)
-            span = float(span)
-        except Exception:
-            return [0.0]
-        if length <= 0.0:
-            return [0.0]
-        if span <= 1.0e-9:
-            return [0.0, length]
-
-        full_span_count = int(math.floor(length / span))
-        full_span_count = min(full_span_count, max(0, int(max_count)))
-        if full_span_count <= 0:
-            return []
-
-        offset = (length - full_span_count * span) / 2.0
-        positions = [offset + span * idx for idx in range(full_span_count + 1)]
-        if offset <= 1.0e-9:
-            positions[0] = 0.0
-        if abs(positions[-1] - length) <= 1.0e-9:
-            positions[-1] = length
-        return positions
+        return list(representation_geometry.centered_member_positions(
+            length,
+            span,
+            fallback_midpoint=False,
+            max_count=max_count,
+        ))
 
     @staticmethod
     def _bay_ranges_from_support_positions(length, supports, support_gap=0.0):
         """Return member segment ranges split by internal support/girder lines."""
-        try:
-            length = float(length)
-            support_gap = max(float(support_gap), 0.0)
-        except Exception:
-            return []
-        if length <= 0.0:
-            return []
-
-        tol = 1.0e-9
-        internal_supports = sorted(
-            pos for pos in (float(value) for value in supports)
-            if tol < pos < length - tol
-        )
-        breakpoints = [0.0] + internal_supports + [length]
-        ranges = []
-        for x0, x1 in zip(breakpoints[:-1], breakpoints[1:]):
-            left_gap = support_gap / 2.0 if any(abs(x0 - support) <= tol for support in internal_supports) else 0.0
-            right_gap = support_gap / 2.0 if any(abs(x1 - support) <= tol for support in internal_supports) else 0.0
-            bay_x0 = max(x0 + left_gap, 0.0)
-            bay_x1 = min(x1 - right_gap, length)
-            if bay_x1 > bay_x0:
-                ranges.append((bay_x0, bay_x1))
-        return ranges
+        return list(representation_geometry.bay_ranges_from_support_positions(length, supports, support_gap))
 
     @staticmethod
     def _ring_member_half_width(dims):
@@ -9993,10 +9930,21 @@ class Application():
             radial_extension = max(radial_extension, long_dims['web_h'] + long_dims['flange_thk'])
             if is_panel_preview:
                 arc_length = abs(theta_end - theta_start) * radius
-                num_stf = max(2, min(24, int(round(arc_length / spacing)) + 1))
-                stiffener_angles = np.linspace(theta_start, theta_end, num_stf)
+                direction = 1.0 if theta_end >= theta_start else -1.0
+                stiffener_angles = [
+                    theta_start + direction * arc_pos / max(radius, 1e-9)
+                    for arc_pos in representation_geometry.centered_member_positions(
+                        arc_length,
+                        spacing,
+                        fallback_midpoint=True,
+                        max_count=24,
+                    )
+                ]
             else:
-                num_stf = max(4, min(72, int(round(2.0 * math.pi * radius / spacing))))
+                num_stf = max(4, min(72, representation_geometry.closed_loop_member_count(
+                    2.0 * math.pi * radius,
+                    spacing,
+                )))
                 stiffener_angles = [2.0 * math.pi * idx / num_stf for idx in range(num_stf)]
             for ang in stiffener_angles:
                 self._add_cylinder_longitudinal_stiffener_3d(

@@ -2,6 +2,7 @@ from pathlib import Path
 import math
 import re
 from types import SimpleNamespace
+from anystruct import fe_solver, representation_geometry
 from anystruct.main_application import Application
 
 
@@ -827,28 +828,37 @@ def test_3d_flat_section_geometry_uses_exact_web_and_flange_dimensions():
     assert abs((max(flange_ys) - min(flange_ys)) - 0.18) < 1e-12
 
 
-def test_3d_member_positions_keep_exact_spacing_and_end_boundary():
+def test_3d_member_positions_keep_exact_spacing_and_symmetric_remainder():
     positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=True)
-    assert positions == [0.0, 2.5, 5.0, 7.5, 10.0]
+    assert positions == [0.5, 3.5, 6.5, 9.5]
     gaps = [round(positions[idx + 1] - positions[idx], 12) for idx in range(len(positions) - 1)]
-    assert gaps == [2.5, 2.5, 2.5, 2.5]
-    assert max(gaps) <= 3.0
+    assert gaps == [3.0, 3.0, 3.0]
+    assert positions[0] == 10.0 - positions[-1]
 
     internal_positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=False)
-    assert internal_positions == [3.0, 6.0, 9.0]
+    assert internal_positions == positions
 
     regular_end_positions = Application._positions_from_length_and_spacing(12.0, 3.0, include_ends=True)
-    assert regular_end_positions == [0.0, 3.0, 6.0, 9.0, 12.0]
+    assert regular_end_positions == [3.0, 6.0, 9.0]
 
     dense_end_positions = Application._positions_from_length_and_spacing(10.0, 0.75, include_ends=True)
     dense_gaps = [dense_end_positions[idx + 1] - dense_end_positions[idx]
                   for idx in range(len(dense_end_positions) - 1)]
     assert round(max(dense_gaps) - min(dense_gaps), 12) == 0.0
-    assert max(dense_gaps) <= 0.75
+    assert max(dense_gaps) == 0.75
+    assert dense_end_positions[0] == 10.0 - dense_end_positions[-1]
+
+
+def test_shared_representation_positions_are_used_by_preview_and_fe_solver():
+    expected = list(representation_geometry.centered_member_positions(10.0, 0.75, fallback_midpoint=True))
+
+    assert Application._positions_from_length_and_spacing(10.0, 0.75, include_ends=True) == expected
+    assert list(fe_solver._centered_member_positions(10.0, 0.75, fallback_midpoint=True)) == expected
+    assert expected[0] == 10.0 - expected[-1]
 
 
 def test_panel_length_expansion_keeps_stiffener_span_as_girder_bay():
-    assert Application._support_positions_from_length_and_span(12.0, 4.0) == [0.0, 4.0, 8.0, 12.0]
+    assert Application._support_positions_from_length_and_span(12.0, 4.0) == [4.0, 8.0]
     assert Application._support_positions_from_length_and_span(10.0, 4.0) == [1.0, 5.0, 9.0]
     assert Application._support_positions_from_length_and_span(3.0, 4.0) == []
     assert Application._bay_ranges_from_support_positions(10.0, [1.0, 5.0, 9.0]) == [
@@ -870,8 +880,10 @@ def test_panel_length_expansion_keeps_stiffener_span_as_girder_bay():
 
     ifc_source = Path(__file__).resolve().parents[1] / "anystruct" / "ifc_model_export.py"
     ifc_text = ifc_source.read_text(encoding="utf-8")
+    assert "import anystruct.representation_geometry as representation_geometry" in main_text
+    assert "from anystruct import representation_geometry" in ifc_text
     assert "def _support_positions_from_length_and_span(length: float, span: float, max_count: int = 80)" in ifc_text
-    assert "offset = (length - full_span_count * span) / 2.0" in ifc_text
+    assert "representation_geometry.centered_member_positions(" in ifc_text
     assert "def _bay_ranges_from_support_positions(" in ifc_text
     flat_export_block = ifc_text[
         ifc_text.index("def _add_flat_structure"):

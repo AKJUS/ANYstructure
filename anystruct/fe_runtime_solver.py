@@ -38,6 +38,11 @@ except ModuleNotFoundError:
     from ANYstructure.anystruct import fe_solver
 
 try:
+    from anystruct import representation_geometry
+except ModuleNotFoundError:
+    from ANYstructure.anystruct import representation_geometry
+
+try:
     from anystruct import tkinter_3d_canvas_thickness_v6 as _tk3d_canvas_module
 except ModuleNotFoundError:
     from ANYstructure.anystruct import tkinter_3d_canvas_thickness_v6 as _tk3d_canvas_module
@@ -1238,7 +1243,7 @@ def _plot_base_geometry_surface(
         if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
             spacing = _safe_float(geometry.get("stiffener_spacing_m"), 0.0)
             if spacing > 0.0:
-                count = max(1, int(round(2.0 * math.pi * radius / spacing)))
+                count = max(1, representation_geometry.closed_loop_member_count(2.0 * math.pi * radius, spacing))
                 section = geometry.get("stiffener_section") or {}
                 web_height = max(_safe_float(section.get("web_height"), 0.1), 0.0)
                 member_radius = max(radius - 0.5 * web_height, 1.0e-6)
@@ -1261,11 +1266,12 @@ def _plot_base_geometry_surface(
                 web_height = max(_safe_float(section.get("web_height"), 0.12), 0.0)
                 member_radius = max(radius - 0.5 * web_height, 1.0e-6)
                 ring_theta = np.linspace(0.0, 2.0 * math.pi, 97)
-                count = max(1, int(math.floor(length / spacing)) + 1)
-                for index in range(count):
-                    z_position = -0.5 * length + index * spacing
-                    if z_position > 0.5 * length + 1.0e-9:
-                        break
+                for station in representation_geometry.centered_member_positions(
+                        length,
+                        spacing,
+                        fallback_midpoint=True,
+                ):
+                    z_position = station - 0.5 * length
                     axis.plot(
                         member_radius * np.cos(ring_theta),
                         member_radius * np.sin(ring_theta),
@@ -1308,11 +1314,11 @@ def _plot_base_geometry_surface(
             section = geometry.get("stiffener_section") or {}
             web_height = max(_safe_float(section.get("web_height"), 0.1), 0.0)
             if spacing > 0.0:
-                count = max(1, int(math.floor(width / spacing)) + 1)
-                for index in range(count):
-                    y_position = index * spacing
-                    if y_position > width + 1.0e-9:
-                        break
+                for y_position in representation_geometry.centered_member_positions(
+                        width,
+                        spacing,
+                        fallback_midpoint=True,
+                ):
                     axis.plot(
                         [0.0, length],
                         [y_position, y_position],
@@ -1326,15 +1332,20 @@ def _plot_base_geometry_surface(
         if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
             section = geometry.get("girder_section") or {}
             web_height = max(_safe_float(section.get("web_height"), 0.15), 0.0)
-            x_position = 0.5 * length
-            axis.plot(
-                [x_position, x_position],
-                [0.0, width],
-                [web_height, web_height],
-                color="#7f1d1d",
-                linewidth=2.0,
-                alpha=member_alpha,
-            )
+            spacing = _safe_float(geometry.get("girder_spacing_m"), 0.0)
+            for x_position in representation_geometry.centered_member_positions(
+                    length,
+                    spacing,
+                    fallback_midpoint=True,
+            ):
+                axis.plot(
+                    [x_position, x_position],
+                    [0.0, width],
+                    [web_height, web_height],
+                    color="#7f1d1d",
+                    linewidth=2.0,
+                    alpha=member_alpha,
+                )
             drew_anything = True
 
         axis.set_xlabel("length [m]")
@@ -3462,7 +3473,10 @@ class RuntimeFEMWindow:
             if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
                 stf_spacing = _safe_float(geometry.get("stiffener_spacing_m"))
                 if stf_spacing > 0.0:
-                    num_longs = int(2.0 * math.pi * radius / stf_spacing)
+                    num_longs = max(1, representation_geometry.closed_loop_member_count(
+                        2.0 * math.pi * radius,
+                        stf_spacing,
+                    ))
                     stf_sec = geometry.get("stiffener_section") or {}
                     hw = _safe_float(stf_sec.get("web_height") or stf_sec.get("web_h") or 0.1)
                     tw = _safe_float(stf_sec.get("web_thickness") or stf_sec.get("web_t") or 0.01)
@@ -3493,22 +3507,24 @@ class RuntimeFEMWindow:
                 gb = _safe_float(gir_sec.get("flange_width") or gir_sec.get("flange_w") or 0.08)
                 gtf = _safe_float(gir_sec.get("flange_thickness") or gir_sec.get("flange_t") or 0.015)
                 if gir_spacing > 0.0:
-                    num_girders = int(length / gir_spacing) + 1
-                    for i in range(num_girders):
-                        z_pos = -0.5 * length + i * gir_spacing
-                        if abs(z_pos) <= 0.5 * length + 1.0e-3:
-                            canvas.add_ring_stiffener(
-                                radius=radius,
-                                z_position=z_pos,
-                                web_height=ghw,
-                                web_thickness=gtw,
-                                flange_width=gb,
-                                flange_thickness=gtf,
-                                color=_blend_hex_color("#ffa0a0", member_alpha),
-                                outline=_blend_hex_color("#804040", member_alpha),
-                                segments=32,
-                                inside=True,
-                            )
+                    for station in representation_geometry.centered_member_positions(
+                            length,
+                            gir_spacing,
+                            fallback_midpoint=True,
+                    ):
+                        z_pos = station - 0.5 * length
+                        canvas.add_ring_stiffener(
+                            radius=radius,
+                            z_position=z_pos,
+                            web_height=ghw,
+                            web_thickness=gtw,
+                            flange_width=gb,
+                            flange_thickness=gtf,
+                            color=_blend_hex_color("#ffa0a0", member_alpha),
+                            outline=_blend_hex_color("#804040", member_alpha),
+                            segments=32,
+                            inside=True,
+                        )
         else:
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
@@ -3531,13 +3547,11 @@ class RuntimeFEMWindow:
                 hw = _safe_float(stf_sec.get("web_height") or stf_sec.get("web_h") or 0.1)
                 b = _safe_float(stf_sec.get("flange_width") or stf_sec.get("flange_w") or 0.0)
                 if spacing > 0.0:
-                    num_stiffeners = int(width / spacing) + 1
-                    valid_indices = []
-                    for i in range(num_stiffeners):
-                        y_pos = i * spacing
-                        if y_pos <= width + 1.0e-3:
-                            valid_indices.append((i, y_pos))
-                    for idx, (i, y_pos) in enumerate(valid_indices):
+                    for y_pos in representation_geometry.centered_member_positions(
+                            width,
+                            spacing,
+                            fallback_midpoint=True,
+                    ):
                         spans = [(0.0, 0.5 * length), (0.5 * length, length)]
                         for stf_start, stf_end in spans:
                             canvas.add_polygon(
@@ -3571,34 +3585,39 @@ class RuntimeFEMWindow:
                 gir_sec = geometry.get("girder_section") or {}
                 ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.15)
                 gb = _safe_float(gir_sec.get("flange_width") or gir_sec.get("flange_w") or 0.08)
-                x_mid = 0.5 * length
-                canvas.add_polygon(
-                    [
-                        Point3D(x_mid, 0.0, 0.0),
-                        Point3D(x_mid, width, 0.0),
-                        Point3D(x_mid, width, ghw),
-                        Point3D(x_mid, 0.0, ghw)
-                    ],
-                    color="#fca5a5",
-                    outline="#991b1b",
-                    width=2,
-                    layer=12,
-                    stipple=member_stipple
-                )
-                if gb > 0.0:
+                spacing = _safe_float(geometry.get("girder_spacing_m"), 0.0)
+                for x_mid in representation_geometry.centered_member_positions(
+                        length,
+                        spacing,
+                        fallback_midpoint=True,
+                ):
                     canvas.add_polygon(
                         [
-                            Point3D(x_mid - 0.5 * gb, 0.0, ghw),
-                            Point3D(x_mid - 0.5 * gb, width, ghw),
-                            Point3D(x_mid + 0.5 * gb, width, ghw),
-                            Point3D(x_mid + 0.5 * gb, 0.0, ghw)
+                            Point3D(x_mid, 0.0, 0.0),
+                            Point3D(x_mid, width, 0.0),
+                            Point3D(x_mid, width, ghw),
+                            Point3D(x_mid, 0.0, ghw)
                         ],
-                        color="#b91c1c",
-                        outline="#7f1d1d",
+                        color="#fca5a5",
+                        outline="#991b1b",
                         width=2,
-                        layer=13,
+                        layer=12,
                         stipple=member_stipple
                     )
+                    if gb > 0.0:
+                        canvas.add_polygon(
+                            [
+                                Point3D(x_mid - 0.5 * gb, 0.0, ghw),
+                                Point3D(x_mid - 0.5 * gb, width, ghw),
+                                Point3D(x_mid + 0.5 * gb, width, ghw),
+                                Point3D(x_mid + 0.5 * gb, 0.0, ghw)
+                            ],
+                            color="#b91c1c",
+                            outline="#7f1d1d",
+                            width=2,
+                            layer=13,
+                            stipple=member_stipple
+                        )
         if hasattr(self, "_custom_load_patches"):
             self._draw_custom_load_patch_outlines(canvas)
         if fit_view:

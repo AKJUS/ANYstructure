@@ -1852,6 +1852,34 @@ def test_cylinder_mesh_fidelity_refines_real_mesh_below_member_spacing_cap():
     assert len(coarse["plot_grid"][0]) < len(medium["plot_grid"][0]) < len(fine["plot_grid"][0])
 
 
+def test_cylinder_girder_stations_center_non_multiple_length():
+    generated = fe_solver.build_generated_geometry(
+        {
+            "geometry": "cylinder",
+            "radius_m": 1.0,
+            "length_m": 10.0,
+            "thickness_m": 0.012,
+            "has_stiffener": False,
+            "has_girder": True,
+            "girder_spacing_m": 4.0,
+        },
+        fe_solver.LightweightFEMConfig(mesh_size_m=5.0, include_stiffeners=False, include_girders=True),
+    )
+    coords = {int(node["id"]): tuple(node["coords"]) for node in generated["nodes"]}
+    ring_z_values = sorted({
+        round(coords[int(node_id)][2], 6)
+        for beam in generated["beams"]
+        if beam["role"] == "girder"
+        for node_id in beam["node_ids"]
+    })
+
+    assert ring_z_values == [1.0, 5.0, 9.0]
+    assert all(
+        left + right == pytest.approx(10.0)
+        for left, right in zip(ring_z_values, reversed(ring_z_values))
+    )
+
+
 def test_cylinder_mesh_size_is_not_capped_by_disabled_members():
     requested = 3.0
     radius = 2.0

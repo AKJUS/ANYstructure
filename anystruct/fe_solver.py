@@ -17,6 +17,11 @@ import re
 import numpy as np
 
 try:
+    from anystruct import representation_geometry as _representation_geometry
+except ModuleNotFoundError:
+    from ANYstructure.anystruct import representation_geometry as _representation_geometry
+
+try:
     from anystruct import fe_solver_backend as _full_backend
     from anystruct.fe_solver_backend.assembly import compute_stresses as _backend_compute_stresses
     from anystruct.fe_solver_backend.assembly import solve_linear as _backend_solve_linear
@@ -341,11 +346,7 @@ def _axis_breaks(
 
 
 def _positive_spacing(value: object) -> float:
-    try:
-        spacing = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return spacing if spacing > 1.0e-9 else 0.0
+    return _representation_geometry.positive_spacing(value)
 
 
 def _member_positions(total_length: float, spacing: float, fallback_midpoint: bool = True) -> tuple[float, ...]:
@@ -366,20 +367,11 @@ def _member_positions(total_length: float, spacing: float, fallback_midpoint: bo
 def _centered_member_positions(total_length: float, spacing: float, fallback_midpoint: bool = True) -> tuple[float, ...]:
     """Return member stations with any cut length shared symmetrically."""
 
-    total_length = max(float(total_length), 1.0e-9)
-    spacing = _positive_spacing(spacing)
-    tol = max(total_length * 1.0e-9, 1.0e-9)
-    if spacing <= 0.0:
-        return (0.5 * total_length,) if fallback_midpoint else ()
-    full_count = int(math.floor(total_length / spacing))
-    if full_count <= 0:
-        return (0.5 * total_length,) if fallback_midpoint else ()
-    offset = 0.5 * (total_length - full_count * spacing)
-    if offset <= tol:
-        positions = [spacing * idx for idx in range(1, full_count)]
-    else:
-        positions = [offset + spacing * idx for idx in range(full_count + 1)]
-    return tuple(position for position in positions if tol < position < total_length - tol)
+    return _representation_geometry.centered_member_positions(
+        total_length,
+        spacing,
+        fallback_midpoint=fallback_midpoint,
+    )
 
 
 def _index_of_break(breaks: list[float], value: float) -> int:
@@ -387,14 +379,7 @@ def _index_of_break(breaks: list[float], value: float) -> int:
 
 
 def _member_count_from_spacing(total_length: float, spacing: float) -> int:
-    try:
-        total_length = float(total_length)
-        spacing = float(spacing)
-    except (TypeError, ValueError):
-        return 0
-    if total_length <= 0.0 or spacing <= 1.0e-9:
-        return 0
-    return max(int(round(total_length / spacing)), 1)
+    return _representation_geometry.closed_loop_member_count(total_length, spacing)
 
 
 def _multiple_at_least(value: int, factor: int) -> int:
@@ -1822,10 +1807,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     girder_positions = []
     if config.include_girders and geometry.get("has_girder"):
         if girder_spacing > 1.0e-9:
-            pos = girder_spacing
-            while pos < length - 1.0e-9 and len(girder_positions) < 100:
-                girder_positions.append(pos)
-                pos += girder_spacing
+            girder_positions = list(_centered_member_positions(length, girder_spacing, fallback_midpoint=True))
         else:
             girder_positions = [length / 2.0]
     axial_mandatory_breaks = tuple(girder_positions) + _custom_patch_axis_breaks(config, "a", length)
