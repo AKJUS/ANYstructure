@@ -1,307 +1,154 @@
-"""
-Modular FE solver package for ANYstructure-style stiffened panels.
+﻿"""Runtime-only FE solver backend embedded in ANYstructure.
 
-Production solver path
-----------------------
-Use this package, not the legacy top-level ``fea_solver.py`` prototype.  The
-package is intentionally split by responsibility:
+This package intentionally exposes only solver runtime APIs required by
+``anystruct.fe_solver``. Non-runtime helpers belong in ANYintelligent and are not shipped in this embedded backend.
 
-- ``fe_core``: model, mesh, node, material and DOF bookkeeping
-- ``elements``: shell, beam and MPC/coupling element formulations
-- ``boundary``: supports, nodal loads, pressure loads and load cases
-- ``matrix_assembly``: explicit K/M/F assembly APIs
-- ``buckling``: geometric stiffness and linear eigenvalue buckling helpers
-- ``nonlinear``: load stepping with tangent-stability limit-point detection
-- ``dynamics``: linear Newmark transient response with pressure patches
-- ``anystructure_fem_mode``: full generated-geometry FEM mode workflow
-- ``assembly``: constraint transformation, nullspace solve and solver routines
-- ``mesh_gen``: limited ANYstructure-oriented mesh generation
-- ``results``: result objects, stress extraction and post-processing helpers
-- ``validation``: verification utilities and benchmark helpers
-- ``reference_cases``: local and upstream CalculiX reference case discovery
-- ``shell_benchmarks``: internal shell benchmark runners
-
-Architecture invariants
------------------------
-- Six DOFs per node: ux, uy, uz, rx, ry, rz.
-- SI units internally: metres, Newtons, Pascals.
-- Beam-shell eccentricity is handled with MPC/constraint transformation, not
-  shared-node eccentricity hacks and not penalty springs.
-- Boundary conditions and MPCs are eliminated through the same transformation
-  machinery before solving.
-- Free-free static problems use explicit rigid-body/nullspace handling instead
-  of artificial support stiffness.
-- Stiffness, mass and load assembly must remain separable for modal and
-  buckling work.
-- Linear buckling solves use ``K phi = lambda KG phi`` with positive ``KG`` for
-  destabilizing reference compression.
-- Linear transient dynamics uses separable K/M/F assembly and the same
-  constraint transformation as static analysis.
-- Nonlinear stability checks stop near the first tangent-stiffness limit point;
-  full post-buckling continuation is out of scope.
+Imports are lazy so opening ANYstructure does not import every solver module.
 """
 
-from .fe_core import DOFManager, FEMesh, FEModel, Material, Node
-from .elements import BeamElement, CoupledBeamShellElement, QuadraticBeamElement, ShellElement, create_element
-from .boundary import (
-    BoundaryCondition,
-    FixedSupport,
-    InPlaneLoad,
-    LoadCase,
-    LoadCombination,
-    PinnedSupport,
-    RollerSupport,
-    SymmetryBC,
-)
-from .cylinder_benchmarks import (
-    CylinderBenchmarkConfig,
-    CylinderBenchmarkResult,
-    CylinderNominalStress,
-    CylinderStressStatistics,
-    build_cylindrical_shell_benchmark_model,
-    nominal_cylinder_membrane_stress,
-    run_cylindrical_shell_benchmark,
-)
-from .buckling import BucklingMode, BucklingResult, solve_eigenvalue_buckling
-from .nonlinear import NonlinearLimitPointResult, NonlinearLoadStep, solve_nonlinear_load_stepping
-from .dynamics import (
-    PressurePatch,
-    TransientConfig,
-    TransientResult,
-    assemble_pressure_patch_load_vector,
-    solve_transient_newmark,
-)
-from .material_curves import (
-    DNVC208MaterialCurve,
-    FiberSectionPlasticityConfig,
-    curve_from_properties,
-    dnv_c208_steel_curve,
-)
-from .imperfections import (
-    CompositeImperfection,
-    EigenmodeImperfection,
-    ImperfectionCalibrationResult,
-    ImperfectionField,
-    StandardImperfection,
-    apply_imperfection,
-    calibrate_imperfection_amplitude,
-    imperfection_from_buckling_mode,
-    standard_flange_twist,
-    standard_member_bow,
-    standard_plate_mode,
-)
-from .nonlinear_static import (
-    DisplacementControl,
-    NonlinearLoadProgram,
-    NonlinearLoadStage,
-    NonlinearStaticResult,
-    NonlinearStaticStep,
-    solve_static_nonlinear,
-)
-from .anystructure_fem_mode import (
-    AnyStructureFEMConfig,
-    AnyStructureFEMResult,
-    build_fe_model_from_generated_geometry,
-    build_symmetric_load_case,
-    idealize_generated_geometry_members,
-    recover_prestress_from_static_result,
-    run_anystructure_fem_mode,
-)
-from .matrix_assembly import (
-    AssemblyError,
-    assemble_geometric_stiffness_matrix,
-    assemble_load_vector,
-    assemble_mass_matrix,
-    assemble_stiffness_matrix,
-    assemble_system,
-)
-from .assembly import (
-    build_constraint_transformation,
-    reconstruct_full_solution,
-    solve_linear,
-    solve_nonlinear,
-)
-from .mesh_gen import (
-    MeshConfig,
-    PanelGeometry,
-    StiffenerCrossSection,
-    generate_beam_mesh,
-    generate_simple_panel_mesh,
-    generate_stiffened_panel_mesh,
-    verify_mesh_quality,
-)
-from .results import (
-    DisplacementResult,
-    FEResult,
-    StressResult,
-    compare_with_analytical,
-    create_fe_result,
-    post_process_results,
-)
-from .validation import (
-    LoadResultant,
-    ShellPatchSummary,
-    dof_order_signature,
-    load_case_resultant,
-    load_vector_resultant,
-    max_abs,
-    mpc_constraint_residuals,
-    nullspace_diagnostics,
-    shell_element_patch_summary,
-)
-from .reference_cases import (
-    CalculixReferenceCase,
-    ShellConvergencePoint,
-    ShellConvergenceTable,
-    classify_reference_case_from_nodes,
-    discover_calculix_reference_cases,
-    discover_calculix_shell_convergence_tables,
-    parse_calculix_shell_convergence_file,
-    summarize_inp_geometry,
-    upstream_calculix_reference_manifest,
-    upstream_calculix_shell_reference_values,
-)
-from .shell_benchmarks import (
-    ShellBenchmarkComparison,
-    ShellBenchmarkComparisonPoint,
-    ShellBenchmarkResult,
-    compare_shell_benchmark_to_reference,
-    run_simple_supported_shell_benchmark,
-    run_simple_supported_shell_convergence,
-    shell_benchmark_results_to_convergence_table,
-    write_internal_shell_convergence_table,
-)
+from __future__ import annotations
 
-__version__ = "0.1.0"
+from importlib import import_module
+from typing import Any, Dict, Tuple
 
-__all__ = [
-    # Core classes
-    "DOFManager",
-    "FEMesh",
-    "FEModel",
-    "Material",
-    "Node",
-    # Elements
-    "BeamElement",
-    "CoupledBeamShellElement",
-    "QuadraticBeamElement",
-    "ShellElement",
-    "create_element",
+__version__ = "0.1.0-anystructure-runtime"
+
+_EXPORTS: Dict[str, Tuple[str, str]] = {
+    # Core model and elements
+    "DOFManager": ("fe_core", "DOFManager"),
+    "FEMesh": ("fe_core", "FEMesh"),
+    "FEModel": ("fe_core", "FEModel"),
+    "Material": ("fe_core", "Material"),
+    "Node": ("fe_core", "Node"),
+    "BeamElement": ("elements", "BeamElement"),
+    "CoupledBeamShellElement": ("elements", "CoupledBeamShellElement"),
+    "QuadraticBeamElement": ("elements", "QuadraticBeamElement"),
+    "ShellElement": ("elements", "ShellElement"),
+    "create_element": ("elements", "create_element"),
     # Boundary and loads
-    "BoundaryCondition",
-    "FixedSupport",
-    "InPlaneLoad",
-    "LoadCase",
-    "LoadCombination",
-    "PinnedSupport",
-    "RollerSupport",
-    "SymmetryBC",
-    # Cylinder benchmarks
-    "CylinderBenchmarkConfig",
-    "CylinderBenchmarkResult",
-    "CylinderNominalStress",
-    "CylinderStressStatistics",
-    "build_cylindrical_shell_benchmark_model",
-    "nominal_cylinder_membrane_stress",
-    "run_cylindrical_shell_benchmark",
-    # Buckling
-    "BucklingMode",
-    "BucklingResult",
-    "solve_eigenvalue_buckling",
-    # Nonlinear stability
-    "NonlinearLimitPointResult",
-    "NonlinearLoadStep",
-    "solve_nonlinear_load_stepping",
-    # Linear transient dynamics / slamming v1
-    "PressurePatch",
-    "TransientConfig",
-    "TransientResult",
-    "assemble_pressure_patch_load_vector",
-    "solve_transient_newmark",
-    # Incremental geometric/material nonlinear statics
-    "DNVC208MaterialCurve",
-    "FiberSectionPlasticityConfig",
-    "curve_from_properties",
-    "dnv_c208_steel_curve",
-    "CompositeImperfection",
-    "EigenmodeImperfection",
-    "ImperfectionCalibrationResult",
-    "ImperfectionField",
-    "StandardImperfection",
-    "apply_imperfection",
-    "calibrate_imperfection_amplitude",
-    "imperfection_from_buckling_mode",
-    "standard_flange_twist",
-    "standard_member_bow",
-    "standard_plate_mode",
-    "DisplacementControl",
-    "NonlinearLoadProgram",
-    "NonlinearLoadStage",
-    "NonlinearStaticResult",
-    "NonlinearStaticStep",
-    "solve_static_nonlinear",
-    # ANYstructure generated-geometry FEM mode
-    "AnyStructureFEMConfig",
-    "AnyStructureFEMResult",
-    "build_fe_model_from_generated_geometry",
-    "build_symmetric_load_case",
-    "idealize_generated_geometry_members",
-    "recover_prestress_from_static_result",
-    "run_anystructure_fem_mode",
-    # Assembly and solving
-    "AssemblyError",
-    "assemble_geometric_stiffness_matrix",
-    "assemble_load_vector",
-    "assemble_mass_matrix",
-    "assemble_stiffness_matrix",
-    "assemble_system",
-    "build_constraint_transformation",
-    "reconstruct_full_solution",
-    "solve_linear",
-    "solve_nonlinear",
-    # Mesh generation
-    "MeshConfig",
-    "PanelGeometry",
-    "StiffenerCrossSection",
-    "generate_beam_mesh",
-    "generate_simple_panel_mesh",
-    "generate_stiffened_panel_mesh",
-    "verify_mesh_quality",
-    # Results
-    "DisplacementResult",
-    "FEResult",
-    "StressResult",
-    "compare_with_analytical",
-    "create_fe_result",
-    "post_process_results",
-    # Validation helpers
-    "LoadResultant",
-    "ShellPatchSummary",
-    "dof_order_signature",
-    "load_case_resultant",
-    "load_vector_resultant",
-    "max_abs",
-    "mpc_constraint_residuals",
-    "nullspace_diagnostics",
-    "shell_element_patch_summary",
-    # Reference cases
-    "CalculixReferenceCase",
-    "ShellConvergencePoint",
-    "ShellConvergenceTable",
-    "classify_reference_case_from_nodes",
-    "discover_calculix_reference_cases",
-    "discover_calculix_shell_convergence_tables",
-    "parse_calculix_shell_convergence_file",
-    "summarize_inp_geometry",
-    "upstream_calculix_reference_manifest",
-    "upstream_calculix_shell_reference_values",
-    # Shell benchmarks
-    "ShellBenchmarkComparison",
-    "ShellBenchmarkComparisonPoint",
-    "ShellBenchmarkResult",
-    "compare_shell_benchmark_to_reference",
-    "run_simple_supported_shell_benchmark",
-    "run_simple_supported_shell_convergence",
-    "shell_benchmark_results_to_convergence_table",
-    "write_internal_shell_convergence_table",
-]
+    "BoundaryCondition": ("boundary", "BoundaryCondition"),
+    "FixedSupport": ("boundary", "FixedSupport"),
+    "InPlaneLoad": ("boundary", "InPlaneLoad"),
+    "LoadCase": ("boundary", "LoadCase"),
+    "LoadCombination": ("boundary", "LoadCombination"),
+    "PinnedSupport": ("boundary", "PinnedSupport"),
+    "RollerSupport": ("boundary", "RollerSupport"),
+    "SymmetryBC": ("boundary", "SymmetryBC"),
+    # Assembly and solvers
+    "build_constraint_transformation": ("assembly", "build_constraint_transformation"),
+    "compute_constraint_force_diagnostics": ("assembly", "compute_constraint_force_diagnostics"),
+    "compute_stresses": ("assembly", "compute_stresses"),
+    "reconstruct_full_solution": ("assembly", "reconstruct_full_solution"),
+    "solve_linear": ("assembly", "solve_linear"),
+    "solve_linear_many": ("assembly", "solve_linear_many"),
+    "solve_nonlinear": ("assembly", "solve_nonlinear"),
+    "AssemblyError": ("matrix_assembly", "AssemblyError"),
+    "assemble_damping_matrix": ("matrix_assembly", "assemble_damping_matrix"),
+    "assemble_geometric_stiffness_matrix": ("matrix_assembly", "assemble_geometric_stiffness_matrix"),
+    "assemble_load_matrix": ("matrix_assembly", "assemble_load_matrix"),
+    "assemble_load_vector": ("matrix_assembly", "assemble_load_vector"),
+    "assemble_mass_matrix": ("matrix_assembly", "assemble_mass_matrix"),
+    "assemble_stiffness_matrix": ("matrix_assembly", "assemble_stiffness_matrix"),
+    "assemble_system": ("matrix_assembly", "assemble_system"),
+    "MatrixClass": ("linalg", "MatrixClass"),
+    "factorize": ("linalg", "factorize"),
+    "solve_many": ("linalg", "solve_many"),
+    # Analysis APIs
+    "BucklingMode": ("buckling", "BucklingMode"),
+    "BucklingResult": ("buckling", "BucklingResult"),
+    "solve_eigenvalue_buckling": ("buckling", "solve_eigenvalue_buckling"),
+    "ModalMode": ("modal", "ModalMode"),
+    "ModalResult": ("modal", "ModalResult"),
+    "solve_free_vibration": ("modal", "solve_free_vibration"),
+    "NonlinearLimitPointResult": ("nonlinear", "NonlinearLimitPointResult"),
+    "NonlinearLoadStep": ("nonlinear", "NonlinearLoadStep"),
+    "solve_nonlinear_load_stepping": ("nonlinear", "solve_nonlinear_load_stepping"),
+    "DisplacementControl": ("nonlinear_static", "DisplacementControl"),
+    "NonlinearConvergenceSettings": ("nonlinear_static", "NonlinearConvergenceSettings"),
+    "NonlinearLoadProgram": ("nonlinear_static", "NonlinearLoadProgram"),
+    "NonlinearLoadStage": ("nonlinear_static", "NonlinearLoadStage"),
+    "NonlinearStaticResult": ("nonlinear_static", "NonlinearStaticResult"),
+    "NonlinearStaticStep": ("nonlinear_static", "NonlinearStaticStep"),
+    "solve_static_nonlinear": ("nonlinear_static", "solve_static_nonlinear"),
+    "ArcLengthControl": ("arc_length", "ArcLengthControl"),
+    "ArcLengthResult": ("arc_length", "ArcLengthResult"),
+    "ArcLengthStep": ("arc_length", "ArcLengthStep"),
+    "solve_static_arc_length": ("arc_length", "solve_static_arc_length"),
+    "PressurePatch": ("dynamics", "PressurePatch"),
+    "TransientConfig": ("dynamics", "TransientConfig"),
+    "TransientResult": ("dynamics", "TransientResult"),
+    "assemble_pressure_patch_load_vector": ("dynamics", "assemble_pressure_patch_load_vector"),
+    "solve_transient_newmark": ("dynamics", "solve_transient_newmark"),
+    # Runtime model building and recovery
+    "MeshConfig": ("mesh_gen", "MeshConfig"),
+    "PanelGeometry": ("mesh_gen", "PanelGeometry"),
+    "StiffenerCrossSection": ("mesh_gen", "StiffenerCrossSection"),
+    "generate_beam_mesh": ("mesh_gen", "generate_beam_mesh"),
+    "generate_simple_panel_mesh": ("mesh_gen", "generate_simple_panel_mesh"),
+    "generate_stiffened_panel_mesh": ("mesh_gen", "generate_stiffened_panel_mesh"),
+    "verify_mesh_quality": ("mesh_gen", "verify_mesh_quality"),
+    "MassProperties": ("mass_properties", "MassProperties"),
+    "calculate_mass_properties": ("mass_properties", "calculate_mass_properties"),
+    "element_mass_points": ("mass_properties", "element_mass_points"),
+    "DisplacementResult": ("results", "DisplacementResult"),
+    "FEResult": ("results", "FEResult"),
+    "StressResult": ("results", "StressResult"),
+    "compare_with_analytical": ("results", "compare_with_analytical"),
+    "create_fe_result": ("results", "create_fe_result"),
+    "RecoveryConfig": ("recovery", "RecoveryConfig"),
+    "ResourceConfig": ("recovery", "ResourceConfig"),
+    "recover_element_stresses": ("recovery", "recover_element_stresses"),
+    "recover_element_stresses_with_report": ("recovery", "recover_element_stresses_with_report"),
+    # Materials, imperfections, capacity workflow
+    "DNVC208MaterialCurve": ("material_curves", "DNVC208MaterialCurve"),
+    "FiberSectionPlasticityConfig": ("material_curves", "FiberSectionPlasticityConfig"),
+    "curve_from_properties": ("material_curves", "curve_from_properties"),
+    "dnv_c208_steel_curve": ("material_curves", "dnv_c208_steel_curve"),
+    "CompositeImperfection": ("imperfections", "CompositeImperfection"),
+    "EigenmodeImperfection": ("imperfections", "EigenmodeImperfection"),
+    "ImperfectionCalibrationResult": ("imperfections", "ImperfectionCalibrationResult"),
+    "ImperfectionField": ("imperfections", "ImperfectionField"),
+    "StandardImperfection": ("imperfections", "StandardImperfection"),
+    "apply_imperfection": ("imperfections", "apply_imperfection"),
+    "calibrate_imperfection_amplitude": ("imperfections", "calibrate_imperfection_amplitude"),
+    "imperfection_from_buckling_mode": ("imperfections", "imperfection_from_buckling_mode"),
+    "standard_flange_twist": ("imperfections", "standard_flange_twist"),
+    "standard_member_bow": ("imperfections", "standard_member_bow"),
+    "standard_plate_mode": ("imperfections", "standard_plate_mode"),
+    "CapacityWorkflowConfig": ("capacity_workflow", "CapacityWorkflowConfig"),
+    "CapacityWorkflowResult": ("capacity_workflow", "CapacityWorkflowResult"),
+    "MeshModeAdequacy": ("capacity_workflow", "MeshModeAdequacy"),
+    "default_eigenmode_imperfection": ("capacity_workflow", "default_eigenmode_imperfection"),
+    "evaluate_mode_mesh_adequacy": ("capacity_workflow", "evaluate_mode_mesh_adequacy"),
+    "run_capacity_workflow_from_builder": ("capacity_workflow", "run_capacity_workflow_from_builder"),
+    "run_nonlinear_capacity_workflow": ("capacity_workflow", "run_nonlinear_capacity_workflow"),
+    # ANYstructure generated-geometry workflow
+    "AnyStructureFEMConfig": ("anystructure_fem_mode", "AnyStructureFEMConfig"),
+    "AnyStructureFEMResult": ("anystructure_fem_mode", "AnyStructureFEMResult"),
+    "build_fe_model_from_generated_geometry": ("anystructure_fem_mode", "build_fe_model_from_generated_geometry"),
+    "build_symmetric_load_case": ("anystructure_fem_mode", "build_symmetric_load_case"),
+    "idealize_generated_geometry_members": ("anystructure_fem_mode", "idealize_generated_geometry_members"),
+    "recover_prestress_from_static_result": ("anystructure_fem_mode", "recover_prestress_from_static_result"),
+    "run_anystructure_fem_mode": ("anystructure_fem_mode", "run_anystructure_fem_mode"),
+    # Runtime load resultants
+    "LoadResultant": ("validation", "LoadResultant"),
+    "load_case_resultant": ("validation", "load_case_resultant"),
+    "load_vector_resultant": ("validation", "load_vector_resultant"),
+}
+
+__all__ = sorted(_EXPORTS) + ["__version__"]
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        module_name, attr_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(f"{__name__}.{module_name}"), attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+

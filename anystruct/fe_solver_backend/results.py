@@ -11,6 +11,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .fe_core import FEModel, FEMesh
+    from .recovery import RecoveryConfig, ResourceConfig
 
 
 @dataclass
@@ -27,6 +28,7 @@ class FEResult:
     reactions: Dict[int, np.ndarray] = field(default_factory=dict)
     solver_info: Dict[str, Any] = field(default_factory=dict)
     assembly_info: Dict[str, Any] = field(default_factory=dict)
+    result_case: Optional[Dict[str, Any]] = None
     
     # Additional results
     strains: Dict[int, Dict[str, np.ndarray]] = field(default_factory=dict)
@@ -70,6 +72,7 @@ class FEResult:
             'num_elements': len(self.element_stresses),
             'solver_info': self.solver_info,
             'assembly_info': self.assembly_info,
+            'result_case': self.result_case,
             'node_displacements': {k: v.tolist() for k, v in self.node_displacements.items()},
             'reactions': {k: v.tolist() for k, v in self.reactions.items()}
         }
@@ -165,9 +168,14 @@ class DisplacementResult:
         }
 
 
-def create_fe_result(model: 'FEModel', displacements: np.ndarray, 
-                     solver_info: Dict[str, Any], 
-                     assembly_info: Dict[str, Any] = None) -> FEResult:
+def create_fe_result(
+    model: 'FEModel',
+    displacements: np.ndarray,
+    solver_info: Dict[str, Any],
+    assembly_info: Dict[str, Any] = None,
+    recovery_config: Optional["RecoveryConfig"] = None,
+    resource_config: Optional["ResourceConfig"] = None,
+) -> FEResult:
     """
     Create a complete FE result from solver output.
     
@@ -180,21 +188,56 @@ def create_fe_result(model: 'FEModel', displacements: np.ndarray,
     Returns:
         FEResult object with all results
     """
-    from .assembly import extract_node_displacements, compute_reactions, compute_stresses
+    from .assembly import compute_reactions
+    from .recovery import (
+        default_recovery_config,
+        enforce_memory_limit,
+        estimate_model_memory,
+        filter_reactions,
+        recover_element_stresses,
+        recover_element_stresses_with_report,
+        recovery_metadata,
+        select_node_displacements,
+    )
     
-    mesh = model.mesh
+    policy_requested = recovery_config is not None or resource_config is not None
+    recovery = default_recovery_config(recovery_config)
+    memory_estimate = estimate_model_memory(model, recovery_config=recovery) if policy_requested else None
+    if memory_estimate is not None:
+        enforce_memory_limit(memory_estimate, resource_config, context="create_fe_result")
+    policy_metadata = recovery_metadata(recovery, resource_config, memory_estimate) if policy_requested else {}
+    result_solver_info = dict(solver_info)
+    if policy_requested:
+        result_solver_info["recovery_policy"] = policy_metadata
     
     # Extract node displacements
-    node_displacements = extract_node_displacements(displacements, mesh)
+    node_displacements = select_node_displacements(model, displacements, recovery)
     
     # Compute reactions (need a load case)
     reactions = {}
     if 'load_case' in solver_info:
         load_case = solver_info['load_case']
-        reactions = compute_reactions(model, displacements, load_case)
+        reactions = filter_reactions(compute_reactions(model, displacements, load_case), recovery, model)
     
     # Compute stresses
-    element_stresses = compute_stresses(model, displacements)
+    if policy_requested:
+        element_stresses, stress_report = recover_element_stresses_with_report(
+            model,
+            displacements,
+            recovery,
+            resource_config=resource_config,
+        )
+        result_solver_info["recovery_policy"]["execution"] = {"element_stress_recovery": stress_report.to_dict()}
+    else:
+        element_stresses = recover_element_stresses(model, displacements, recovery)
+
+    result_case = solver_info.get("result_case")
+    if policy_requested and isinstance(result_case, dict):
+        result_case = dict(result_case)
+        result_case["recovery"] = {**dict(result_case.get("recovery", {})), **recovery.to_dict()}
+        metadata = dict(result_case.get("metadata", {}))
+        metadata.update({key: value for key, value in policy_metadata.items() if key != "recovery"})
+        result_case["metadata"] = metadata
     
     return FEResult(
         model_name=model.name,
@@ -202,8 +245,9 @@ def create_fe_result(model: 'FEModel', displacements: np.ndarray,
         node_displacements=node_displacements,
         element_stresses=element_stresses,
         reactions=reactions,
-        solver_info=solver_info,
-        assembly_info=assembly_info or {}
+        solver_info=result_solver_info,
+        assembly_info=assembly_info or {},
+        result_case=result_case,
     )
 
 

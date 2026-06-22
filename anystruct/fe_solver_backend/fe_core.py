@@ -9,7 +9,7 @@ This module contains the fundamental classes for FE analysis:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Union
+from typing import TYPE_CHECKING, Any, List, Dict, Tuple, Optional, Union
 import numpy as np
 
 if TYPE_CHECKING:
@@ -127,17 +127,54 @@ class FEMesh:
     nodes: Dict[int, Node] = field(default_factory=dict)
     elements: Dict[int, 'Element'] = field(default_factory=dict)
     dof_manager: DOFManager = field(default_factory=DOFManager)
+    revisions: Dict[str, int] = field(default_factory=lambda: {
+        "topology": 0,
+        "geometry": 0,
+        "material": 0,
+        "load": 0,
+        "boundary": 0,
+        "mpc": 0,
+        "result_state": 0,
+    })
+
+    def bump_revision(self, category: str) -> None:
+        """Increment a mesh/model revision category and clear stale caches."""
+        self.revisions[category] = int(self.revisions.get(category, 0)) + 1
+        if category in {"topology", "geometry", "material", "mpc"}:
+            for element in self.elements.values():
+                for name in ("_stiffness_matrix", "_mass_matrix", "_internal_forces", "_nl_cache"):
+                    if hasattr(element, name):
+                        setattr(element, name, None)
+        if category in {"topology", "mpc"} and hasattr(self, "_sparsity_cache"):
+            self._sparsity_cache = {}
+
+    def revision_signature(self) -> Dict[str, int]:
+        return {key: int(value) for key, value in sorted(self.revisions.items())}
     
     def add_node(self, node_id: int, x: float, y: float, z: float) -> Node:
         """Add a node to the mesh."""
         node = Node(id=node_id, x=x, y=y, z=z)
         node.dofs = self.dof_manager.add_node(node_id)
         self.nodes[node_id] = node
+        self.bump_revision("topology")
+        self.bump_revision("geometry")
         return node
     
     def add_element(self, element_id: int, element: 'Element'):
         """Add an element to the mesh."""
         self.elements[element_id] = element
+        self.bump_revision("topology")
+        self.bump_revision("mpc")
+
+    def set_node_coordinates(self, node_id: int, x: float, y: float, z: float) -> None:
+        """Update node coordinates and invalidate geometry-dependent caches."""
+        node = self.get_node(node_id)
+        if node is None:
+            raise ValueError(f"Node {node_id} not found")
+        node.x = float(x)
+        node.y = float(y)
+        node.z = float(z)
+        self.bump_revision("geometry")
     
     def get_node(self, node_id: int) -> Optional[Node]:
         return self.nodes.get(node_id)
@@ -200,6 +237,7 @@ class FEModel:
             hardening_curve=hardening_curve
         )
         self.materials[name] = mat
+        self.mesh.bump_revision("material")
         return mat
     
     def set_material(self, name: str):
@@ -224,10 +262,12 @@ class FEModel:
     def add_boundary_condition(self, bc: 'BoundaryCondition'):
         """Add a boundary condition to the model."""
         self.boundary_conditions.append(bc)
+        self.mesh.bump_revision("boundary")
     
     def add_load_case(self, load_case: 'LoadCase'):
         """Add a load case to the model."""
         self.load_cases.append(load_case)
+        self.mesh.bump_revision("load")
     
     def apply_boundary_conditions(self):
         """Apply all boundary conditions to the mesh DOF manager."""
@@ -241,3 +281,15 @@ class FEModel:
         # Re-add nodes to reset DOFs
         for node_id, node in self.mesh.nodes.items():
             node.dofs = self.mesh.dof_manager.add_node(node_id)
+        self.mesh.bump_revision("boundary")
+        self.mesh.bump_revision("topology")
+
+    def set_node_coordinates(self, node_id: int, x: float, y: float, z: float) -> None:
+        """Update node coordinates and invalidate geometry-dependent caches."""
+        self.mesh.set_node_coordinates(node_id, x, y, z)
+
+    def bump_revision(self, category: str) -> None:
+        self.mesh.bump_revision(category)
+
+    def revision_signature(self) -> Dict[str, int]:
+        return self.mesh.revision_signature()

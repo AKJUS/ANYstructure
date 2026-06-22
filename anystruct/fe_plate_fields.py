@@ -2698,11 +2698,12 @@ def detect_cylinder_geometry(
 def infer_cylinder_fields(
     model: FeShellModel,
     geometry: CylinderGeometry | None = None,
+    members: Sequence[CylinderMember] | None = None,
 ) -> list[CylinderField]:
     """Infer cylindrical bays, longitudinal stiffeners, and ring frames."""
 
     geometry = detect_cylinder_geometry(model) if geometry is None else geometry
-    members = _infer_cylinder_members(model, geometry)
+    members = tuple(_infer_cylinder_members(model, geometry) if members is None else members)
     longitudinals = sorted(
         (member for member in members if member.role == "longitudinal_stiffener"),
         key=lambda member: member.station,
@@ -3283,6 +3284,611 @@ def calculate_cylinder_buckling(
                 }
             )
     return results
+
+
+def _runtime_fea_payload(runtime_result: Any) -> dict[str, Any]:
+    if isinstance(runtime_result, dict):
+        if str(runtime_result.get("format", "")) == "anystructure-runtime-fe-results-v1":
+            return runtime_result
+        nested = runtime_result.get("fea_result_import")
+        if isinstance(nested, dict):
+            return nested
+        visualization = runtime_result.get("visualization")
+        if isinstance(visualization, dict) and isinstance(visualization.get("fea_result_import"), dict):
+            return visualization["fea_result_import"]
+    visualization = getattr(runtime_result, "visualization", None)
+    if isinstance(visualization, dict) and isinstance(visualization.get("fea_result_import"), dict):
+        return visualization["fea_result_import"]
+    raise ValueError(
+        "runtime_result does not contain visualization['fea_result_import']; "
+        "run the production runtime FEM solver and pass its result object"
+    )
+
+
+def fe_shell_model_from_runtime_result(runtime_result: Any) -> FeShellModel:
+    """Build the normal FE-results shell model from a runtime FEM result payload."""
+
+    payload = _runtime_fea_payload(runtime_result)
+    nodes: dict[int, Point3D] = {}
+    for item in payload.get("nodes", ()) or ():
+        if isinstance(item, dict):
+            node_id = int(item.get("id"))
+            coords = item.get("coords", (0.0, 0.0, 0.0))
+        else:
+            node_id = int(item[0])
+            coords = item[1]
+        nodes[node_id] = (float(coords[0]), float(coords[1]), float(coords[2]))
+
+    shell_elements: dict[int, ShellElement] = {}
+    elsets: dict[str, list[int]] = defaultdict(list)
+    for item in payload.get("shells", ()) or ():
+        element_id = int(item.get("id", item.get("element_id", 0)))
+        if element_id <= 0:
+            continue
+        node_ids = tuple(int(node_id) for node_id in item.get("node_ids", ()))
+        elset = item.get("elset")
+        shell_elements[element_id] = ShellElement(
+            element_id=element_id,
+            node_ids=node_ids,
+            element_type=str(item.get("type", "S4") or "S4"),
+            elset=None if elset is None else str(elset),
+        )
+        if elset:
+            elsets[str(elset)].append(element_id)
+
+    for name, values in (payload.get("elsets", {}) or {}).items():
+        elsets[str(name)].extend(int(value) for value in values)
+
+    shell_sections: list[ShellSection] = []
+    for section in payload.get("shell_sections", ()) or ():
+        shell_sections.append(
+            ShellSection(
+                elset=None if section.get("elset") is None else str(section.get("elset")),
+                material=None if section.get("material") is None else str(section.get("material")),
+                thickness_m=_safe_float(section.get("thickness_m")),
+                offset=None if section.get("offset") is None else str(section.get("offset")),
+            )
+        )
+    if not shell_sections and shell_elements:
+        elset = "runtime_all_shells"
+        elsets[elset].extend(shell_elements)
+        shell_sections.append(ShellSection(elset=elset, material="steel", thickness_m=None))
+
+    return FeShellModel(
+        nodes=nodes,
+        shell_elements=shell_elements,
+        elsets={name: tuple(sorted(set(values))) for name, values in elsets.items()},
+        shell_sections=tuple(shell_sections),
+        source_path=str(payload.get("source", "runtime FEM result")),
+    )
+
+
+def frd_stress_from_runtime_result(runtime_result: Any) -> FrdStressResult:
+    """Build an FRD-like stress result from a runtime FEM result payload."""
+
+    payload = _runtime_fea_payload(runtime_result)
+    model = fe_shell_model_from_runtime_result(payload)
+    raw_stress = payload.get("nodal_stress_pa", {}) or {}
+    nodal_stress: dict[int, tuple[float, ...]] = {}
+    for node_id, values in raw_stress.items():
+        nodal_stress[int(node_id)] = tuple(float(value) for value in values)
+    return FrdStressResult(
+        path=str(payload.get("source", "runtime FEM result")),
+        nodes=model.nodes,
+        element_nodes={
+            int(element_id): tuple(int(node_id) for node_id in element.node_ids)
+            for element_id, element in model.shell_elements.items()
+        },
+        components=tuple(str(component) for component in payload.get("stress_components", ("SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"))),
+        nodal_stress=nodal_stress,
+        units=str(payload.get("units", "Pa")),
+    )
+
+
+def cylinder_geometry_from_runtime_result(runtime_result: Any, model: FeShellModel | None = None) -> CylinderGeometry | None:
+    """Return runtime-provided cylinder metadata when available."""
+
+    payload = _runtime_fea_payload(runtime_result)
+    geometry = payload.get("cylinder_geometry")
+    if not isinstance(geometry, dict):
+        return None
+    valid_shell_ids = set(model.shell_elements) if model is not None else None
+    skin_id_values: list[int] = []
+    for value in geometry.get("skin_element_ids", ()) or ():
+        try:
+            element_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if valid_shell_ids is None or element_id in valid_shell_ids:
+            skin_id_values.append(element_id)
+    skin_ids = tuple(skin_id_values)
+    if not skin_ids:
+        return None
+    axial_bounds = geometry.get("axial_bounds", (0.0, 0.0))
+    return CylinderGeometry(
+        axis_origin=tuple(float(value) for value in geometry.get("axis_origin", (0.0, 0.0, 0.0))),
+        axis_direction=_normalise(tuple(float(value) for value in geometry.get("axis_direction", (0.0, 0.0, 1.0)))),
+        radius_m=float(geometry.get("radius_m", 0.0) or 0.0),
+        axial_bounds=(float(axial_bounds[0]), float(axial_bounds[1])),
+        radial_rms_error_m=float(geometry.get("radial_rms_error_m", 0.0) or 0.0),
+        skin_element_ids=tuple(sorted(set(skin_ids))),
+        skin_thickness_m=_safe_float(geometry.get("skin_thickness_m")),
+        confidence=float(geometry.get("confidence", 1.0) or 1.0),
+        diagnostics=tuple(str(item) for item in geometry.get("diagnostics", ()) or ()),
+    )
+
+
+def cylinder_members_from_runtime_result(
+    runtime_result: Any,
+    geometry: CylinderGeometry,
+) -> tuple[CylinderMember, ...]:
+    """Return runtime beam stiffeners/girders as cylinder member boundaries."""
+
+    payload = _runtime_fea_payload(runtime_result)
+    members: list[CylinderMember] = []
+    seen: set[tuple[str, int]] = set()
+    for item in payload.get("runtime_members", ()) or ():
+        role_text = str(item.get("role", "")).lower()
+        if "flange" in role_text:
+            continue
+        if "stiffener" in role_text:
+            role = "longitudinal_stiffener"
+        elif "girder" in role_text or "frame" in role_text:
+            role = "ring_frame"
+        else:
+            continue
+        try:
+            points = [tuple(float(value) for value in point) for point in item.get("points", ()) or ()]
+        except (TypeError, ValueError):
+            continue
+        if len(points) < 2:
+            continue
+        section = item.get("section", {}) or {}
+        centroid = _mean_point(points)
+        if role == "longitudinal_stiffener":
+            station = _cylinder_angle(centroid, geometry)
+            direction = geometry.axis_direction
+        else:
+            station = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+            radial = _normalise(_radial_vector(centroid, geometry.axis_origin, geometry.axis_direction))
+            direction = _normalise(_cross(geometry.axis_direction, radial))
+        key = (role, int(round(station * 1.0e7)))
+        if key in seen:
+            continue
+        seen.add(key)
+        web_height = max(_safe_float(section.get("web_height")) or 0.0, 0.0)
+        web_thickness = max(_safe_float(section.get("web_thickness")) or 0.0, 0.0)
+        flange_width = max(_safe_float(section.get("flange_width")) or 0.0, 0.0)
+        flange_thickness = max(_safe_float(section.get("flange_thickness")) or 0.0, 0.0)
+        section_type = "T" if flange_width > 0.0 and flange_thickness > 0.0 else "FB"
+        members.append(
+            CylinderMember(
+                member_id=f"runtime_{role}_{len(members) + 1:03d}",
+                role=role,
+                section_type=section_type,
+                web_element_ids=(),
+                flange_element_ids=(int(item.get("id", 0) or 0),) if section_type == "T" else (),
+                station=station,
+                direction=direction,
+                web_height_m=web_height,
+                flange_width_m=flange_width if flange_width > 0.0 else None,
+                web_thickness_m=web_thickness if web_thickness > 0.0 else None,
+                flange_thickness_m=flange_thickness if flange_thickness > 0.0 else None,
+                confidence=1.0,
+                diagnostics=("runtime beam member used as cylinder bay boundary",),
+            )
+        )
+    return tuple(sorted(members, key=lambda member: (member.role, member.station)))
+
+
+def _runtime_payload_has_member_web_shells(payload: dict[str, Any]) -> bool:
+    for shell in payload.get("shells", ()) or ():
+        role = str(shell.get("role", shell.get("elset", ""))).lower()
+        if "stiffener_web" in role or "girder_web" in role or "frame_web" in role:
+            return True
+    return False
+
+
+def _runtime_flange_beams_by_station(
+    runtime_result: Any,
+    geometry: CylinderGeometry,
+) -> dict[str, list[tuple[float, dict[str, Any], int]]]:
+    payload = _runtime_fea_payload(runtime_result)
+    flanges: dict[str, list[tuple[float, dict[str, Any], int]]] = {
+        "longitudinal_stiffener": [],
+        "ring_stiffener": [],
+        "ring_frame": [],
+    }
+    for item in payload.get("runtime_members", ()) or ():
+        role_text = str(item.get("role", "")).lower()
+        if "flange" not in role_text:
+            continue
+        try:
+            points = [tuple(float(value) for value in point) for point in item.get("points", ()) or ()]
+        except (TypeError, ValueError):
+            continue
+        if len(points) < 2:
+            continue
+        centroid = _mean_point(points)
+        if "stiffener" in role_text:
+            role = "longitudinal_stiffener"
+            station = _cylinder_angle(centroid, geometry)
+        elif "girder" in role_text or "frame" in role_text:
+            role = "ring_frame"
+            station = _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+        else:
+            continue
+        flanges.setdefault(role, []).append((station, dict(item.get("section") or {}), int(item.get("id", 0) or 0)))
+    return flanges
+
+
+def _runtime_flange_dimensions(section: dict[str, Any]) -> tuple[float | None, float | None]:
+    width = _safe_float(section.get("web_thickness"))
+    thickness = _safe_float(section.get("web_height"))
+    if width is None or width <= 0.0:
+        width = _safe_float(section.get("flange_width"))
+    if thickness is None or thickness <= 0.0:
+        thickness = _safe_float(section.get("flange_thickness"))
+    return width, thickness
+
+
+def _augment_cylinder_members_with_runtime_flange_beams(
+    members: Sequence[CylinderMember],
+    runtime_result: Any,
+    geometry: CylinderGeometry,
+) -> tuple[CylinderMember, ...]:
+    flanges_by_role = _runtime_flange_beams_by_station(runtime_result, geometry)
+    if not any(flanges_by_role.values()):
+        return tuple(members)
+    axial_tol = max((geometry.axial_bounds[1] - geometry.axial_bounds[0]) * 1.0e-5, 1.0e-7)
+    angular_tol = max(axial_tol / max(geometry.radius_m, 1.0e-12), 1.0e-5)
+    augmented: list[CylinderMember] = []
+    for member in members:
+        matched_role = member.role
+        candidates = flanges_by_role.get(member.role, [])
+        if not candidates and member.role == "ring_stiffener":
+            candidates = flanges_by_role.get("ring_frame", [])
+            if candidates:
+                matched_role = "ring_frame"
+        best: tuple[float, dict[str, Any], int] | None = None
+        for station, section, beam_id in candidates:
+            if member.role == "longitudinal_stiffener":
+                distance = abs(_wrapped_angle_difference(station, member.station))
+                tolerance = angular_tol
+            else:
+                distance = abs(station - member.station)
+                tolerance = axial_tol
+            if distance <= tolerance and (best is None or distance < best[0]):
+                best = (distance, section, beam_id)
+        if best is None:
+            augmented.append(member)
+            continue
+        flange_width, flange_thickness = _runtime_flange_dimensions(best[1])
+        if not flange_width or not flange_thickness:
+            augmented.append(member)
+            continue
+        augmented.append(
+            CylinderMember(
+                member_id=member.member_id,
+                role=matched_role,
+                section_type="T",
+                web_element_ids=member.web_element_ids,
+                flange_element_ids=tuple(sorted(set(member.flange_element_ids + ((best[2],) if best[2] else ())))),
+                station=member.station,
+                direction=member.direction,
+                web_height_m=member.web_height_m,
+                flange_width_m=flange_width,
+                web_thickness_m=member.web_thickness_m,
+                flange_thickness_m=flange_thickness,
+                confidence=member.confidence,
+                diagnostics=member.diagnostics + ("runtime flange beam supplied flange dimensions",),
+            )
+        )
+    return tuple(augmented)
+
+
+def _runtime_frd_summary(payload: dict[str, Any], stress: FrdStressResult | None) -> dict[str, Any]:
+    return {
+        "source": str(payload.get("source", "runtime FEM result")),
+        "format": str(payload.get("format", "anystructure-runtime-fe-results-v1")),
+        "result_blocks": [
+            {
+                "name": "STRESS",
+                "components": list(stress.components if stress is not None else payload.get("stress_components", ())),
+                "node_count": 0 if stress is None else len(stress.nodal_stress),
+                "units": str(payload.get("units", "Pa")),
+            }
+        ],
+    }
+
+
+def _create_flat_fea_buckling_session_from_model(
+    model: FeShellModel,
+    frd_stress: FrdStressResult | None = None,
+    *,
+    inp_path: str = "runtime FEM result",
+    frd_path: str | None = None,
+    frd_summary: dict[str, Any] | None = None,
+    calculation_method: str = "SemiAnalytical S3/U3",
+    buckling_acceptance: str = "ultimate",
+    pressure_mpa: float = 0.0,
+    material_yield_mpa: float = 355.0,
+    elastic_modulus_mpa: float = 210000.0,
+    material_factor: float = 1.15,
+    poisson: float = 0.3,
+    ml_algo: Any = None,
+    run_buckling: bool = True,
+    stress_reduction_method: str | None = None,
+) -> FeaBucklingSession:
+    fields = tuple(infer_plate_fields(model))
+    diagnostics: list[str] = []
+    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
+    diagnostics.append(f"stress reduction method: {reduction_method}")
+
+    if frd_stress is not None and frd_stress.nodal_stress:
+        panel_stresses = tuple(
+            reduce_field_stresses(
+                model,
+                fields,
+                frd_stress,
+                stress_reduction_method=reduction_method,
+            )
+        )
+    else:
+        panel_stresses = ()
+        diagnostics.append("no runtime/FRD stresses supplied; panel stresses set to defaults")
+
+    buckling_results: tuple[dict[str, Any], ...] = ()
+    if run_buckling and panel_stresses:
+        buckling_results = tuple(
+            calculate_field_buckling(
+                fields,
+                panel_stresses,
+                calculation_method=calculation_method,
+                buckling_acceptance=buckling_acceptance,
+                pressure_mpa=pressure_mpa,
+                material_yield_mpa=material_yield_mpa,
+                elastic_modulus_mpa=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+                ml_algo=ml_algo,
+            )
+        )
+
+    unavailable_results = [result for result in buckling_results if not result.get("available", False)]
+    if unavailable_results:
+        diagnostics.append(
+            f"{len(unavailable_results)} of {len(buckling_results)} flat-panel buckling calculations "
+            "returned no identifiable usage factor"
+        )
+        diagnostics.extend(
+            f"{result.get('field_id', '?')}: {result.get('error', 'no result')}"
+            for result in unavailable_results[:20]
+        )
+
+    plot_by_field = {record["field_id"]: record for record in panel_plot_records(model, fields)}
+    stress_by_field = {stress.field_id: stress for stress in panel_stresses}
+    result_by_field = {str(result.get("field_id")): result for result in buckling_results if result.get("field_id")}
+    panels = tuple(
+        FeaBucklingPanel(
+            field_id=field_item.field_id,
+            field=field_item,
+            stress=stress_by_field.get(field_item.field_id),
+            anystructure_input=anystructure_input_for_field(
+                field_item,
+                stress_by_field.get(field_item.field_id),
+                pressure_mpa=pressure_mpa,
+                material_yield_mpa=material_yield_mpa,
+                elastic_modulus_mpa=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+                calculation_method=calculation_method,
+                buckling_acceptance=buckling_acceptance,
+            ),
+            plot_bounds=tuple(plot_by_field.get(field_item.field_id, {}).get("bounds", (0.0, 0.0, 0.0, 0.0))),
+            buckling_result=result_by_field.get(field_item.field_id),
+            usage_factor=_selected_uf_from_buckling_result(result_by_field.get(field_item.field_id, {})),
+        )
+        for field_item in fields
+    )
+    return FeaBucklingSession(
+        inp_path=inp_path,
+        frd_path=frd_path,
+        model=model,
+        fields=fields,
+        panels=panels,
+        frd_summary=frd_summary,
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _create_cylinder_fea_buckling_session_from_model(
+    model: FeShellModel,
+    frd_stress: FrdStressResult | None = None,
+    *,
+    geometry: CylinderGeometry | None = None,
+    members: Sequence[CylinderMember] | None = None,
+    inp_path: str = "runtime FEM result",
+    frd_path: str | None = None,
+    frd_summary: dict[str, Any] | None = None,
+    calculation_method: str = "DNV-RP-C202",
+    buckling_acceptance: str = "ultimate",
+    pressure_mpa: float = 0.0,
+    material_yield_mpa: float = 355.0,
+    elastic_modulus_mpa: float = 210000.0,
+    material_factor: float = 1.15,
+    poisson: float = 0.3,
+    ml_algo: Any = None,
+    run_buckling: bool = True,
+    stress_reduction_method: str | None = None,
+) -> FeaCylinderSession:
+    geometry = detect_cylinder_geometry(model) if geometry is None else geometry
+    fields = tuple(infer_cylinder_fields(model, geometry, members=members))
+    diagnostics: list[str] = []
+    reduction_method = normalize_stress_reduction_method(stress_reduction_method)
+    diagnostics.append(f"stress reduction method: {reduction_method}")
+    if calculation_method in _FLAT_PANEL_BUCKLING_METHODS:
+        diagnostics.append(_cylinder_flat_panel_method_warning(calculation_method))
+    else:
+        diagnostics.append(
+            "cylinder calculation uses CylStru; requested common GUI method="
+            f"{calculation_method!r}, acceptance={buckling_acceptance!r}"
+        )
+
+    if frd_stress is not None and frd_stress.nodal_stress:
+        stresses = tuple(
+            reduce_cylinder_stresses(
+                model,
+                geometry,
+                fields,
+                frd_stress,
+                stress_reduction_method=reduction_method,
+            )
+        )
+    else:
+        stresses = ()
+        diagnostics.append("no runtime/FRD stresses supplied; cylinder stresses set to defaults")
+
+    buckling_results: tuple[dict[str, Any], ...] = ()
+    if run_buckling and stresses:
+        buckling_results = tuple(
+            calculate_cylinder_buckling(
+                fields,
+                stresses,
+                calculation_method=calculation_method,
+                buckling_acceptance=buckling_acceptance,
+                pressure_mpa=pressure_mpa,
+                material_yield_mpa=material_yield_mpa,
+                elastic_modulus_mpa=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+                ml_algo=ml_algo,
+            )
+        )
+
+    unavailable_results = [result for result in buckling_results if not result.get("available", False)]
+    if unavailable_results:
+        diagnostics.append(
+            f"{len(unavailable_results)} of {len(buckling_results)} cylinder buckling calculations "
+            "returned no identifiable usage factor"
+        )
+        diagnostics.extend(
+            f"{result.get('field_id', '?')}: {result.get('error', 'no result')}"
+            for result in unavailable_results[:20]
+        )
+
+    stress_by_field = {stress.field_id: stress for stress in stresses}
+    result_by_field = {str(result["field_id"]): result for result in buckling_results if result.get("field_id")}
+    panels = tuple(
+        FeaCylinderPanel(
+            field_id=field_item.field_id,
+            field=field_item,
+            stress=stress_by_field.get(field_item.field_id),
+            anystructure_input=anystructure_input_for_cylinder_field(
+                field_item,
+                stress_by_field.get(field_item.field_id),
+                pressure_mpa=pressure_mpa,
+                material_yield_mpa=material_yield_mpa,
+                elastic_modulus_mpa=elastic_modulus_mpa,
+                material_factor=material_factor,
+                poisson=poisson,
+            ),
+            buckling_result=result_by_field.get(field_item.field_id),
+            usage_factor=_selected_uf_from_buckling_result(result_by_field.get(field_item.field_id, {})),
+        )
+        for field_item in fields
+    )
+    return FeaCylinderSession(
+        inp_path=inp_path,
+        frd_path=frd_path,
+        model=model,
+        geometry=geometry,
+        fields=fields,
+        panels=panels,
+        frd_summary=frd_summary,
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def create_runtime_fea_buckling_session(
+    runtime_result: Any,
+    *,
+    geometry_type: str = "auto",
+    **kwargs: Any,
+) -> FeaBucklingSession | FeaCylinderSession:
+    """Return panel-by-panel buckling sessions directly from a runtime FEM result."""
+
+    payload = _runtime_fea_payload(runtime_result)
+    model = fe_shell_model_from_runtime_result(payload)
+    frd_stress = frd_stress_from_runtime_result(payload)
+    frd_summary = _runtime_frd_summary(payload, frd_stress)
+    source = str(payload.get("source", "runtime FEM result"))
+
+    geometry_choice = geometry_type.strip().lower()
+    if geometry_choice not in {"auto", "flat", "cylinder"}:
+        raise ValueError("geometry_type must be 'auto', 'flat', or 'cylinder'")
+    if geometry_choice == "cylinder":
+        runtime_geometry = cylinder_geometry_from_runtime_result(payload, model)
+        runtime_members = None
+        if runtime_geometry is not None:
+            if _runtime_payload_has_member_web_shells(payload):
+                runtime_members = _augment_cylinder_members_with_runtime_flange_beams(
+                    _infer_cylinder_members(model, runtime_geometry),
+                    payload,
+                    runtime_geometry,
+                )
+            else:
+                runtime_members = cylinder_members_from_runtime_result(payload, runtime_geometry)
+        return _create_cylinder_fea_buckling_session_from_model(
+            model,
+            frd_stress,
+            geometry=runtime_geometry,
+            members=runtime_members,
+            inp_path=source,
+            frd_path=source,
+            frd_summary=frd_summary,
+            **kwargs,
+        )
+    if geometry_choice == "flat":
+        return _create_flat_fea_buckling_session_from_model(
+            model,
+            frd_stress,
+            inp_path=source,
+            frd_path=source,
+            frd_summary=frd_summary,
+            **kwargs,
+        )
+
+    if str(payload.get("geometry_type", "")).strip().lower() == "cylinder" or is_cylindrical_shell_model(model):
+        runtime_geometry = cylinder_geometry_from_runtime_result(payload, model)
+        runtime_members = None
+        if runtime_geometry is not None:
+            if _runtime_payload_has_member_web_shells(payload):
+                runtime_members = _augment_cylinder_members_with_runtime_flange_beams(
+                    _infer_cylinder_members(model, runtime_geometry),
+                    payload,
+                    runtime_geometry,
+                )
+            else:
+                runtime_members = cylinder_members_from_runtime_result(payload, runtime_geometry)
+        return _create_cylinder_fea_buckling_session_from_model(
+            model,
+            frd_stress,
+            geometry=runtime_geometry,
+            members=runtime_members,
+            inp_path=source,
+            frd_path=source,
+            frd_summary=frd_summary,
+            **kwargs,
+        )
+    return _create_flat_fea_buckling_session_from_model(
+        model,
+        frd_stress,
+        inp_path=source,
+        frd_path=source,
+        frd_summary=frd_summary,
+        **kwargs,
+    )
 
 
 def create_fea_cylinder_buckling_session(

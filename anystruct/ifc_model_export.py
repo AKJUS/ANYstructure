@@ -31,6 +31,11 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+try:
+    from anystruct import representation_geometry
+except ModuleNotFoundError:
+    from ANYstructure.anystruct import representation_geometry
+
 
 try:
     import ifcopenshell
@@ -446,42 +451,14 @@ def _section_dimensions_from_app(app: Any, section_obj: Any) -> SectionDimension
 
 def _positions_from_length_and_spacing(length: float, spacing: float, include_ends: bool = True,
                                        max_count: int = 80) -> list[float]:
-    """Return stiffener/ring positions.
+    """Return repeated member positions with symmetric end compensation."""
 
-    When boundary members are requested, the input spacing is treated as the
-    maximum target spacing. Positions are spread evenly between 0 and length so
-    the last bay is not larger than the rest.
-    """
-    length = _pos_float(length, 0.0)
-    spacing = _pos_float(spacing, 0.0)
-    if length <= EPS:
-        return [0.0]
-    if spacing <= EPS:
-        return [0.0, length] if include_ends else [length / 2.0]
-
-    if include_ends:
-        interval_count = max(1, int(math.ceil(length / spacing)))
-        interval_count = min(interval_count, max(1, int(max_count)))
-        return [float(length) * idx / interval_count for idx in range(interval_count + 1)]
-
-    positions: list[float] = [0.0] if include_ends else []
-    next_pos = spacing
-    count_guard = 0
-    while next_pos < length - EPS and count_guard < max_count:
-        positions.append(float(next_pos))
-        next_pos += spacing
-        count_guard += 1
-
-    if not positions:
-        return [length / 2.0]
-
-    # Final de-duplication/sorting guard for very small or unusual dimensions.
-    clean_positions: list[float] = []
-    for pos in sorted(float(p) for p in positions):
-        pos = min(max(pos, 0.0), float(length))
-        if not clean_positions or abs(pos - clean_positions[-1]) > max(10.0 * EPS, 1.0e-9):
-            clean_positions.append(pos)
-    return clean_positions or [length / 2.0]
+    return list(representation_geometry.centered_member_positions(
+        length,
+        spacing,
+        fallback_midpoint=True,
+        max_count=max_count,
+    ))
 
 
 def _ring_member_half_width(dims: SectionDimensions | None) -> float:
@@ -517,48 +494,18 @@ def _ring_positions_without_heavy_frame_overlap(
 def _support_positions_from_length_and_span(length: float, span: float, max_count: int = 80) -> list[float]:
     """Return centered girder/support stations while preserving the bay span."""
 
-    length = _pos_float(length, 0.0)
-    span = _pos_float(span, 0.0)
-    if length <= EPS:
-        return [0.0]
-    if span <= EPS:
-        return [0.0, length]
-
-    full_span_count = min(int(math.floor(length / span)), max(0, int(max_count)))
-    if full_span_count <= 0:
-        return []
-
-    offset = (length - full_span_count * span) / 2.0
-    positions = [offset + span * idx for idx in range(full_span_count + 1)]
-    if offset <= EPS:
-        positions[0] = 0.0
-    if abs(positions[-1] - length) <= EPS:
-        positions[-1] = length
-    return positions
+    return list(representation_geometry.centered_member_positions(
+        length,
+        span,
+        fallback_midpoint=False,
+        max_count=max_count,
+    ))
 
 
 def _bay_ranges_from_support_positions(length: float, supports: Iterable[float], support_gap: float = 0.0) -> list[tuple[float, float]]:
     """Return member segment ranges split by internal support/girder lines."""
 
-    length = _pos_float(length, 0.0)
-    support_gap = max(_pos_float(support_gap, 0.0), 0.0)
-    if length <= EPS:
-        return []
-
-    internal_supports = sorted(
-        pos for pos in (float(value) for value in supports)
-        if EPS < pos < length - EPS
-    )
-    breakpoints = [0.0] + internal_supports + [length]
-    ranges: list[tuple[float, float]] = []
-    for x0, x1 in zip(breakpoints[:-1], breakpoints[1:]):
-        left_gap = support_gap / 2.0 if any(abs(x0 - support) <= EPS for support in internal_supports) else 0.0
-        right_gap = support_gap / 2.0 if any(abs(x1 - support) <= EPS for support in internal_supports) else 0.0
-        bay_x0 = max(x0 + left_gap, 0.0)
-        bay_x1 = min(x1 - right_gap, length)
-        if bay_x1 > bay_x0:
-            ranges.append((bay_x0, bay_x1))
-    return ranges
+    return list(representation_geometry.bay_ranges_from_support_positions(length, supports, support_gap))
 
 
 def _flat_lg_from_objects(app: Any, girder: Any, stiffener: Any, spacing: float) -> float:
@@ -2595,10 +2542,21 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
         spacing = max(long_dims.spacing, EPS)
         if is_panel:
             arc_length = abs(theta_end - theta_start) * radius
-            num_stf = max(2, min(72, int(round(arc_length / spacing)) + 1))
-            angles = [theta_start + (theta_end - theta_start) * i / (num_stf - 1) for i in range(num_stf)]
+            direction = 1.0 if theta_end >= theta_start else -1.0
+            angles = [
+                theta_start + direction * arc_pos / max(radius, EPS)
+                for arc_pos in representation_geometry.centered_member_positions(
+                    arc_length,
+                    spacing,
+                    fallback_midpoint=True,
+                    max_count=72,
+                )
+            ]
         else:
-            num_stf = max(4, min(144, int(round(2.0 * math.pi * radius / spacing))))
+            num_stf = max(4, min(144, representation_geometry.closed_loop_member_count(
+                2.0 * math.pi * radius,
+                spacing,
+            )))
             angles = [2.0 * math.pi * idx / num_stf for idx in range(num_stf)]
         _add_cylinder_longitudinal_members(ctx, active_line, radius, length, angles, long_dims, thk, side_sign,
                                            shell_export=shell_export)

@@ -28,7 +28,9 @@ Transverse shear depends on the topology:
       edge midpoints and interpolated), integrated at the full 2x2 rule.  This
       avoids both shear locking and the spurious zero-energy w-hourglass mode
       of one-point reduced shear integration.
-    * 8-node: reduced 2x2 shear integration (S8R style).
+    * 8-node: reduced 2x2 shear integration (S8R style).  When full element
+      reduced integration is requested, a small nullspace-projection
+      hourglass stiffness stabilizes modes outside the six rigid-body modes.
 
 Beam section convention
 -----------------------
@@ -129,6 +131,36 @@ def _beam_rotation_matrix(e1: np.ndarray, orientation: Optional[np.ndarray]) -> 
     e3 = _cross3(e1, e2)
     e3 /= np.linalg.norm(e3)
     return np.column_stack((e1, e2, e3))
+
+
+def _rotation_vector_from_matrix(rotation: np.ndarray) -> np.ndarray:
+    """Return the axis-angle rotation vector for a proper 3x3 rotation matrix."""
+    R = np.asarray(rotation, dtype=float).reshape(3, 3)
+    trace_value = float(np.trace(R))
+    cos_angle = max(min((trace_value - 1.0) / 2.0, 1.0), -1.0)
+    angle = float(np.arccos(cos_angle))
+    if angle < 1.0e-12:
+        return 0.5 * np.array(
+            [R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]],
+            dtype=float,
+        )
+    if abs(np.pi - angle) < 1.0e-6:
+        axis = np.sqrt(np.maximum(np.diag(R) + 1.0, 0.0) / 2.0)
+        if R[2, 1] - R[1, 2] < 0.0:
+            axis[0] *= -1.0
+        if R[0, 2] - R[2, 0] < 0.0:
+            axis[1] *= -1.0
+        if R[1, 0] - R[0, 1] < 0.0:
+            axis[2] *= -1.0
+        norm = float(np.linalg.norm(axis))
+        if norm <= _SMALL:
+            return np.zeros(3, dtype=float)
+        return angle * axis / norm
+    axis = np.array(
+        [R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]],
+        dtype=float,
+    ) / (2.0 * np.sin(angle))
+    return angle * axis
 
 
 class Element(ABC):
@@ -307,6 +339,162 @@ def _jit_compute_8node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarra
     return N, dN_dxi, dN_deta
 
 
+@njit
+def _jit_integrate_nonlinear_response(
+    u_loc: np.ndarray,
+    N_res: np.ndarray,
+    M_res: np.ndarray,
+    C0: np.ndarray,
+    C1: np.ndarray,
+    C2: np.ndarray,
+    B_m_all: np.ndarray,
+    B_b_all: np.ndarray,
+    B_d_all: np.ndarray,
+    Gw_all: np.ndarray,
+    detw_all: np.ndarray,
+    B_s_all: np.ndarray,
+    detw_shear_all: np.ndarray,
+    D_shear: np.ndarray,
+    drilling_stiffness: float,
+    tangent: bool,
+    has_plasticity: bool,
+    n_dof: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    F_loc = np.zeros(n_dof)
+    K_loc = np.zeros((n_dof, n_dof))
+    
+    n_gp = len(detw_all)
+    for g in range(n_gp):
+        detw = detw_all[g]
+        B_m = B_m_all[g]
+        B_b = B_b_all[g]
+        B_d = B_d_all[g]
+        Gw = Gw_all[g]
+        
+        # Calculate theta = Gw @ u_loc
+        theta_0 = 0.0
+        theta_1 = 0.0
+        for i in range(n_dof):
+            theta_0 += Gw[0, i] * u_loc[i]
+            theta_1 += Gw[1, i] * u_loc[i]
+            
+        # Calculate B_eff = B_m + B_nl
+        B_eff = np.zeros((3, n_dof))
+        for i in range(n_dof):
+            B_eff[0, i] = B_m[0, i] + theta_0 * Gw[0, i]
+            B_eff[1, i] = B_m[1, i] + theta_1 * Gw[1, i]
+            B_eff[2, i] = B_m[2, i] + theta_0 * Gw[1, i] + theta_1 * Gw[0, i]
+            
+        # B_eff.T @ N_res[g] + B_b.T @ M_res[g]
+        N_g = N_res[g]
+        M_g = M_res[g]
+        B_eff_T_N = np.zeros(n_dof)
+        B_b_T_M = np.zeros(n_dof)
+        for i in range(n_dof):
+            B_eff_T_N[i] = B_eff[0, i] * N_g[0] + B_eff[1, i] * N_g[1] + B_eff[2, i] * N_g[2]
+            B_b_T_M[i] = B_b[0, i] * M_g[0] + B_b[1, i] * M_g[1] + B_b[2, i] * M_g[2]
+            
+        # B_d @ u_loc
+        Bd_u = 0.0
+        for i in range(n_dof):
+            Bd_u += B_d[0, i] * u_loc[i]
+            
+        for i in range(n_dof):
+            F_loc[i] += (B_eff_T_N[i] + B_b_T_M[i]) * detw
+            F_loc[i] += B_d[0, i] * (drilling_stiffness * Bd_u) * detw
+            
+        if not tangent:
+            continue
+            
+        # K_loc += (B_eff.T @ C0[g] @ B_eff + B_b.T @ C2[g] @ B_b) * detw
+        C0_g = C0[g]
+        C2_g = C2[g]
+        
+        C0_B_eff = np.zeros((3, n_dof))
+        C2_B_b = np.zeros((3, n_dof))
+        for r in range(3):
+            for c in range(n_dof):
+                val0 = 0.0
+                val2 = 0.0
+                for k in range(3):
+                    val0 += C0_g[r, k] * B_eff[k, c]
+                    val2 += C2_g[r, k] * B_b[k, c]
+                C0_B_eff[r, c] = val0
+                C2_B_b[r, c] = val2
+                
+        for r in range(n_dof):
+            for c in range(n_dof):
+                val_eff = 0.0
+                val_b = 0.0
+                for k in range(3):
+                    val_eff += B_eff[k, r] * C0_B_eff[k, c]
+                    val_b += B_b[k, r] * C2_B_b[k, c]
+                K_loc[r, c] += (val_eff + val_b) * detw
+                
+        if has_plasticity:
+            # coupling = B_eff.T @ C1[g] @ B_b
+            C1_g = C1[g]
+            C1_B_b = np.zeros((3, n_dof))
+            for r in range(3):
+                for c in range(n_dof):
+                    val1 = 0.0
+                    for k in range(3):
+                        val1 += C1_g[r, k] * B_b[k, c]
+                    C1_B_b[r, c] = val1
+            
+            for r in range(n_dof):
+                for c in range(n_dof):
+                    val_c = 0.0
+                    for k in range(3):
+                        val_c += B_eff[k, r] * C1_B_b[k, c]
+                    K_loc[r, c] += (val_c + val_c) * detw
+                    
+        # Geometric initial stress stiffness
+        N00 = N_g[0]
+        N11 = N_g[1]
+        N01 = N_g[2]
+        
+        N_Gw_0 = N00 * Gw[0] + N01 * Gw[1]
+        N_Gw_1 = N01 * Gw[0] + N11 * Gw[1]
+        for r in range(n_dof):
+            for c in range(n_dof):
+                K_loc[r, c] += (Gw[0, r] * N_Gw_0[c] + Gw[1, r] * N_Gw_1[c]) * detw
+                K_loc[r, c] += B_d[0, r] * (drilling_stiffness * B_d[0, c]) * detw
+
+    # Shear stiffness and force contribution
+    for g in range(len(detw_shear_all)):
+        detw_s = detw_shear_all[g]
+        B_s = B_s_all[g]
+        
+        # F_loc += K_s @ u_loc
+        Bs_u_0 = 0.0
+        Bs_u_1 = 0.0
+        for i in range(n_dof):
+            Bs_u_0 += B_s[0, i] * u_loc[i]
+            Bs_u_1 += B_s[1, i] * u_loc[i]
+            
+        f_s_0 = D_shear[0, 0] * Bs_u_0 + D_shear[0, 1] * Bs_u_1
+        f_s_1 = D_shear[1, 0] * Bs_u_0 + D_shear[1, 1] * Bs_u_1
+        
+        for i in range(n_dof):
+            F_loc[i] += (B_s[0, i] * f_s_0 + B_s[1, i] * f_s_1) * detw_s
+            
+        if not tangent:
+            continue
+            
+        # K_loc += K_s
+        C_s = np.zeros((2, n_dof))
+        for r in range(2):
+            for c in range(n_dof):
+                C_s[r, c] = D_shear[r, 0] * B_s[0, c] + D_shear[r, 1] * B_s[1, c]
+                
+        for r in range(n_dof):
+            for c in range(n_dof):
+                K_loc[r, c] += (B_s[0, r] * C_s[0, c] + B_s[1, r] * C_s[1, c]) * detw_s
+                
+    return F_loc, K_loc
+
+
 class ShellElement(Element):
     """4/8-node quadrilateral Mindlin-Reissner shell element."""
 
@@ -354,10 +542,14 @@ class ShellElement(Element):
         material_name: str = "default",
         thickness: float = 0.01,
         drilling_stabilization: float = 1.0e-3,
+        reduced_integration: bool = False,
+        hourglass_stabilization: float = 1.0e-6,
     ):
         super().__init__(element_id, node_ids, material_name)
         self.thickness = float(thickness)
         self.drilling_stabilization = float(drilling_stabilization)
+        self.reduced_integration = reduced_integration
+        self.hourglass_stabilization = float(hourglass_stabilization)
         self._is_8node = len(node_ids) == 8
         self._is_4node = len(node_ids) == 4
         if not (self._is_4node or self._is_8node):
@@ -373,10 +565,14 @@ class ShellElement(Element):
 
     @property
     def gauss_points(self) -> np.ndarray:
+        if self._is_8node and self.reduced_integration:
+            return self.GAUSS_POINTS_2x2
         return self.GAUSS_POINTS_3x3 if self._is_8node else self.GAUSS_POINTS_2x2
 
     @property
     def gauss_weights(self) -> np.ndarray:
+        if self._is_8node and self.reduced_integration:
+            return self.GAUSS_WEIGHTS_2x2
         return self.GAUSS_WEIGHTS_3x3 if self._is_8node else self.GAUSS_WEIGHTS_2x2
 
     @property
@@ -591,6 +787,60 @@ class ShellElement(Element):
         )
         return inv_j2 @ B_covariant, det_j
 
+    def _rigid_body_mode_matrix(self, coords: np.ndarray) -> np.ndarray:
+        modes = np.zeros((self.total_dofs, 6), dtype=float)
+        centroid = np.mean(coords, axis=0)
+        axes = np.eye(3, dtype=float)
+
+        for local, coord in enumerate(coords):
+            base = local * 6
+            r = coord - centroid
+            modes[base + 0, 0] = 1.0
+            modes[base + 1, 1] = 1.0
+            modes[base + 2, 2] = 1.0
+            for axis_index, axis in enumerate(axes):
+                displacement = _cross3(axis, r)
+                modes[base : base + 3, 3 + axis_index] = displacement
+                modes[base + 3 : base + 6, 3 + axis_index] = axis
+
+        q, rmat = np.linalg.qr(modes)
+        diag = np.abs(np.diag(rmat))
+        if diag.size == 0:
+            return np.zeros((self.total_dofs, 0), dtype=float)
+        keep = diag > max(float(np.max(diag)) * 1.0e-10, _SMALL)
+        return q[:, keep]
+
+    def _hourglass_stabilization_matrix(self, K_base: np.ndarray, coords: np.ndarray) -> np.ndarray:
+        """Small stiffness on reduced-integration Q8 modes outside rigid motion."""
+        coefficient = float(getattr(self, "hourglass_stabilization", 0.0))
+        if not (self._is_8node and self.reduced_integration) or coefficient <= 0.0:
+            return np.zeros_like(K_base)
+
+        K_sym = 0.5 * (K_base + K_base.T)
+        eigvals, eigvecs = np.linalg.eigh(K_sym)
+        max_eig = max(float(np.max(np.abs(eigvals))), 1.0)
+        zero_tol = 1.0e-9 * max_eig
+        zero_mask = np.abs(eigvals) < zero_tol
+        if int(np.sum(zero_mask)) <= 6:
+            return np.zeros_like(K_base)
+
+        zero_space = eigvecs[:, zero_mask]
+        rigid = self._rigid_body_mode_matrix(coords)
+        if rigid.size:
+            zero_space = zero_space - rigid @ (rigid.T @ zero_space)
+
+        u, singular_values, _ = np.linalg.svd(zero_space, full_matrices=False)
+        if singular_values.size == 0:
+            return np.zeros_like(K_base)
+        keep = singular_values > 1.0e-8
+        if not np.any(keep):
+            return np.zeros_like(K_base)
+
+        hourglass_modes = u[:, keep]
+        stiffness_scale = coefficient * max_eig
+        K_hg = stiffness_scale * (hourglass_modes @ hourglass_modes.T)
+        return 0.5 * (K_hg + K_hg.T)
+
     def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
         coords = self.get_node_coordinates(mesh)
         E = material.elastic_modulus
@@ -637,6 +887,9 @@ class ShellElement(Element):
                 _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
                 K_local = (B_s.T @ D_shear @ B_s) * det_j * weight
                 K += T.T @ K_local @ T
+
+        self._hourglass_stiffness_matrix = self._hourglass_stabilization_matrix(K, coords)
+        K += self._hourglass_stiffness_matrix
 
         self._stiffness_matrix = K
         return K
@@ -796,7 +1049,38 @@ class ShellElement(Element):
                 _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
                 shear_data.append({"B_s": B_s, "detw": abs(det_j) * float(weight)})
 
-        cache = {"T0": T0, "gp": gp_data, "shear": shear_data}
+        n_gp = len(gp_data)
+        B_m_all = np.zeros((n_gp, 3, self.total_dofs))
+        B_b_all = np.zeros((n_gp, 3, self.total_dofs))
+        B_d_all = np.zeros((n_gp, 1, self.total_dofs))
+        Gw_all = np.zeros((n_gp, 2, self.total_dofs))
+        detw_all = np.zeros(n_gp)
+        for g, gp in enumerate(gp_data):
+            B_m_all[g] = gp["B_m"]
+            B_b_all[g] = gp["B_b"]
+            B_d_all[g] = gp["B_d"]
+            Gw_all[g] = gp["Gw"]
+            detw_all[g] = gp["detw"]
+
+        n_shear = len(shear_data)
+        B_s_all = np.zeros((n_shear, 2, self.total_dofs))
+        detw_shear_all = np.zeros(n_shear)
+        for g, sh in enumerate(shear_data):
+            B_s_all[g] = sh["B_s"]
+            detw_shear_all[g] = sh["detw"]
+
+        cache = {
+            "T0": T0,
+            "gp": gp_data,
+            "shear": shear_data,
+            "B_m_all": B_m_all,
+            "B_b_all": B_b_all,
+            "B_d_all": B_d_all,
+            "Gw_all": Gw_all,
+            "detw_all": detw_all,
+            "B_s_all": B_s_all,
+            "detw_shear_all": detw_shear_all,
+        }
         self._nl_cache = cache
         return cache
 
@@ -878,6 +1162,7 @@ class ShellElement(Element):
                 E,
                 nu,
                 curve,
+                compute_tangent=tangent,
             )
             trial_state = {"plastic_strain": ep_new, "alpha": alpha_new, "layer_strain": layer_strain.copy()}
 
@@ -893,40 +1178,45 @@ class ShellElement(Element):
             C2 = np.einsum("l,l,l,glij->gij", w_layers, z_layers, z_layers, C_tan)
 
         n_dof = self.total_dofs
-        F_loc = np.zeros(n_dof, dtype=float)
-        K_loc = np.zeros((n_dof, n_dof), dtype=float) if tangent else None
-        for g, gp in enumerate(cache["gp"]):
-            detw = gp["detw"]
-            B_eff = B_eff_list[g]
-            B_b = gp["B_b"]
-            B_d = gp["B_d"]
-            F_loc += (B_eff.T @ N_res[g] + B_b.T @ M_res[g]) * detw
-            F_loc += B_d.T @ (drilling_stiffness * (B_d @ u_loc)) * detw
-            if not tangent:
-                continue
-            K_loc += (B_eff.T @ C0[g] @ B_eff + B_b.T @ C2[g] @ B_b) * detw
-            if curve is not None:
-                coupling = B_eff.T @ C1[g] @ B_b
-                K_loc += (coupling + coupling.T) * detw
-            # Geometric (initial stress) stiffness from current membrane
-            # resultants; tension-positive, so tension stiffens.
-            N_mat = np.array(
-                [[N_res[g, 0], N_res[g, 2]], [N_res[g, 2], N_res[g, 1]]], dtype=float
-            )
-            K_loc += gp["Gw"].T @ N_mat @ gp["Gw"] * detw
-            # Elastic drilling stabilization.
-            K_loc += B_d.T @ (drilling_stiffness * B_d) * detw
+        F_loc, K_loc_temp = _jit_integrate_nonlinear_response(
+            u_loc,
+            N_res,
+            M_res,
+            C0,
+            C1,
+            C2,
+            cache["B_m_all"],
+            cache["B_b_all"],
+            cache["B_d_all"],
+            cache["Gw_all"],
+            cache["detw_all"],
+            cache["B_s_all"],
+            cache["detw_shear_all"],
+            D_shear,
+            drilling_stiffness,
+            tangent,
+            curve is not None,
+            n_dof,
+        )
+        K_loc = K_loc_temp if tangent else None
 
-        for sh in cache["shear"]:
-            B_s = sh["B_s"]
-            K_s = B_s.T @ D_shear @ B_s * sh["detw"]
-            F_loc += K_s @ u_loc
-            if tangent:
-                K_loc += K_s
+        K_hg = getattr(self, "_hourglass_stiffness_matrix", None)
+        if self._is_8node and self.reduced_integration and float(getattr(self, "hourglass_stabilization", 0.0)) > 0.0:
+            if K_hg is None:
+                self.compute_stiffness_matrix(mesh, material)
+                K_hg = getattr(self, "_hourglass_stiffness_matrix", None)
+
+        F_global = T0.T @ F_loc
+        if K_hg is not None:
+            u_global = np.asarray(u_elem, dtype=float)
+            F_global = F_global + K_hg @ u_global
 
         if not tangent:
-            return T0.T @ F_loc, None, trial_state
-        return T0.T @ F_loc, T0.T @ K_loc @ T0, trial_state
+            return F_global, None, trial_state
+        K_global = T0.T @ K_loc @ T0
+        if K_hg is not None:
+            K_global = K_global + K_hg
+        return F_global, K_global, trial_state
 
     def compute_stresses(
         self,
@@ -1115,6 +1405,9 @@ class BeamElement(Element):
         self._kz = self.cross_section.get("shear_factor_z", 5.0 / 6.0)
         self._orientation = _section_orientation(self.cross_section)
         self._fiber_plasticity = self.cross_section.get("fiber_plasticity")
+        self._geometric_nonlinearity = str(
+            self.cross_section.get("geometric_nonlinearity", self.cross_section.get("geometry", "von_karman"))
+        ).lower()
         # Optional exact stress-recovery data; estimated from A and I if absent.
         self._c_y = self.cross_section.get("c_y")
         self._c_z = self.cross_section.get("c_z")
@@ -1168,12 +1461,8 @@ class BeamElement(Element):
             T[b + 3:b + 6, b + 3:b + 6] = Rt
         return length, T
 
-    def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
-        coords = self.get_node_coordinates(mesh)
-        try:
-            L, T = self._beam_frame_and_transform(coords)
-        except ValueError:
-            return np.zeros((self.total_dofs, self.total_dofs))
+    def _local_linear_stiffness(self, length: float, material: "Material", include_axial: bool = True) -> np.ndarray:
+        L = float(length)
         E = material.elastic_modulus
         G = material.shear_modulus
         EA = E * self._A
@@ -1181,8 +1470,9 @@ class BeamElement(Element):
         EIz = E * self._Iz
         GJ = G * self._J
         K = np.zeros((12, 12), dtype=float)
-        K[0, 0] = K[6, 6] = EA / L
-        K[0, 6] = K[6, 0] = -EA / L
+        if include_axial:
+            K[0, 0] = K[6, 6] = EA / L
+            K[0, 6] = K[6, 0] = -EA / L
 
         # Bending about local y: deflection w (local z), rotation ry, EIy,
         # Timoshenko shear parameter from the local-z shear area.
@@ -1210,6 +1500,15 @@ class BeamElement(Element):
 
         K[3, 3] = K[9, 9] = GJ / L
         K[3, 9] = K[9, 3] = -GJ / L
+        return K
+
+    def compute_stiffness_matrix(self, mesh: "FEMesh", material: "Material") -> np.ndarray:
+        coords = self.get_node_coordinates(mesh)
+        try:
+            L, T = self._beam_frame_and_transform(coords)
+        except ValueError:
+            return np.zeros((self.total_dofs, self.total_dofs))
+        K = self._local_linear_stiffness(L, material)
         K_global = T.T @ K @ T
         self._stiffness_matrix = K_global
         return K_global
@@ -1486,6 +1785,65 @@ class BeamElement(Element):
             return T.T @ F_loc, None, trial_state
         return T.T @ F_loc, T.T @ K_loc @ T, trial_state
 
+    def _current_beam_frame_and_transform(self, coords: np.ndarray, u_elem: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+        current = coords.copy()
+        current[0] += np.asarray(u_elem[0:3], dtype=float)
+        current[1] += np.asarray(u_elem[6:9], dtype=float)
+        length = float(np.linalg.norm(current[1] - current[0]))
+        if length < _SMALL:
+            raise ValueError(f"Beam element {self.element_id} has near-zero current length")
+        e1 = (current[1] - current[0]) / length
+        R = _beam_rotation_matrix(e1, self._orientation)
+        T = np.zeros((12, 12), dtype=float)
+        Rt = R.T
+        for i in range(2):
+            b = i * 6
+            T[b:b + 3, b:b + 3] = Rt
+            T[b + 3:b + 6, b + 3:b + 6] = Rt
+        return length, T, R, current
+
+    def _compute_corotational_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Optional[Any],
+        tangent: bool,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
+        """Elastic 2-node corotational beam response.
+
+        The element frame follows the current chord.  Rigid-body chord rotation
+        is subtracted from nodal rotations, so a finite rigid rotation with
+        matching nodal rotation vectors produces near-zero internal force.
+        """
+        coords = self.get_node_coordinates(mesh)
+        L0, _T0 = self._beam_frame_and_transform(coords)
+        Lc, Tc, Rc, _current = self._current_beam_frame_and_transform(coords, np.asarray(u_elem, dtype=float))
+        R0 = _beam_rotation_matrix((coords[1] - coords[0]) / L0, self._orientation)
+        rigid_rotation = _rotation_vector_from_matrix(Rc @ R0.T)
+
+        u_global = np.asarray(u_elem, dtype=float).reshape(12)
+        q = np.zeros(12, dtype=float)
+        q[6] = Lc - L0
+        q[3:6] = Rc.T @ (u_global[3:6] - rigid_rotation)
+        q[9:12] = Rc.T @ (u_global[9:12] - rigid_rotation)
+
+        K_loc = self._local_linear_stiffness(L0, material)
+        F_loc = K_loc @ q
+        F_global = Tc.T @ F_loc
+        trial_state = {
+            "geometric_nonlinearity": "corotational",
+            "initial_length": float(L0),
+            "current_length": float(Lc),
+            "axial_extension": float(Lc - L0),
+            "rigid_rotation_vector": rigid_rotation.copy(),
+            "basic_deformation_norm": float(np.linalg.norm(q)),
+        }
+        if not tangent:
+            return F_global, None, trial_state
+        K_global = Tc.T @ K_loc @ Tc
+        return F_global, K_global, trial_state
+
     def compute_nonlinear_response(
         self,
         mesh: "FEMesh",
@@ -1507,6 +1865,11 @@ class BeamElement(Element):
         provided, in which case axial/bending response is integrated over a
         uniaxial fiber section using the material hardening curve.
         """
+        if self._geometric_nonlinearity in {"corotational", "co_rotational", "corot"}:
+            return self._compute_corotational_nonlinear_response(
+                mesh, material, u_elem, state, tangent
+            )
+
         fiber_config = self._fiber_plasticity_config(material)
         if fiber_config is not None:
             return self._compute_fiber_nonlinear_response(

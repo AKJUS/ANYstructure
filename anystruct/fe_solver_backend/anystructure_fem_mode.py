@@ -555,7 +555,8 @@ def build_fe_model_from_generated_geometry(
             thickness = _as_float(_value(shell, "thickness", "t"), 0.0) * config.geometry_scale
             if thickness <= 0.0:
                 raise ValueError("shell-thickness-must-be-positive")
-            _add_model_element(model, elem_id, ShellElement(elem_id, node_ids, _material_name(shell, config), thickness=thickness))
+            elem_type = str(_value(shell, "type", default="")).upper()
+            _add_model_element(model, elem_id, ShellElement(elem_id, node_ids, _material_name(shell, config), thickness=thickness, reduced_integration=(elem_type == "S8R")))
             element_count += 1
 
     beam_roles: List[str] = []

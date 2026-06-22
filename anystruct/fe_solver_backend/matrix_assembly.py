@@ -7,8 +7,10 @@ which matrices they need without side effects.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -32,6 +34,8 @@ def _base_info(model: "FEModel", matrix_type: str) -> Dict[str, Any]:
         "assembly_time": 0.0,
         "element_times": {},
         "skipped_elements": [],
+        "diagnostics": {},
+        "revision_signature": getattr(mesh, "revision_signature", lambda: {})(),
     }
 
 
@@ -43,7 +47,39 @@ def _check_element_matrix_shape(element_id: int, matrix_name: str, matrix: np.nd
             f"Element {element_id} returned {matrix_name} with shape {matrix.shape}; "
             f"expected {expected_shape}."
         )
+    if not np.all(np.isfinite(matrix)):
+        raise AssemblyError(f"Element {element_id} returned non-finite values in {matrix_name}.")
     return matrix
+
+
+def _relative_symmetry_error(matrix: sparse.spmatrix | np.ndarray) -> float:
+    if sparse.issparse(matrix):
+        diff = matrix - matrix.T
+        numerator = float(sparse.linalg.norm(diff))
+        denominator = max(float(sparse.linalg.norm(matrix)), 1.0)
+        return numerator / denominator
+    dense = np.asarray(matrix, dtype=float)
+    return float(np.linalg.norm(dense - dense.T) / max(np.linalg.norm(dense), 1.0))
+
+
+def _topology_signature(mesh: Any, matrix_type: str) -> str:
+    revisions = getattr(mesh, "revision_signature", lambda: {})()
+    payload = {
+        "matrix_type": matrix_type,
+        "topology_revision": revisions.get("topology", 0),
+        "mpc_revision": revisions.get("mpc", 0),
+        "elements": [
+            {
+                "id": int(elem_id),
+                "class": element.__class__.__name__,
+                "node_ids": [int(node_id) for node_id in getattr(element, "node_ids", [])],
+                "dofs": [int(dof) for dof in element.get_dof_mapping(mesh)],
+            }
+            for elem_id, element in mesh.elements.items()
+        ],
+    }
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _scatter_element_matrix(
@@ -81,11 +117,11 @@ def _get_cached_sparsity_pattern(mesh: "FEMesh", matrix_type: str) -> Tuple[np.n
     if not hasattr(mesh, "_sparsity_cache"):
         mesh._sparsity_cache = {}
 
-    current_elem_ids = list(mesh.elements.keys())
+    signature = _topology_signature(mesh, matrix_type)
 
     if matrix_type in mesh._sparsity_cache:
         cached = mesh._sparsity_cache[matrix_type]
-        if cached["elem_ids"] == current_elem_ids:
+        if cached.get("signature") == signature:
             return cached["rows"], cached["cols"]
 
     rows_list = []
@@ -104,7 +140,7 @@ def _get_cached_sparsity_pattern(mesh: "FEMesh", matrix_type: str) -> Tuple[np.n
     mesh._sparsity_cache[matrix_type] = {
         "rows": rows_concat,
         "cols": cols_concat,
-        "elem_ids": current_elem_ids,
+        "signature": signature,
     }
     return rows_concat, cols_concat
 
@@ -119,6 +155,65 @@ def _assemble_element_matrix(
     info = _base_info(model, matrix_type)
     start_time = time.time()
 
+    # Precompute shell stiffnesses in a JIT-compiled batch if doing stiffness matrix assembly
+    precomputed = {}
+    if matrix_type == "stiffness":
+        from .elements import ShellElement
+        from .vectorized_stiffness import compute_shell_stiffness_matrices_jit
+
+        groups = {}
+        for elem_id, element in mesh.elements.items():
+            if isinstance(element, ShellElement):
+                key = (
+                    element.num_nodes,
+                    element.thickness,
+                    element.drilling_stabilization,
+                    element.material_name,
+                )
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append((elem_id, element))
+
+        for key, elem_list in groups.items():
+            num_nodes, thickness, drilling_stabilization, material_name = key
+            material = model.get_material(material_name)
+            E = float(material.elastic_modulus)
+            nu = float(material.poisson_ratio)
+            G = float(material.shear_modulus)
+
+            n_elem = len(elem_list)
+            coords_all = np.zeros((n_elem, num_nodes, 3))
+            for idx, (elem_id, element) in enumerate(elem_list):
+                coords_all[idx] = element.get_node_coordinates(mesh)
+
+            first_element = elem_list[0][1]
+            is_4node = first_element._is_4node
+            gauss_points = first_element.gauss_points
+            gauss_weights = first_element.gauss_weights
+            if is_4node:
+                shear_points = np.empty((0, 2))
+                shear_weights = np.empty(0)
+            else:
+                shear_points = first_element.shear_gauss_points
+                shear_weights = first_element.shear_gauss_weights
+
+            stiffnesses = compute_shell_stiffness_matrices_jit(
+                coords_all,
+                is_4node,
+                thickness,
+                drilling_stabilization,
+                E,
+                nu,
+                G,
+                gauss_points,
+                gauss_weights,
+                shear_points,
+                shear_weights,
+            )
+
+            for idx, (elem_id, element) in enumerate(elem_list):
+                precomputed[elem_id] = stiffnesses[idx]
+
     # Retrieve or build cached sparsity pattern
     rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, matrix_type)
 
@@ -131,13 +226,24 @@ def _assemble_element_matrix(
             info["skipped_elements"].append(int(elem_id))
             continue
 
-        element_matrix = element_matrix_getter(element, mesh, material)
+        if elem_id in precomputed:
+            element_matrix = precomputed[elem_id]
+        else:
+            element_matrix = element_matrix_getter(element, mesh, material)
+
         element_matrix = _check_element_matrix_shape(
             int(elem_id),
             matrix_type,
             element_matrix,
             int(dof_mapping.size),
         )
+        if matrix_type in {"stiffness", "mass", "geometric_stiffness"}:
+            local_symmetry = _relative_symmetry_error(element_matrix)
+            if local_symmetry > 1.0e-8:
+                raise AssemblyError(
+                    f"Element {elem_id} returned nonsymmetric {matrix_type}; "
+                    f"relative symmetry error {local_symmetry:.3e}."
+                )
         data_list.append(np.asarray(element_matrix, dtype=float).ravel())
 
         info["element_times"][int(elem_id)] = time.time() - elem_start
@@ -146,7 +252,9 @@ def _assemble_element_matrix(
     info["assembly_time"] = time.time() - start_time
     
     if not data_list:
-        return sparse.csr_matrix((total_dofs, total_dofs), dtype=float), info
+        matrix = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+        info["diagnostics"]["assembled_symmetry_error"] = 0.0
+        return matrix, info
         
     data_concat = np.concatenate(data_list)
     coo = sparse.coo_matrix(
@@ -154,7 +262,10 @@ def _assemble_element_matrix(
         shape=(total_dofs, total_dofs),
         dtype=float,
     )
-    return coo.tocsr(), info
+    matrix = coo.tocsr()
+    info["diagnostics"]["assembled_symmetry_error"] = _relative_symmetry_error(matrix)
+    info["sparsity_signature"] = _topology_signature(mesh, matrix_type)
+    return matrix, info
 
 
 def assemble_stiffness_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
@@ -240,7 +351,9 @@ def assemble_geometric_stiffness_matrix(
     info["state_source"] = "none" if element_states is None else type(element_states).__name__
     
     if not data_list:
-        return sparse.csr_matrix((total_dofs, total_dofs), dtype=float), info
+        matrix = sparse.csr_matrix((total_dofs, total_dofs), dtype=float)
+        info["diagnostics"]["assembled_symmetry_error"] = 0.0
+        return matrix, info
         
     data_concat = np.concatenate(data_list)
     coo = sparse.coo_matrix(
@@ -248,7 +361,10 @@ def assemble_geometric_stiffness_matrix(
         shape=(total_dofs, total_dofs),
         dtype=float,
     )
-    return coo.tocsr(), info
+    matrix = coo.tocsr()
+    info["diagnostics"]["assembled_symmetry_error"] = _relative_symmetry_error(matrix)
+    info["sparsity_signature"] = _topology_signature(mesh, "geometric_stiffness")
+    return matrix, info
 
 
 def assemble_load_vector(model: "FEModel", load_case: Optional["LoadCase"] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -265,6 +381,8 @@ def assemble_load_vector(model: "FEModel", load_case: Optional["LoadCase"] = Non
 
     if load_vector.shape != (total_dofs,):
         raise AssemblyError(f"Load vector shape {load_vector.shape} does not match total DOFs {(total_dofs,)}.")
+    if not np.all(np.isfinite(load_vector)):
+        raise AssemblyError(f"Load case {load_name!r} produced non-finite load vector values.")
 
     return load_vector, {
         "vector_type": "load",
@@ -273,6 +391,56 @@ def assemble_load_vector(model: "FEModel", load_case: Optional["LoadCase"] = Non
         "total_dofs": total_dofs,
         "assembly_time": time.time() - start_time,
         "load_norm": float(np.linalg.norm(load_vector)),
+    }
+
+
+def assemble_load_matrix(
+    model: "FEModel",
+    load_cases: Sequence[Optional["LoadCase"]],
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Assemble a dense load matrix with one column per load case."""
+    start = time.time()
+    vectors = []
+    infos = []
+    names = []
+    for load_case in load_cases:
+        vector, info = assemble_load_vector(model, load_case)
+        vectors.append(vector)
+        infos.append(info)
+        names.append(None if load_case is None else load_case.name)
+    total_dofs = model.mesh.dof_manager.total_dofs
+    matrix = np.column_stack(vectors) if vectors else np.zeros((total_dofs, 0), dtype=float)
+    return matrix, {
+        "vector_type": "load_matrix",
+        "load_cases": names,
+        "num_load_cases": len(names),
+        "total_dofs": total_dofs,
+        "assembly_time": time.time() - start,
+        "columns": infos,
+        "load_norms": [float(np.linalg.norm(matrix[:, idx])) for idx in range(matrix.shape[1])],
+        "revision_signature": getattr(model.mesh, "revision_signature", lambda: {})(),
+    }
+
+
+def assemble_damping_matrix(
+    model: "FEModel",
+    rayleigh_alpha: float = 0.0,
+    rayleigh_beta: float = 0.0,
+) -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
+    """Assemble Rayleigh damping C = alpha M + beta K."""
+    start = time.time()
+    M, mass_info = assemble_mass_matrix(model)
+    K, stiffness_info = assemble_stiffness_matrix(model)
+    C = (float(rayleigh_alpha) * M + float(rayleigh_beta) * K).tocsr()
+    return C, {
+        "matrix_type": "damping",
+        "rayleigh_alpha": float(rayleigh_alpha),
+        "rayleigh_beta": float(rayleigh_beta),
+        "mass": mass_info,
+        "stiffness": stiffness_info,
+        "assembly_time": time.time() - start,
+        "diagnostics": {"assembled_symmetry_error": _relative_symmetry_error(C)},
+        "revision_signature": getattr(model.mesh, "revision_signature", lambda: {})(),
     }
 
 

@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 from scipy import linalg
-from scipy.sparse.linalg import eigsh, spsolve
+from scipy.sparse.linalg import eigsh
 
 from .assembly import build_constraint_transformation
+from .cases import make_result_case
+from .linalg import MatrixClass, factorize
 from .matrix_assembly import (
     assemble_geometric_stiffness_matrix,
     assemble_load_vector,
@@ -63,6 +65,7 @@ class NonlinearLimitPointResult:
     critical_load_factor_estimate: Optional[float]
     assembly_info: Dict[str, Any]
     constraint_info: Dict[str, Any]
+    result_case: Optional[Dict[str, Any]] = None
 
     @property
     def last_load_factor(self) -> float:
@@ -82,6 +85,7 @@ class NonlinearLimitPointResult:
             "critical_load_factor_estimate": self.critical_load_factor_estimate,
             "assembly_info": self.assembly_info,
             "constraint_info": self.constraint_info,
+            "result_case": self.result_case,
             "steps": [step.to_dict() for step in self.steps],
         }
 
@@ -175,10 +179,28 @@ def solve_nonlinear_load_stepping(
     }
 
     if K_red.shape[0] == 0:
-        return NonlinearLimitPointResult([], "empty_reduced_system", u0.copy(), None, assembly_info, constraint_info)
+        result_case = make_result_case(
+            name="nonlinear_limit_point",
+            analysis_type="nonlinear_limit_point",
+            load_cases=() if load_case is None else (load_case,),
+            assembly_info=assembly_info,
+            solver_info={"convergence_info": {"status": "empty_reduced_system"}},
+            recovery={"steps": 0, "limit_point": True},
+            settings={"max_load_factor": max_load_factor, "num_steps": num_steps},
+        ).to_dict()
+        return NonlinearLimitPointResult([], "empty_reduced_system", u0.copy(), None, assembly_info, constraint_info, result_case)
 
     initial_min = _minimum_tangent_eigenvalue(K_red, KG_red, 0.0)
     if initial_min <= 0.0:
+        result_case = make_result_case(
+            name="nonlinear_limit_point",
+            analysis_type="nonlinear_limit_point",
+            load_cases=() if load_case is None else (load_case,),
+            assembly_info=assembly_info,
+            solver_info={"convergence_info": {"status": "initial_tangent_not_positive"}},
+            recovery={"steps": 0, "limit_point": True},
+            settings={"max_load_factor": max_load_factor, "num_steps": num_steps},
+        ).to_dict()
         return NonlinearLimitPointResult(
             [],
             "initial_tangent_not_positive",
@@ -186,6 +208,7 @@ def solve_nonlinear_load_stepping(
             0.0,
             assembly_info,
             constraint_info,
+            result_case,
         )
 
     steps: List[NonlinearLoadStep] = []
@@ -216,7 +239,12 @@ def solve_nonlinear_load_stepping(
         KT_red = (K_red - float(load_factor) * KG_red).tocsr()
         try:
             with np.errstate(all="ignore"):
-                q = np.asarray(spsolve(KT_red, rhs), dtype=float).reshape(-1)
+                handle = factorize(
+                    KT_red,
+                    MatrixClass.SYMMETRIC_INDEFINITE,
+                    signature=f"nonlinear.limit_step:{step_index}:{float(load_factor):.16g}",
+                )
+                q = np.asarray(handle.solve(rhs), dtype=float).reshape(-1)
         except Exception:
             status = "solver_failed"
             break
@@ -255,4 +283,18 @@ def solve_nonlinear_load_stepping(
             break
         previous_step = step
 
-    return NonlinearLimitPointResult(steps, status, u, critical_estimate, assembly_info, constraint_info)
+    result_case = make_result_case(
+        name="nonlinear_limit_point",
+        analysis_type="nonlinear_limit_point",
+        load_cases=() if load_case is None else (load_case,),
+        assembly_info=assembly_info,
+        solver_info={"convergence_info": {"status": status}},
+        recovery={"steps": len(steps), "limit_point": True},
+        settings={
+            "max_load_factor": max_load_factor,
+            "num_steps": num_steps,
+            "stability_tolerance": stability_tolerance,
+            "stop_at_limit": stop_at_limit,
+        },
+    ).to_dict()
+    return NonlinearLimitPointResult(steps, status, u, critical_estimate, assembly_info, constraint_info, result_case)

@@ -248,6 +248,18 @@ class Camera3D:
         if factor > 0.0:
             self.set_orbit(distance=max(self.near * 2.0, self.distance * factor))
 
+    def pan_view_pixels(self, delta_x: float, delta_y: float, width: int, height: int) -> None:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        right, camera_up, _forward = self.basis()
+        visible_height = 2.0 * self.distance * math.tan(self.fov / 2.0)
+        visible_width = visible_height * float(width) / float(height)
+        world_dx = -float(delta_x) * visible_width / float(width)
+        world_dy = float(delta_y) * visible_height / float(height)
+        offset = right * world_dx + camera_up * world_dy
+        self.target = self.target + offset
+        self._update_position()
+
     def set_target(self, target: Point3D) -> None:
         self.target = Point3D(target.x, target.y, target.z)
         self._update_position()
@@ -315,6 +327,7 @@ class Tkinter3DCanvas(tk.Frame):
         self.bg = bg
         self.camera = Camera3D()
         self.objects: List[Dict[str, Any]] = []
+        self._explicit_opaque_cylinder_occluders: List[Dict[str, Any]] = []
 
         # Optional fixed 2D legend.  The 3D projection reserves space for it,
         # so the legend never covers the model.
@@ -337,7 +350,9 @@ class Tkinter3DCanvas(tk.Frame):
         self._last_mouse_x = 0
         self._last_mouse_y = 0
         self._is_dragging = False
+        self._drag_mode = ""
         self._interactive_render = False
+        self._fast_polygon_target = 1800
 
         self._redraw_after_id: Optional[str] = None
         self._finish_interaction_after_id: Optional[str] = None
@@ -346,9 +361,12 @@ class Tkinter3DCanvas(tk.Frame):
         self._world_primitive_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         self.canvas.bind("<Configure>", self._on_resize, add="+")
-        self.canvas.bind("<ButtonPress-1>", self._on_mouse_down, add="+")
+        self.canvas.bind("<ButtonPress-1>", lambda event: self._on_mouse_down(event, "pan"), add="+")
         self.canvas.bind("<B1-Motion>", self._on_mouse_drag, add="+")
         self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up, add="+")
+        self.canvas.bind("<ButtonPress-3>", lambda event: self._on_mouse_down(event, "rotate"), add="+")
+        self.canvas.bind("<B3-Motion>", self._on_mouse_drag, add="+")
+        self.canvas.bind("<ButtonRelease-3>", self._on_mouse_up, add="+")
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel, add="+")
         self.canvas.bind("<Button-4>", self._on_mouse_wheel, add="+")
         self.canvas.bind("<Button-5>", self._on_mouse_wheel, add="+")
@@ -423,11 +441,18 @@ class Tkinter3DCanvas(tk.Frame):
 
     @staticmethod
     def _format_legend_value(value: float) -> str:
-        if abs(value) >= 100.0:
+        magnitude = abs(float(value))
+        if magnitude >= 100.0:
             return f"{value:.0f}"
-        if abs(value) >= 10.0:
+        if magnitude >= 10.0:
             return f"{value:.1f}".rstrip("0").rstrip(".")
-        return f"{value:.2f}".rstrip("0").rstrip(".")
+        if magnitude >= 1.0:
+            return f"{value:.2f}".rstrip("0").rstrip(".")
+        if magnitude >= 1.0e-2:
+            return f"{value:.4f}".rstrip("0").rstrip(".")
+        if magnitude >= 1.0e-5 or magnitude == 0.0:
+            return f"{value:.6f}".rstrip("0").rstrip(".")
+        return f"{value:.3e}"
 
     def _draw_thickness_legend(self) -> None:
         legend = self._thickness_legend
@@ -553,15 +578,17 @@ class Tkinter3DCanvas(tk.Frame):
         self.height = new_height
         self._request_redraw()
 
-    def _on_mouse_down(self, event: tk.Event) -> None:
+    def _on_mouse_down(self, event: tk.Event, mode: str) -> None:
         self._last_mouse_x = int(event.x)
         self._last_mouse_y = int(event.y)
         self._is_dragging = True
+        self._drag_mode = str(mode)
         self._interactive_render = True
         self.canvas.focus_set()
 
     def _on_mouse_up(self, _event: tk.Event) -> None:
         self._is_dragging = False
+        self._drag_mode = ""
         self._interactive_render = False
         self._cancel_scheduled_redraw()
         self._request_redraw()
@@ -575,10 +602,13 @@ class Tkinter3DCanvas(tk.Frame):
         self._last_mouse_x = int(event.x)
         self._last_mouse_y = int(event.y)
 
-        self.camera.orbit(
-            delta_azimuth=-dx * 0.008,
-            delta_elevation=dy * 0.008,
-        )
+        if self._drag_mode == "rotate":
+            self.camera.orbit(
+                delta_azimuth=-dx * 0.008,
+                delta_elevation=dy * 0.008,
+            )
+        else:
+            self.camera.pan_view_pixels(dx, dy, self._plot_width(), self.height)
         self._interactive_render = True
         self._request_redraw(interactive=True)
 
@@ -650,6 +680,7 @@ class Tkinter3DCanvas(tk.Frame):
 
     def clear(self) -> None:
         self.objects.clear()
+        self._explicit_opaque_cylinder_occluders.clear()
         self._invalidate_geometry_cache()
         self._clear_canvas_only()
 
@@ -662,8 +693,13 @@ class Tkinter3DCanvas(tk.Frame):
         self.height = max(1, self.canvas.winfo_height())
         self._clear_canvas_only()
 
-        quality = "fast" if self._interactive_render else "full"
+        interactive = self._interactive_render
+        quality = "fast" if interactive else "full"
         primitives = self._get_world_primitives(quality)
+        # Hidden-member ray checks and stipple/legend drawing are restored on
+        # mouse release.  Skipping them while dragging keeps orbiting responsive
+        # on dense cylinder models without changing the final rendered view.
+        opaque_cylinder_occluders = [] if interactive else self._collect_opaque_cylinder_occluders()
 
         right, camera_up, forward = self.camera.basis()
         position = self.camera.position
@@ -703,8 +739,20 @@ class Tkinter3DCanvas(tk.Frame):
             return result
 
         render_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
+        overlay_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
+        offscreen_margin = 20.0
+        min_screen_x = -offscreen_margin
+        max_screen_x = float(plot_width) + offscreen_margin
+        min_screen_y = -offscreen_margin
+        max_screen_y = float(self.height) + offscreen_margin
 
         for primitive in primitives:
+            if self._primitive_hidden_by_opaque_cylinder(
+                    primitive,
+                    opaque_cylinder_occluders,
+                    position,
+            ):
+                continue
             if primitive.get("cull_backface", False):
                 normal = primitive["normal"]
                 center = primitive["center"]
@@ -724,6 +772,13 @@ class Tkinter3DCanvas(tk.Frame):
                 end = project(primitive["end"])
                 if start is None or end is None:
                     continue
+                if (
+                        max(start[0], end[0]) < min_screen_x
+                        or min(start[0], end[0]) > max_screen_x
+                        or max(start[1], end[1]) < min_screen_y
+                        or min(start[1], end[1]) > max_screen_y
+                ):
+                    continue
                 depth = 0.5 * (start[2] + end[2])
                 coords = (start[0], start[1], end[0], end[1])
             else:
@@ -737,29 +792,47 @@ class Tkinter3DCanvas(tk.Frame):
                     projected.append(point_2d)
                 if clipped or len(projected) < 3:
                     continue
-
-                depth = sum(item[2] for item in projected) / len(projected)
+                depth_total = 0.0
+                min_x = float("inf")
+                max_x = float("-inf")
+                min_y = float("inf")
+                max_y = float("-inf")
                 flat: List[float] = []
-                for screen_x, screen_y, _point_depth in projected:
+                for screen_x, screen_y, point_depth in projected:
+                    depth_total += point_depth
+                    min_x = min(min_x, screen_x)
+                    max_x = max(max_x, screen_x)
+                    min_y = min(min_y, screen_y)
+                    max_y = max(max_y, screen_y)
                     flat.extend((screen_x, screen_y))
+                if (
+                        max_x < min_screen_x
+                        or min_x > max_screen_x
+                        or max_y < min_screen_y
+                        or min_y > max_screen_y
+                ):
+                    continue
+
+                depth = depth_total / len(projected)
                 coords = tuple(flat)
 
-            render_items.append(
-                (
-                    depth,
-                    int(primitive.get("layer", 0)),
-                    primitive,
-                    coords,
-                )
+            item = (
+                depth,
+                int(primitive.get("layer", 0)),
+                primitive,
+                coords,
             )
+            if primitive.get("draw_overlay"):
+                overlay_items.append(item)
+                continue
+            render_items.append(item)
 
-        depth_span = max(0.001, far - near)
-        # Apply a layer bias to resolve depth sorting of overlapping/coplanar elements
-        # (e.g. plate and stiffeners). Higher layers are drawn later (on top).
-        layer_epsilon = depth_span * 0.025
+        # Layer is only a near-coplanar tie-breaker.  The old far/near-based
+        # bias was large enough to draw internal members through an opaque shell.
+        scene_scale = max(float(self.camera.distance), 1.0)
+        layer_epsilon = max(1.0e-9, scene_scale * 1.0e-7)
         render_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
 
-        interactive = self._interactive_render
         for _depth, _layer, primitive, coords in render_items:
             if primitive["kind"] == "line":
                 self.canvas.create_line(
@@ -769,15 +842,30 @@ class Tkinter3DCanvas(tk.Frame):
                 )
             else:
                 outline = "" if interactive and primitive.get("fast_no_outline") else primitive["outline"]
+                kwargs = {
+                    "fill": primitive["color"],
+                    "outline": outline,
+                    "width": primitive["width"],
+                    "stipple": "" if interactive else primitive.get("stipple", ""),
+                }
+                if primitive.get("tags"):
+                    kwargs["tags"] = primitive.get("tags")
                 self.canvas.create_polygon(
                     *coords,
-                    fill=primitive["color"],
-                    outline=outline,
-                    width=primitive["width"],
-                    stipple=primitive.get("stipple", ""),
+                    **kwargs
                 )
 
-        self._draw_thickness_legend()
+        overlay_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
+        for _depth, _layer, primitive, coords in overlay_items:
+            if primitive["kind"] == "line":
+                self.canvas.create_line(
+                    *coords,
+                    fill=primitive["color"],
+                    width=primitive["width"],
+                )
+
+        if not interactive:
+            self._draw_thickness_legend()
 
     def _get_world_primitives(self, quality: str) -> List[Dict[str, Any]]:
         cached = self._world_primitive_cache.get(quality)
@@ -785,7 +873,17 @@ class Tkinter3DCanvas(tk.Frame):
             return cached
 
         primitives: List[Dict[str, Any]] = []
+        polygon_stride = 1
+        if quality == "fast":
+            polygon_count = sum(1 for obj in self.objects if obj.get("type") == "polygon")
+            if polygon_count > self._fast_polygon_target:
+                polygon_stride = max(1, math.ceil(polygon_count / float(self._fast_polygon_target)))
+        polygon_index = 0
         for obj in self.objects:
+            if quality == "fast" and obj.get("type") == "polygon":
+                polygon_index += 1
+                if polygon_stride > 1 and not obj.get("tags") and (polygon_index - 1) % polygon_stride:
+                    continue
             primitives.extend(self._object_to_primitives(obj, quality))
 
         self._world_primitive_cache[quality] = primitives
@@ -818,6 +916,7 @@ class Tkinter3DCanvas(tk.Frame):
         cull_backface: bool = False,
         fast_no_outline: bool = True,
         stipple: str = "",
+        tags: str = "",
     ) -> Optional[Dict[str, Any]]:
         if len(vertices) < 3:
             return None
@@ -840,6 +939,7 @@ class Tkinter3DCanvas(tk.Frame):
             "cull_backface": cull_backface,
             "fast_no_outline": fast_no_outline,
             "stipple": stipple,
+            "tags": tags,
         }
 
     @staticmethod
@@ -849,6 +949,7 @@ class Tkinter3DCanvas(tk.Frame):
         color: str,
         width: int,
         layer: int = 30,
+        draw_overlay: bool = False,
     ) -> Dict[str, Any]:
         return {
             "kind": "line",
@@ -857,6 +958,7 @@ class Tkinter3DCanvas(tk.Frame):
             "color": color,
             "width": width,
             "layer": layer,
+            "draw_overlay": bool(draw_overlay),
         }
 
     def _object_to_primitives(
@@ -872,17 +974,20 @@ class Tkinter3DCanvas(tk.Frame):
                     obj["end"],
                     obj.get("color", "black"),
                     int(obj.get("width", 1)),
+                    layer=int(obj.get("layer", 30)),
+                    draw_overlay=bool(obj.get("draw_overlay", False)),
                 )
             ]
-        if object_type == "polygon":
+        elif object_type == "polygon":
             primitive = self._polygon_primitive(
-                obj.get("vertices", []),
-                obj.get("color", "gray"),
-                obj.get("outline", "black"),
-                int(obj.get("width", 1)),
-                layer=int(obj.get("layer", 5)),
-                cull_backface=bool(obj.get("cull_backface", False)),
+                vertices=obj["vertices"],
+                color=obj["color"],
+                outline=obj["outline"],
+                width=obj["width"],
+                layer=obj.get("layer", 5),
+                cull_backface=obj.get("cull_backface", False),
                 stipple=obj.get("stipple", ""),
+                tags=obj.get("tags", ""),
             )
             return [primitive] if primitive else []
         if object_type == "cylinder":
@@ -1114,6 +1219,7 @@ class Tkinter3DCanvas(tk.Frame):
                     ],
                     patch_color,
                     outline,
+                    width=1,
                     layer=0,
                     cull_backface=cull_shell_backfaces,
                     stipple=shell_stipple,
@@ -1126,6 +1232,7 @@ class Tkinter3DCanvas(tk.Frame):
                 rings[-1],
                 color,
                 outline,
+                width=1,
                 layer=1,
                 cull_backface=cull_shell_backfaces,
                 stipple=shell_stipple,
@@ -1134,6 +1241,7 @@ class Tkinter3DCanvas(tk.Frame):
                 list(reversed(rings[0])),
                 color,
                 outline,
+                width=1,
                 layer=1,
                 cull_backface=cull_shell_backfaces,
                 stipple=shell_stipple,
@@ -1217,6 +1325,7 @@ class Tkinter3DCanvas(tk.Frame):
                 ],
                 web_color,
                 outline,
+                width=1,
                 layer=12,
                 cull_backface=False,
             )
@@ -1259,6 +1368,7 @@ class Tkinter3DCanvas(tk.Frame):
                         ],
                         flange_color,
                         outline,
+                        width=1,
                         layer=13,
                         cull_backface=False,
                     )
@@ -1382,6 +1492,7 @@ class Tkinter3DCanvas(tk.Frame):
                     face,
                     web_color,
                     outline,
+                    width=1,
                     layer=20,
                     cull_backface=False,
                 )
@@ -1423,6 +1534,7 @@ class Tkinter3DCanvas(tk.Frame):
                     ],
                     flange_color,
                     outline,
+                    width=1,
                     layer=21,
                     cull_backface=False,
                 )
@@ -1435,12 +1547,135 @@ class Tkinter3DCanvas(tk.Frame):
     # Public scene API
     # ------------------------------------------------------------------
 
+    def set_opaque_cylinder_occluder(
+            self,
+            radius: float,
+            height: float,
+            center: Optional[Point3D] = None,
+    ) -> None:
+        # Register a non-rendered finite cylinder used for hidden-surface tests.
+        self._explicit_opaque_cylinder_occluders.append(
+            {
+                "radius": max(0.0, float(radius)),
+                "height": max(0.0, float(height)),
+                "center": center if center is not None else Point3D(0.0, 0.0, 0.0),
+            }
+        )
+
+    def _collect_opaque_cylinder_occluders(self) -> List[Dict[str, Any]]:
+        occluders = list(self._explicit_opaque_cylinder_occluders)
+        for obj in self.objects:
+            if obj.get("type") != "cylinder":
+                continue
+            opacity = max(0.0, min(1.0, float(obj.get("opacity", 1.0))))
+            show_backfaces = obj.get("show_backfaces")
+            if show_backfaces is None:
+                show_backfaces = opacity < 0.90
+            if opacity < 0.94 or bool(show_backfaces):
+                continue
+            occluders.append(
+                {
+                    "radius": max(0.0, float(obj.get("radius", 0.0))),
+                    "height": max(0.0, float(obj.get("height", 0.0))),
+                    "center": obj.get("center", Point3D(0.0, 0.0, 0.0)),
+                }
+            )
+        return occluders
+
+    @staticmethod
+    def _point_is_hidden_by_finite_cylinder(
+            camera_position: Point3D,
+            point: Point3D,
+            occluder: Dict[str, Any],
+    ) -> bool:
+        radius = max(0.0, float(occluder.get("radius", 0.0)))
+        height = max(0.0, float(occluder.get("height", 0.0)))
+        center = occluder.get("center", Point3D(0.0, 0.0, 0.0))
+        if radius <= _EPS or height <= _EPS:
+            return False
+
+        local_x = point.x - center.x
+        local_y = point.y - center.y
+        radial_distance = math.hypot(local_x, local_y)
+        z_bottom = center.z - 0.5 * height
+        z_top = center.z + 0.5 * height
+        radial_tolerance = max(radius * 1.0e-6, 1.0e-8)
+        z_tolerance = max(height * 1.0e-7, 1.0e-8)
+
+        if radial_distance >= radius - radial_tolerance:
+            return False
+        if point.z < z_bottom - z_tolerance or point.z > z_top + z_tolerance:
+            return False
+
+        origin_x = camera_position.x - center.x
+        origin_y = camera_position.y - center.y
+        direction_x = point.x - camera_position.x
+        direction_y = point.y - camera_position.y
+        direction_z = point.z - camera_position.z
+
+        coefficient_a = direction_x * direction_x + direction_y * direction_y
+        if coefficient_a <= _EPS:
+            return False
+        coefficient_b = 2.0 * (
+            origin_x * direction_x + origin_y * direction_y
+        )
+        coefficient_c = (
+            origin_x * origin_x
+            + origin_y * origin_y
+            - radius * radius
+        )
+        discriminant = coefficient_b * coefficient_b - 4.0 * coefficient_a * coefficient_c
+        if discriminant < 0.0:
+            return False
+
+        square_root = math.sqrt(max(0.0, discriminant))
+        denominator = 2.0 * coefficient_a
+        roots = sorted(
+            (
+                (-coefficient_b - square_root) / denominator,
+                (-coefficient_b + square_root) / denominator,
+            )
+        )
+        for parameter in roots:
+            if parameter <= 1.0e-8 or parameter >= 1.0 - 1.0e-6:
+                continue
+            intersection_z = camera_position.z + parameter * direction_z
+            if z_bottom - z_tolerance <= intersection_z <= z_top + z_tolerance:
+                return True
+        return False
+
+    def _primitive_hidden_by_opaque_cylinder(
+            self,
+            primitive: Dict[str, Any],
+            occluders: Sequence[Dict[str, Any]],
+            camera_position: Point3D,
+    ) -> bool:
+        # Member surfaces use layers 10-29. Shells, result plates and selection
+        # outlines are intentionally excluded from this hidden-surface filter.
+        layer = int(primitive.get("layer", 0))
+        if layer < 10 or layer >= 30 or not occluders:
+            return False
+
+        center = primitive.get("center")
+        if not isinstance(center, Point3D):
+            return False
+        return any(
+            self._point_is_hidden_by_finite_cylinder(
+                camera_position,
+                center,
+                occluder,
+            )
+            for occluder in occluders
+        )
+
     def add_line(
         self,
         start: Point3D,
         end: Point3D,
         color: str = "black",
         width: int = 1,
+        layer: int = 30,
+        draw_overlay: bool = False,
     ) -> None:
         self.objects.append(
             {
@@ -1449,6 +1684,8 @@ class Tkinter3DCanvas(tk.Frame):
                 "end": end,
                 "color": color,
                 "width": width,
+                "layer": int(layer),
+                "draw_overlay": bool(draw_overlay),
             }
         )
         self._invalidate_geometry_cache()
@@ -1463,6 +1700,7 @@ class Tkinter3DCanvas(tk.Frame):
         cull_backface: bool = False,
         layer: int = 5,
         stipple: str = "",
+        tags: str = "",
     ) -> None:
         self.objects.append(
             {
@@ -1474,6 +1712,7 @@ class Tkinter3DCanvas(tk.Frame):
                 "cull_backface": cull_backface,
                 "layer": layer,
                 "stipple": stipple,
+                "tags": tags,
             }
         )
         self._invalidate_geometry_cache()
@@ -1816,7 +2055,7 @@ def _add_controls(parent: tk.Misc, canvas_3d: Tkinter3DCanvas) -> tk.Frame:
 
     tk.Label(
         controls,
-        text="Drag with left mouse button to orbit; use the wheel to zoom.",
+        text="Right-drag to rotate; left-drag to move; use the wheel to zoom.",
     ).pack(side=tk.RIGHT, padx=6)
     return controls
 

@@ -13,11 +13,13 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Option
 
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import factorized, spsolve
 
 from .assembly import build_constraint_transformation, reconstruct_full_solution
+from .cases import make_result_case
+from .linalg import MatrixClass, factorize
 from .boundary import LoadCase
 from .matrix_assembly import assemble_load_vector, assemble_mass_matrix, assemble_stiffness_matrix
+from .recovery import RecoveryConfig, ResourceConfig, enforce_memory_limit, estimate_model_memory, recovery_metadata
 from .validation import load_vector_resultant
 
 if TYPE_CHECKING:
@@ -185,6 +187,8 @@ class TransientConfig:
     initial_displacement: Optional[np.ndarray] = None
     initial_velocity: Optional[np.ndarray] = None
     include_stress_history: bool = False
+    recovery: Optional[RecoveryConfig] = None
+    resource_config: Optional[ResourceConfig] = None
 
     def __post_init__(self) -> None:
         if self.dt <= 0.0:
@@ -217,6 +221,12 @@ class TransientResult:
     stress_history: Optional[Tuple[Dict[int, Dict[str, np.ndarray]], ...]]
     status: str
     diagnostics: Dict[str, Any]
+    result_case: Optional[Dict[str, Any]] = None
+    history_storage_mode: str = "full"
+    history_dof_indices: Optional[np.ndarray] = None
+    displacement_envelope: Optional[np.ndarray] = None
+    velocity_envelope: Optional[np.ndarray] = None
+    acceleration_envelope: Optional[np.ndarray] = None
 
     def node_displacement_history(self, model: "FEModel", node_id: int) -> np.ndarray:
         """Return saved 6-DOF displacement history for one node."""
@@ -225,6 +235,8 @@ class TransientResult:
             raise ValueError(f"Node {node_id} not found")
         if int(node_id) in self.node_histories:
             return self.node_histories[int(node_id)]
+        if self.history_storage_mode != "full":
+            raise ValueError(f"Node {node_id} was not saved in {self.history_storage_mode!r} transient history storage")
         return self.displacements[:, node.dofs]
 
 
@@ -255,6 +267,26 @@ def _translation_peak(model: "FEModel", displacement: np.ndarray) -> Tuple[float
             peak = value
             peak_node = int(node_id)
     return peak, peak_node
+
+
+def _saved_step_count(times: np.ndarray, save_every: int) -> int:
+    if times.size == 0:
+        return 0
+    count = 1
+    for step_index in range(1, len(times)):
+        if step_index % int(save_every) == 0 or step_index == len(times) - 1:
+            count += 1
+    return count
+
+
+def _node_dof_indices(model: "FEModel", node_ids: Sequence[int]) -> np.ndarray:
+    indices = []
+    for node_id in node_ids:
+        node = model.mesh.get_node(int(node_id))
+        if node is None:
+            raise ValueError(f"Configured output node {node_id} not found")
+        indices.extend(int(dof) for dof in node.dofs)
+    return np.asarray(indices, dtype=np.intp)
 
 
 def assemble_pressure_patch_load_vector(
@@ -292,14 +324,30 @@ def _reduced_load(
     return np.asarray(T.T @ (full_load - K @ u0), dtype=float).reshape(-1)
 
 
-def _selected_stresses(model: "FEModel", displacement: np.ndarray, output_elements: Optional[Sequence[int]]) -> Dict[int, Dict[str, np.ndarray]]:
-    from .assembly import compute_stresses
+def _selected_stresses(
+    model: "FEModel",
+    displacement: np.ndarray,
+    output_elements: Optional[Sequence[int]],
+    recovery: Optional[RecoveryConfig],
+) -> Dict[int, Dict[str, np.ndarray]]:
+    from .recovery import RecoveryConfig, recover_element_stresses
 
-    all_stresses = compute_stresses(model, displacement)
-    if output_elements is None:
-        return all_stresses
-    wanted = {int(element_id) for element_id in output_elements}
-    return {element_id: values for element_id, values in all_stresses.items() if int(element_id) in wanted}
+    if recovery is not None:
+        element_ids = output_elements if output_elements is not None else recovery.element_ids
+        scoped = RecoveryConfig(
+            node_ids=recovery.node_ids,
+            element_ids=element_ids,
+            components=recovery.components,
+            include_displacements=recovery.include_displacements,
+            include_stresses=recovery.include_stresses,
+            include_reactions=recovery.include_reactions,
+            history_mode=recovery.history_mode,
+            store_full_histories=recovery.store_full_histories,
+            metadata=recovery.metadata,
+        )
+    else:
+        scoped = RecoveryConfig(element_ids=output_elements)
+    return recover_element_stresses(model, displacement, scoped)
 
 
 def solve_transient_newmark(
@@ -346,6 +394,34 @@ def solve_transient_newmark(
         return load
 
     times = _time_grid(config)
+    recovery = config.recovery
+    output_node_ids = tuple(int(node_id) for node_id in (config.output_nodes or ()))
+    if recovery is not None and not output_node_ids and recovery.node_ids is not None:
+        output_node_ids = tuple(int(node_id) for node_id in recovery.node_ids)
+    output_element_ids: Optional[Tuple[int, ...]]
+    if config.output_elements is not None:
+        output_element_ids = tuple(int(element_id) for element_id in config.output_elements)
+    elif recovery is not None and recovery.element_ids is not None:
+        output_element_ids = tuple(int(element_id) for element_id in recovery.element_ids)
+    else:
+        output_element_ids = None
+    include_stress_history = bool(config.include_stress_history)
+    if recovery is not None:
+        include_stress_history = include_stress_history and bool(recovery.include_stresses)
+    history_storage_mode = "full" if recovery is None else str(recovery.history_mode)
+    if recovery is not None and history_storage_mode == "full" and not recovery.store_full_histories:
+        history_storage_mode = "selected"
+    if history_storage_mode == "selected" and not output_node_ids and (recovery is None or recovery.include_displacements):
+        output_node_ids = tuple(int(node_id) for node_id in model.mesh.nodes)
+    history_dof_indices = _node_dof_indices(model, output_node_ids) if history_storage_mode == "selected" else None
+    estimated_saved_steps = _saved_step_count(times, config.save_every)
+    preflight_memory = estimate_model_memory(
+        model,
+        transient_saved_steps=estimated_saved_steps,
+        store_full_history=history_storage_mode == "full",
+        recovery_config=recovery,
+    )
+    enforce_memory_limit(preflight_memory, config.resource_config, context="solve_transient_newmark")
     q = _full_initial_vector(config.initial_displacement, total_dofs)
     v_full = _full_initial_vector(config.initial_velocity, total_dofs)
     q_red = np.asarray((q - u0)[np.asarray(independent_dofs, dtype=int)], dtype=float).reshape(-1)
@@ -353,7 +429,8 @@ def solve_transient_newmark(
 
     F0_red = _reduced_load(T, K, u0, full_load_at(float(times[0])))
     try:
-        a_red = np.asarray(spsolve(M_red, F0_red - C_red @ v_red - K_red @ q_red), dtype=float).reshape(-1)
+        mass_handle = factorize(M_red, MatrixClass.SYMMETRIC_SEMIDEFINITE, signature="transient.initial_mass")
+        a_red = np.asarray(mass_handle.solve(F0_red - C_red @ v_red - K_red @ q_red), dtype=float).reshape(-1)
     except Exception as exc:
         raise ValueError(f"Could not compute initial acceleration: {exc}") from exc
 
@@ -361,7 +438,11 @@ def solve_transient_newmark(
     saved_u = []
     saved_v = []
     saved_a = []
-    stress_history = [] if config.include_stress_history else None
+    node_history_values: Dict[int, list[np.ndarray]] = {int(node_id): [] for node_id in output_node_ids}
+    displacement_envelope: Optional[np.ndarray] = None
+    velocity_envelope: Optional[np.ndarray] = None
+    acceleration_envelope: Optional[np.ndarray] = None
+    stress_history = [] if include_stress_history else None
     peak_displacement = 0.0
     peak_displacement_node = None
     peak_von_mises = 0.0
@@ -370,13 +451,31 @@ def solve_transient_newmark(
 
     def save_state(time: float, q_state: np.ndarray, v_state: np.ndarray, a_state: np.ndarray) -> None:
         nonlocal peak_displacement, peak_displacement_node, peak_von_mises
+        nonlocal displacement_envelope, velocity_envelope, acceleration_envelope
         full_u = reconstruct_full_solution(T, q_state, u0)
         full_v = np.asarray(T @ v_state, dtype=float).reshape(-1)
         full_a = np.asarray(T @ a_state, dtype=float).reshape(-1)
         saved_times.append(float(time))
-        saved_u.append(full_u)
-        saved_v.append(full_v)
-        saved_a.append(full_a)
+        if history_storage_mode == "full":
+            saved_u.append(full_u)
+            saved_v.append(full_v)
+            saved_a.append(full_a)
+        elif history_storage_mode == "selected":
+            indices = np.asarray(history_dof_indices if history_dof_indices is not None else (), dtype=np.intp)
+            saved_u.append(full_u[indices])
+            saved_v.append(full_v[indices])
+            saved_a.append(full_a[indices])
+        elif history_storage_mode == "envelope":
+            abs_u = np.abs(full_u)
+            abs_v = np.abs(full_v)
+            abs_a = np.abs(full_a)
+            displacement_envelope = abs_u if displacement_envelope is None else np.maximum(displacement_envelope, abs_u)
+            velocity_envelope = abs_v if velocity_envelope is None else np.maximum(velocity_envelope, abs_v)
+            acceleration_envelope = abs_a if acceleration_envelope is None else np.maximum(acceleration_envelope, abs_a)
+        for node_id in output_node_ids:
+            node = model.mesh.get_node(int(node_id))
+            if node is not None:
+                node_history_values[int(node_id)].append(full_u[np.asarray(node.dofs, dtype=np.intp)])
         current_peak, current_node = _translation_peak(model, full_u)
         if current_peak > peak_displacement:
             peak_displacement = current_peak
@@ -384,7 +483,7 @@ def solve_transient_newmark(
         energy_kinetic.append(0.5 * float(v_state @ (M_red @ v_state)))
         energy_strain.append(0.5 * float(q_state @ (K_red @ q_state)))
         if stress_history is not None:
-            stresses = _selected_stresses(model, full_u, config.output_elements)
+            stresses = _selected_stresses(model, full_u, output_element_ids, recovery)
             stress_history.append(stresses)
             for element_stresses in stresses.values():
                 if "von_mises" in element_stresses:
@@ -402,6 +501,7 @@ def solve_transient_newmark(
     factorization_reused = False
     cached_dt = None
     cached_solver = None
+    cached_solver_diagnostics: Dict[str, Any] = {}
 
     beta = float(config.beta)
     gamma = float(config.gamma)
@@ -416,11 +516,17 @@ def solve_transient_newmark(
         a4 = gamma / beta - 1.0
         a5 = dt * (gamma / (2.0 * beta) - 1.0)
         if cached_solver is None or cached_dt is None or not np.isclose(dt, cached_dt):
-            K_eff = (K_red + a0 * M_red + a1 * C_red).tocsc()
+            K_eff = (K_red + a0 * M_red + a1 * C_red).tocsr()
             try:
-                cached_solver = factorized(K_eff)
+                cached_solver = factorize(
+                    K_eff,
+                    MatrixClass.SYMMETRIC_INDEFINITE,
+                    signature=f"transient.effective:{dt:.16g}",
+                )
+                cached_solver_diagnostics = cached_solver.diagnostics()
             except Exception:
                 cached_solver = None
+                cached_solver_diagnostics = {"failure_reason": "effective_stiffness_factorization_failed"}
             cached_dt = dt
             factorization_count += 1
 
@@ -434,10 +540,16 @@ def solve_transient_newmark(
             + C_red @ (a1 * q_red + a4 * v_red + a5 * a_red)
         )
         if cached_solver is not None:
-            q_next = np.asarray(cached_solver(rhs), dtype=float).reshape(-1)
+            q_next = np.asarray(cached_solver.solve(rhs), dtype=float).reshape(-1)
             factorization_reused = True
         else:
-            q_next = np.asarray(spsolve((K_red + a0 * M_red + a1 * C_red).tocsr(), rhs), dtype=float).reshape(-1)
+            fallback_handle = factorize(
+                (K_red + a0 * M_red + a1 * C_red).tocsr(),
+                MatrixClass.GENERAL,
+                signature=f"transient.effective.fallback:{dt:.16g}:{step_index}",
+            )
+            q_next = np.asarray(fallback_handle.solve(rhs), dtype=float).reshape(-1)
+            cached_solver_diagnostics = fallback_handle.diagnostics()
         solve_count += 1
         a_next = a0 * (q_next - q_red) - a2 * v_red - a3 * a_red
         v_next = v_red + dt * ((1.0 - gamma) * a_red + gamma * a_next)
@@ -454,15 +566,28 @@ def solve_transient_newmark(
     else:
         energy_drift = 0.0
 
-    saved_u_array = np.vstack(saved_u) if saved_u else np.zeros((0, total_dofs), dtype=float)
-    saved_v_array = np.vstack(saved_v) if saved_v else np.zeros((0, total_dofs), dtype=float)
-    saved_a_array = np.vstack(saved_a) if saved_a else np.zeros((0, total_dofs), dtype=float)
+    history_width = total_dofs if history_storage_mode == "full" else int(0 if history_dof_indices is None else len(history_dof_indices))
+    if history_storage_mode == "envelope":
+        history_width = 0
+    saved_u_array = np.vstack(saved_u) if saved_u else np.zeros((0, history_width), dtype=float)
+    saved_v_array = np.vstack(saved_v) if saved_v else np.zeros((0, history_width), dtype=float)
+    saved_a_array = np.vstack(saved_a) if saved_a else np.zeros((0, history_width), dtype=float)
     node_histories: Dict[int, np.ndarray] = {}
-    for node_id in config.output_nodes or ():
+    for node_id in output_node_ids:
         node = model.mesh.get_node(int(node_id))
         if node is None:
             raise ValueError(f"Configured output node {node_id} not found")
-        node_histories[int(node_id)] = saved_u_array[:, node.dofs]
+        values = node_history_values.get(int(node_id), [])
+        node_histories[int(node_id)] = np.vstack(values) if values else np.zeros((0, 6), dtype=float)
+
+    recovery_memory = estimate_model_memory(
+        model,
+        transient_saved_steps=len(saved_times),
+        store_full_history=history_storage_mode == "full",
+        recovery_config=recovery,
+    )
+    enforce_memory_limit(recovery_memory, config.resource_config, context="solve_transient_newmark.recovery")
+    policy_metadata = recovery_metadata(recovery, config.resource_config, recovery_memory)
 
     diagnostics: Dict[str, Any] = {
         "method": "newmark",
@@ -476,17 +601,60 @@ def solve_transient_newmark(
         "factorization_count": int(factorization_count),
         "factorization_reused": bool(factorization_reused and factorization_count <= max(solve_count, 1)),
         "solve_count": int(solve_count),
+        "initial_mass_factorization": mass_handle.diagnostics(),
+        "effective_stiffness_factorization": cached_solver_diagnostics,
         "constraint_info": constraint_info,
         "stiffness": stiffness_info,
         "mass": mass_info,
         "base_load": base_load_info,
         "pressure_patches": patch_infos,
-        "output_nodes": [int(node_id) for node_id in (config.output_nodes or ())],
-        "output_elements": [int(element_id) for element_id in (config.output_elements or ())],
+        "output_nodes": [int(node_id) for node_id in output_node_ids],
+        "output_elements": [] if output_element_ids is None else [int(element_id) for element_id in output_element_ids],
+        "history_storage_mode": history_storage_mode,
+        "history_dof_indices": None if history_dof_indices is None else [int(dof) for dof in history_dof_indices],
+        "recovery_policy": policy_metadata,
         "kinetic_energy": energy_kinetic,
         "strain_energy": energy_strain,
         "max_relative_energy_drift": energy_drift,
     }
+    assembly_info = {
+        "stiffness": stiffness_info,
+        "mass": mass_info,
+        "load": base_load_info,
+    }
+    result_case = make_result_case(
+        name="linear_transient_newmark",
+        analysis_type="linear_transient",
+        load_cases=() if base_load_case is None else (base_load_case,),
+        assembly_info=assembly_info,
+        solver_info={"backend": cached_solver_diagnostics, "convergence_info": {"status": "completed"}},
+        recovery={
+            "displacement_history": True,
+            "velocity_history": True,
+            "acceleration_history": True,
+            "history_storage_mode": history_storage_mode,
+            "history_dof_indices": None if history_dof_indices is None else [int(dof) for dof in history_dof_indices],
+            "stress_history": include_stress_history,
+            "output_nodes": [int(node_id) for node_id in output_node_ids],
+            "output_elements": None if output_element_ids is None else [int(element_id) for element_id in output_element_ids],
+            **policy_metadata["recovery"],
+        },
+        settings={
+            "dt": config.dt,
+            "t_end": config.t_end,
+            "beta": beta,
+            "gamma": gamma,
+            "rayleigh_alpha": config.rayleigh_alpha,
+            "rayleigh_beta": config.rayleigh_beta,
+            "save_every": config.save_every,
+        },
+        metadata={
+            "pressure_patches": [info.get("patch_name") for info in patch_infos],
+            "resources": policy_metadata.get("resources"),
+            "memory_estimate": policy_metadata.get("memory_estimate"),
+        },
+    ).to_dict()
+    diagnostics["result_case"] = result_case
     return TransientResult(
         times=np.asarray(saved_times, dtype=float),
         displacements=saved_u_array,
@@ -502,4 +670,10 @@ def solve_transient_newmark(
         stress_history=None if stress_history is None else tuple(stress_history),
         status="completed",
         diagnostics=diagnostics,
+        result_case=result_case,
+        history_storage_mode=history_storage_mode,
+        history_dof_indices=None if history_dof_indices is None else np.asarray(history_dof_indices, dtype=np.intp),
+        displacement_envelope=displacement_envelope,
+        velocity_envelope=velocity_envelope,
+        acceleration_envelope=acceleration_envelope,
     )

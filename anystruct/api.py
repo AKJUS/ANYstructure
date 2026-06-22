@@ -110,6 +110,18 @@ def analyze_fea_result_buckling(inp_path, frd_path, **kwargs):
     return create_fea_result_buckling_session(inp_path, frd_path, **kwargs).summary()
 
 
+def create_runtime_fea_result_buckling_session(runtime_result, **kwargs):
+    """Scan a runtime FEM result and return selectable ANYstructure buckling panels."""
+
+    return fe_plate_fields.create_runtime_fea_buckling_session(runtime_result, **kwargs)
+
+
+def analyze_runtime_fea_result_buckling(runtime_result, **kwargs):
+    """Reduce runtime FEM stresses panel by panel and return a serializable summary."""
+
+    return create_runtime_fea_result_buckling_session(runtime_result, **kwargs).summary()
+
+
 class FlatStru():
     '''
     API class for all flat plates.\n
