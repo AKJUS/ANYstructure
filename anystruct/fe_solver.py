@@ -557,13 +557,42 @@ def _wants_s8(config: LightweightFEMConfig) -> bool:
     return _normalized_choice(config.shell_element_order, "s4") in {"s8", "s8r", "8 node", "8 node shell", "quadratic"}
 
 
+def _wants_s3(config: LightweightFEMConfig) -> bool:
+    return _normalized_choice(config.shell_element_order, "s4") in {
+        "s3",
+        "t3",
+        "tri3",
+        "tria3",
+        "shell3",
+        "3 node",
+        "3 node shell",
+        "3 node triangle",
+        "linear triangle",
+    }
+
+
+def _wants_s6(config: LightweightFEMConfig) -> bool:
+    return _normalized_choice(config.shell_element_order, "s4") in {
+        "s6",
+        "t6",
+        "tri6",
+        "tria6",
+        "shell6",
+        "6 node",
+        "6 node shell",
+        "6 node triangle",
+        "quadratic triangle",
+    }
+
+
 def _wants_b3(config: LightweightFEMConfig) -> bool:
     return _normalized_choice(config.beam_element_order, "b2") in {"b3", "3 node", "3 node beam", "quadratic", "quadratic beam"}
 
 
 def _shell_order_from_geometry(generated_geometry: dict) -> str:
     for shell in generated_geometry.get("shells", []) or []:
-        return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
+        node_count = len(shell.get("node_ids", []))
+        return {3: "S3", 4: "S4", 6: "S6", 8: "S8"}.get(node_count, "S4")
     return "S4"
 
 
@@ -576,7 +605,8 @@ def _beam_order_from_geometry(generated_geometry: dict) -> str:
 def _shell_element_type(shell: dict[str, object]) -> str:
     if "type" in shell:
         return str(shell["type"])
-    return "S8" if len(shell.get("node_ids", [])) == 8 else "S4"
+    node_count = len(shell.get("node_ids", []))
+    return {3: "S3", 4: "S4", 6: "S6", 8: "S8"}.get(node_count, "S4")
 
 
 def _refined_midpoint_breaks(values: list[float]) -> list[float]:
@@ -639,6 +669,79 @@ def _upgrade_shells_to_s8(nodes: list[dict[str, object]], shells: list[dict[str,
             midside_id(n3, n4),
             midside_id(n4, n1),
         ]
+
+
+def _split_shells_to_triangles(
+    nodes: list[dict[str, object]],
+    shells: list[dict[str, object]],
+    radius: float = 0.0,
+    quadratic: bool = False,
+    element_type: str = "S3",
+) -> None:
+    """Convert generated 4-node quads to SESAM-style triangular shells in place."""
+
+    node_coords = _node_lookup(nodes)
+    next_node_id = max(node_coords, default=0) + 1
+    midside_nodes: dict[tuple[int, int], int] = {}
+
+    def midpoint_coords(n1: int, n2: int) -> np.ndarray:
+        a = node_coords[int(n1)]
+        b = node_coords[int(n2)]
+        if radius <= 0.0:
+            return 0.5 * (a + b)
+        radial_a = float(np.linalg.norm(a[:2]))
+        radial_b = float(np.linalg.norm(b[:2]))
+        tol = max(abs(float(radius)) * 1.0e-6, 1.0e-9)
+        if abs(radial_a - radius) <= tol and abs(radial_b - radius) <= tol:
+            return _project_cylinder_midpoint(a, b, radius)
+        return 0.5 * (a + b)
+
+    def midside_id(n1: int, n2: int) -> int:
+        nonlocal next_node_id
+        key = tuple(sorted((int(n1), int(n2))))
+        if key in midside_nodes:
+            return midside_nodes[key]
+        coords = midpoint_coords(int(n1), int(n2))
+        node_id = next_node_id
+        next_node_id += 1
+        midside_nodes[key] = node_id
+        node_coords[node_id] = coords
+        nodes.append({"id": node_id, "coords": coords.tolist()})
+        return node_id
+
+    converted: list[dict[str, object]] = []
+    next_element_id = 1
+    for shell in shells:
+        node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
+        if len(node_ids) == (6 if quadratic else 3):
+            updated = dict(shell)
+            updated["id"] = next_element_id
+            updated["type"] = element_type
+            converted.append(updated)
+            next_element_id += 1
+            continue
+        if len(node_ids) != 4:
+            updated = dict(shell)
+            updated["id"] = next_element_id
+            converted.append(updated)
+            next_element_id += 1
+            continue
+
+        n1, n2, n3, n4 = node_ids
+        tri_corners = ((n1, n2, n3), (n1, n3, n4))
+        for corners in tri_corners:
+            tri = dict(shell)
+            tri["id"] = next_element_id
+            tri["type"] = element_type
+            if quadratic:
+                a, b, c = corners
+                tri["node_ids"] = [a, b, c, midside_id(a, b), midside_id(b, c), midside_id(c, a)]
+            else:
+                tri["node_ids"] = list(corners)
+            converted.append(tri)
+            next_element_id += 1
+
+    shells[:] = converted
 
 
 def _axis_symmetry_constraints(axis: str) -> dict[str, float]:
@@ -1704,7 +1807,11 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             )
             beam_id += 1
 
-    if _wants_s8(config):
+    if _wants_s6(config):
+        _split_shells_to_triangles(nodes, shells, quadratic=True, element_type="S6")
+    elif _wants_s3(config):
+        _split_shells_to_triangles(nodes, shells, quadratic=False, element_type="S3")
+    elif _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
         _upgrade_shells_to_s8(nodes, shells, element_type=elem_type)
 
@@ -1977,7 +2084,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 )
                 beam_id += 1
 
-    if _wants_s8(config):
+    if _wants_s6(config):
+        _split_shells_to_triangles(nodes, shells, radius=radius, quadratic=True, element_type="S6")
+    elif _wants_s3(config):
+        _split_shells_to_triangles(nodes, shells, radius=radius, quadratic=False, element_type="S3")
+    elif _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
         _upgrade_shells_to_s8(nodes, shells, radius=radius, element_type=elem_type)
 
@@ -2227,7 +2338,10 @@ def _fea_result_import_payload(
                 "offset": None,
             },
         )
-        element_type = str(generated_shell.get("type", "S8" if len(element.node_ids) == 8 else "S4") or "")
+        element_type = str(
+            generated_shell.get("type")
+            or {3: "S3", 4: "S4", 6: "S6", 8: "S8"}.get(len(element.node_ids), "S4")
+        )
         shell_payload.append(
             {
                 "id": int(element_id),
@@ -2437,11 +2551,33 @@ def _visualization_member_lines(
     return tuple(lines)
 
 
+def _visualization_surface_boundary_node_ids(node_ids: list[int]) -> list[int]:
+    """Return shell boundary nodes in plotting order, including midside nodes."""
+
+    if len(node_ids) == 6:
+        return [node_ids[0], node_ids[3], node_ids[1], node_ids[4], node_ids[2], node_ids[5]]
+    if len(node_ids) == 8:
+        return [
+            node_ids[0],
+            node_ids[4],
+            node_ids[1],
+            node_ids[5],
+            node_ids[2],
+            node_ids[6],
+            node_ids[3],
+            node_ids[7],
+        ]
+    return list(node_ids)
+
+
 def _visualization_shell_surfaces(
     generated_geometry: dict,
     model,
     displacements: np.ndarray,
     fields: dict[str, dict[int, float]],
+    *,
+    include_skin: bool = False,
+    include_members: bool = True,
 ) -> tuple[dict[str, object], ...]:
     surfaces: list[dict[str, object]] = []
     if displacements is None:
@@ -2453,9 +2589,13 @@ def _visualization_shell_surfaces(
     }
     for shell_id, shell in sorted(shell_lookup.items()):
         role = str(shell.get("role", "skin") or "skin")
-        if role.lower() in {"", "skin"}:
+        is_skin = role.lower() in {"", "skin"}
+        if is_skin and not include_skin:
             continue
-        node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
+        if not is_skin and not include_members:
+            continue
+        element_node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
+        node_ids = _visualization_surface_boundary_node_ids(element_node_ids)
         if len(node_ids) < 3:
             continue
         points = []
@@ -2478,7 +2618,7 @@ def _visualization_shell_surfaces(
             continue
         field_values: dict[str, float] = {}
         for field_name, by_node in fields.items():
-            values = [float(by_node[node_id]) for node_id in node_ids if node_id in by_node]
+            values = [float(by_node[node_id]) for node_id in element_node_ids if node_id in by_node]
             if values:
                 field_values[field_name] = float(sum(values) / len(values))
         for field_name, values in disp_values.items():
@@ -2489,6 +2629,7 @@ def _visualization_shell_surfaces(
                 "id": shell_id,
                 "role": role,
                 "node_ids": tuple(node_ids),
+                "element_node_ids": tuple(element_node_ids),
                 "points": tuple(points),
                 "displaced_points": tuple(displaced_points),
                 "field_values": field_values,
@@ -2622,6 +2763,14 @@ def _visualization_from_full_result(
         "scalar_label": scalar_label,
         "member_lines": _visualization_member_lines(generated_geometry, model, displacements, stresses_by_element),
         "shell_surfaces": _visualization_shell_surfaces(generated_geometry, model, displacements, fields),
+        "skin_shell_surfaces": _visualization_shell_surfaces(
+            generated_geometry,
+            model,
+            displacements,
+            fields,
+            include_skin=True,
+            include_members=False,
+        ),
     }
     return result
 
@@ -3372,16 +3521,23 @@ def _mesh_quality_diagnostics(
     role_counts: collections.Counter[str] = collections.Counter()
 
     for shell in generated_geometry.get("shells", []) or []:
-        node_ids = [int(node_id) for node_id in shell.get("node_ids", [])[:4]]
+        all_node_ids = [int(node_id) for node_id in shell.get("node_ids", [])]
+        if len(all_node_ids) in {3, 6}:
+            corner_count = 3
+        elif len(all_node_ids) in {4, 8}:
+            corner_count = 4
+        else:
+            corner_count = len(all_node_ids)
+        node_ids = all_node_ids[:corner_count]
         role_counts[_generated_shell_role(shell)] += 1
-        if len(node_ids) != 4 or any(node_id not in nodes for node_id in node_ids):
+        if len(node_ids) not in {3, 4} or any(node_id not in nodes for node_id in node_ids):
             invalid_count += 1
             continue
         coords = np.asarray([nodes[node_id] for node_id in node_ids], dtype=float)
         if not np.all(np.isfinite(coords)):
             invalid_count += 1
             continue
-        edges = [coords[(index + 1) % 4] - coords[index] for index in range(4)]
+        edges = [coords[(index + 1) % len(node_ids)] - coords[index] for index in range(len(node_ids))]
         lengths = [float(np.linalg.norm(edge)) for edge in edges]
         min_length = min(lengths) if lengths else 0.0
         max_length = max(lengths) if lengths else 0.0
@@ -3391,7 +3547,8 @@ def _mesh_quality_diagnostics(
         aspect_ratios.append(max_length / min_length)
 
         angle_deviation = 0.0
-        for index in range(4):
+        ideal_angle = 60.0 if len(node_ids) == 3 else 90.0
+        for index in range(len(node_ids)):
             a = -edges[index - 1]
             b = edges[index]
             denom = float(np.linalg.norm(a) * np.linalg.norm(b))
@@ -3400,12 +3557,15 @@ def _mesh_quality_diagnostics(
                 break
             cosine = float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
             angle = math.degrees(math.acos(cosine))
-            angle_deviation = max(angle_deviation, abs(90.0 - angle))
+            angle_deviation = max(angle_deviation, abs(ideal_angle - angle))
         skew_degrees.append(angle_deviation)
 
         triangle_area_1 = 0.5 * float(np.linalg.norm(np.cross(coords[1] - coords[0], coords[2] - coords[0])))
-        triangle_area_2 = 0.5 * float(np.linalg.norm(np.cross(coords[2] - coords[0], coords[3] - coords[0])))
-        area = triangle_area_1 + triangle_area_2
+        if len(node_ids) == 3:
+            area = triangle_area_1
+        else:
+            triangle_area_2 = 0.5 * float(np.linalg.norm(np.cross(coords[2] - coords[0], coords[3] - coords[0])))
+            area = triangle_area_1 + triangle_area_2
         if area <= 1.0e-18:
             invalid_count += 1
             continue
@@ -3413,7 +3573,7 @@ def _mesh_quality_diagnostics(
 
         normal = np.cross(coords[1] - coords[0], coords[2] - coords[0])
         normal_norm = float(np.linalg.norm(normal))
-        if normal_norm > 1.0e-15:
+        if normal_norm > 1.0e-15 and len(node_ids) == 4:
             normal /= normal_norm
             out_of_plane = abs(float(np.dot(coords[3] - coords[0], normal)))
             warps.append(out_of_plane / max(sum(lengths) / 4.0, 1.0e-15))
@@ -3876,7 +4036,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         diagnostics.append("Applied balanced axial force: " + str(round(float(config.axial_force_n), 3)) + " N.")
     if (not config.custom_load_bc_enabled) and abs(float(config.enforced_displacement_m or 0.0)) > 0.0:
         diagnostics.append("Applied prescribed displacement constraints from the enforced displacement input.")
-    if _wants_s8(config):
+    if _wants_s6(config):
+        diagnostics.append("Generated S6 triangular shell elements with shared midside nodes.")
+    elif _wants_s3(config):
+        diagnostics.append("Generated S3 triangular shell elements.")
+    elif _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
         diagnostics.append(f"Generated {elem_type} shell elements with shared midside nodes.")
     if _member_webs_as_shells(config):

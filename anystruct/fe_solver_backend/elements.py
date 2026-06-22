@@ -2,7 +2,7 @@
 Finite Element Implementations
 
 This module contains element formulations for:
-- ShellElement: 4/8-node quadrilateral Mindlin-Reissner shell element
+- ShellElement: 3/6-node triangular and 4/8-node quadrilateral Mindlin-Reissner shell element
 - BeamElement: 2-node Timoshenko beam element with 6 DOF/node
 - QuadraticBeamElement: 3-node quadratic Timoshenko beam element
 - CoupledBeamShellElement: kinematic MPC element for eccentric beam-shell interaction
@@ -28,6 +28,13 @@ Transverse shear depends on the topology:
       edge midpoints and interpolated), integrated at the full 2x2 rule.  This
       avoids both shear locking and the spurious zero-energy w-hourglass mode
       of one-point reduced shear integration.
+    * 3-node: centroidal edge-compatible assumed shear.  This is the constant
+      shear part of the DSG/MITC3 family: transverse shear is evaluated from
+      the element-average shear gap in the centroid frame, preserving rigid
+      body motion and constant-shear patches without the locking-prone fully
+      integrated linear Mindlin shear term.
+    * 6-node: quadratic displacement interpolation with reduced three-point
+      triangular shear integration.
     * 8-node: reduced 2x2 shear integration (S8R style).  When full element
       reduced integration is requested, a small nullspace-projection
       hourglass stiffness stabilizes modes outside the six rigid-body modes.
@@ -340,6 +347,46 @@ def _jit_compute_8node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarra
 
 
 @njit
+def _jit_compute_3node_shape_functions(r: float, s: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    N = np.array([1.0 - r - s, r, s])
+    dN_dr = np.array([-1.0, 1.0, 0.0])
+    dN_ds = np.array([-1.0, 0.0, 1.0])
+    return N, dN_dr, dN_ds
+
+
+@njit
+def _jit_compute_6node_shape_functions(r: float, s: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    l1 = 1.0 - r - s
+    l2 = r
+    l3 = s
+
+    N = np.zeros(6, dtype=float)
+    N[0] = l1 * (2.0 * l1 - 1.0)
+    N[1] = l2 * (2.0 * l2 - 1.0)
+    N[2] = l3 * (2.0 * l3 - 1.0)
+    N[3] = 4.0 * l1 * l2
+    N[4] = 4.0 * l2 * l3
+    N[5] = 4.0 * l3 * l1
+
+    dN_dr = np.zeros(6, dtype=float)
+    dN_dr[0] = 1.0 - 4.0 * l1
+    dN_dr[1] = 4.0 * l2 - 1.0
+    dN_dr[2] = 0.0
+    dN_dr[3] = 4.0 * (l1 - l2)
+    dN_dr[4] = 4.0 * l3
+    dN_dr[5] = -4.0 * l3
+
+    dN_ds = np.zeros(6, dtype=float)
+    dN_ds[0] = 1.0 - 4.0 * l1
+    dN_ds[1] = 0.0
+    dN_ds[2] = 4.0 * l3 - 1.0
+    dN_ds[3] = -4.0 * l2
+    dN_ds[4] = 4.0 * l2
+    dN_ds[5] = 4.0 * (l1 - l3)
+    return N, dN_dr, dN_ds
+
+
+@njit
 def _jit_integrate_nonlinear_response(
     u_loc: np.ndarray,
     N_res: np.ndarray,
@@ -496,7 +543,45 @@ def _jit_integrate_nonlinear_response(
 
 
 class ShellElement(Element):
-    """4/8-node quadrilateral Mindlin-Reissner shell element."""
+    """3/6-node triangular and 4/8-node quadrilateral Mindlin-Reissner shell element."""
+
+    TRI_GAUSS_POINTS_1 = np.array([[1.0 / 3.0, 1.0 / 3.0]], dtype=float)
+    TRI_GAUSS_WEIGHTS_1 = np.array([0.5], dtype=float)
+
+    TRI_GAUSS_POINTS_3 = np.array(
+        [[1.0 / 6.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0], [1.0 / 6.0, 2.0 / 3.0]],
+        dtype=float,
+    )
+    TRI_GAUSS_WEIGHTS_3 = np.array([1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0], dtype=float)
+
+    _DUNAVANT_A1 = 0.059715871789770
+    _DUNAVANT_B1 = 0.470142064105115
+    _DUNAVANT_A2 = 0.797426985353087
+    _DUNAVANT_B2 = 0.101286507323456
+    TRI_GAUSS_POINTS_7 = np.array(
+        [
+            [1.0 / 3.0, 1.0 / 3.0],
+            [_DUNAVANT_B1, _DUNAVANT_B1],
+            [_DUNAVANT_A1, _DUNAVANT_B1],
+            [_DUNAVANT_B1, _DUNAVANT_A1],
+            [_DUNAVANT_B2, _DUNAVANT_B2],
+            [_DUNAVANT_A2, _DUNAVANT_B2],
+            [_DUNAVANT_B2, _DUNAVANT_A2],
+        ],
+        dtype=float,
+    )
+    TRI_GAUSS_WEIGHTS_7 = np.array(
+        [
+            0.1125,
+            0.066197076394253,
+            0.066197076394253,
+            0.066197076394253,
+            0.062969590272414,
+            0.062969590272414,
+            0.062969590272414,
+        ],
+        dtype=float,
+    )
 
     GAUSS_POINTS_1x1 = np.array([[0.0, 0.0]], dtype=float)
     GAUSS_WEIGHTS_1x1 = np.array([4.0], dtype=float)
@@ -546,14 +631,20 @@ class ShellElement(Element):
         hourglass_stabilization: float = 1.0e-6,
     ):
         super().__init__(element_id, node_ids, material_name)
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError(f"Shell element {element_id} has repeated node ids")
         self.thickness = float(thickness)
         self.drilling_stabilization = float(drilling_stabilization)
         self.reduced_integration = reduced_integration
         self.hourglass_stabilization = float(hourglass_stabilization)
+        self._is_3node = len(node_ids) == 3
+        self._is_6node = len(node_ids) == 6
         self._is_8node = len(node_ids) == 8
         self._is_4node = len(node_ids) == 4
-        if not (self._is_4node or self._is_8node):
-            raise ValueError(f"ShellElement requires 4 or 8 nodes, got {len(node_ids)}")
+        self._is_triangular = self._is_3node or self._is_6node
+        self._is_quadrilateral = self._is_4node or self._is_8node
+        if not (self._is_triangular or self._is_quadrilateral):
+            raise ValueError(f"ShellElement requires 3, 4, 6 or 8 nodes, got {len(node_ids)}")
 
     @property
     def num_nodes(self) -> int:
@@ -565,22 +656,38 @@ class ShellElement(Element):
 
     @property
     def gauss_points(self) -> np.ndarray:
+        if self._is_3node:
+            return self.TRI_GAUSS_POINTS_3
+        if self._is_6node:
+            return self.TRI_GAUSS_POINTS_7
         if self._is_8node and self.reduced_integration:
             return self.GAUSS_POINTS_2x2
         return self.GAUSS_POINTS_3x3 if self._is_8node else self.GAUSS_POINTS_2x2
 
     @property
     def gauss_weights(self) -> np.ndarray:
+        if self._is_3node:
+            return self.TRI_GAUSS_WEIGHTS_3
+        if self._is_6node:
+            return self.TRI_GAUSS_WEIGHTS_7
         if self._is_8node and self.reduced_integration:
             return self.GAUSS_WEIGHTS_2x2
         return self.GAUSS_WEIGHTS_3x3 if self._is_8node else self.GAUSS_WEIGHTS_2x2
 
     @property
     def shear_gauss_points(self) -> np.ndarray:
+        if self._is_3node:
+            return self.TRI_GAUSS_POINTS_1
+        if self._is_6node:
+            return self.TRI_GAUSS_POINTS_3
         return self.GAUSS_POINTS_2x2 if self._is_8node else self.GAUSS_POINTS_1x1
 
     @property
     def shear_gauss_weights(self) -> np.ndarray:
+        if self._is_3node:
+            return self.TRI_GAUSS_WEIGHTS_1
+        if self._is_6node:
+            return self.TRI_GAUSS_WEIGHTS_3
         return self.GAUSS_WEIGHTS_2x2 if self._is_8node else self.GAUSS_WEIGHTS_1x1
 
     def get_node_coordinates(self, mesh: "FEMesh") -> np.ndarray:
@@ -593,12 +700,22 @@ class ShellElement(Element):
         return coords
 
     def compute_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self._is_3node:
+            return self._compute_3node_shape_functions(xi, eta)
+        if self._is_6node:
+            return self._compute_6node_shape_functions(xi, eta)
         if self._is_4node:
             return self._compute_4node_shape_functions(xi, eta)
         return self._compute_8node_shape_functions(xi, eta)
 
+    def _compute_3node_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _jit_compute_3node_shape_functions(xi, eta)
+
     def _compute_4node_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         return _jit_compute_4node_shape_functions(xi, eta)
+
+    def _compute_6node_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _jit_compute_6node_shape_functions(xi, eta)
 
     def _compute_8node_shape_functions(self, xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         return _jit_compute_8node_shape_functions(xi, eta)
@@ -617,6 +734,9 @@ class ShellElement(Element):
         candidate_edges = []
         if coords.shape[0] >= 2:
             candidate_edges.append(coords[1] - coords[0])
+        if coords.shape[0] >= 3:
+            candidate_edges.append(coords[2] - coords[0])
+            candidate_edges.append(coords[2] - coords[1])
         if coords.shape[0] >= 4:
             candidate_edges.append(coords[2] - coords[3])
             candidate_edges.append(coords[3] - coords[0])
@@ -719,6 +839,11 @@ class ShellElement(Element):
         B_d[0, 5::6] = N
         return B_d
 
+    def _reference_center(self) -> Tuple[float, float]:
+        if self._is_triangular:
+            return 1.0 / 3.0, 1.0 / 3.0
+        return 0.0, 0.0
+
     # MITC4 assumed natural transverse shear (4-node elements only).
     #
     # Covariant shear strains are sampled where they are exact for pure
@@ -734,9 +859,42 @@ class ShellElement(Element):
     _MITC4_SAMPLE_POINTS = {"A": (0.0, -1.0), "B": (1.0, 0.0), "C": (0.0, 1.0), "D": (-1.0, 0.0)}
 
     def _center_frame(self, coords: np.ndarray) -> np.ndarray:
-        _, dN_dxi, dN_deta = self.compute_shape_functions(0.0, 0.0)
+        xi, eta = self._reference_center()
+        _, dN_dxi, dN_deta = self.compute_shape_functions(xi, eta)
         R, _, _, _ = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
         return R
+
+    def _tri3_assumed_shear_b_matrix(self, coords: np.ndarray, R: np.ndarray) -> Tuple[np.ndarray, float]:
+        """
+        Constant assumed-shear field for the 3-node triangle.
+
+        The row space is evaluated in the centroid frame and integrated once
+        over the triangular area.  This is the constant shear-gap part used by
+        DSG3/MITC3-style triangles: rigid rotations satisfy
+        ``dw/dx + theta_y = 0`` and ``dw/dy - theta_x = 0`` exactly, while a
+        constant transverse-shear patch is reproduced without the locking-prone
+        fully integrated linear Mindlin shear interpolation.
+        """
+        if not self._is_3node:
+            raise ValueError("_tri3_assumed_shear_b_matrix is only valid for 3-node shells")
+        planar = coords @ R[:, :2]
+        r, s = self._reference_center()
+        N, dN_dr, dN_ds = self.compute_shape_functions(r, s)
+        J2 = np.array(
+            [
+                [float(dN_dr @ planar[:, 0]), float(dN_dr @ planar[:, 1])],
+                [float(dN_ds @ planar[:, 0]), float(dN_ds @ planar[:, 1])],
+            ],
+            dtype=float,
+        )
+        try:
+            inv_j2, det_j = _inv2(J2)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(f"Shell element {self.element_id} has a singular triangular shear Jacobian") from exc
+        dN_dx = inv_j2[0, 0] * dN_dr + inv_j2[0, 1] * dN_ds
+        dN_dy = inv_j2[1, 0] * dN_dr + inv_j2[1, 1] * dN_ds
+        _, _, B_s = self._build_shell_b_matrices(N, dN_dx, dN_dy)
+        return B_s, abs(float(det_j))
 
     def _mitc4_shear_samples(self, coords: np.ndarray, R: np.ndarray) -> Tuple[np.ndarray, Dict[str, Tuple[np.ndarray, np.ndarray]]]:
         """Return in-plane node coordinates and covariant shear rows at A-D."""
@@ -811,9 +969,10 @@ class ShellElement(Element):
         return q[:, keep]
 
     def _hourglass_stabilization_matrix(self, K_base: np.ndarray, coords: np.ndarray) -> np.ndarray:
-        """Small stiffness on reduced-integration Q8 modes outside rigid motion."""
+        """Small stiffness on non-rigid zero modes outside rigid motion."""
         coefficient = float(getattr(self, "hourglass_stabilization", 0.0))
-        if not (self._is_8node and self.reduced_integration) or coefficient <= 0.0:
+        stabilized_topology = (self._is_8node and self.reduced_integration) or self._is_triangular
+        if not stabilized_topology or coefficient <= 0.0:
             return np.zeros_like(K_base)
 
         K_sym = 0.5 * (K_base + K_base.T)
@@ -879,6 +1038,12 @@ class ShellElement(Element):
                 B_s, det_j = self._mitc4_shear_b_matrix(planar, samples, float(xi), float(eta))
                 K_local = (B_s.T @ D_shear @ B_s) * det_j * weight
                 K += T.T @ K_local @ T
+        elif self._is_3node:
+            R = self._center_frame(coords)
+            T = self._local_dof_transform(R)
+            B_s, det_j = self._tri3_assumed_shear_b_matrix(coords, R)
+            K_local = (B_s.T @ D_shear @ B_s) * det_j * float(np.sum(self.shear_gauss_weights))
+            K += T.T @ K_local @ T
         else:
             for (xi, eta), weight in zip(self.shear_gauss_points, self.shear_gauss_weights):
                 N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
@@ -1033,6 +1198,9 @@ class ShellElement(Element):
             for (xi, eta), weight in zip(self.GAUSS_POINTS_2x2, self.GAUSS_WEIGHTS_2x2):
                 B_s, det_j = self._mitc4_shear_b_matrix(planar, samples, float(xi), float(eta))
                 shear_data.append({"B_s": B_s, "detw": abs(det_j) * float(weight)})
+        elif self._is_3node:
+            B_s, det_j = self._tri3_assumed_shear_b_matrix(coords, R0)
+            shear_data.append({"B_s": B_s, "detw": det_j * float(np.sum(self.shear_gauss_weights))})
         else:
             for (xi, eta), weight in zip(self.shear_gauss_points, self.shear_gauss_weights):
                 N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
@@ -1283,10 +1451,16 @@ class ShellElement(Element):
         mitc_planar = None
         mitc_samples = None
         mitc_u_local = None
+        tri3_B_s = None
+        tri3_u_local = None
         if self._is_4node:
             R_center = self._center_frame(coords)
             mitc_planar, mitc_samples = self._mitc4_shear_samples(coords, R_center)
             mitc_u_local = self._local_dof_transform(R_center) @ u_elem_global
+        elif self._is_3node:
+            R_center = self._center_frame(coords)
+            tri3_B_s, _ = self._tri3_assumed_shear_b_matrix(coords, R_center)
+            tri3_u_local = self._local_dof_transform(R_center) @ u_elem_global
 
         for idx, (xi, eta) in enumerate(self.gauss_points):
             N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
@@ -1299,6 +1473,8 @@ class ShellElement(Element):
             if self._is_4node:
                 B_s_mitc, _ = self._mitc4_shear_b_matrix(mitc_planar, mitc_samples, float(xi), float(eta))
                 shear_strain = B_s_mitc @ mitc_u_local
+            elif self._is_3node:
+                shear_strain = tri3_B_s @ tri3_u_local
             else:
                 shear_strain = B_s @ u_local
 
@@ -2260,6 +2436,16 @@ class CoupledBeamShellElement(Element):
 
 ELEMENT_TYPES = {
     "shell": ShellElement,
+    "shell3": ShellElement,
+    "tri3": ShellElement,
+    "tria3": ShellElement,
+    "t3": ShellElement,
+    "s3": ShellElement,
+    "shell6": ShellElement,
+    "tri6": ShellElement,
+    "tria6": ShellElement,
+    "t6": ShellElement,
+    "s6": ShellElement,
     "beam": BeamElement,
     "quadratic_beam": QuadraticBeamElement,
     "coupled": CoupledBeamShellElement,
@@ -2273,10 +2459,11 @@ def create_element(
     material_name: str = "default",
     **kwargs: Any,
 ) -> Element:
-    if element_type not in ELEMENT_TYPES:
+    normalized_type = str(element_type).lower()
+    if normalized_type not in ELEMENT_TYPES:
         raise ValueError(f"Unknown element type: {element_type}")
-    if element_type == "coupled":
+    if normalized_type == "coupled":
         if len(node_ids) != 2:
             raise ValueError("CoupledBeamShellElement factory requires [beam_node_id, shell_node_id]")
         return CoupledBeamShellElement(element_id, node_ids[0], node_ids[1], material_name, **kwargs)
-    return ELEMENT_TYPES[element_type](element_id, node_ids, material_name, **kwargs)
+    return ELEMENT_TYPES[normalized_type](element_id, node_ids, material_name, **kwargs)

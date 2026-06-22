@@ -352,11 +352,13 @@ def _assemble_nonlinear_system(
 
     groups = {}
     for elem_id, element in mesh.elements.items():
-        if isinstance(element, ShellElement):
+        if isinstance(element, ShellElement) and getattr(element, "_is_quadrilateral", False):
             key = (
                 element.num_nodes,
                 element.thickness,
                 element.drilling_stabilization,
+                element.reduced_integration,
+                element.hourglass_stabilization,
                 element.material_name,
             )
             if key not in groups:
@@ -367,7 +369,7 @@ def _assemble_nonlinear_system(
     precomputed_K = {}
 
     for key, elem_list in groups.items():
-        num_nodes, thickness, drilling_stabilization, material_name = key
+        num_nodes, thickness, drilling_stabilization, _reduced_integration, _hourglass_stabilization, material_name = key
         material = model.get_material(material_name)
         E = float(material.elastic_modulus)
         nu = float(material.poisson_ratio)
