@@ -229,7 +229,7 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "def switch_to_multiple_calculation_mode(self):" in source
     assert "def switch_to_fea_result_buckling_mode(self):" in source
     assert "Enable experimental mode at startup to use FEA result buckling." in source
-    assert "Enable experimental mode at startup to import INP/FRD files." in source
+    assert "Enable experimental mode at startup to import FE model/result files." in source
     assert "self._single_line_name = selected_line" in source
     assert "self._activate_simplified_calculation_pipeline()" in source
     assert "def _ensure_single_dummy_line(self):" in source
@@ -262,6 +262,8 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def reimport_fea_buckling_files(self):" in source
     assert "def import_fea_buckling_files(self, inp_path, frd_path=None):" in source
     assert "fe_plate_fields.create_fea_buckling_session(" in source
+    assert "SESAM FEM/SIF" in source
+    assert "has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists" in source
     assert "ml_algo=getattr(self, '_ML_buckling', None)" in source
     assert "messagebox.showwarning('FEA buckling method warning'" in source
     assert "def _draw_fea_buckling_canvas(self):" in source
