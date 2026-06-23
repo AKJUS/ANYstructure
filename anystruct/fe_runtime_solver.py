@@ -781,8 +781,12 @@ def _configure_tk_canvas_colormap(colormap: str) -> None:
         pass
 
 
-def _surface_facecolors(values_grid: list[list[float]], colormap: str = "jet"):
-    values = _all_grid_values(values_grid) or [0.0]
+def _surface_facecolors(values_grid: list[list[float]], colormap: str = "jet", extra_values: list[float] | None = None):
+    values = _all_grid_values(values_grid)
+    if extra_values:
+        values.extend(float(value) for value in extra_values)
+    if not values:
+        values = [0.0]
     norm = mcolors.Normalize(vmin=min(values), vmax=max(values) if max(values) > min(values) else min(values) + 1.0)
     cmap = colormaps.get(colormap, colormaps["jet"])
     return [[cmap(norm(value)) for value in row] for row in values_grid], norm, cmap
@@ -1077,10 +1081,19 @@ def _plot_visualization_surface(
         else:
             color_grid = scalar_values
             colorbar_label = str(visualization.get("scalar_label", component))
-    facecolors, norm, cmap = _surface_facecolors(color_grid, colormap)
     scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
+    skin_polygons = []
+    skin_values = []
+    for surface in visualization.get("skin_shell_surfaces") or ():
+        polygon = _shell_surface_points(surface, scale)
+        if len(polygon) < 3:
+            continue
+        value = _shell_surface_component_value(surface, component, is_mode=is_mode)
+        skin_polygons.append(polygon)
+        skin_values.append(value)
+
     shell_polygons = []
-    shell_colors = []
+    shell_values = []
     for surface in visualization.get("shell_surfaces") or ():
         if member_alpha <= 0.0 or not _shell_surface_role_visible(surface, show_stiffeners, show_girders):
             continue
@@ -1089,7 +1102,12 @@ def _plot_visualization_surface(
             continue
         value = _shell_surface_component_value(surface, component, is_mode=is_mode)
         shell_polygons.append(polygon)
-        shell_colors.append(cmap(norm(value)))
+        shell_values.append(value)
+
+    surface_values = skin_values + shell_values
+    facecolors, norm, cmap = _surface_facecolors(color_grid, colormap, surface_values)
+    skin_colors = [cmap(norm(value)) for value in skin_values]
+    shell_colors = [cmap(norm(value)) for value in shell_values]
 
     if visualization.get("type") == "cylinder":
         axial = _plot_grid_values(visualization.get("axial_m"))
@@ -1132,18 +1150,28 @@ def _plot_visualization_surface(
             ]
 
         if show_plate:
-            axis.plot_surface(
-                np.asarray(x),
-                np.asarray(y),
-                np.asarray(z),
-                facecolors=np.asarray(facecolors),
-                rstride=1,
-                cstride=1,
-                linewidth=0.15,
-                antialiased=True,
-                shade=False,
-                alpha=plate_alpha,
-            )
+            if skin_polygons:
+                collection = Poly3DCollection(
+                    skin_polygons,
+                    facecolors=skin_colors,
+                    edgecolors="#111827",
+                    linewidths=0.25,
+                    alpha=plate_alpha,
+                )
+                axis.add_collection3d(collection)
+            else:
+                axis.plot_surface(
+                    np.asarray(x),
+                    np.asarray(y),
+                    np.asarray(z),
+                    facecolors=np.asarray(facecolors),
+                    rstride=1,
+                    cstride=1,
+                    linewidth=0.15,
+                    antialiased=True,
+                    shade=False,
+                    alpha=plate_alpha,
+                )
         if shell_polygons:
             collection = Poly3DCollection(
                 shell_polygons,
@@ -1168,18 +1196,28 @@ def _plot_visualization_surface(
         w = _plot_grid_values(visualization.get("w_m"))
         z = [[value * scale for value in row] for row in w]
         if show_plate:
-            axis.plot_surface(
-                np.asarray(x),
-                np.asarray(y),
-                np.asarray(z),
-                facecolors=np.asarray(facecolors),
-                rstride=1,
-                cstride=1,
-                linewidth=0.15,
-                antialiased=True,
-                shade=False,
-                alpha=_clamped_alpha(plate_alpha, 1.0),
-            )
+            if skin_polygons:
+                collection = Poly3DCollection(
+                    skin_polygons,
+                    facecolors=skin_colors,
+                    edgecolors="#111827",
+                    linewidths=0.25,
+                    alpha=_clamped_alpha(plate_alpha, 1.0),
+                )
+                axis.add_collection3d(collection)
+            else:
+                axis.plot_surface(
+                    np.asarray(x),
+                    np.asarray(y),
+                    np.asarray(z),
+                    facecolors=np.asarray(facecolors),
+                    rstride=1,
+                    cstride=1,
+                    linewidth=0.15,
+                    antialiased=True,
+                    shade=False,
+                    alpha=_clamped_alpha(plate_alpha, 1.0),
+                )
         if shell_polygons:
             collection = Poly3DCollection(
                 shell_polygons,
@@ -1197,7 +1235,7 @@ def _plot_visualization_surface(
 
     axis.set_title(title)
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-    mappable.set_array(_all_grid_values(color_grid))
+    mappable.set_array(_all_grid_values(color_grid) + surface_values)
     figure.colorbar(mappable, ax=axis, shrink=0.68, pad=0.1, label=colorbar_label)
 
 
@@ -2140,10 +2178,10 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     },
     "shell_element_order": {
         "title": "Shell Element",
-        "purpose": "Selects 4-node or 8-node quadrilateral shell elements.",
-        "use": "S4 is faster. S8 adds shared midside nodes and uses higher-order shell interpolation in the core solver. S8R is the reduced integration version of S8.",
-        "output": "Mesh diagnostics report the shell order. S8 usually increases node count and runtime. S8R significantly speeds up S8 by reducing integration points.",
-        "caution": "S8 can improve curvature and bending representation, but it should be verified with mesh convergence. S8R exhibits hourglass modes, so use with caution for unconstrained models.",
+        "purpose": "Selects triangular or quadrilateral shell elements.",
+        "use": "S4 is fastest for quadrilateral meshes. S3 splits generated quads into linear triangles. S6 adds triangular midside nodes. S8 adds quadrilateral midside nodes, and S8R is the reduced integration version of S8.",
+        "output": "Mesh diagnostics report the shell order. S3/S6 are useful for SESAM/GeniE-style triangular compatibility checks; S6 and S8 increase node count and runtime.",
+        "caution": "Triangular and higher-order shells should be checked with mesh convergence. S8R exhibits hourglass modes, so use with caution for unconstrained models.",
     },
     "beam_element_order": {
         "title": "Beam Element",
@@ -2903,7 +2941,7 @@ class RuntimeFEMWindow:
             ("stepwise", "static only", "nonlinear static", "ANYintelligent capacity workflow"),
         )
         self._add_option_row(solver_options, 1, "shell_element_order", "Shell element", self.shell_element_order,
-                             ("S4", "S8", "S8R"))
+                             ("S4", "S3", "S6", "S8", "S8R"))
         self._add_option_row(solver_options, 2, "beam_element_order", "Beam element", self.beam_element_order,
                              ("B2", "B3"))
         self._add_option_row(
@@ -3634,8 +3672,11 @@ class RuntimeFEMWindow:
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
         _configure_tk_canvas_colormap(str(self.colormap_vis.get()))
-        has_member_shell_surfaces = bool(((self.current_result.visualization if self.current_result is not None else {}) or {}).get("shell_surfaces"))
-        if self.snapshot.is_cylinder and plate_alpha >= 0.94 and not has_member_shell_surfaces:
+        visualization_payload = ((self.current_result.visualization if self.current_result is not None else {}) or {})
+        has_explicit_shell_surfaces = bool(
+            visualization_payload.get("shell_surfaces") or visualization_payload.get("skin_shell_surfaces")
+        )
+        if self.snapshot.is_cylinder and plate_alpha >= 0.94 and not has_explicit_shell_surfaces:
             set_occluder = getattr(canvas, "set_opaque_cylinder_occluder", None)
             if callable(set_occluder):
                 set_occluder(
@@ -3669,6 +3710,8 @@ class RuntimeFEMWindow:
                 colorbar_label = str(visualization.get("scalar_label", component))
 
         all_vals = _all_grid_values(color_grid)
+        for surface in visualization.get("skin_shell_surfaces") or ():
+            all_vals.append(_shell_surface_component_value(surface, component, is_mode=is_mode))
         show_stiffeners_for_range = self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis", None) is not None else True
         show_girders_for_range = self.show_girder_vis.get() if getattr(self, "show_girder_vis", None) is not None else True
         if member_alpha > 0.0:
@@ -3746,33 +3789,50 @@ class RuntimeFEMWindow:
         show_plate_var = getattr(self, "show_plate_vis", None)
         show_plate = show_plate_var.get() if show_plate_var is not None else True
         if show_plate and plate_alpha > 0.0:
-            R = len(x)
-            C = len(x[0]) if R > 0 else 0
-            point_grid = [
-                [
-                    Point3D(x[row_index][col_index], y[row_index][col_index], z[row_index][col_index])
-                    for col_index in range(C)
-                ]
-                for row_index in range(R)
-            ]
-            for i in range(R - 1):
-                for j in range(C - 1):
-                    p1 = point_grid[i][j]
-                    p2 = point_grid[i + 1][j]
-                    p3 = point_grid[i + 1][j + 1]
-                    p4 = point_grid[i][j + 1]
-
-                    avg_val = 0.25 * (
-                                color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
-                            j + 1])
-                    color = _interpolate_thickness_color(avg_val, vmin, vmax)
+            skin_shell_surfaces = tuple(visualization.get("skin_shell_surfaces") or ())
+            if skin_shell_surfaces:
+                for surface in skin_shell_surfaces:
+                    polygon = _shell_surface_points(surface, scale)
+                    if len(polygon) < 3:
+                        continue
+                    value = _shell_surface_component_value(surface, component, is_mode=is_mode)
+                    color = _interpolate_thickness_color(value, vmin, vmax)
                     canvas.add_polygon(
-                        [p1, p2, p3, p4],
+                        [Point3D(x, y, z) for x, y, z in polygon],
                         color=color,
-                        outline="#64748b",
+                        outline="#111827",
+                        width=1,
                         layer=5,
                         stipple=plate_stipple,
                     )
+            else:
+                R = len(x)
+                C = len(x[0]) if R > 0 else 0
+                point_grid = [
+                    [
+                        Point3D(x[row_index][col_index], y[row_index][col_index], z[row_index][col_index])
+                        for col_index in range(C)
+                    ]
+                    for row_index in range(R)
+                ]
+                for i in range(R - 1):
+                    for j in range(C - 1):
+                        p1 = point_grid[i][j]
+                        p2 = point_grid[i + 1][j]
+                        p3 = point_grid[i + 1][j + 1]
+                        p4 = point_grid[i][j + 1]
+
+                        avg_val = 0.25 * (
+                                    color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
+                                j + 1])
+                        color = _interpolate_thickness_color(avg_val, vmin, vmax)
+                        canvas.add_polygon(
+                            [p1, p2, p3, p4],
+                            color=color,
+                            outline="#64748b",
+                            layer=5,
+                            stipple=plate_stipple,
+                        )
 
         show_stiffeners_var = getattr(self, "show_stiffener_vis", None)
         show_stiffeners = show_stiffeners_var.get() if show_stiffeners_var is not None else True

@@ -2181,7 +2181,7 @@ class Application():
             card_row,
             title='FEA result buckling',
             subtitle='FE panel scan',
-            details='Import PrePoMax/CalculiX INP/FRD files and select buckling panels directly.',
+            details='Import CalculiX INP/FRD or SESAM FEM/SIF files and select buckling panels directly.',
             button_text='Start FEA mode',
             command=lambda: choose('fea'),
             primary=False,
@@ -2369,25 +2369,38 @@ class Application():
         self._fea_buckling_created = []
 
     def open_fea_buckling_files(self):
-        """Ask for INP/FRD files and import them into FEA-result buckling mode."""
+        """Ask for FE model/result files and import them into FEA-result buckling mode."""
         if not getattr(self, '_experimental_mode_enabled', False):
             try:
                 messagebox.showinfo(
                     title='Experimental FEA result buckling',
-                    message='Enable experimental mode at startup to import INP/FRD files.',
+                    message='Enable experimental mode at startup to import FE model/result files.',
                 )
             except Exception:
                 pass
             return
         inp_path = filedialog.askopenfilename(
-            title='Open CalculiX/PrePoMax input deck',
-            filetypes=(('CalculiX input', '*.inp'), ('All files', '*.*')),
+            title='Open FE model/input deck',
+            filetypes=(
+                ('Supported FE model/result', '*.inp *.FEM *.fem *.SIF *.sif'),
+                ('CalculiX input', '*.inp'),
+                ('SESAM FEM/SIF', '*.FEM *.fem *.SIF *.sif'),
+                ('All files', '*.*'),
+            ),
         )
         if not inp_path:
             return
+        if str(inp_path).lower().endswith('.sif'):
+            self.import_fea_buckling_files(inp_path, None)
+            return
         frd_path = filedialog.askopenfilename(
-            title='Open CalculiX/PrePoMax result file',
-            filetypes=(('CalculiX result', '*.frd'), ('All files', '*.*')),
+            title='Open FE result file',
+            filetypes=(
+                ('Supported FE result', '*.frd *.SIF *.sif'),
+                ('CalculiX result', '*.frd'),
+                ('SESAM SIF', '*.SIF *.sif'),
+                ('All files', '*.*'),
+            ),
         )
         self.import_fea_buckling_files(inp_path, frd_path or None)
 
@@ -2544,6 +2557,13 @@ class Application():
         """Load FEA files and prepare clickable buckling panels."""
         if not getattr(self, '_experimental_mode_enabled', False):
             return
+        input_text = str(inp_path)
+        input_lower = input_text.lower()
+        paired_sif_exists = False
+        if input_lower.endswith('.fem'):
+            base_path, _extension = os.path.splitext(input_text)
+            paired_sif_exists = os.path.exists(base_path + '.SIF') or os.path.exists(base_path + '.sif')
+        has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists
         try:
             self._fea_buckling_session = fe_plate_fields.create_fea_buckling_session(
                 inp_path,
@@ -2554,7 +2574,7 @@ class Application():
                 material_yield_mpa=self._new_material.get(),
                 material_factor=self._new_material_factor.get(),
                 ml_algo=getattr(self, '_ML_buckling', None),
-                run_buckling=bool(frd_path),
+                run_buckling=has_result_source,
                 stress_reduction_method=self._fea_stress_reduction_method.get(),
             )
         except Exception as err:

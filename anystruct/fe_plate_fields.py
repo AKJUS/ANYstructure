@@ -1,10 +1,11 @@
-"""Infer flat and cylindrical stiffened fields from CalculiX/PrePoMax shells.
+"""Infer flat and cylindrical stiffened fields from FE shell models.
 
 Flat structures are interpreted from connected coplanar patches. Cylindrical
 structures use a separate best-fit axis/radius pipeline, preserve periodic
 circumferential topology, and infer longitudinal stiffeners plus ring
-stiffeners/frames from local shell orientation. FRD stresses can be projected
-to either flat panel axes or local axial/circumferential cylinder axes.
+stiffeners/frames from local shell orientation. CalculiX FRD and SESAM SIF
+stresses can be projected to either flat panel axes or local
+axial/circumferential cylinder axes.
 """
 
 from __future__ import annotations
@@ -491,6 +492,127 @@ def read_calculix_frd_stress(path: str | os.PathLike[str]) -> FrdStressResult:
     )
 
 
+def _path_suffix(path: str | os.PathLike[str] | None) -> str:
+    return "" if path is None else Path(str(path)).suffix.lower()
+
+
+def _is_sesam_model_path(path: str | os.PathLike[str] | None) -> bool:
+    return _path_suffix(path) in {".fem", ".sif"}
+
+
+def _is_sesam_result_path(path: str | os.PathLike[str] | None) -> bool:
+    return _path_suffix(path) == ".sif"
+
+
+def _paired_sesam_sif_path(path: str | os.PathLike[str]) -> str | None:
+    source = Path(str(path))
+    if source.suffix.lower() != ".fem":
+        return None
+    for suffix in (".SIF", ".sif"):
+        candidate = source.with_suffix(suffix)
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _default_fea_result_path(
+    inp_path: str | os.PathLike[str],
+    frd_path: str | os.PathLike[str] | None,
+) -> str | None:
+    if frd_path is not None:
+        return str(frd_path)
+    if _is_sesam_result_path(inp_path):
+        return str(inp_path)
+    if _path_suffix(inp_path) == ".fem":
+        return _paired_sesam_sif_path(inp_path)
+    return None
+
+
+def read_sesam_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
+    """Read SESAM FEM/SIF shell geometry into the FE-results interpreter model."""
+
+    from anystruct.sesam_import import read_sesam_model
+
+    path_text = str(path)
+    sesam_model = read_sesam_model(path_text)
+    shell_elements: dict[int, ShellElement] = {}
+    elsets: dict[str, list[int]] = defaultdict(list)
+    section_by_elset: dict[str, ShellSection] = {}
+
+    for element in sesam_model.shell_elements.values():
+        material_id = element.material_id if element.material_id is not None else 0
+        property_id = element.property_id if element.property_id is not None else 0
+        elset = f"sesam_shell_{element.element_type.lower()}_prop_{property_id}_mat_{material_id}"
+        shell_elements[element.element_id] = ShellElement(
+            element_id=element.element_id,
+            node_ids=element.node_ids,
+            element_type=element.element_type,
+            elset=elset,
+        )
+        elsets[elset].append(element.element_id)
+        if elset not in section_by_elset:
+            thickness = None
+            if element.property_id is not None:
+                thickness = sesam_model.shell_thicknesses.get(element.property_id)
+            if thickness is None and sesam_model.shell_thicknesses:
+                thickness = next(iter(sesam_model.shell_thicknesses.values()))
+            section_by_elset[elset] = ShellSection(
+                elset=elset,
+                material=f"sesam_material_{material_id}" if material_id else None,
+                thickness_m=thickness,
+            )
+
+    return FeShellModel(
+        nodes=dict(sesam_model.nodes),
+        shell_elements=shell_elements,
+        elsets={name: tuple(values) for name, values in elsets.items()},
+        shell_sections=tuple(section_by_elset.values()),
+        source_path=path_text,
+    )
+
+
+def read_sesam_sif_stress_result(path: str | os.PathLike[str]) -> FrdStressResult:
+    """Read SESAM SIF RVSTRESS as the FRD-like stress object used here."""
+
+    from anystruct.sesam_import import read_sesam_sif_stress
+
+    stress = read_sesam_sif_stress(path)
+    return FrdStressResult(
+        path=stress.path,
+        nodes=dict(stress.nodes),
+        element_nodes=dict(stress.element_nodes),
+        components=tuple(stress.components),
+        nodal_stress=dict(stress.nodal_stress),
+        units=stress.units,
+    )
+
+
+def read_fea_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
+    """Read a supported FE shell model: CalculiX INP or SESAM FEM/SIF."""
+
+    if _is_sesam_model_path(path):
+        return read_sesam_shell_model(path)
+    return read_calculix_inp(path)
+
+
+def read_fea_result_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Return lightweight result metadata for FRD or SIF files."""
+
+    if _is_sesam_result_path(path):
+        from anystruct.sesam_import import read_sesam_sif_summary
+
+        return read_sesam_sif_summary(path)
+    return read_calculix_frd_summary(path)
+
+
+def read_fea_stress(path: str | os.PathLike[str]) -> FrdStressResult:
+    """Read supported FE stress results: CalculiX FRD or SESAM SIF."""
+
+    if _is_sesam_result_path(path):
+        return read_sesam_sif_stress_result(path)
+    return read_calculix_frd_stress(path)
+
+
 def reduce_field_stresses(
     model: FeShellModel,
     fields: Sequence[PlateField],
@@ -724,16 +846,16 @@ def _create_flat_fea_buckling_session(
     """Create a selectable FE-result buckling session for API and GUI callers."""
 
     inp_path = str(inp_path)
-    frd_path_text = None if frd_path is None else str(frd_path)
-    model = read_calculix_inp(inp_path)
+    frd_path_text = _default_fea_result_path(inp_path, frd_path)
+    model = read_fea_shell_model(inp_path)
     fields = tuple(infer_plate_fields(model))
-    frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
+    frd_summary = read_fea_result_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
     reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     diagnostics.append(f"stress reduction method: {reduction_method}")
 
     if frd_path_text:
-        frd_stress = read_calculix_frd_stress(frd_path_text)
+        frd_stress = read_fea_stress(frd_path_text)
         panel_stresses = tuple(
             reduce_field_stresses(
                 model,
@@ -1111,10 +1233,10 @@ def analyze_frd_buckling(
 ) -> dict[str, Any]:
     """Read INP/FRD, infer fields, reduce stresses, and run buckling checks."""
 
-    model = read_calculix_inp(inp_path)
+    model = read_fea_shell_model(inp_path)
     fields = infer_plate_fields(model)
-    frd_summary = read_calculix_frd_summary(frd_path)
-    frd_stress = read_calculix_frd_stress(frd_path)
+    frd_summary = read_fea_result_summary(frd_path)
+    frd_stress = read_fea_stress(frd_path)
     panel_stresses = reduce_field_stresses(model, fields, frd_stress)
     buckling_results = calculate_field_buckling(fields, panel_stresses, **buckling_kwargs)
     payload = _summary_payload(model, fields, frd_summary)
@@ -3914,11 +4036,11 @@ def create_fea_cylinder_buckling_session(
     """
 
     inp_path = str(inp_path)
-    frd_path_text = None if frd_path is None else str(frd_path)
-    model = read_calculix_inp(inp_path)
+    frd_path_text = _default_fea_result_path(inp_path, frd_path)
+    model = read_fea_shell_model(inp_path)
     geometry = detect_cylinder_geometry(model)
     fields = tuple(infer_cylinder_fields(model, geometry))
-    frd_summary = read_calculix_frd_summary(frd_path_text) if frd_path_text else None
+    frd_summary = read_fea_result_summary(frd_path_text) if frd_path_text else None
     diagnostics: list[str] = []
     reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     diagnostics.append(f"stress reduction method: {reduction_method}")
@@ -3931,7 +4053,7 @@ def create_fea_cylinder_buckling_session(
         )
 
     if frd_path_text:
-        frd_stress = read_calculix_frd_stress(frd_path_text)
+        frd_stress = read_fea_stress(frd_path_text)
         stresses = tuple(
             reduce_cylinder_stresses(
                 model,
@@ -4033,7 +4155,7 @@ def create_fea_structure_buckling_session(
     if geometry_type == "flat":
         return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
 
-    model = read_calculix_inp(inp_path)
+    model = read_fea_shell_model(inp_path)
     if is_cylindrical_shell_model(model):
         return create_fea_cylinder_buckling_session(inp_path, frd_path, **kwargs)
     return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
@@ -4616,9 +4738,9 @@ def _member_at_station(
     return None if not candidates else min(candidates, key=lambda member: abs(member.station - station))
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Infer flat stiffened plate fields from CalculiX shell files.")
-    parser.add_argument("inp", help="CalculiX/PrePoMax .inp file")
-    parser.add_argument("--frd", help="Optional CalculiX .frd result file")
+    parser = argparse.ArgumentParser(description="Infer flat stiffened plate fields from FE shell files.")
+    parser.add_argument("inp", help="CalculiX/PrePoMax .inp, SESAM .FEM, or SESAM .SIF file")
+    parser.add_argument("--frd", help="Optional CalculiX .frd or SESAM .SIF result file")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of a compact text summary")
     parser.add_argument("--plot", metavar="PNG", help="Save a colored 2D plot of the inferred buckling panels")
     parser.add_argument("--no-plot-labels", action="store_true", help="Do not annotate panel ids on the plot")
@@ -4627,14 +4749,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=("panel", "uf"),
         help="Color plot by panel id or buckling utilization factor; default is uf with --buckling, otherwise panel",
     )
-    parser.add_argument("--stresses", action="store_true", help="Reduce FRD stresses to one stress set per field")
+    parser.add_argument("--stresses", action="store_true", help="Reduce FE result stresses to one stress set per field")
     parser.add_argument(
         "--stress-method",
         default=STRESS_REDUCTION_METHODS[0],
         choices=STRESS_REDUCTION_METHODS,
         help="Representative FE stress interpretation used with --stresses/--buckling",
     )
-    parser.add_argument("--buckling", action="store_true", help="Run ANYstructure buckling checks from reduced FRD stresses")
+    parser.add_argument("--buckling", action="store_true", help="Run ANYstructure buckling checks from reduced FE result stresses")
     parser.add_argument(
         "--buckling-method",
         default="SemiAnalytical S3/U3",
@@ -4650,15 +4772,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pressure-mpa", type=float, default=0.0, help="Optional lateral pressure for buckling checks")
     args = parser.parse_args(argv)
 
-    model = read_calculix_inp(args.inp)
+    model = read_fea_shell_model(args.inp)
     fields = infer_plate_fields(model)
-    frd_summary = read_calculix_frd_summary(args.frd) if args.frd else None
+    result_path = _default_fea_result_path(args.inp, args.frd)
+    frd_summary = read_fea_result_summary(result_path) if result_path else None
     payload = _summary_payload(model, fields, frd_summary)
     panel_stresses: list[PanelStress] = []
     if args.stresses or args.buckling:
-        if not args.frd:
-            parser.error("--stresses/--buckling requires --frd")
-        frd_stress = read_calculix_frd_stress(args.frd)
+        if not result_path:
+            parser.error("--stresses/--buckling requires --frd or a SESAM .SIF input/result file")
+        frd_stress = read_fea_stress(result_path)
         panel_stresses = reduce_field_stresses(
             model,
             fields,

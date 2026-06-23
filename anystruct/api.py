@@ -3,21 +3,8 @@ import math
 try:
     from anystruct.calc_structure import *
     from anystruct.calc_loads import *
-    import anystruct.load_window as load_window
-    import anystruct.make_grid_numpy as grid
-    import anystruct.grid_window as grid_window
     import anystruct.helper as hlp
     from anystruct.helper import *
-    import anystruct.optimize as op
-    import anystruct.calculate_semianalytical as semi_analytical
-    import anystruct.optimize_window as opw
-    import anystruct.optimize_cylinder as opc
-    import anystruct.optimize_multiple_window as opwmult
-    import anystruct.optimize_geometry as optgeo
-    import anystruct.pl_stf_window as struc
-    import anystruct.stresses_window as stress
-    import anystruct.fatigue_window as fatigue
-    import anystruct.load_factor_window as load_factors
     import anystruct.api_helpers as api_helpers
     from anystruct.project_application import (
         ProjectFileCodec,
@@ -29,27 +16,13 @@ try:
     )
     from anystruct.project_state import ProjectState
     from anystruct.report_generator import LetterMaker
-    import anystruct.sesam_interface as sesam
     import anystruct.fe_plate_fields as fe_plate_fields
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
     from ANYstructure.anystruct.calc_loads import *
-    import ANYstructure.anystruct.load_window as load_window
-    import ANYstructure.anystruct.make_grid_numpy as grid
-    import ANYstructure.anystruct.grid_window as grid_window
     import ANYstructure.anystruct.helper as hlp
     from ANYstructure.anystruct.helper import *
-    import ANYstructure.anystruct.optimize as op
-    import ANYstructure.anystruct.calculate_semianalytical as semi_analytical
-    import ANYstructure.anystruct.optimize_window as opw
-    import ANYstructure.anystruct.optimize_cylinder as opc
-    import ANYstructure.anystruct.optimize_multiple_window as opwmult
-    import ANYstructure.anystruct.optimize_geometry as optgeo
-    import ANYstructure.anystruct.pl_stf_window as struc
-    import ANYstructure.anystruct.stresses_window as stress
-    import ANYstructure.anystruct.fatigue_window as fatigue
-    import ANYstructure.anystruct.load_factor_window as load_factors
     import ANYstructure.anystruct.api_helpers as api_helpers
     from ANYstructure.anystruct.project_application import (
         ProjectFileCodec,
@@ -61,8 +34,23 @@ except ModuleNotFoundError:
     )
     from ANYstructure.anystruct.project_state import ProjectState
     from ANYstructure.anystruct.report_generator import LetterMaker
-    import ANYstructure.anystruct.sesam_interface as sesam
     import ANYstructure.anystruct.fe_plate_fields as fe_plate_fields
+
+
+def _optimize_module():
+    try:
+        import anystruct.optimize as optimize_module
+    except ModuleNotFoundError:
+        import ANYstructure.anystruct.optimize as optimize_module
+    return optimize_module
+
+
+def _semi_analytical_module():
+    try:
+        import anystruct.calculate_semianalytical as semi_analytical_module
+    except ModuleNotFoundError:
+        import ANYstructure.anystruct.calculate_semianalytical as semi_analytical_module
+    return semi_analytical_module
 
 
 def load_project_state(path):
@@ -120,6 +108,28 @@ def analyze_runtime_fea_result_buckling(runtime_result, **kwargs):
     """Reduce runtime FEM stresses panel by panel and return a serializable summary."""
 
     return create_runtime_fea_result_buckling_session(runtime_result, **kwargs).summary()
+
+
+def import_sesam_fem_model(path, **kwargs):
+    """Import a SESAM FEM/SIF model into the ANYstructure FE backend."""
+
+    try:
+        from anystruct.sesam_import import build_fe_model_from_sesam_fem
+    except ModuleNotFoundError:
+        from ANYstructure.anystruct.sesam_import import build_fe_model_from_sesam_fem
+
+    return build_fe_model_from_sesam_fem(path, **kwargs)
+
+
+def run_sesam_fem_static(path, **kwargs):
+    """Import a SESAM FEM/SIF model and run the linear FE solver."""
+
+    try:
+        from anystruct.sesam_import import run_sesam_fem_static as _run_sesam_fem_static
+    except ModuleNotFoundError:
+        from ANYstructure.anystruct.sesam_import import run_sesam_fem_static as _run_sesam_fem_static
+
+    return _run_sesam_fem_static(path, **kwargs)
 
 
 class FlatStru():
@@ -269,6 +279,7 @@ class FlatStru():
     def _semi_analytical_buckling_results(self):
         self._ensure_puls_defaults()
         mat_fac = float(self._FlatStructure.Plate.mat_factor)
+        semi_analytical = _semi_analytical_module()
         try:
             result = semi_analytical.solve_anystructure_panel(
                 self._FlatStructure,
@@ -323,6 +334,7 @@ class FlatStru():
 
     def _numeric_ml_buckling_results(self, ml_algo=None):
         self._ensure_puls_defaults()
+        op = _optimize_module()
         ml_algo = self._ml_buckling_model if ml_algo is None else ml_algo
         mat_fac = float(self._FlatStructure.Plate.mat_factor)
         prefix = op._get_numeric_pipeline_prefix(self._FlatStructure)

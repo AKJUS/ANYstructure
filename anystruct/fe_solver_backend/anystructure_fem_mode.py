@@ -549,7 +549,7 @@ def build_fe_model_from_generated_geometry(
                 skipped_member_plate_roles.append(member_plate_role)
                 continue
             node_ids = _node_ids(shell)
-            if len(node_ids) not in {4, 8}:
+            if len(node_ids) not in {3, 4, 6, 8}:
                 raise ValueError(f"unsupported-shell-topology-{len(node_ids)}")
             elem_id = int(_value(shell, "id", "element_id", default=element_count + 1))
             thickness = _as_float(_value(shell, "thickness", "t"), 0.0) * config.geometry_scale
