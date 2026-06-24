@@ -134,6 +134,19 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "LoadResultant": ("validation", "LoadResultant"),
     "load_case_resultant": ("validation", "load_case_resultant"),
     "load_vector_resultant": ("validation", "load_vector_resultant"),
+    # SESAM formatted FEM document import/export
+    "FemDiagnostic": ("sesam_fem", "FemDiagnostic"),
+    "FemRawRecord": ("sesam_fem", "FemRawRecord"),
+    "SesamFemDocument": ("sesam_fem", "SesamFemDocument"),
+    "SesamFemError": ("sesam_fem", "SesamFemError"),
+    "SesamFemExportReport": ("sesam_fem", "SesamFemExportReport"),
+    "SesamFemImportResult": ("sesam_fem", "SesamFemImportResult"),
+    "export_sesam_fem": ("sesam_fem", "export_sesam_fem"),
+    "import_sesam_fem": ("sesam_fem", "import_sesam_fem"),
+    "read_raw_records": ("sesam_fem", "read_raw_records"),
+    "read_sesam_fem_document": ("sesam_fem", "read_sesam_fem_document"),
+    "validate_sesam_fem_document": ("sesam_fem", "validate_sesam_fem_document"),
+    "write_sesam_fem_document": ("sesam_fem", "write_sesam_fem_document"),
 }
 
 __all__ = sorted(_EXPORTS) + ["__version__"]
@@ -151,4 +164,7 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
+
+
+
 
