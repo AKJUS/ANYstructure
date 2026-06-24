@@ -54,7 +54,15 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .pytest_tmp/
+.pytest_tmp_*/
 cover/
+
+# Local validation/reference data
+/ref_Cases/
+
+# Local application/tool artifacts
+/backup.txt
+/.ai/
 
 # Translations
 *.mo
@@ -162,4 +170,4 @@ cython_debug/
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+.idea/

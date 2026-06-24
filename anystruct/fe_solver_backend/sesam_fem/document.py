@@ -41,6 +41,10 @@ class FemSection:
     iy: Optional[float] = None
     iz: Optional[float] = None
     torsion: Optional[float] = None
+    web_height: Optional[float] = None
+    web_thickness: Optional[float] = None
+    flange_width: Optional[float] = None
+    flange_thickness: Optional[float] = None
     raw_values: tuple[float, ...] = ()
 
 
@@ -59,6 +63,20 @@ class FemCoordinate:
 
 
 @dataclass(frozen=True)
+class FemUnitVector:
+    transform_id: int
+    vector: tuple[float, float, float]
+    raw_values: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class FemCoordinateTransform:
+    transform_id: int
+    matrix: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
+    raw_values: tuple[float, ...]
+
+
+@dataclass(frozen=True)
 class FemNode:
     node_id: int
     coordinates: tuple[float, float, float]
@@ -71,7 +89,9 @@ class FemElementReference:
     element_id: int
     material_id: Optional[int]
     section_id: Optional[int]
-    raw_values: tuple[float, ...]
+    transform_id: Optional[int]
+    nodal_transform_ids: tuple[int, ...] = ()
+    raw_values: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +139,8 @@ class SesamFemDocument:
     sections: Mapping[int, FemSection]
     concepts: tuple[FemConceptRecord, ...]
     coordinate_systems: Mapping[int, FemCoordinate]
+    unit_vectors: Mapping[int, FemUnitVector]
+    coordinate_transforms: Mapping[int, FemCoordinateTransform]
     nodes: Mapping[int, FemNode]
     elements: Mapping[int, FemElement]
     element_references: Mapping[int, FemElementReference]
@@ -136,6 +158,8 @@ class SesamFemDocument:
             "sections": len(self.sections),
             "nodes": len(self.nodes),
             "elements": len(self.elements),
+            "unit_vectors": len(self.unit_vectors),
+            "coordinate_transforms": len(self.coordinate_transforms),
             "element_types": dict(Counter(element.type_code for element in self.elements.values())),
             "boundaries": len(self.boundaries),
             "dependencies": len(self.dependencies),
@@ -182,8 +206,11 @@ def parse_sesam_fem_records(
     }
 
     coordinate_systems = _parse_coordinates(raw_records, diagnostics)
+    unit_vectors = _parse_unit_vectors(raw_records, diagnostics)
+    coordinate_transforms = _parse_coordinate_transforms(raw_records, diagnostics)
+    known_transform_ids = set(unit_vectors) | set(coordinate_transforms)
     nodes = _parse_nodes(raw_records, diagnostics)
-    element_references = _parse_element_references(raw_records, diagnostics)
+    element_references = _parse_element_references(raw_records, diagnostics, known_transform_ids)
     elements = _parse_elements(raw_records, element_references, diagnostics)
     boundaries = _parse_boundaries(raw_records, diagnostics)
     concepts = _parse_concepts(raw_records, diagnostics)
@@ -213,6 +240,8 @@ def parse_sesam_fem_records(
         sections=sections,
         concepts=concepts,
         coordinate_systems=coordinate_systems,
+        unit_vectors=unit_vectors,
+        coordinate_transforms=coordinate_transforms,
         nodes=nodes,
         elements=elements,
         element_references=element_references,
@@ -281,8 +310,9 @@ def _parse_sections(
 ) -> tuple[dict[int, FemSection], dict[int, str]]:
     sections: dict[int, FemSection] = {}
     names: dict[int, str] = {}
+    dimensions: dict[int, dict[str, float]] = {}
     for record in records:
-        if record.name in {"GELTH", "GBEAMG", "GIORH", "GBARM"}:
+        if record.name in {"GELTH", "GBEAMG"}:
             if not record.numeric_fields:
                 diagnostics.append(_diag("FEM101", f"{record.name} record has no section id", record))
                 continue
@@ -304,16 +334,37 @@ def _parse_sections(
                 sections[section_id] = FemSection(
                     section_id=section_id,
                     kind="beam_section",
-                    area=values[1] if len(values) > 1 and values[1] > 0.0 else None,
-                    iy=values[2] if len(values) > 2 and values[2] > 0.0 else None,
-                    iz=values[3] if len(values) > 3 and values[3] > 0.0 else None,
-                    torsion=values[4] if len(values) > 4 and values[4] > 0.0 else None,
+                    area=values[2] if len(values) > 2 and values[2] > 0.0 else None,
+                    iy=values[4] if len(values) > 4 and values[4] > 0.0 else None,
+                    iz=values[5] if len(values) > 5 and values[5] > 0.0 else None,
+                    torsion=values[3] if len(values) > 3 and values[3] > 0.0 else None,
                     raw_values=values,
                 )
         elif record.name == "TDSECT" and record.numeric_fields:
             section_id = _int_field(record.numeric_fields[0], "section id", record, diagnostics)
             if section_id is not None and record.text_fields:
                 names[section_id] = " ".join(record.text_fields)
+        elif record.name == "GIORH" and record.numeric_fields:
+            section_id = _int_field(record.numeric_fields[0], "section id", record, diagnostics)
+            if section_id is not None:
+                values = record.numeric_fields
+                dim: dict[str, float] = {}
+                if len(values) > 1 and values[1] > 0.0:
+                    dim["web_height"] = float(values[1])
+                if len(values) > 2 and values[2] > 0.0:
+                    dim["web_thickness"] = float(values[2])
+                if len(values) > 5 and values[5] > 0.0:
+                    dim["flange_width"] = float(values[5])
+                if len(values) > 6 and values[6] > 0.0:
+                    dim["flange_thickness"] = float(values[6])
+                if dim:
+                    dimensions[section_id] = dim
+
+    for section_id, dim in dimensions.items():
+        if section_id in sections:
+            from dataclasses import replace
+            sections[section_id] = replace(sections[section_id], **dim)
+
     return sections, names
 
 
@@ -337,9 +388,83 @@ def _parse_coordinates(
         coordinates[coordinate_id] = FemCoordinate(coordinate_id, record.numeric_fields)
     return coordinates
 
+def _parse_unit_vectors(
+    records: tuple[FemRawRecord, ...],
+    diagnostics: list[FemDiagnostic],
+) -> dict[int, FemUnitVector]:
+    vectors: dict[int, FemUnitVector] = {}
+    for record in records:
+        if record.name != "GUNIVEC":
+            continue
+        values = record.numeric_fields
+        if len(values) < 4:
+            diagnostics.append(_diag("FEM101", "GUNIVEC record must contain id and vector components", record))
+            continue
+        transform_id = _int_field(values[0], "unit vector id", record, diagnostics)
+        if transform_id is None:
+            continue
+        if transform_id in vectors:
+            diagnostics.append(_diag("FEM102", f"duplicate unit vector id {transform_id}", record))
+            continue
+        vectors[transform_id] = FemUnitVector(
+            transform_id=transform_id,
+            vector=(float(values[1]), float(values[2]), float(values[3])),
+            raw_values=values,
+        )
+    return vectors
+
+
+# BNTRCOS stores the transformation from global to local coordinates.  The rows
+# are local axis direction cosines in global coordinates for stress recovery.
+def _parse_coordinate_transforms(
+    records: tuple[FemRawRecord, ...],
+    diagnostics: list[FemDiagnostic],
+) -> dict[int, FemCoordinateTransform]:
+    transforms: dict[int, FemCoordinateTransform] = {}
+    for record in records:
+        if record.name != "BNTRCOS":
+            continue
+        values = record.numeric_fields
+        if len(values) < 10:
+            diagnostics.append(_diag("FEM101", "BNTRCOS record must contain id and 9 direction cosines", record))
+            continue
+        transform_id = _int_field(values[0], "coordinate transform id", record, diagnostics)
+        if transform_id is None:
+            continue
+        if transform_id in transforms:
+            diagnostics.append(_diag("FEM102", f"duplicate coordinate transform id {transform_id}", record))
+            continue
+        matrix = (
+            (float(values[1]), float(values[2]), float(values[3])),
+            (float(values[4]), float(values[5]), float(values[6])),
+            (float(values[7]), float(values[8]), float(values[9])),
+        )
+        transforms[transform_id] = FemCoordinateTransform(transform_id, matrix, values)
+    return transforms
+
 
 def _parse_nodes(records: tuple[FemRawRecord, ...], diagnostics: list[FemDiagnostic]) -> dict[int, FemNode]:
     nodes: dict[int, FemNode] = {}
+    for record in records:
+        if record.name != "GCOORD":
+            continue
+        values = record.numeric_fields
+        if len(values) < 4:
+            diagnostics.append(_diag("FEM101", "GCOORD record must contain node id and coordinates", record))
+            continue
+        node_id = _int_field(values[0], "node id", record, diagnostics)
+        if node_id is None:
+            continue
+        if node_id in nodes:
+            diagnostics.append(_diag("FEM102", f"duplicate node id {node_id}", record))
+            continue
+        nodes[node_id] = FemNode(
+            node_id=node_id,
+            coordinate_system_id=0,
+            coordinates=(float(values[1]), float(values[2]), float(values[3])),
+            raw_values=values,
+        )
+
     for record in records:
         if record.name != "GNODE":
             continue
@@ -351,7 +476,6 @@ def _parse_nodes(records: tuple[FemRawRecord, ...], diagnostics: list[FemDiagnos
         if node_id is None:
             continue
         if node_id in nodes:
-            diagnostics.append(_diag("FEM102", f"duplicate node id {node_id}", record))
             continue
         if len(values) >= 5:
             coordinate_id = _int_field(values[1], "node coordinate system id", record, diagnostics)
@@ -373,6 +497,7 @@ def _parse_nodes(records: tuple[FemRawRecord, ...], diagnostics: list[FemDiagnos
 def _parse_element_references(
     records: tuple[FemRawRecord, ...],
     diagnostics: list[FemDiagnostic],
+    known_transform_ids: set[int],
 ) -> dict[int, FemElementReference]:
     references: dict[int, FemElementReference] = {}
     for record in records:
@@ -391,9 +516,54 @@ def _parse_element_references(
             if len(values) > index and values[index] > 0.0:
                 section_id = _optional_int(values[index], "section id", record, diagnostics)
                 break
-        references[element_id] = FemElementReference(element_id, material_id, section_id, values)
+        transform_id = (
+            _parse_transform_reference(values[11], record, diagnostics, known_transform_ids)
+            if len(values) > 11
+            else None
+        )
+        nodal_transform_ids = _parse_nodal_transform_references(values, record, diagnostics, known_transform_ids)
+        references[element_id] = FemElementReference(
+            element_id,
+            material_id,
+            section_id,
+            transform_id,
+            nodal_transform_ids,
+            values,
+        )
     return references
 
+
+def _parse_transform_reference(
+    value: float,
+    record: FemRawRecord,
+    diagnostics: list[FemDiagnostic],
+    known_transform_ids: set[int],
+) -> Optional[int]:
+    reference = _optional_int(value, "transform id", record, diagnostics)
+    if reference is None or reference <= 0:
+        return None
+    return reference if reference in known_transform_ids else None
+
+
+def _parse_nodal_transform_references(
+    values: tuple[float, ...],
+    record: FemRawRecord,
+    diagnostics: list[FemDiagnostic],
+    known_transform_ids: set[int],
+) -> tuple[int, ...]:
+    if len(values) <= 12 or len(values) <= 11 or values[11] >= 0.0:
+        return ()
+    tail_count = len(values) - 12
+    if tail_count <= 0 or tail_count % 4 != 0:
+        return ()
+    node_count = tail_count // 4
+    transform_values = values[12 + 3 * node_count:12 + 4 * node_count]
+    transform_ids: list[int] = []
+    for value in transform_values:
+        reference = _parse_transform_reference(value, record, diagnostics, known_transform_ids)
+        if reference is not None:
+            transform_ids.append(reference)
+    return tuple(transform_ids)
 
 def _parse_elements(
     records: tuple[FemRawRecord, ...],
@@ -467,7 +637,8 @@ def _parse_boundaries(
         if node_id is None:
             continue
         flags = []
-        for value in values[1:7]:
+        start_index = 2 if len(values) >= 8 else 1
+        for value in values[start_index:start_index + 6]:
             flag = _optional_int(value, "boundary dof flag", record, diagnostics)
             if flag is not None:
                 flags.append(flag)
@@ -475,7 +646,7 @@ def _parse_boundaries(
             FemBoundary(
                 node_id=node_id,
                 dof_flags=tuple(flags),
-                prescribed_values=tuple(values[7:13]),
+                prescribed_values=tuple(values[start_index + 6:start_index + 12]),
                 raw_values=values,
             )
         )

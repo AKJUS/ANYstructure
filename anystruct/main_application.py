@@ -193,6 +193,7 @@ class Application():
         sub_menu.add_command(label='Open excel input', command=self.open_excel_file)
         sub_menu.add_separator()
         self._file_menu = sub_menu
+        sub_menu.add_command(label='Import FEM and run in fe-solver', command=self.on_import_fem_and_run_solver)
         file_export_menu = tk.Menu(sub_menu)
         sub_menu.add_cascade(label='Export', menu=file_export_menu)
         file_export_menu.add_command(label='Geometry to SESAM GeniE JS...', command=self.export_to_js)
@@ -1261,7 +1262,7 @@ class Application():
 
         ''' Start shell input '''
 
-        ''' 
+        '''
         Shell input
         '''
         self._new_shell_thk = tk.DoubleVar()
@@ -2367,6 +2368,29 @@ class Application():
             except Exception:
                 pass
         self._fea_buckling_created = []
+    def on_import_fem_and_run_solver(self):
+        """Ask for a FEM file, parse it, and send it to the internal FE solver window."""
+        inp_path = filedialog.askopenfilename(
+            title='Import FEM and run in fe-solver',
+            filetypes=(
+                ('SESAM FEM', '*.FEM *.fem'),
+                ('All files', '*.*'),
+            ),
+        )
+        if not inp_path:
+            return
+
+        from anystruct.api import import_sesam_fem_model
+        try:
+            import_result = import_sesam_fem_model(inp_path)
+            if not import_result or import_result.model is None:
+                messagebox.showerror("FEM Import Error", "Failed to parse FEM file into a valid model.")
+                return
+
+            from anystruct.fe_runtime_solver import open_runtime_fem_window
+            open_runtime_fem_window(self._parent, self, imported_fem_model=import_result.model, imported_path=inp_path)
+        except Exception as e:
+            messagebox.showerror("FEM Import Error", f"An error occurred while importing FEM:\n{e}")
 
     def open_fea_buckling_files(self):
         """Ask for FE model/result files and import them into FEA-result buckling mode."""
@@ -3047,7 +3071,7 @@ class Application():
         if any([flat_unstf, flat_stf, flat_panel_stf_girder]):
 
             '''
-                    self._flat_gui_headlines = [ttk.Label(self._tab_prop, text='Plate input'), 
+                    self._flat_gui_headlines = [ttk.Label(self._tab_prop, text='Plate input'),
                                     ttk.Label(self._tab_prop, text='Stiffener'),
                                     ttk.Label(self._tab_prop, text='Girder'),
                                     ttk.Label(self._tab_prop, text='Load/stresses input'),
@@ -3416,7 +3440,7 @@ class Application():
             self._new_shell_exclude_ring_stf.set(False)
             self._new_shell_exclude_ring_frame.set(False)
         '''
-            geomeries = {1:'Unstiffened shell (Force input)', 
+            geomeries = {1:'Unstiffened shell (Force input)',
                     2:'Unstiffened panel (Stress input)',
                     3:'Longitudinal Stiffened shell (Force input)',
                     4:'Longitudinal Stiffened panel (Stress input)',
@@ -7387,7 +7411,7 @@ class Application():
                 if self._new_buckling_method.get() == 'DNV-RP-C201 - prescriptive':
                     '''
                             return {'Plate': {'Plate buckling': up_buckling}, 'Stiffener': {'Overpressure plate side': stf_buckling_pl_side,
-                                                    'Overpressure stiffener side': stf_buckling_stf_side, 
+                                                    'Overpressure stiffener side': stf_buckling_stf_side,
                                                     'Resistance between stiffeners': stf_plate_resistance,
                                                     'Shear capacity': stf_shear_capacity},
                 'Girder': {'Overpressure plate side': girder_buckling_pl_side,

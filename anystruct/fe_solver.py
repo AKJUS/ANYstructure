@@ -2647,7 +2647,8 @@ def _visualization_from_full_result(
     stresses_by_element: dict[int, object] | None = None,
 ) -> dict[str, object]:
     grid = generated_geometry.get("plot_grid") or []
-    if not grid or displacements is None:
+    has_custom = bool(generated_geometry.get("shells") or generated_geometry.get("beams"))
+    if (not grid and not has_custom) or displacements is None:
         return {}
 
     if stresses_by_element is None:
@@ -3980,7 +3981,7 @@ def _add_cylinder_buckling_gauge(model, generated_geometry: dict) -> bool:
             "buckling_gauge_top_lid",
             [top_center],
             {"ux": 0.0, "uy": 0.0},))
-def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_callback=None) -> LightweightFEMResult:
+def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_callback=None, imported_fem_model=None) -> LightweightFEMResult:
     """Run the vendored production FE mesh backend for generated ANYstructure geometry."""
 
     if _full_backend is None or _backend_solve_linear is None or _backend_solve_buckling is None or _backend_load_case_resultant is None:
@@ -3994,7 +3995,20 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         )
 
     if status_callback: status_callback("Building generated geometry...")
-    generated_geometry = build_generated_geometry(geometry, config)
+    if imported_fem_model is not None:
+        nodes = []
+        for nid, n in imported_fem_model.mesh.nodes.items():
+            nodes.append({"id": nid, "coords": list(n.coords())})
+        shells = []
+        beams = []
+        for eid, el in imported_fem_model.mesh.elements.items():
+            if el.__class__.__name__ == "ShellElement":
+                shells.append({"id": eid, "node_ids": list(el.node_ids), "role": "skin"})
+            elif el.__class__.__name__ == "BeamElement":
+                beams.append({"id": eid, "node_ids": list(el.node_ids), "role": "stiffener"})
+        generated_geometry = {"geometry": "flat panel", "plot_grid": [], "nodes": nodes, "shells": shells, "beams": beams}
+    else:
+        generated_geometry = build_generated_geometry(geometry, config)
     material_curve, material_properties = _nonlinear_curve_payload(config, geometry)
     effective_elastic_modulus = float(material_properties.get("E_pa", config.elastic_modulus_pa)) if material_properties else config.elastic_modulus_pa
     effective_yield_stress = float(material_properties.get("sigma_yield", config.yield_stress_pa)) if material_properties else config.yield_stress_pa
@@ -4098,7 +4112,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
 
     try:
         if status_callback: status_callback("Building FE model...")
-        model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
+        if imported_fem_model is not None:
+            model = imported_fem_model
+        else:
+            model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
         _apply_material_curve_to_model(model, material_curve, material_properties)
         imperfection_info = {}
         if not _wants_capacity_workflow(config):
@@ -4116,7 +4133,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             )
         elif imperfection_info:
             diagnostics.append("Imperfection input was not applied: " + str(imperfection_info.get("reason", imperfection_info.get("status", "unknown"))))
-        if abs(float(symmetric_pressure)) > 0.0:
+        if imported_fem_model is not None and getattr(model, "load_cases", None):
+            load_case = model.load_cases[0]
+            diagnostics.append("Using primary load case imported from the external FEM file.")
+        elif abs(float(symmetric_pressure)) > 0.0:
             load_case = _full_backend.build_symmetric_load_case(None, model, backend_config)
             pressure_before, pressure_after = _filter_load_case_pressure_to_skin_shells(load_case, generated_geometry)
             if pressure_before > pressure_after:

@@ -54,6 +54,8 @@ GEOMETRY_RECORDS: FrozenSet[str] = frozenset(
     {"GCOORD", "GNODE", "GELMNT1", "GELREF1", "GUNIVEC", "GECCEN"}
 )
 
+TRANSFORM_RECORDS: FrozenSet[str] = frozenset({"BNTRCOS"})
+
 BOUNDARY_LOAD_RECORDS: FrozenSet[str] = frozenset(
     {"BNBCD", "BLDEP", "TDLOAD", "BEUSLO", "BNLOAD", "BNACCLO", "BGRAV"}
 )
@@ -63,6 +65,7 @@ SUPPORTED_RECORDS: FrozenSet[str] = (
     | MATERIAL_SECTION_RECORDS
     | CONCEPT_RECORDS
     | GEOMETRY_RECORDS
+    | TRANSFORM_RECORDS
     | BOUNDARY_LOAD_RECORDS
 )
 

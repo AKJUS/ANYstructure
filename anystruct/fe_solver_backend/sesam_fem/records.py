@@ -191,11 +191,7 @@ def _guard_supported_file(path: Path, data: bytes) -> None:
             "SESAM .SIN direct-access files are not supported by the pure-Python FEM reader",
             code="FEM001",
         )
-    if suffix == ".sif":
-        raise SesamFemError(
-            "SESAM .SIF result databases are not formatted FEM input files",
-            code="FEM001",
-        )
+    # SIF files are supported because they use the same FEM text formatting
     if not data:
         raise SesamFemError("formatted FEM file is empty", code="FEM003")
     sample = data[:4096]

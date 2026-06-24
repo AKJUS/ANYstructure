@@ -14,7 +14,7 @@ from .importer import import_sesam_fem
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m fe_solver.sesam_fem")
+    parser = argparse.ArgumentParser(prog="python -m anystruct.fe_solver_backend.sesam_fem")
     parser.add_argument("--lenient", action="store_true", help="collect diagnostics instead of failing on errors")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
     sub = parser.add_subparsers(dest="command", required=True)

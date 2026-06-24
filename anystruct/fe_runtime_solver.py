@@ -500,7 +500,7 @@ def _runtime_custom_edges(options: RuntimeFEMOptions) -> list[dict[str, float | 
 
 
 def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions,
-                    status_callback=None) -> RuntimeFEMRunResult:
+                    status_callback=None, imported_fem_model=None) -> RuntimeFEMRunResult:
     """Run the ANYstructure-owned lightweight FEM solver."""
 
     geometry = runtime_geometry_summary(snapshot)
@@ -598,7 +598,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         capacity_mesh_min_elements_per_half_wave=options.capacity_mesh_min_elements_per_half_wave,
     )
     if fe_solver.full_backend_available():
-        solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback)
+        solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback, imported_fem_model=imported_fem_model)
         if solver_result.status in {"backend_unavailable", "invalid", "static_failed", "production_failed"}:
             fallback = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
             diagnostics.extend(solver_result.diagnostics)
@@ -2448,9 +2448,20 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
 class RuntimeFEMWindow:
     """Popup window for the experimental full-geometry FEM runtime solver."""
 
-    def __init__(self, parent: Any, app: Any, use_parent_as_window: bool = False):
+    def __init__(self, parent: Any, app: Any, use_parent_as_window: bool = False, imported_fem_model=None, imported_path=None):
         self.app = app
-        self.snapshot = active_line_snapshot(app)
+        self.imported_fem_model = imported_fem_model
+        if self.imported_fem_model is not None:
+            self.snapshot = RuntimeFEMLineSnapshot(
+                line_name=str(imported_path or "Imported FEM"),
+                line_points=[],
+                structure_bundle=[],
+                pressure_pa=0.0,
+                domain="FEM File",
+                is_cylinder=False,
+            )
+        else:
+            self.snapshot = active_line_snapshot(app)
         if use_parent_as_window:
             self.window = parent
             self.window.configure(background=getattr(app, "_general_color", "#f0f0f0"))
@@ -3491,6 +3502,31 @@ class RuntimeFEMWindow:
         member_stipple = _alpha_to_stipple(member_alpha)
         _configure_tk_canvas_colormap(str(colormap_var.get() if colormap_var is not None else "jet"))
 
+        if hasattr(self, "imported_fem_model") and self.imported_fem_model is not None:
+            from anystruct.tkinter_3d_canvas_thickness_v6 import Point3D
+            get_node = self.imported_fem_model.mesh.get_node
+            for element in self.imported_fem_model.mesh.elements.values():
+                if element.__class__.__name__ == "ShellElement":
+                    if not show_plate: continue
+                    nodes = [get_node(int(nid)) for nid in element.node_ids]
+                    if all(n is not None for n in nodes):
+                        canvas.add_polygon(
+                            [Point3D(*n.coords()) for n in nodes],
+                            outline="gray",
+                            color="#d8e2ea",
+                            stipple=plate_stipple,
+                        )
+                elif element.__class__.__name__ == "BeamElement":
+                    if not show_stiffeners: continue
+                    nodes = [get_node(int(nid)) for nid in element.node_ids]
+                    if len(nodes) >= 2 and all(n is not None for n in nodes):
+                        pts = [Point3D(*n.coords()) for n in nodes]
+                        for i in range(len(pts) - 1):
+                            canvas.add_line(pts[i], pts[i+1], color="blue", width=2)
+            if fit_view:
+                canvas.fit_to_scene()
+            return
+
         if self.snapshot.is_cylinder:
             radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
@@ -4472,7 +4508,7 @@ class RuntimeFEMWindow:
                 self.solver_queue.put(msg)
 
             try:
-                self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb), None))
+                self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb, imported_fem_model=self.imported_fem_model), None))
             except Exception as error:
                 self.solver_queue.put((None, error))
 
@@ -5296,11 +5332,11 @@ class RuntimeFEMWindow:
         self._write_status("3D view set to " + view + ".")
 
 
-def open_runtime_fem_window(parent: Any, app: Any) -> RuntimeFEMWindow | None:
-    """Open the experimental runtime FEM popup for the app active line."""
+def open_runtime_fem_window(parent: Any, app: Any, imported_fem_model=None, imported_path=None) -> RuntimeFEMWindow | None:
+    """Open the experimental runtime FEM popup for the app active line, or a direct FEM import."""
 
     try:
-        return RuntimeFEMWindow(parent, app)
+        return RuntimeFEMWindow(parent, app, imported_fem_model=imported_fem_model, imported_path=imported_path)
     except Exception as error:
         messagebox.showinfo("Experimental FEM solver", str(error))
         return None

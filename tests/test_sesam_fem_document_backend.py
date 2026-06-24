@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from anystruct import fe_plate_fields
 from anystruct.fe_solver_backend.elements import ShellElement
 from anystruct.fe_solver_backend.sesam_fem import (
     SesamFemError,
@@ -13,6 +14,10 @@ from anystruct.fe_solver_backend.sesam_fem import (
     read_sesam_fem_document,
     write_sesam_fem_document,
 )
+from anystruct.fe_solver_backend.sesam_fem.sif_importer import read_sesam_sif_stress
+
+
+REF_CASES = Path(__file__).resolve().parents[1] / "ref_Cases"
 
 
 def _work_dir() -> Path:
@@ -31,21 +36,116 @@ def _mixed_shell_fem() -> str:
             "MISOSEL          1  2.100000D+11  3.000000D-01  7.850000D+03",
             "TDMATER          1  S355 steel",
             "GELTH           10  2.000000D-02",
-            "GCOORD           0",
-            "GNODE            1               0               0               0               0",
-            "GNODE            2               0               1               0               0",
-            "GNODE            3               0               0               1               0",
-            "GNODE            4               0               1               1               0",
+            "GCOORD           1               0               0               0",
+            "GCOORD           2               1               0               0",
+            "GCOORD           3               0               1               0",
+            "GCOORD           4               1               1               0",
+            "GNODE            1               1               6          123456",
+            "GNODE            2               2               6          123456",
+            "GNODE            3               3               6          123456",
+            "GNODE            4               4               6          123456",
             "GELMNT1        100               0              25               0               1               2               3",
             "GELREF1        100               1              10",
             "GELMNT1        200               0              24               0               1               2               4               3",
             "GELREF1        200               1              10",
-            "BNBCD            1               1               1               1               0               0               0",
+            "BNBCD            1               6               1               1               1               0               0               0",
             "FOOBAR          99",
             "IEND",
             "",
         ]
     )
+
+
+def _transformed_shell_sif() -> str:
+    return "\n".join(
+        [
+            "IDENT          101               1",
+            "UNITS            1               1               1",
+            "MISOSEL          1  2.100000D+11  3.000000D-01  7.850000D+03",
+            "GELTH           10  2.000000D-02",
+            "GUNIVEC          5               0               0               1",
+            "BNTRCOS          7               1               0               0               0               1               0               0               0               1",
+            "GCOORD           1               0               0               0",
+            "GCOORD           2               1               0               0",
+            "GCOORD           3               1               1               0",
+            "GCOORD           4               0               1               0",
+            "GELMNT1        100               0              24               0               1               2               3               4",
+            "GELREF1        100               1               0               0               0               0               0               0              10               0               0               7",
+            "RVSTRESS         1               0             100               0              24               0    1.000000E+08               0               0    1.000000E+08               0",
+            "IEND",
+            "",
+        ]
+    )
+
+
+def _oriented_beam_fem() -> str:
+    return "\n".join(
+        [
+            "IDENT          102               1",
+            "UNITS            1               1               1",
+            "MISOSEL          1  2.100000D+11  3.000000D-01  7.850000D+03",
+            "GBEAMG           1               0    2.000000E-02    1.000000E-06    2.000000E-06    3.000000E-06",
+            "GUNIVEC          5               0               0               1",
+            "GCOORD           1               0               0               0",
+            "GCOORD           2               1               0               0",
+            "GELMNT1        300               0              15               0               1               2",
+            "GELREF1        300               1               0               0               0               0               0               0               1               0               0               5",
+            "IEND",
+            "",
+        ]
+    )
+
+
+def test_reader_parses_unit_vectors_and_coordinate_transforms() -> None:
+    path = _work_dir() / "transformed_shell.SIF"
+    path.write_text(_transformed_shell_sif(), encoding="ascii")
+
+    document = read_sesam_fem_document(path)
+
+    assert document.unit_vectors[5].vector == (0.0, 0.0, 1.0)
+    assert document.coordinate_transforms[7].matrix == (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    assert document.element_references[100].transform_id == 7
+
+
+def test_sif_stress_uses_explicit_bntrcos_shell_transform() -> None:
+    path = _work_dir() / "transformed_shell.SIF"
+    path.write_text(_transformed_shell_sif(), encoding="ascii")
+
+    stress = read_sesam_sif_stress(path).element_stress[100]
+
+    assert stress[0] == pytest.approx(0.0, abs=1.0e-6)
+    assert stress[1] == pytest.approx(100.0e6)
+    assert stress[3] == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_fem_importer_attaches_explicit_shell_transform_metadata() -> None:
+    path = _work_dir() / "transformed_shell.SIF"
+    path.write_text(_transformed_shell_sif(), encoding="ascii")
+
+    result = import_sesam_fem(path)
+    shell = result.model.mesh.elements[100]
+
+    assert getattr(shell, "sesam_transform_ids") == (7,)
+    assert getattr(shell, "sesam_local_axes") == {
+        "x": (1.0, 0.0, 0.0),
+        "y": (0.0, 1.0, 0.0),
+        "z": (0.0, 0.0, 1.0),
+    }
+
+
+def test_fem_importer_maps_gunivec_to_beam_orientation() -> None:
+    path = _work_dir() / "oriented_beam.FEM"
+    path.write_text(_oriented_beam_fem(), encoding="ascii")
+
+    result = import_sesam_fem(path)
+    beam = result.model.mesh.elements[300]
+
+    assert getattr(beam, "sesam_transform_ids") == (5,)
+    assert beam.cross_section["orientation"] == (0.0, 0.0, 1.0)
 
 
 def test_read_document_preserves_unknown_and_mixed_shell_topology() -> None:
@@ -111,7 +211,7 @@ def test_rejects_sin_sif_binary_and_missing_iend() -> None:
     binary_path.write_bytes(b"\x00\x01\x02not formatted fem")
     missing_iend_path.write_text("IDENT          1\nGNODE           1 0 0 0 0\n", encoding="ascii")
 
-    for path in (sin_path, sif_path, binary_path):
+    for path in (sin_path, binary_path):
         with pytest.raises(SesamFemError) as exc_info:
             read_sesam_fem_document(path)
         assert exc_info.value.code == "FEM001"
@@ -166,3 +266,80 @@ def test_reader_accepts_fixed_width_numeric_fields() -> None:
 
     document = read_sesam_fem_document(path)
     assert document.nodes[1].coordinates == pytest.approx((1.25, -2.5, 0.0))
+
+
+@pytest.mark.skipif(not REF_CASES.exists(), reason="SESAM reference cases are not available")
+def test_q8_sif_cylinder_panel_uses_real_ring_frame_and_membrane_stresses() -> None:
+    session = fe_plate_fields.create_fea_buckling_session(
+        REF_CASES / "allQuad2ndorder_pressure_force_gravity_girder_stiffners.SIF",
+        geometry_type="cylinder",
+        run_buckling=True,
+    )
+
+    assert len(session.model.shell_elements) == 640
+    assert len(session.geometry.skin_element_ids) == 640
+    assert len(session.panels) == 16
+
+    panel = session.panel("cyl_field_009")
+    ring_frame = panel.anystructure_input["ring_frame"]
+    assert ring_frame["web_height_mm"] == pytest.approx(400.0, rel=1.0e-6)
+    assert ring_frame["flange_width_mm"] == pytest.approx(100.0, rel=1.0e-6)
+    assert ring_frame["source_member_id"] != "beam_ring_001"
+    assert panel.usage_factor is not None
+    assert panel.stress is not None
+    assert panel.stress.sample_count == 40
+    assert panel.stress.axial_stress_mpa == pytest.approx(-1.125, abs=1.0e-3)
+    assert panel.stress.hoop_stress_mpa == pytest.approx(-6.102, abs=1.0e-3)
+    assert panel.stress.torsional_shear_mpa == pytest.approx(1.939, abs=1.0e-3)
+
+
+@pytest.mark.skipif(not REF_CASES.exists(), reason="SESAM reference cases are not available")
+def test_highload_sif_cylinder_maps_sesam_sigyy_to_axial_stress() -> None:
+    session = fe_plate_fields.create_fea_buckling_session(
+        REF_CASES / "allQuadLinear_pressure_force_gravity_girder_stiffners_HighLoad.SIF",
+        geometry_type="cylinder",
+        run_buckling=False,
+    )
+
+    assert len(session.model.shell_elements) == 640
+    assert len(session.geometry.skin_element_ids) == 640
+    assert len(session.panels) == 16
+
+    panel = session.panel("cyl_field_002")
+    assert panel.stress is not None
+    assert panel.stress.sample_count == 40
+    assert panel.stress.axial_stress_mpa == pytest.approx(-248.0, abs=0.1)
+    assert panel.stress.hoop_stress_mpa == pytest.approx(-26.66, abs=0.1)
+    assert panel.stress.torsional_shear_mpa == pytest.approx(39.12, abs=0.1)
+
+    axial_max = max(abs(panel.stress.axial_stress_mpa) for panel in session.panels)
+    hoop_max = max(abs(panel.stress.hoop_stress_mpa) for panel in session.panels)
+    shear_max = max(abs(panel.stress.torsional_shear_mpa) for panel in session.panels)
+    assert axial_max > 5.0 * hoop_max
+    assert shear_max == pytest.approx(96.8, abs=0.5)
+
+
+@pytest.mark.skipif(not REF_CASES.exists(), reason="SESAM reference cases are not available")
+@pytest.mark.parametrize(
+    ("filename", "shell_count"),
+    [
+        ("allTriLinear_pressure_force_gravity_girder_stiffners.SIF", 1412),
+        ("allTri2ndorder_pressure_force_gravity_girder_stiffners.SIF", 1412),
+        ("mixed2ndOrder_pressure_force_gravity_girder_stiffner.SIF", 630),
+    ],
+)
+def test_sif_cylinder_import_keeps_tri_mixed_skin_and_populated_panels(
+    filename: str,
+    shell_count: int,
+) -> None:
+    session = fe_plate_fields.create_fea_buckling_session(
+        REF_CASES / filename,
+        geometry_type="cylinder",
+        run_buckling=False,
+    )
+
+    assert len(session.model.shell_elements) == shell_count
+    assert len(session.geometry.skin_element_ids) == shell_count
+    assert len(session.panels) == 16
+    assert all(field.element_ids for field in session.fields)
+    assert all(panel.stress is not None and panel.stress.sample_count > 0 for panel in session.panels)

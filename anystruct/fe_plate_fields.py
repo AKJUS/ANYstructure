@@ -64,11 +64,29 @@ class ShellElement:
     @property
     def corner_node_ids(self) -> tuple[int, ...]:
         element_type = self.element_type.upper()
-        if element_type.startswith("S8") and len(self.node_ids) >= 4:
+        if element_type.startswith(("S8", "Q8")) and len(self.node_ids) >= 4:
+            if len(self.node_ids) >= 8:
+                return (self.node_ids[0], self.node_ids[2], self.node_ids[4], self.node_ids[6])
             return self.node_ids[:4]
+        if element_type.startswith("T6") and len(self.node_ids) >= 3:
+            if len(self.node_ids) >= 6:
+                return (self.node_ids[0], self.node_ids[2], self.node_ids[4])
+            return self.node_ids[:3]
         if element_type.startswith("S6") and len(self.node_ids) >= 3:
             return self.node_ids[:3]
         return self.node_ids[:4]
+
+
+@dataclass(frozen=True)
+class FeBeamElement:
+    """One beam element carried alongside shell geometry for panel inference."""
+
+    element_id: int
+    node_ids: tuple[int, ...]
+    element_type: str = ""
+    property_id: int | None = None
+    material_id: int | None = None
+    cross_section: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -87,6 +105,7 @@ class FeShellModel:
 
     nodes: dict[int, Point3D]
     shell_elements: dict[int, ShellElement]
+    beam_elements: dict[int, FeBeamElement] = field(default_factory=dict)
     elsets: dict[str, tuple[int, ...]] = field(default_factory=dict)
     shell_sections: tuple[ShellSection, ...] = ()
     source_path: str | None = None
@@ -531,40 +550,68 @@ def _default_fea_result_path(
 def read_sesam_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
     """Read SESAM FEM/SIF shell geometry into the FE-results interpreter model."""
 
-    from anystruct.sesam_import import read_sesam_model
+    from anystruct.fe_solver_backend.sesam_fem.importer import import_sesam_fem, _beam_section
+    from anystruct.fe_solver_backend.sesam_fem.schema import get_element_spec
 
     path_text = str(path)
-    sesam_model = read_sesam_model(path_text)
+    result = import_sesam_fem(path_text, strict=False, build_model=False)
+    document = result.document
+
     shell_elements: dict[int, ShellElement] = {}
     elsets: dict[str, list[int]] = defaultdict(list)
     section_by_elset: dict[str, ShellSection] = {}
+    beam_elements: dict[int, FeBeamElement] = {}
 
-    for element in sesam_model.shell_elements.values():
+    for element in document.elements.values():
+        spec = get_element_spec(element.type_code)
+        if spec is None:
+            continue
+
         material_id = element.material_id if element.material_id is not None else 0
-        property_id = element.property_id if element.property_id is not None else 0
-        elset = f"sesam_shell_{element.element_type.lower()}_prop_{property_id}_mat_{material_id}"
-        shell_elements[element.element_id] = ShellElement(
-            element_id=element.element_id,
-            node_ids=element.node_ids,
-            element_type=element.element_type,
-            elset=elset,
-        )
-        elsets[elset].append(element.element_id)
-        if elset not in section_by_elset:
-            thickness = None
-            if element.property_id is not None:
-                thickness = sesam_model.shell_thicknesses.get(element.property_id)
-            if thickness is None and sesam_model.shell_thicknesses:
-                thickness = next(iter(sesam_model.shell_thicknesses.values()))
-            section_by_elset[elset] = ShellSection(
+        section_id = element.section_id if element.section_id is not None else 0
+
+        if spec.is_shell:
+            elset = f"sesam_shell_{spec.name.lower()}_prop_{section_id}_mat_{material_id}"
+            shell_elements[element.element_id] = ShellElement(
+                element_id=element.element_id,
+                node_ids=element.node_ids,
+                element_type=spec.name,
                 elset=elset,
-                material=f"sesam_material_{material_id}" if material_id else None,
-                thickness_m=thickness,
+            )
+            elsets[elset].append(element.element_id)
+            if elset not in section_by_elset:
+                thickness = None
+                if element.section_id is not None:
+                    section = document.sections.get(element.section_id)
+                    if section is not None and section.thickness is not None and section.thickness > 0.0:
+                        thickness = float(section.thickness)
+                if thickness is None and document.sections:
+                    for s in document.sections.values():
+                        if s.thickness is not None and s.thickness > 0.0:
+                            thickness = float(s.thickness)
+                            break
+                if thickness is None:
+                    thickness = 0.01
+                section_by_elset[elset] = ShellSection(
+                    elset=elset,
+                    material=f"sesam_material_{material_id}" if material_id else None,
+                    thickness_m=thickness,
+                )
+        elif spec.is_beam:
+            cross_section = _beam_section(document.sections.get(section_id))
+            beam_elements[element.element_id] = FeBeamElement(
+                element_id=element.element_id,
+                node_ids=element.node_ids,
+                element_type=spec.name,
+                property_id=section_id,
+                material_id=material_id,
+                cross_section=cross_section,
             )
 
     return FeShellModel(
-        nodes=dict(sesam_model.nodes),
+        nodes={node_id: tuple(node.coordinates) for node_id, node in document.nodes.items()},
         shell_elements=shell_elements,
+        beam_elements=beam_elements,
         elsets={name: tuple(values) for name, values in elsets.items()},
         shell_sections=tuple(section_by_elset.values()),
         source_path=path_text,
@@ -574,7 +621,7 @@ def read_sesam_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
 def read_sesam_sif_stress_result(path: str | os.PathLike[str]) -> FrdStressResult:
     """Read SESAM SIF RVSTRESS as the FRD-like stress object used here."""
 
-    from anystruct.sesam_import import read_sesam_sif_stress
+    from anystruct.fe_solver_backend.sesam_fem.sif_importer import read_sesam_sif_stress
 
     stress = read_sesam_sif_stress(path)
     return FrdStressResult(
@@ -599,7 +646,7 @@ def read_fea_result_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
     """Return lightweight result metadata for FRD or SIF files."""
 
     if _is_sesam_result_path(path):
-        from anystruct.sesam_import import read_sesam_sif_summary
+        from anystruct.fe_solver_backend.sesam_fem.sif_importer import read_sesam_sif_summary
 
         return read_sesam_sif_summary(path)
     return read_calculix_frd_summary(path)
@@ -1591,6 +1638,82 @@ def _infer_members_from_patches(model: FeShellModel, patches: Sequence[SurfacePa
     )
     members.extend(stiffeners)
     members.extend(girders)
+
+    if getattr(model, "beam_elements", None):
+        beam_stiffeners = []
+        beam_girders = []
+        for element in model.beam_elements.values():
+            nodes = [model.nodes[n] for n in element.node_ids]
+            centroid = _mean_point(nodes)
+            if len(nodes) >= 2:
+                tangent = _normalise((nodes[-1][0]-nodes[0][0], nodes[-1][1]-nodes[0][1], nodes[-1][2]-nodes[0][2]))
+            else:
+                tangent = member_direction
+
+            stiff_align = abs(_dot(tangent, member_direction))
+            gird_align = abs(_dot(tangent, transverse_direction))
+
+            if stiff_align > gird_align:
+                # Stiffener! Station is along transverse_direction
+                station = _dot(centroid, transverse_direction)
+                beam_stiffeners.append((station, element, tangent))
+            else:
+                # Girder! Station is along member_direction
+                station = _dot(centroid, member_direction)
+                beam_girders.append((station, element, tangent))
+
+        def group_flat_beams(items, tolerance):
+            groups = []
+            for station, element, tangent in items:
+                for index, (existing_station, elements, existing_tangent) in enumerate(groups):
+                    if abs(station - existing_station) <= tolerance:
+                        elements.append(element)
+                        groups[index] = ((existing_station + station) / 2.0, elements, existing_tangent)
+                        break
+                else:
+                    groups.append((station, [element], tangent))
+            return groups
+
+        axial_length = max((_length((model.nodes[n][0], model.nodes[n][1], model.nodes[n][2])) for n in model.nodes), default=1.0)
+        linear_tolerance = max(axial_length * 1.0e-5, 1.0e-5)
+
+        for index, (station, elements, tangent) in enumerate(group_flat_beams(beam_stiffeners, linear_tolerance), start=len(stiffeners)+1):
+            cross = elements[0].cross_section
+            members.append(InferredMember(
+                member_id=f"beam_stiffener_{index:03d}",
+                role="stiffener",
+                section_type=cross.get("section_type", "L"),
+                web_patch_id="beam_element",
+                flange_patch_id=None,
+                direction=tangent,
+                station=station,
+                web_height_m=cross.get("web_height", 0.0),
+                flange_width_m=cross.get("flange_width", 0.0) or None,
+                web_thickness_m=cross.get("web_thickness", 0.0) or None,
+                flange_thickness_m=cross.get("flange_thickness", 0.0) or None,
+                thickness_source="beam cross section",
+                diagnostics=("inferred from beam elements",),
+            ))
+            stiffeners.append(members[-1])
+
+        for index, (station, elements, tangent) in enumerate(group_flat_beams(beam_girders, linear_tolerance), start=len(girders)+1):
+            cross = elements[0].cross_section
+            members.append(InferredMember(
+                member_id=f"beam_girder_{index:03d}",
+                role="girder",
+                section_type=cross.get("section_type", "T"),
+                web_patch_id="beam_element",
+                flange_patch_id=None,
+                direction=tangent,
+                station=station,
+                web_height_m=cross.get("web_height", 0.0),
+                flange_width_m=cross.get("flange_width", 0.0) or None,
+                web_thickness_m=cross.get("web_thickness", 0.0) or None,
+                flange_thickness_m=cross.get("flange_thickness", 0.0) or None,
+                thickness_source="beam cross section",
+                diagnostics=("inferred from beam elements",),
+            ))
+            girders.append(members[-1])
 
     return _PatchInference(
         base_patch=base_patch,
@@ -2687,7 +2810,7 @@ def is_cylindrical_shell_model(
 def detect_cylinder_geometry(
     model: FeShellModel,
     *,
-    radial_tolerance_fraction: float = 0.006,
+    radial_tolerance_fraction: float = 0.02,
     normal_alignment: float = 0.65,
 ) -> CylinderGeometry:
     """Fit a circular cylinder and identify the true shell skin.
@@ -2730,7 +2853,10 @@ def detect_cylinder_geometry(
         points_element = [model.nodes[node_id] for node_id in element.corner_node_ids]
         centroid = _element_centroid(model, element)
         radial_vector = _radial_vector(centroid, origin, axis)
-        radial_distance = _length(radial_vector)
+        radial_distance = _median(
+            _length(_radial_vector(point, origin, axis))
+            for point in points_element
+        ) or _length(radial_vector)
         if radial_distance <= 1.0e-12:
             continue
         normal = _element_normal(points_element)
@@ -2885,6 +3011,8 @@ def infer_cylinder_fields(
                 angle = _cylinder_angle(centroid, geometry)
                 if _angle_in_interval(angle, start_angle, end_angle):
                     selected_ids.append(element_id)
+            if not selected_ids:
+                continue
 
             angle_span = _positive_angle(end_angle - start_angle)
             if not longitudinals:
@@ -4353,6 +4481,87 @@ def _infer_cylinder_members(
                     diagnostics=member.diagnostics,
                 )
             )
+
+    if getattr(model, "beam_elements", None):
+        beam_longitudinals = []
+        beam_rings = []
+        for element in model.beam_elements.values():
+            nodes = [model.nodes[n] for n in element.node_ids]
+            centroid = _mean_point(nodes)
+            if len(nodes) >= 2:
+                tangent = _normalise((nodes[-1][0]-nodes[0][0], nodes[-1][1]-nodes[0][1], nodes[-1][2]-nodes[0][2]))
+            else:
+                tangent = geometry.axis_direction
+            axial_alignment = abs(_dot(tangent, geometry.axis_direction))
+            role = "longitudinal" if axial_alignment >= 0.8 else "ring"
+            station = (
+                _cylinder_angle(centroid, geometry)
+                if role == "longitudinal"
+                else _axial_coordinate(centroid, geometry.axis_origin, geometry.axis_direction)
+            )
+            if role == "longitudinal":
+                beam_longitudinals.append((station, element))
+            else:
+                beam_rings.append((station, element))
+
+        axial_length = geometry.axial_bounds[1] - geometry.axial_bounds[0]
+        linear_tolerance = max(axial_length * 1.0e-5, geometry.radius_m * 1.0e-5, 1.0e-7)
+        angular_tolerance = max(linear_tolerance / max(geometry.radius_m, 1.0e-12), 1.0e-5)
+
+        def group_beams(items, tolerance, is_angle):
+            groups = []
+            for station, element in items:
+                for index, (existing_station, elements) in enumerate(groups):
+                    error = abs(_wrapped_angle_difference(station, existing_station)) if is_angle else abs(station - existing_station)
+                    if error <= tolerance:
+                        elements.append(element)
+                        if is_angle:
+                            merged = math.atan2(
+                                math.sin(existing_station) + math.sin(station),
+                                math.cos(existing_station) + math.cos(station),
+                            )
+                        else:
+                            merged = (existing_station + station) / 2.0
+                        groups[index] = (merged, elements)
+                        break
+                else:
+                    groups.append((station, [element]))
+            return groups
+
+        for index, (station, elements) in enumerate(group_beams(beam_longitudinals, angular_tolerance, True), start=1):
+            cross = elements[0].cross_section
+            members.append(CylinderMember(
+                member_id=f"beam_longitudinal_{index:03d}",
+                role="longitudinal_stiffener",
+                section_type=cross.get("section_type", "L"),
+                web_element_ids=tuple(e.element_id for e in elements),
+                flange_element_ids=(),
+                station=station,
+                direction=geometry.axis_direction,
+                web_height_m=cross.get("web_height", 0.0),
+                flange_width_m=cross.get("flange_width", 0.0) or None,
+                web_thickness_m=cross.get("web_thickness", 0.0) or None,
+                flange_thickness_m=cross.get("flange_thickness", 0.0) or None,
+                confidence=1.0,
+            ))
+
+        for index, (station, elements) in enumerate(group_beams(beam_rings, linear_tolerance, False), start=1):
+            cross = elements[0].cross_section
+            members.append(CylinderMember(
+                member_id=f"beam_ring_{index:03d}",
+                role="ring_stiffener",
+                section_type=cross.get("section_type", "T"),
+                web_element_ids=tuple(e.element_id for e in elements),
+                flange_element_ids=(),
+                station=station,
+                direction=_normalise((model.nodes[elements[0].node_ids[-1]][0]-model.nodes[elements[0].node_ids[0]][0], model.nodes[elements[0].node_ids[-1]][1]-model.nodes[elements[0].node_ids[0]][1], model.nodes[elements[0].node_ids[-1]][2]-model.nodes[elements[0].node_ids[0]][2])) if len(elements[0].node_ids) >= 2 else geometry.axis_direction,
+                web_height_m=cross.get("web_height", 0.0),
+                flange_width_m=cross.get("flange_width", 0.0) or None,
+                web_thickness_m=cross.get("web_thickness", 0.0) or None,
+                flange_thickness_m=cross.get("flange_thickness", 0.0) or None,
+                confidence=1.0,
+            ))
+
     return tuple(members)
 
 
@@ -4548,7 +4757,25 @@ def _set_cylinder_member(setter: Any, member: CylinderMember, spacing_m: float) 
 
 def _first_cylinder_member(field_item: CylinderField, role: str) -> CylinderMember | None:
     candidates = [member for member in field_item.members if member.role == role]
-    return None if not candidates else sorted(candidates, key=lambda member: member.member_id)[0]
+    if not candidates:
+        return None
+    return sorted(candidates, key=_cylinder_member_selection_key, reverse=True)[0]
+
+
+def _cylinder_member_selection_key(member: CylinderMember) -> tuple[float, float, float, float, int, str]:
+    web_thickness = member.web_thickness_m or 0.0
+    flange_width = member.flange_width_m or 0.0
+    flange_thickness = member.flange_thickness_m or 0.0
+    area_proxy = max(member.web_height_m, 0.0) * max(web_thickness, 0.0)
+    area_proxy += max(flange_width, 0.0) * max(flange_thickness, 0.0)
+    return (
+        area_proxy,
+        member.web_height_m,
+        flange_width,
+        flange_thickness,
+        len(member.web_element_ids),
+        member.member_id,
+    )
 
 
 def _fit_circle_about_axis(points: Any, axis: Vector3D) -> tuple[Point3D, float, float]:

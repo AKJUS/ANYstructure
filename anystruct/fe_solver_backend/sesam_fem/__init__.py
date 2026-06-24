@@ -4,6 +4,7 @@ from .diagnostics import FemDiagnostic, SesamFemError
 from .document import (
     FemBoundary,
     FemCoordinate,
+    FemCoordinateTransform,
     FemElement,
     FemElementReference,
     FemHeader,
@@ -11,6 +12,7 @@ from .document import (
     FemMaterial,
     FemNode,
     FemSection,
+    FemUnitVector,
     SesamFemDocument,
     parse_sesam_fem_records,
     read_sesam_fem_document,
@@ -24,6 +26,7 @@ from .validation import validate_sesam_fem_document
 __all__ = [
     "FemBoundary",
     "FemCoordinate",
+    "FemCoordinateTransform",
     "FemDiagnostic",
     "FemElement",
     "FemElementReference",
@@ -33,6 +36,7 @@ __all__ = [
     "FemNode",
     "FemRawRecord",
     "FemSection",
+    "FemUnitVector",
     "SESAM_ELEMENT_REGISTRY",
     "SesamElementSpec",
     "SesamFemDocument",

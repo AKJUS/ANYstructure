@@ -111,25 +111,45 @@ def analyze_runtime_fea_result_buckling(runtime_result, **kwargs):
 
 
 def import_sesam_fem_model(path, **kwargs):
-    """Import a SESAM FEM/SIF model into the ANYstructure FE backend."""
+    """Import a SESAM FEM model into the ANYstructure FE backend."""
 
     try:
-        from anystruct.sesam_import import build_fe_model_from_sesam_fem
+        from anystruct.fe_solver_backend.sesam_fem.importer import import_sesam_fem
     except ModuleNotFoundError:
-        from ANYstructure.anystruct.sesam_import import build_fe_model_from_sesam_fem
+        from ANYstructure.anystruct.fe_solver_backend.sesam_fem.importer import import_sesam_fem
 
-    return build_fe_model_from_sesam_fem(path, **kwargs)
+    return import_sesam_fem(path, **kwargs)
 
 
 def run_sesam_fem_static(path, **kwargs):
-    """Import a SESAM FEM/SIF model and run the linear FE solver."""
+    """Import a SESAM FEM model and run the linear FE solver."""
 
     try:
-        from anystruct.sesam_import import run_sesam_fem_static as _run_sesam_fem_static
+        from anystruct.fe_solver_backend.sesam_fem.importer import import_sesam_fem
+        from anystruct.fe_solver_backend import solve_linear
     except ModuleNotFoundError:
-        from ANYstructure.anystruct.sesam_import import run_sesam_fem_static as _run_sesam_fem_static
+        from ANYstructure.anystruct.fe_solver_backend.sesam_fem.importer import import_sesam_fem
+        from ANYstructure.anystruct.fe_solver_backend import solve_linear
 
-    return _run_sesam_fem_static(path, **kwargs)
+    imported = import_sesam_fem(path, **kwargs)
+    if imported.model is None:
+        raise RuntimeError("No model was generated from the FEM file.")
+
+    displacements, solver_info = solve_linear(
+        imported.model,
+        load_case=None,
+        solver_type=kwargs.get("solver_type", "direct"),
+        constraint_mode=kwargs.get("constraint_mode", "auto"),
+    )
+
+    class _DummySesamStaticRun:
+        def __init__(self, sp, ir, disp, si):
+            self.source_path = sp
+            self.import_result = ir
+            self.displacements = disp
+            self.solver_info = si
+
+    return _DummySesamStaticRun(str(path), imported, displacements, solver_info)
 
 
 class FlatStru():
@@ -160,7 +180,7 @@ class FlatStru():
         self._buckling_method = "DNV-RP-C201 - prescriptive"
         self._buckling_acceptance = "ultimate"
         self._ml_buckling_model = None
-    
+
     @property
     def calculation_domain(self):
         return self._calculation_domain
@@ -462,7 +482,7 @@ class FlatStru():
                 sub_cls.t = thickness
                 sub_cls.span = self._FlatStructure.Plate.span
 
-    
+
     def set_stresses(self, pressure: float = 0, sigma_x1: float = 0,sigma_x2: float = 0, sigma_y1: float = 0,
                      sigma_y2: float = 0, tau_xy: float = 0):
         '''
@@ -519,8 +539,8 @@ class FlatStru():
         :type stf_type: str
         :param spacing: spacing between stiffeners
         :type spacing: float
-        :return: 
-        :rtype: 
+        :return:
+        :rtype:
         '''
         self._FlatStructure.Stiffener.hw = hw
         self._FlatStructure.Stiffener.tw = tw
@@ -559,8 +579,8 @@ class FlatStru():
         :type stf_type: str
         :param spacing: spacing between girders
         :type spacing: float
-        :return: 
-        :rtype: 
+        :return:
+        :rtype:
         '''
         self._FlatStructure.Girder.hw = hw
         self._FlatStructure.Girder.tw = tw
