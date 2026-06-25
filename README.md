@@ -5,7 +5,7 @@ ANYstructure is the ultimate steel structure design tool for plate fields and cy
 Weight, weld and cost optimization.
 Calculations are based on DNV standards and recommended practices.
 
-### What's new in 6.1.1 ###
+### What's new in 6.1.1 ### 
 * Urgent fix for cylindrical shell updates where hidden cone defaults could overwrite radius, ring spacing and shell lengths.
 * 3D CAD export dialog now includes a transformation scale input and keeps intermediate IFC files unchecked by default.
 * 3D solid export can write one joined IFC product without building a heavy global boolean union.
