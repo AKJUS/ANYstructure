@@ -2173,6 +2173,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         "plot_grid": [[node_id(row, col) for col in range(cols)] + [node_id(row, 0)] for row in range(rows)],
         "plot_type": "cylinder",
         "radius_m": radius,
+        "length_m": length,
         "bottom_ring_node_ids": start_ring,
         "top_ring_node_ids": end_ring,
         "mesh_generation": mesh_generation,
@@ -3245,10 +3246,10 @@ def _custom_edge_load_entries(config: LightweightFEMConfig) -> list[dict[str, ob
     return entries
 
 
-def _normalised_custom_pressure_patches(patches: object) -> list[dict[str, float]]:
+def _normalised_custom_pressure_patches(patches: object) -> list[dict[str, object]]:
     if not isinstance(patches, list):
         return []
-    normalised: list[dict[str, float]] = []
+    normalised: list[dict[str, object]] = []
     for patch in patches:
         if not isinstance(patch, dict):
             continue
@@ -3263,14 +3264,32 @@ def _normalised_custom_pressure_patches(patches: object) -> list[dict[str, float
             "max_a": max_a,
             "min_b": min_b,
             "max_b": max_b,
+            "axis_a_origin": str(patch.get("axis_a_origin", "") or ""),
         })
     return normalised
 
 
-def _custom_pressure_patches(config: LightweightFEMConfig) -> list[dict[str, float]]:
+def _custom_patch_axis_interval(patch: dict[str, object], axis: str, limit: float) -> tuple[float, float]:
+    lower_key, upper_key = ("min_a", "max_a") if axis == "a" else ("min_b", "max_b")
+    lower = float(patch.get(lower_key, 0.0))
+    upper = float(patch.get(upper_key, 0.0))
+    if upper < lower:
+        lower, upper = upper, lower
+    if axis == "a":
+        origin = str(patch.get("axis_a_origin", "") or "").strip().lower()
+        centered = origin in {"center", "centered", "mid", "midspan", "middle"}
+        half = 0.5 * float(limit)
+        tol = max(float(limit) * 1.0e-9, 1.0e-9)
+        if centered or (-half - tol <= lower <= half + tol and -half - tol <= upper <= half + tol and lower < 0.0):
+            lower += half
+            upper += half
+    return max(0.0, lower), min(float(limit), upper)
+
+
+def _custom_pressure_patches(config: LightweightFEMConfig) -> list[dict[str, object]]:
     entries = _custom_pressure_load_entries(config)
     if entries:
-        patches: list[dict[str, float]] = []
+        patches: list[dict[str, object]] = []
         for entry in entries:
             patches.extend(_normalised_custom_pressure_patches(entry.get("patches", [])))
         return patches
@@ -3287,15 +3306,14 @@ def _custom_patch_axis_breaks(config: LightweightFEMConfig, axis: str, limit: fl
 
     if not config.custom_load_bc_enabled:
         return ()
-    keys = ("min_a", "max_a") if axis == "a" else ("min_b", "max_b")
     values: list[float] = []
     tol = max(float(limit) * 1.0e-9, 1.0e-9)
     for patch in _custom_pressure_patches(config):
-        for key in keys:
-            try:
-                value = float(patch.get(key, 0.0))
-            except (TypeError, ValueError):
-                continue
+        try:
+            lower, upper = _custom_patch_axis_interval(patch, axis, limit)
+        except (TypeError, ValueError):
+            continue
+        for value in (lower, upper):
             if tol < value < float(limit) - tol:
                 values.append(value)
     return tuple(sorted(set(round(value, 12) for value in values)))
@@ -3322,7 +3340,7 @@ def _custom_pressure_patch_element_ids_from_patches(
         model,
         generated_geometry: dict,
         geometry: dict,
-        patches: list[dict[str, float]],
+        patches: list[dict[str, object]],
 ) -> tuple[int, ...]:
     shell_ids = _skin_shell_element_ids(model, generated_geometry)
     if not shell_ids:
@@ -3334,6 +3352,7 @@ def _custom_pressure_patch_element_ids_from_patches(
     selected: list[int] = []
     if generated_geometry.get("plot_type") == "cylinder":
         radius = _positive(generated_geometry.get("radius_m", geometry.get("radius_m", 0.0)), 0.0)
+        length = _positive(generated_geometry.get("length_m", geometry.get("length_m", 0.0)), 0.0)
         circumference = 2.0 * math.pi * radius if radius > 0.0 else 0.0
 
         for element_id in shell_ids:
@@ -3346,8 +3365,7 @@ def _custom_pressure_patch_element_ids_from_patches(
             
             in_patch = False
             for patch in patches:
-                min_a = float(patch.get("min_a", 0.0))
-                max_a = float(patch.get("max_a", 0.0))
+                min_a, max_a = _custom_patch_axis_interval(patch, "a", length)
                 min_b = float(patch.get("min_b", 0.0))
                 max_b = float(patch.get("max_b", 0.0))
                 
@@ -3365,7 +3383,7 @@ def _custom_pressure_patch_element_ids_from_patches(
             
             if in_patch:
                 selected.append(int(element_id))
-        return tuple(selected) or shell_ids
+        return tuple(selected)
 
     for element_id in shell_ids:
         centroid = _element_centroid(model, element_id)
@@ -3376,8 +3394,7 @@ def _custom_pressure_patch_element_ids_from_patches(
         
         in_patch = False
         for patch in patches:
-            min_a = float(patch.get("min_a", 0.0))
-            max_a = float(patch.get("max_a", 0.0))
+            min_a, max_a = _custom_patch_axis_interval(patch, "a", _positive(geometry.get("length_m", 0.0), 0.0))
             min_b = float(patch.get("min_b", 0.0))
             max_b = float(patch.get("max_b", 0.0))
             if min_a - 1.0e-12 <= cx <= max_a + 1.0e-12 and min_b - 1.0e-12 <= cy <= max_b + 1.0e-12:
@@ -3386,7 +3403,7 @@ def _custom_pressure_patch_element_ids_from_patches(
                 
         if in_patch:
             selected.append(int(element_id))
-    return tuple(selected) or shell_ids
+    return tuple(selected)
 
 
 def _filter_load_case_pressure_to_skin_shells(load_case, generated_geometry: dict) -> tuple[int, int]:

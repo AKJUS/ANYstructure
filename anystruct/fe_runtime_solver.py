@@ -2600,6 +2600,7 @@ class RuntimeFEMWindow:
         self.figure_toolbar_frame = None
         self.preview_canvas = None
         self.figure_parent = None
+        self._last_run_result_status_text = ""
         self.result_case_selector = None
         self.component_selector = None
         self.run_button = None
@@ -3503,7 +3504,6 @@ class RuntimeFEMWindow:
         _configure_tk_canvas_colormap(str(colormap_var.get() if colormap_var is not None else "jet"))
 
         if hasattr(self, "imported_fem_model") and self.imported_fem_model is not None:
-            from anystruct.tkinter_3d_canvas_thickness_v6 import Point3D
             get_node = self.imported_fem_model.mesh.get_node
             for element in self.imported_fem_model.mesh.elements.values():
                 if element.__class__.__name__ == "ShellElement":
@@ -4148,11 +4148,14 @@ class RuntimeFEMWindow:
                 self.figure_parent,
             )
 
-    def _write_status(self, text: str) -> None:
+    def _write_status(self, text: str, keep_run_results: bool = False) -> None:
         if self.result_text is None:
             return
+        display_text = str(text)
+        if keep_run_results and self._last_run_result_status_text:
+            display_text = self._last_run_result_status_text + "\n\nRun status update:\n" + display_text
         self.result_text.delete("1.0", tk.END)
-        self.result_text.insert(tk.END, text)
+        self.result_text.insert(tk.END, display_text)
 
     def _set_solver_running(self, is_running: bool) -> None:
         if self.run_button is not None:
@@ -4190,7 +4193,7 @@ class RuntimeFEMWindow:
             messagebox.showerror("FEA result buckling", str(error))
             return
         if imported:
-            self._write_status(format_runtime_fem_result(self.current_result) + "\n\nReturned FEM result to FEA-result buckling mode.")
+            self._write_status("Returned FEM result to FEA-result buckling mode.", keep_run_results=True)
 
     def _options(self) -> RuntimeFEMOptions:
         return RuntimeFEMOptions(
@@ -4459,12 +4462,13 @@ class RuntimeFEMWindow:
             added += 1
         if added == 0:
             self._write_status(
-                "Select at least one panel with non-zero pressure or right-click at least one edge with non-zero edge load before adding."
+                "Select at least one panel with non-zero pressure or right-click at least one edge with non-zero edge load before adding.",
+                keep_run_results=True,
             )
             return
         self.custom_load_bc_enabled.set(True)
         self._sync_custom_load_payloads()
-        self._write_status(f"Added {added} custom load item(s) to the run list.")
+        self._write_status(f"Added {added} custom load item(s) to the run list.", keep_run_results=True)
 
     def _delete_selected_custom_load(self) -> None:
         tree = getattr(self, "_custom_load_tree", None)
@@ -4472,11 +4476,11 @@ class RuntimeFEMWindow:
             return
         selected = tree.selection()
         if not selected:
-            self._write_status("Select a pressure or edge load in the list before deleting.")
+            self._write_status("Select a pressure or edge load in the list before deleting.", keep_run_results=True)
             return
         iid = selected[0]
         if not iid.startswith("load:"):
-            self._write_status("Boundary-condition information cannot be deleted from the load list.")
+            self._write_status("Boundary-condition information cannot be deleted from the load list.", keep_run_results=True)
             return
         try:
             index = int(iid.split(":", 1)[1])
@@ -4485,7 +4489,7 @@ class RuntimeFEMWindow:
         if 0 <= index < len(self._custom_load_entries):
             del self._custom_load_entries[index]
             self._sync_custom_load_payloads()
-            self._write_status("Deleted selected custom load from the run list.")
+            self._write_status("Deleted selected custom load from the run list.", keep_run_results=True)
 
     def run(self) -> None:
         """Prepare/run the runtime FEM request and render Matplotlib results."""
@@ -4498,6 +4502,7 @@ class RuntimeFEMWindow:
         options = self._options()
         self._set_solver_running(True)
         self._cancel_requested = False
+        self._last_run_result_status_text = ""
         self._run_status_history = ["The result plot will update when the solver finishes.", ""]
         self._write_status("Running FEM solver...\n\n" + "\n".join(self._run_status_history))
 
@@ -4545,7 +4550,8 @@ class RuntimeFEMWindow:
         self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
         self._set_display_modes(result)
-        self._write_status(format_runtime_fem_result(result))
+        self._last_run_result_status_text = format_runtime_fem_result(result)
+        self._write_status(self._last_run_result_status_text)
         self._refresh_figure()
         self._update_buckling_handoff_button(is_running=False)
 
@@ -4575,11 +4581,12 @@ class RuntimeFEMWindow:
             self._force_fit_next_refresh = self.result_canvas is None
             self._set_custom_load_selection_active(True, refresh=False)
             self._write_status(
-                "Custom load selection is active. Left-click panels for pressure; right-click edges for line loads; right-drag rotates, left-drag moves, wheel zooms."
+                "Custom load selection is active. Left-click panels for pressure; right-click edges for line loads; right-drag rotates, left-drag moves, wheel zooms.",
+                keep_run_results=True,
             )
         else:
             self._set_custom_load_selection_active(False, refresh=False)
-            self._write_status("Custom load selection finished.")
+            self._write_status("Custom load selection finished.", keep_run_results=True)
         self._refresh_figure(preserve_view=True)
 
     def _bind_custom_load_canvas_selection(self, canvas: Tkinter3DCanvas) -> None:
@@ -4602,7 +4609,7 @@ class RuntimeFEMWindow:
 
         patch_index = self._pick_custom_load_patch(self.result_canvas, float(event.x), float(event.y))
         if patch_index is None:
-            self._write_status("Custom load selection: no panel was found at the clicked position.")
+            self._write_status("Custom load selection: no panel was found at the clicked position.", keep_run_results=True)
             return
 
         self._custom_load_selected_index = patch_index
@@ -4610,7 +4617,7 @@ class RuntimeFEMWindow:
         patch["selected"] = not bool(patch.get("selected", False))
         self._update_custom_load_summary()
         state = "selected" if patch["selected"] else "cleared"
-        self._write_status(f"Custom load panel {patch_index + 1} {state}.")
+        self._write_status(f"Custom load panel {patch_index + 1} {state}.", keep_run_results=True)
         self._refresh_figure(preserve_view=True)
 
     def _on_custom_load_edge_canvas_press(self, event: Any) -> None:
@@ -4627,7 +4634,7 @@ class RuntimeFEMWindow:
 
         edge = self._pick_custom_load_edge(self.result_canvas, float(event.x), float(event.y))
         if edge is None:
-            self._write_status("Custom load selection: no edge was found at the clicked position.")
+            self._write_status("Custom load selection: no edge was found at the clicked position.", keep_run_results=True)
             return
 
         key = self._custom_load_edge_key(*edge)
@@ -4638,7 +4645,7 @@ class RuntimeFEMWindow:
             self._custom_selected_edge_keys.add(key)
             state = "selected"
         self._update_custom_load_summary()
-        self._write_status(f"Custom load edge {state}.")
+        self._write_status(f"Custom load edge {state}.", keep_run_results=True)
         self._refresh_figure(preserve_view=True)
 
     @staticmethod
@@ -5125,7 +5132,8 @@ class RuntimeFEMWindow:
         self._force_fit_next_refresh = False
         self._update_custom_load_summary()
         self._write_status(
-            "Custom load selection and all manually created panel cuts were cleared."
+            "Custom load selection and all manually created panel cuts were cleared.",
+            keep_run_results=True,
         )
         self._refresh_figure(preserve_view=True)
 
@@ -5138,14 +5146,16 @@ class RuntimeFEMWindow:
                 or self._custom_load_selected_index >= len(self._custom_load_patches)
         ):
             self._write_status(
-                "Select a custom load panel before using Split A or Split B."
+                "Select a custom load panel before using Split A or Split B.",
+                keep_run_results=True,
             )
             return
 
         field = self._custom_load_patches[self._custom_load_selected_index]
         if not bool(field.get("selected", False)):
             self._write_status(
-                "The active panel is not selected. Select it before cutting."
+                "The active panel is not selected. Select it before cutting.",
+                keep_run_results=True,
             )
             return
 
@@ -5210,7 +5220,8 @@ class RuntimeFEMWindow:
         self._update_custom_load_summary()
         self._write_status(
             f"Selected custom load panel was split in local {direction_label} "
-            "at its midpoint. Press Clear to remove all cuts."
+            "at its midpoint. Press Clear to remove all cuts.",
+            keep_run_results=True,
         )
         self._refresh_figure(preserve_view=True)
 
@@ -5281,20 +5292,23 @@ class RuntimeFEMWindow:
         self._custom_load_selected_index = -1
         for index_a in range(len(a_breaks) - 1):
             for index_b in range(len(b_breaks) - 1):
-                self._custom_load_patches.append({
+                patch = {
                     "min_a": a_breaks[index_a],
                     "max_a": a_breaks[index_a + 1],
                     "min_b": b_breaks[index_b],
                     "max_b": b_breaks[index_b + 1],
                     "selected": False,
-                })
+                }
+                if is_cylinder:
+                    patch["axis_a_origin"] = "centered"
+                self._custom_load_patches.append(patch)
         self._update_custom_load_summary()
 
     def _redraw_base_3d(self) -> None:
         self._display_base_geometry = True
         self._force_fit_next_refresh = True
         self._refresh_figure()
-        self._write_status("Displaying base 3D model geometry.")
+        self._write_status("Displaying base 3D model geometry.", keep_run_results=True)
 
     def _show_results(self) -> None:
         if self.current_result is None:
@@ -5304,7 +5318,7 @@ class RuntimeFEMWindow:
         self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
         self._refresh_figure()
-        self._write_status("Displaying the latest FEM results.")
+        self._write_status("Displaying the latest FEM results.", keep_run_results=True)
 
     def _set_runtime_3d_view(self, view_name: str) -> None:
         self.use_interactive_3d.set(True)
@@ -5329,7 +5343,7 @@ class RuntimeFEMWindow:
             canvas.set_top_view()
         else:
             return
-        self._write_status("3D view set to " + view + ".")
+        self._write_status("3D view set to " + view + ".", keep_run_results=True)
 
 
 def open_runtime_fem_window(parent: Any, app: Any, imported_fem_model=None, imported_path=None) -> RuntimeFEMWindow | None:

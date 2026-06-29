@@ -1664,6 +1664,94 @@ def test_saved_custom_load_entries_add_panel_and_edge_breaks_to_mesh():
     assert len(fe_solver._custom_edge_segments(config)) == 1
 
 
+def test_centered_cylinder_custom_pressure_patch_selects_matching_axial_location():
+    geometry = {
+        "geometry": "cylinder",
+        "length_m": 5.0,
+        "radius_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        custom_loads_json=json.dumps([
+            {
+                "type": "pressure",
+                "pressure_pa": 500.0,
+                "patches": [
+                    {
+                        "min_a": 0.0,
+                        "max_a": 2.5,
+                        "min_b": 0.0,
+                        "max_b": 2.0 * math.pi,
+                        "axis_a_origin": "centered",
+                    }
+                ],
+            },
+        ]),
+    )
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    nodes = {int(node["id"]): tuple(node["coords"]) for node in generated["nodes"]}
+
+    class DummyElement:
+        thickness = 0.012
+
+        def __init__(self, node_ids):
+            self.node_ids = tuple(node_ids)
+
+        def get_node_coordinates(self, _mesh):
+            return [nodes[int(node_id)] for node_id in self.node_ids]
+
+    class DummyMesh:
+        def __init__(self):
+            self.elements = {
+                int(shell["id"]): DummyElement(shell["node_ids"])
+                for shell in generated["shells"]
+                if shell.get("role", "skin") == "skin"
+            }
+
+        def get_element(self, element_id):
+            return self.elements.get(int(element_id))
+
+    class DummyModel:
+        mesh = DummyMesh()
+
+    patches = fe_solver._custom_pressure_patches(config)
+    selected = fe_solver._custom_pressure_patch_element_ids_from_patches(
+        DummyModel(),
+        generated,
+        geometry,
+        patches,
+    )
+    selected_centroid_z = [
+        fe_solver._element_centroid(DummyModel(), element_id)[2]
+        for element_id in selected
+    ]
+
+    class DummyLoadCase:
+        def __init__(self):
+            self.pressure_loads = {}
+
+        def add_pressure_load(self, element_id, pressure):
+            self.pressure_loads[int(element_id)] = float(pressure)
+
+    load_case = DummyLoadCase()
+    applied = fe_solver._add_custom_panel_pressure_loads(
+        DummyModel(),
+        load_case,
+        generated,
+        geometry,
+        config,
+    )
+
+    assert selected
+    assert min(selected_centroid_z) >= 2.5 - 1.0e-9
+    assert max(selected_centroid_z) <= 5.0 + 1.0e-9
+    assert applied == len(selected)
+    assert set(load_case.pressure_loads) == set(selected)
+
+
 def test_custom_plate_loads_can_be_added_to_imported_pressure():
     geometry = {
         "geometry": "flat panel",
@@ -2412,3 +2500,67 @@ def test_populate_canvas_with_geometry_outer_vs_intermediate_stiffeners():
         assert len(segments) == 2
         spans = sorted([(round(min(p.x for p in seg), 2), round(max(p.x for p in seg), 2)) for seg in segments])
         assert spans == [(0.0, 5.0), (5.0, 10.0)]
+
+
+def test_populate_canvas_with_geometry_accepts_generated_cylinder_preview():
+    class DummyCanvas:
+        def __init__(self):
+            self.cylinders = []
+            self.longitudinal_stiffeners = []
+            self.ring_stiffeners = []
+
+        def add_cylinder(self, *args, **kwargs):
+            self.cylinders.append((args, kwargs))
+
+        def add_longitudinal_stiffener(self, *args, **kwargs):
+            self.longitudinal_stiffeners.append((args, kwargs))
+
+        def add_ring_stiffener(self, *args, **kwargs):
+            self.ring_stiffeners.append((args, kwargs))
+
+        def after_idle(self, func):
+            pass
+
+        def fit_to_scene(self):
+            pass
+
+    class DummyWindow:
+        def __init__(self):
+            app = fe_runtime_solver.example_runtime_app("cylinder")
+            self.snapshot = fe_runtime_solver.active_line_snapshot(app)
+
+        def _populate_canvas_with_geometry(self, canvas):
+            fe_runtime_solver.RuntimeFEMWindow._populate_canvas_with_geometry(self, canvas)
+
+    window = DummyWindow()
+    canvas = DummyCanvas()
+    window._populate_canvas_with_geometry(canvas)
+
+    assert len(canvas.cylinders) == 1
+    assert len(canvas.longitudinal_stiffeners) > 0
+    assert len(canvas.ring_stiffeners) > 0
+
+
+def test_runtime_status_updates_do_not_replace_completed_run_results():
+    class DummyText:
+        def __init__(self):
+            self.value = ""
+
+        def delete(self, *_args):
+            self.value = ""
+
+        def insert(self, _index, text):
+            self.value += str(text)
+
+    class DummyWindow:
+        result_text = DummyText()
+        _last_run_result_status_text = "RESULTS\nStatus: ok\nBuckling LF: 1.23"
+
+    fe_runtime_solver.RuntimeFEMWindow._write_status(
+        DummyWindow(),
+        "3D view set to fit.",
+        keep_run_results=True,
+    )
+
+    assert "RESULTS\nStatus: ok\nBuckling LF: 1.23" in DummyWindow.result_text.value
+    assert "Run status update:\n3D view set to fit." in DummyWindow.result_text.value
