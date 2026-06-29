@@ -16,7 +16,7 @@ import math
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -121,6 +121,7 @@ class FrdStressResult:
     components: tuple[str, ...]
     nodal_stress: dict[int, tuple[float, ...]]
     units: str = "Pa"
+    element_stress: dict[int, tuple[float, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ class InferredMember:
     web_thickness_m: float | None = None
     flange_thickness_m: float | None = None
     thickness_source: str | None = None
+    run_length_m: float = 0.0
     confidence: float = 1.0
     diagnostics: tuple[str, ...] = ()
 
@@ -631,6 +633,7 @@ def read_sesam_sif_stress_result(path: str | os.PathLike[str]) -> FrdStressResul
         components=tuple(stress.components),
         nodal_stress=dict(stress.nodal_stress),
         units=stress.units,
+        element_stress=dict(stress.element_stress),
     )
 
 
@@ -685,11 +688,28 @@ def reduce_field_stresses(
     inference = _infer_members_from_patches(model, patches)
     base_normal = inference.base_normal
     base_offset = inference.base_patch.offset
-    member_direction = inference.member_direction
-    transverse_direction = inference.transverse_direction
+    default_member_direction = inference.member_direction
+    default_transverse_direction = inference.transverse_direction
+    use_field_axes = _is_sesam_model_path(model.source_path)
 
     panel_stresses: list[PanelStress] = []
     for field_item in fields:
+        if use_field_axes:
+            member_direction, transverse_direction = _field_local_axes(model, field_item)
+            field_normal = _field_representative_normal(model, field_item)
+            field_points = [
+                point
+                for polygon in _field_element_polygons(model, field_item)
+                for point in polygon
+            ]
+            field_centroid = _mean_point(field_points)
+            stress_base_normal = field_normal
+            stress_base_offset = _dot(field_centroid, field_normal)
+        else:
+            member_direction = default_member_direction
+            transverse_direction = default_transverse_direction
+            stress_base_normal = base_normal
+            stress_base_offset = base_offset
         if reduction_method == "CSR area weighted mean":
             samples = _field_element_stress_samples(
                 model,
@@ -702,8 +722,8 @@ def reduce_field_stresses(
             samples = _field_stress_samples(
                 field_item,
                 frd_stress,
-                base_normal,
-                base_offset,
+                stress_base_normal,
+                stress_base_offset,
                 member_direction,
                 transverse_direction,
             )
@@ -1100,9 +1120,9 @@ def panel_3d_records(
     """Return 3D buckling-panel polygons.
 
     Unlike ``panel_plot_records`` this does not flatten panels into one plane.
-    Each field is represented by one coarse panel surface, so panels at
-    different elevations, perpendicular panels, and skewed panels remain
-    separated in model coordinates without exposing the FE mesh.
+    For SESAM imports the field is drawn from its actual shell polygons because
+    those models often contain skewed plate strips where one bounding rectangle
+    visually overstates the panel.
     """
 
     if fields and isinstance(fields[0], CylinderField):
@@ -1114,21 +1134,19 @@ def panel_3d_records(
             field_values=field_values,
         )
 
-    patches = detect_surface_patches(model)
-    try:
-        inference = _infer_members_from_patches(model, patches) if patches else None
-    except Exception:
-        inference = None
-    local_x = inference.member_direction if inference is not None else (1.0, 0.0, 0.0)
-    local_y = inference.transverse_direction if inference is not None else (0.0, 1.0, 0.0)
+    use_element_polygons = _is_sesam_model_path(model.source_path)
     records: list[dict[str, Any]] = []
     for index, field_item in enumerate(fields):
-        polygons = [_field_representative_panel_polygon(model, field_item)]
+        if use_element_polygons:
+            polygons = _field_element_polygons(model, field_item)
+        else:
+            polygons = [_field_representative_panel_polygon(model, field_item)]
         if not polygons:
             polygons = [_field_bbox_representative_polygon(field_item)]
         points = [point for polygon in polygons for point in polygon]
         bbox = _bbox(points) if points else field_item.bbox
         value = None if field_values is None else field_values.get(field_item.field_id)
+        local_x, local_y = _field_local_axes(model, field_item)
         records.append(
             {
                 "field_id": field_item.field_id,
@@ -1323,6 +1341,11 @@ def detect_surface_patches(model: FeShellModel, decimals: int = 6) -> list[Surfa
 def infer_plate_fields(model: FeShellModel) -> list[PlateField]:
     """Infer flat plate fields and shell-plate stiffener sections from a shell model."""
 
+    if _is_sesam_model_path(model.source_path):
+        sesam_fields = _infer_sesam_plate_fields(model)
+        if sesam_fields:
+            return sesam_fields
+
     patches = detect_surface_patches(model)
     if not patches:
         return []
@@ -1399,6 +1422,1233 @@ def infer_plate_fields(model: FeShellModel) -> list[PlateField]:
             field_index += 1
 
     return fields
+
+
+def _infer_sesam_plate_fields(model: FeShellModel) -> list[PlateField]:
+    """Infer SESAM buckling panels from beam sections and geometric plate edges."""
+
+    patches = [
+        patch
+        for patch in detect_surface_patches(model, decimals=3)
+        if patch.area > 1.0e-3 and len(patch.element_ids) > 0
+    ]
+    if not patches:
+        return []
+
+    fields: list[PlateField] = []
+    field_index = 1
+    for patch in sorted(patches, key=lambda item: (-item.area, item.patch_id)):
+        patch_fields = _split_sesam_patch_by_beams(
+            model,
+            patch,
+            field_index,
+        )
+        fields.extend(patch_fields)
+        field_index += len(patch_fields)
+    fields = _merge_sesam_curved_side_fields(model, fields)
+    fields = _merge_sesam_sliver_fields(model, fields)
+    fields = _deduplicate_plate_field_elements(model, fields)
+    return _renumber_plate_fields(fields)
+
+
+def _split_sesam_patch_by_beams(
+    model: FeShellModel,
+    patch: SurfacePatch,
+    start_index: int,
+) -> list[PlateField]:
+    patch_polygons = _element_polygons_for_ids(model, patch.element_ids)
+    points = [point for polygon in patch_polygons for point in polygon]
+    if len(points) < 3:
+        return []
+    normal = patch.normal
+    local_u, local_v = _patch_local_axes_from_polygons(patch_polygons, normal)
+    u_min, u_max = _point_bounds_along(points, local_u)
+    v_min, v_max = _point_bounds_along(points, local_v)
+    u_extent = u_max - u_min
+    v_extent = v_max - v_min
+    if u_extent <= 1.0e-8 or v_extent <= 1.0e-8:
+        return []
+
+    plane_tolerance = max(0.03, min(u_extent, v_extent) * 0.02)
+    station_tolerance = max(0.04, min(u_extent, v_extent) * 0.015)
+    overlap_tolerance = max(0.03, min(u_extent, v_extent) * 0.02)
+    u_members: list[InferredMember] = []
+    v_members: list[InferredMember] = []
+
+    for beam in model.beam_elements.values():
+        cross = beam.cross_section or {}
+        if not cross.get("web_height"):
+            continue
+        beam_points = [model.nodes[node_id] for node_id in beam.node_ids if node_id in model.nodes]
+        if len(beam_points) < 2:
+            continue
+        distances = [abs(_dot(point, normal) - patch.offset) for point in beam_points]
+        if min(distances) > plane_tolerance or sum(distances) / len(distances) > plane_tolerance * 2.0:
+            continue
+        projected = [_dot(point, local_u) for point in beam_points]
+        transverse = [_dot(point, local_v) for point in beam_points]
+        tangent = _normalise(_subtract(beam_points[-1], beam_points[0]))
+        tangent_in_plane = _project_to_plane(tangent, normal)
+        if _length(tangent_in_plane) <= 1.0e-8:
+            continue
+        align_u = abs(_dot(tangent_in_plane, local_u))
+        align_v = abs(_dot(tangent_in_plane, local_v))
+        if max(align_u, align_v) < 0.93:
+            continue
+        runs_u = align_u >= align_v
+        if runs_u:
+            run_min, run_max = min(projected), max(projected)
+            station = sum(transverse) / len(transverse)
+            if max(transverse) - min(transverse) > station_tolerance:
+                continue
+            if station < v_min - station_tolerance or station > v_max + station_tolerance:
+                continue
+            if min(run_max, u_max) - max(run_min, u_min) < overlap_tolerance:
+                continue
+            station = min(max(station, v_min), v_max)
+            run_length = max(min(run_max, u_max) - max(run_min, u_min), 0.0)
+            u_members.append(
+                _sesam_beam_member(
+                    beam,
+                    "beam_u",
+                    len(u_members) + 1,
+                    tangent_in_plane,
+                    station,
+                    run_length_m=run_length,
+                )
+            )
+        else:
+            run_min, run_max = min(transverse), max(transverse)
+            station = sum(projected) / len(projected)
+            if max(projected) - min(projected) > station_tolerance:
+                continue
+            if station < u_min - station_tolerance or station > u_max + station_tolerance:
+                continue
+            if min(run_max, v_max) - max(run_min, v_min) < overlap_tolerance:
+                continue
+            station = min(max(station, u_min), u_max)
+            run_length = max(min(run_max, v_max) - max(run_min, v_min), 0.0)
+            v_members.append(
+                _sesam_beam_member(
+                    beam,
+                    "beam_v",
+                    len(v_members) + 1,
+                    tangent_in_plane,
+                    station,
+                    run_length_m=run_length,
+                )
+            )
+
+    u_members = _filter_sesam_sustained_beam_members(
+        u_members,
+        station_tolerance,
+        min_required_length=min(max(u_extent * 0.10, overlap_tolerance * 2.0), 0.80),
+    )
+    v_members = _filter_sesam_sustained_beam_members(
+        v_members,
+        station_tolerance,
+        min_required_length=min(max(v_extent * 0.10, overlap_tolerance * 2.0), 0.80),
+    )
+    u_members = _merge_sesam_members(u_members, station_tolerance)
+    v_members = _merge_sesam_members(v_members, station_tolerance)
+    u_plate_members, v_plate_members = _sesam_out_of_plane_plate_members(
+        model,
+        patch,
+        local_u,
+        local_v,
+        normal,
+        (u_min, u_max),
+        (v_min, v_max),
+        plane_tolerance,
+        station_tolerance,
+        overlap_tolerance,
+    )
+    u_plate_members = _filter_sesam_sustained_boundary_members(
+        u_plate_members,
+        station_tolerance,
+        min_required_length=min(max(u_extent * 0.08, overlap_tolerance * 1.5), 0.60),
+    )
+    v_plate_members = _filter_sesam_sustained_boundary_members(
+        v_plate_members,
+        station_tolerance,
+        min_required_length=min(max(v_extent * 0.08, overlap_tolerance * 1.5), 0.60),
+    )
+    if abs(normal[2]) < 0.35:
+        u_free_edge_members, v_free_edge_members = _sesam_internal_free_edge_members(
+            model,
+            patch,
+            local_u,
+            local_v,
+            normal,
+            (u_min, u_max),
+            (v_min, v_max),
+            station_tolerance,
+            overlap_tolerance,
+        )
+    else:
+        u_free_edge_members, v_free_edge_members = [], []
+    split_u_members, split_v_members = _sesam_split_member_families(u_members, v_members)
+    has_u_beam_splits = bool(split_u_members)
+    has_v_beam_splits = bool(split_v_members)
+    split_u_members = list(split_u_members) if has_u_beam_splits else list(u_plate_members)
+    split_v_members = list(split_v_members) if has_v_beam_splits else list(v_plate_members)
+    if has_u_beam_splits:
+        split_u_members.extend(u_plate_members)
+    if has_v_beam_splits:
+        split_v_members.extend(v_plate_members)
+    split_u_members.extend(u_free_edge_members)
+    split_v_members.extend(v_free_edge_members)
+    split_u_members = _merge_sesam_members(split_u_members, station_tolerance)
+    split_v_members = _merge_sesam_members(split_v_members, station_tolerance)
+    u_stations = _sesam_split_stations(u_min, u_max, split_v_members, station_tolerance)
+    v_stations = _sesam_split_stations(v_min, v_max, split_u_members, station_tolerance)
+    u_stations = _sesam_merge_short_intervals(
+        u_stations,
+        min_interval=0.0 if v_free_edge_members else (0.55 if u_extent > 2.0 else 0.0),
+    )
+    v_stations = _sesam_merge_short_intervals(
+        v_stations,
+        min_interval=0.0 if u_free_edge_members else (0.55 if v_extent > 2.0 else 0.0),
+    )
+    if len(u_stations) * len(v_stations) > max(len(patch.element_ids) * 3, 200):
+        u_stations = [u_min, u_max]
+        v_stations = [v_min, v_max]
+
+    centroids = {
+        element_id: _element_centroid(model, model.shell_elements[element_id])
+        for element_id in patch.element_ids
+    }
+    element_uv = {
+        element_id: (_dot(centroid, local_u), _dot(centroid, local_v))
+        for element_id, centroid in centroids.items()
+    }
+    elements_by_cell: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for element_id, (u_value, v_value) in element_uv.items():
+        u_index = _station_interval_index(u_value, u_stations, station_tolerance)
+        v_index = _station_interval_index(v_value, v_stations, station_tolerance)
+        if u_index is None or v_index is None:
+            continue
+        elements_by_cell[(u_index, v_index)].append(element_id)
+
+    fields: list[PlateField] = []
+    seen_element_sets: set[tuple[int, ...]] = set()
+    for u_index, (u0, u1) in enumerate(zip(u_stations[:-1], u_stations[1:])):
+        for v_index, (v0, v1) in enumerate(zip(v_stations[:-1], v_stations[1:])):
+            if u1 - u0 <= 1.0e-8 or v1 - v0 <= 1.0e-8:
+                continue
+            selected = tuple(sorted(elements_by_cell.get((u_index, v_index), ())))
+            if not selected:
+                continue
+            if selected in seen_element_sets:
+                continue
+            seen_element_sets.add(selected)
+            attached = [
+                member
+                for member in split_v_members
+                if abs(member.station - u0) <= station_tolerance or abs(member.station - u1) <= station_tolerance
+            ]
+            attached.extend(
+                member
+                for member in split_u_members
+                if abs(member.station - v0) <= station_tolerance or abs(member.station - v1) <= station_tolerance
+            )
+            unique_members = tuple({member.member_id: member for member in attached}.values())
+            fields.append(
+                PlateField(
+                    field_id=f"field_{start_index + len(fields):03d}",
+                    base_patch_id=patch.patch_id,
+                    element_ids=selected,
+                    bbox=_bbox_for_elements(model, selected),
+                    span_m=max(u1 - u0, v1 - v0),
+                    spacing_m=min(u1 - u0, v1 - v0),
+                    transverse_bounds=(min(u0, u1), max(u0, u1)),
+                    attached_member_ids=tuple(member.member_id for member in unique_members),
+                    members=unique_members,
+                    shell_section_thickness_m=_shell_section_thickness_for_elements(model, selected),
+                    diagnostics=("SESAM plate patch split by beam sections, out-of-plane plates, and free edges",),
+                )
+            )
+    return fields
+
+
+def _sesam_split_member_families(
+    u_members: Sequence[InferredMember],
+    v_members: Sequence[InferredMember],
+) -> tuple[Sequence[InferredMember], Sequence[InferredMember]]:
+    """Return beam families that should split a SESAM plate patch.
+
+    Beams above the girder-height threshold split in either direction.  If both
+    local families only contain stiffeners, keep the denser family as the
+    stiffener-spacing boundaries and leave the other direction bounded by plate
+    edges or separate plate patches.
+    """
+
+    u_girders = [member for member in u_members if member.role == "girder"]
+    v_girders = [member for member in v_members if member.role == "girder"]
+    if u_girders or v_girders:
+        split_u = list(u_members) if u_girders else []
+        split_v = list(v_members) if v_girders else []
+        if not split_u and len(u_members) >= len(v_members):
+            split_u = list(u_members)
+        if not split_v and len(v_members) > len(u_members):
+            split_v = list(v_members)
+        return split_u, split_v
+    if len(u_members) >= len(v_members):
+        return u_members, ()
+    return (), v_members
+
+
+def _merge_sesam_curved_side_fields(model: FeShellModel, fields: Sequence[PlateField]) -> list[PlateField]:
+    candidates: list[PlateField] = []
+    passthrough: list[PlateField] = []
+    for field_item in fields:
+        if _is_sesam_curved_side_field(model, field_item):
+            candidates.append(field_item)
+        else:
+            passthrough.append(field_item)
+    if not candidates:
+        return list(fields)
+
+    groups: defaultdict[tuple[int, int, int], list[PlateField]] = defaultdict(list)
+    for field_item in candidates:
+        points = [point for polygon in _field_element_polygons(model, field_item) for point in polygon]
+        if not points:
+            passthrough.append(field_item)
+            continue
+        radii = [math.hypot(point[0], point[1]) for point in points]
+        z_min, z_max = field_item.bbox[2]
+        thickness_mm = int(round((_shell_section_thickness_for_elements(model, field_item.element_ids) or 0.0) * 1000.0))
+        key = (
+            int(round(min(z_min, z_max) / 0.05)),
+            int(round(max(z_min, z_max) / 0.05)),
+            int(round((sum(radii) / len(radii)) / 0.25)),
+            thickness_mm,
+        )
+        groups[key].append(field_item)
+
+    merged: list[PlateField] = list(passthrough)
+    for group_fields in groups.values():
+        if len(group_fields) <= 1:
+            merged.extend(group_fields)
+            continue
+        for component in _connected_field_components(model, group_fields):
+            if len(component) <= 1:
+                merged.extend(component)
+                continue
+            for chunk in _split_curved_component_by_span(model, component):
+                if len(chunk) <= 1:
+                    merged.extend(chunk)
+                else:
+                    merged.append(_merge_plate_field_component(model, chunk))
+    return merged
+
+
+def _merge_sesam_sliver_fields(model: FeShellModel, fields: Sequence[PlateField]) -> list[PlateField]:
+    """Merge small SESAM edge fragments into adjacent panels.
+
+    Irregular access holes and trimmed plate ends can produce one- or two-element
+    panels bounded by incidental mesh edges.  GeniE generally folds those
+    fragments into the neighbouring geometric panel unless they form a sustained
+    bay.  This pass preserves shell ownership while removing those mesh slivers.
+    """
+
+    field_by_id = {field_item.field_id: field_item for field_item in fields}
+    if not field_by_id:
+        return []
+
+    def is_sliver(field_item: PlateField) -> bool:
+        if not (field_item.spacing_m < 0.30 or field_item.span_m < 0.45):
+            return False
+        if len(field_item.element_ids) > 4 and field_item.spacing_m >= 0.25:
+            return False
+        return True
+
+    changed = True
+    while changed:
+        changed = False
+        current_fields = list(field_by_id.values())
+        edge_to_fields: defaultdict[tuple[int, int], set[str]] = defaultdict(set)
+        node_to_fields: defaultdict[int, set[str]] = defaultdict(set)
+        edges_by_field: dict[str, tuple[tuple[int, int], ...]] = {}
+        nodes_by_field: dict[str, set[int]] = {}
+        for field_item in current_fields:
+            edges = tuple(_field_shell_edges(model, field_item))
+            nodes = _field_shell_nodes(model, field_item)
+            edges_by_field[field_item.field_id] = edges
+            nodes_by_field[field_item.field_id] = nodes
+            for edge in edges:
+                edge_to_fields[edge].add(field_item.field_id)
+            for node_id in nodes:
+                node_to_fields[node_id].add(field_item.field_id)
+
+        ordered = sorted(
+            current_fields,
+            key=lambda item: (len(item.element_ids), item.spacing_m, item.span_m, item.field_id),
+        )
+        for field_item in ordered:
+            if field_item.field_id not in field_by_id or not is_sliver(field_item):
+                continue
+            neighbour_scores: defaultdict[str, int] = defaultdict(int)
+            for edge in edges_by_field.get(field_item.field_id, ()):
+                for neighbour_id in edge_to_fields.get(edge, ()):
+                    if neighbour_id != field_item.field_id and neighbour_id in field_by_id:
+                        neighbour_scores[neighbour_id] += 10
+            for node_id in nodes_by_field.get(field_item.field_id, ()):
+                for neighbour_id in node_to_fields.get(node_id, ()):
+                    if neighbour_id != field_item.field_id and neighbour_id in field_by_id:
+                        neighbour_scores[neighbour_id] += 1
+            if not neighbour_scores:
+                continue
+
+            field_normal = _field_representative_normal(model, field_item)
+            field_thickness = field_item.shell_section_thickness_m or 0.0
+
+            def neighbour_score(neighbour_id: str) -> tuple[bool, bool, bool, int, int, float]:
+                neighbour = field_by_id[neighbour_id]
+                neighbour_normal = _field_representative_normal(model, neighbour)
+                normal_match = abs(_dot(field_normal, neighbour_normal)) >= 0.70
+                thickness_delta = abs((neighbour.shell_section_thickness_m or 0.0) - field_thickness)
+                thickness_match = thickness_delta <= 0.002
+                return (
+                    normal_match,
+                    thickness_match,
+                    not is_sliver(neighbour),
+                    neighbour_scores[neighbour_id],
+                    len(neighbour.element_ids),
+                    -thickness_delta,
+                )
+
+            target_id = max(neighbour_scores, key=neighbour_score)
+            field_by_id[target_id] = _merge_sesam_general_fields(
+                model,
+                field_by_id[target_id],
+                field_item,
+                "SESAM mesh sliver merged into adjacent geometric panel",
+            )
+            del field_by_id[field_item.field_id]
+            changed = True
+            break
+
+    return list(field_by_id.values())
+
+
+def _field_shell_edges(model: FeShellModel, field_item: PlateField) -> list[tuple[int, int]]:
+    edges: list[tuple[int, int]] = []
+    for element_id in field_item.element_ids:
+        element = model.shell_elements.get(element_id)
+        if element is None:
+            continue
+        nodes = list(element.corner_node_ids)
+        edges.extend(tuple(sorted((first, second))) for first, second in zip(nodes, nodes[1:] + nodes[:1]))
+    return edges
+
+
+def _field_shell_nodes(model: FeShellModel, field_item: PlateField) -> set[int]:
+    return {
+        node_id
+        for element_id in field_item.element_ids
+        if element_id in model.shell_elements
+        for node_id in model.shell_elements[element_id].corner_node_ids
+    }
+
+
+def _merge_sesam_general_fields(
+    model: FeShellModel,
+    first: PlateField,
+    second: PlateField,
+    diagnostic: str,
+) -> PlateField:
+    element_ids = tuple(sorted(set(first.element_ids).union(second.element_ids)))
+    bbox = _bbox_for_elements(model, element_ids)
+    polygons = _element_polygons_for_ids(model, element_ids)
+    points = [point for polygon in polygons for point in polygon]
+    normal = _field_representative_normal(model, first)
+    try:
+        local_u, local_v = _patch_local_axes_from_polygons(polygons, normal)
+        u_values = [_dot(point, local_u) for point in points]
+        v_values = [_dot(point, local_v) for point in points]
+        u_extent = max(u_values) - min(u_values)
+        v_extent = max(v_values) - min(v_values)
+        span = max(u_extent, v_extent)
+        spacing = min(u_extent, v_extent)
+        transverse_bounds = (
+            (min(v_values), max(v_values))
+            if u_extent >= v_extent
+            else (min(u_values), max(u_values))
+        )
+    except Exception:
+        ranges = [bbox[index][1] - bbox[index][0] for index in range(3)]
+        span = max(ranges)
+        spacing = sorted(ranges)[1]
+        transverse_bounds = (0.0, spacing)
+
+    members = tuple({member.member_id: member for field_item in (first, second) for member in field_item.members}.values())
+    return replace(
+        first,
+        base_patch_id=f"merged_{first.base_patch_id}",
+        element_ids=element_ids,
+        bbox=bbox,
+        span_m=span,
+        spacing_m=spacing,
+        transverse_bounds=transverse_bounds,
+        attached_member_ids=tuple(member.member_id for member in members),
+        members=members,
+        shell_section_thickness_m=_shell_section_thickness_for_elements(model, element_ids),
+        confidence=min(first.confidence, second.confidence),
+        diagnostics=first.diagnostics + (diagnostic,),
+    )
+
+
+def _is_sesam_curved_side_field(model: FeShellModel, field_item: PlateField) -> bool:
+    polygons = _field_element_polygons(model, field_item)
+    points = [point for polygon in polygons for point in polygon]
+    if len(points) < 4:
+        return False
+    z_extent = field_item.bbox[2][1] - field_item.bbox[2][0]
+    if z_extent < 0.15:
+        return False
+    normal = _field_representative_normal(model, field_item)
+    if abs(normal[2]) > 0.35:
+        return False
+    radii = [math.hypot(point[0], point[1]) for point in points]
+    mean_radius = sum(radii) / len(radii)
+    if mean_radius < 5.0:
+        return False
+    if max(radii) - min(radii) > max(0.35, mean_radius * 0.025):
+        return False
+    centroid = _mean_point(points)
+    radial = _normalise((centroid[0], centroid[1], 0.0))
+    if _length(radial) <= 1.0e-8:
+        return False
+    return abs(_dot(normal, radial)) > 0.70
+
+
+def _connected_field_components(model: FeShellModel, fields: Sequence[PlateField]) -> list[list[PlateField]]:
+    node_sets = {
+        field_item.field_id: {
+            node_id
+            for element_id in field_item.element_ids
+            for node_id in model.shell_elements[element_id].corner_node_ids
+            if element_id in model.shell_elements
+        }
+        for field_item in fields
+    }
+    by_id = {field_item.field_id: field_item for field_item in fields}
+    adjacency: defaultdict[str, set[str]] = defaultdict(set)
+    for index, first in enumerate(fields):
+        first_nodes = node_sets[first.field_id]
+        for second in fields[index + 1:]:
+            if len(first_nodes.intersection(node_sets[second.field_id])) >= 2:
+                adjacency[first.field_id].add(second.field_id)
+                adjacency[second.field_id].add(first.field_id)
+
+    components: list[list[PlateField]] = []
+    visited: set[str] = set()
+    for field_item in fields:
+        if field_item.field_id in visited:
+            continue
+        stack = [field_item.field_id]
+        visited.add(field_item.field_id)
+        component_ids: list[str] = []
+        while stack:
+            current = stack.pop()
+            component_ids.append(current)
+            for next_id in adjacency.get(current, ()):
+                if next_id not in visited:
+                    visited.add(next_id)
+                    stack.append(next_id)
+        components.append([by_id[field_id] for field_id in component_ids])
+    return components
+
+
+def _merge_plate_field_component(model: FeShellModel, fields: Sequence[PlateField]) -> PlateField:
+    element_ids = tuple(sorted({element_id for field_item in fields for element_id in field_item.element_ids}))
+    bbox = _bbox_for_elements(model, element_ids)
+    polygons = _element_polygons_for_ids(model, element_ids)
+    points = [point for polygon in polygons for point in polygon]
+    z_extent = bbox[2][1] - bbox[2][0]
+    horizontal_extent = _curved_horizontal_extent(points)
+    members = tuple({member.member_id: member for field_item in fields for member in field_item.members}.values())
+    attached_member_ids = tuple(member.member_id for member in members)
+    return PlateField(
+        field_id=fields[0].field_id,
+        base_patch_id=f"curved_{fields[0].base_patch_id}",
+        element_ids=element_ids,
+        bbox=bbox,
+        span_m=max(horizontal_extent, z_extent),
+        spacing_m=min(horizontal_extent, z_extent),
+        transverse_bounds=(bbox[2][0], bbox[2][1]),
+        attached_member_ids=attached_member_ids,
+        members=members,
+        shell_section_thickness_m=_shell_section_thickness_for_elements(model, element_ids),
+        confidence=min(field_item.confidence for field_item in fields),
+        diagnostics=("SESAM curved side fields merged across connected circumferential facets",),
+    )
+
+
+def _split_curved_component_by_span(
+    model: FeShellModel,
+    fields: Sequence[PlateField],
+    max_span_m: float = 2.70,
+) -> list[list[PlateField]]:
+    ordered = sorted(fields, key=lambda field_item: _field_circumferential_angle(model, field_item))
+    hard_split_indices = _curved_component_perpendicular_split_indices(model, ordered)
+    if hard_split_indices:
+        chunks: list[list[PlateField]] = []
+        start = 0
+        for split_index in sorted(hard_split_indices):
+            segment = ordered[start:split_index]
+            if segment:
+                chunks.extend(_split_ordered_curved_fields_by_span(model, segment, max_span_m))
+            start = split_index
+        tail = ordered[start:]
+        if tail:
+            chunks.extend(_split_ordered_curved_fields_by_span(model, tail, max_span_m))
+        return chunks
+
+    return _split_ordered_curved_fields_by_span(model, ordered, max_span_m)
+
+
+def _split_ordered_curved_fields_by_span(
+    model: FeShellModel,
+    ordered: Sequence[PlateField],
+    max_span_m: float,
+) -> list[list[PlateField]]:
+    chunks: list[list[PlateField]] = []
+    current: list[PlateField] = []
+    for field_item in ordered:
+        trial = [*current, field_item]
+        trial_points = [
+            point
+            for trial_field in trial
+            for polygon in _field_element_polygons(model, trial_field)
+            for point in polygon
+        ]
+        if current and _curved_horizontal_extent(trial_points) > max_span_m:
+            chunks.append(current)
+            current = [field_item]
+        else:
+            current = trial
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _curved_component_perpendicular_split_indices(
+    model: FeShellModel,
+    ordered: Sequence[PlateField],
+) -> set[int]:
+    if len(ordered) < 3:
+        return set()
+    component_element_ids = {
+        element_id
+        for field_item in ordered
+        for element_id in field_item.element_ids
+    }
+    edge_to_elements: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+    for element_id, element in model.shell_elements.items():
+        nodes = list(element.corner_node_ids)
+        for first, second in zip(nodes, nodes[1:] + nodes[:1]):
+            edge_to_elements[tuple(sorted((first, second)))].append(element_id)
+
+    contact_flags = [
+        _curved_field_has_perpendicular_plate_contact(
+            model,
+            field_item,
+            component_element_ids,
+            edge_to_elements,
+        )
+        for field_item in ordered
+    ]
+    return {
+        index + 1
+        for index in range(len(contact_flags) - 1)
+        if contact_flags[index] and contact_flags[index + 1]
+    }
+
+
+def _curved_field_has_perpendicular_plate_contact(
+    model: FeShellModel,
+    field_item: PlateField,
+    component_element_ids: set[int],
+    edge_to_elements: dict[tuple[int, int], Sequence[int]],
+) -> bool:
+    points = [point for polygon in _field_element_polygons(model, field_item) for point in polygon]
+    if not points:
+        return False
+    centroid = _mean_point(points)
+    radial = _normalise((centroid[0], centroid[1], 0.0))
+    if _length(radial) <= 1.0e-8:
+        return False
+
+    for element_id in field_item.element_ids:
+        element = model.shell_elements.get(element_id)
+        if element is None:
+            continue
+        nodes = list(element.corner_node_ids)
+        for first, second in zip(nodes, nodes[1:] + nodes[:1]):
+            for adjacent_id in edge_to_elements.get(tuple(sorted((first, second))), ()):
+                if adjacent_id == element_id or adjacent_id in component_element_ids:
+                    continue
+                polygons = _element_polygons_for_ids(model, (adjacent_id,))
+                if not polygons:
+                    continue
+                adjacent_normal = _element_normal(polygons[0])
+                if abs(adjacent_normal[2]) > 0.35:
+                    continue
+                # On the cylindrical/faceted side, true bounding bulkheads or
+                # perpendicular plates have a tangential normal.  The adjacent
+                # horizontal/top-bottom plate strips have radial normals and
+                # must not split the circumferential panel extent.
+                if abs(_dot(adjacent_normal, radial)) < 0.35:
+                    return True
+    return False
+
+
+def _field_circumferential_angle(model: FeShellModel, field_item: PlateField) -> float:
+    points = [point for polygon in _field_element_polygons(model, field_item) for point in polygon]
+    centroid = _mean_point(points)
+    return math.atan2(centroid[1], centroid[0])
+
+
+def _curved_horizontal_extent(points: Sequence[Point3D]) -> float:
+    if len(points) < 2:
+        return 0.0
+    radii = [math.hypot(point[0], point[1]) for point in points]
+    mean_radius = sum(radii) / len(radii)
+    angles = sorted(math.atan2(point[1], point[0]) for point in points)
+    if len(angles) < 2 or mean_radius <= 1.0e-8:
+        return 0.0
+    gaps = [
+        (angles[index + 1] - angles[index], index)
+        for index in range(len(angles) - 1)
+    ]
+    wrap_gap = (angles[0] + 2.0 * math.pi - angles[-1], len(angles) - 1)
+    largest_gap, gap_index = max([*gaps, wrap_gap], key=lambda item: item[0])
+    if gap_index == len(angles) - 1:
+        unwrapped = angles
+    else:
+        unwrapped = [angle if angle >= angles[gap_index + 1] else angle + 2.0 * math.pi for angle in angles]
+    angle_span = max(unwrapped) - min(unwrapped)
+    arc_length = mean_radius * angle_span
+    chord_extent = max(
+        math.hypot(first[0] - second[0], first[1] - second[1])
+        for first in points
+        for second in points
+    )
+    return max(arc_length, chord_extent)
+
+
+def _station_interval_index(value: float, stations: Sequence[float], tolerance: float) -> int | None:
+    if len(stations) < 2:
+        return None
+    if value < stations[0] - tolerance or value > stations[-1] + tolerance:
+        return None
+    for index, (lower, upper) in enumerate(zip(stations[:-1], stations[1:])):
+        is_last = index == len(stations) - 2
+        if lower - tolerance <= value < upper - tolerance:
+            return index
+        if is_last and lower - tolerance <= value <= upper + tolerance:
+            return index
+    centers = [abs(value - (stations[index] + stations[index + 1]) * 0.5) for index in range(len(stations) - 1)]
+    return min(range(len(centers)), key=centers.__getitem__)
+
+
+def _patch_local_axes_from_polygons(polygons: Sequence[Sequence[Point3D]], normal: Vector3D) -> tuple[Vector3D, Vector3D]:
+    direction_clusters: list[tuple[Vector3D, float]] = []
+    for polygon in polygons:
+        if len(polygon) < 2:
+            continue
+        for start, end in zip(polygon, [*polygon[1:], polygon[0]]):
+            edge = _project_to_plane(_subtract(end, start), normal)
+            edge_length = _length(edge)
+            if edge_length <= 1.0e-8:
+                continue
+            direction = _canonical_direction(_normalise(edge))
+            for cluster_index, (cluster_direction, cluster_weight) in enumerate(direction_clusters):
+                dot_value = _dot(direction, cluster_direction)
+                if abs(dot_value) < 0.985:
+                    continue
+                if dot_value < 0.0:
+                    direction = (-direction[0], -direction[1], -direction[2])
+                combined = (
+                    cluster_direction[0] * cluster_weight + direction[0] * edge_length,
+                    cluster_direction[1] * cluster_weight + direction[1] * edge_length,
+                    cluster_direction[2] * cluster_weight + direction[2] * edge_length,
+                )
+                direction_clusters[cluster_index] = (_normalise(combined), cluster_weight + edge_length)
+                break
+            else:
+                direction_clusters.append((direction, edge_length))
+
+    if not direction_clusters:
+        points = [point for polygon in polygons for point in polygon]
+        return _patch_local_axes_from_points(points, normal)
+
+    direction_clusters.sort(key=lambda item: item[1], reverse=True)
+    local_u = direction_clusters[0][0]
+    local_v_candidate: Vector3D | None = None
+    for direction, _weight in direction_clusters[1:]:
+        transverse = (
+            direction[0] - local_u[0] * _dot(direction, local_u),
+            direction[1] - local_u[1] * _dot(direction, local_u),
+            direction[2] - local_u[2] * _dot(direction, local_u),
+        )
+        if _length(transverse) > 0.15:
+            local_v_candidate = transverse
+            break
+    if local_v_candidate is None:
+        local_v = _normalise(_cross(normal, local_u))
+    else:
+        local_v = _normalise(local_v_candidate)
+        if _dot(_cross(local_u, local_v), normal) < 0.0:
+            local_v = (-local_v[0], -local_v[1], -local_v[2])
+    if _length(local_v) <= 1.0e-8:
+        local_v = _normalise(_cross(normal, local_u))
+    return local_u, local_v
+
+
+def _canonical_direction(direction: Vector3D) -> Vector3D:
+    dominant_index = max(range(3), key=lambda index: abs(direction[index]))
+    if direction[dominant_index] < 0.0:
+        return (-direction[0], -direction[1], -direction[2])
+    return direction
+
+
+def _patch_local_axes_from_points(points: Sequence[Point3D], normal: Vector3D) -> tuple[Vector3D, Vector3D]:
+    bbox = _bbox(points)
+    axis_vectors: tuple[Vector3D, ...] = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    candidates: list[tuple[float, Vector3D]] = []
+    for index, axis in enumerate(axis_vectors):
+        projected = _project_to_plane(axis, normal)
+        if _length(projected) > 1.0e-8:
+            candidates.append((bbox[index][1] - bbox[index][0], projected))
+    if not candidates:
+        return (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+    local_u = sorted(candidates, key=lambda item: item[0], reverse=True)[0][1]
+    local_v = _normalise(_cross(normal, local_u))
+    if _length(local_v) <= 1.0e-8:
+        local_v = sorted(candidates, key=lambda item: item[0])[-1][1]
+    return local_u, local_v
+
+
+def _point_bounds_along(points: Sequence[Point3D], direction: Vector3D) -> tuple[float, float]:
+    values = [_dot(point, direction) for point in points]
+    return min(values), max(values)
+
+
+def _sesam_split_stations(
+    lower: float,
+    upper: float,
+    members: Sequence[InferredMember],
+    tolerance: float,
+) -> list[float]:
+    stations = [
+        member.station
+        for member in members
+        if lower + tolerance < member.station < upper - tolerance
+    ]
+    return _unique_sorted([lower, *stations, upper], tolerance=tolerance)
+
+
+def _sesam_merge_short_intervals(stations: Sequence[float], min_interval: float) -> list[float]:
+    if min_interval <= 0.0 or len(stations) <= 2:
+        return list(stations)
+    result = [float(stations[0])]
+    for station in stations[1:-1]:
+        if float(station) - result[-1] >= min_interval:
+            result.append(float(station))
+    upper = float(stations[-1])
+    if upper - result[-1] < min_interval and len(result) > 1:
+        result.pop()
+    if not result or not math.isclose(result[-1], upper, rel_tol=0.0, abs_tol=1.0e-12):
+        result.append(upper)
+    return result
+
+
+def _sesam_beam_member(
+    beam: FeBeamElement,
+    prefix: str,
+    index: int,
+    direction: Vector3D,
+    station: float,
+    *,
+    run_length_m: float = 0.0,
+) -> InferredMember:
+    cross = beam.cross_section or {}
+    web_height = float(cross.get("web_height") or 0.0)
+    role = "girder" if web_height > 0.6 else "stiffener"
+    return InferredMember(
+        member_id=f"{prefix}_{index:03d}",
+        role=role,
+        section_type=str(cross.get("section_type") or "FB"),
+        web_patch_id=f"beam_{beam.element_id}",
+        flange_patch_id=None,
+        direction=direction,
+        station=station,
+        web_height_m=web_height,
+        flange_width_m=_safe_float(cross.get("flange_width")),
+        web_thickness_m=_safe_float(cross.get("web_thickness")),
+        flange_thickness_m=_safe_float(cross.get("flange_thickness")),
+        thickness_source="SESAM beam section",
+        run_length_m=max(float(run_length_m), 0.0),
+        diagnostics=(f"SESAM beam section {cross.get('name', beam.property_id)}",),
+    )
+
+
+def _filter_sesam_sustained_beam_members(
+    members: Sequence[InferredMember],
+    tolerance: float,
+    *,
+    min_required_length: float,
+) -> list[InferredMember]:
+    if not members:
+        return []
+    groups: list[list[InferredMember]] = []
+    for member in sorted(members, key=lambda item: item.station):
+        for group in groups:
+            if abs(member.station - group[0].station) <= tolerance:
+                group.append(member)
+                break
+        else:
+            groups.append([member])
+
+    kept: list[InferredMember] = []
+    for group in groups:
+        if any(member.role == "girder" for member in group):
+            kept.extend(group)
+            continue
+        total_run = sum(max(member.run_length_m, 0.0) for member in group)
+        if total_run >= min_required_length:
+            kept.extend(group)
+    return kept
+
+
+def _filter_sesam_sustained_boundary_members(
+    members: Sequence[InferredMember],
+    tolerance: float,
+    *,
+    min_required_length: float,
+) -> list[InferredMember]:
+    if not members:
+        return []
+    groups: list[list[InferredMember]] = []
+    for member in sorted(members, key=lambda item: item.station):
+        for group in groups:
+            if abs(member.station - group[0].station) <= tolerance:
+                group.append(member)
+                break
+        else:
+            groups.append([member])
+
+    kept: list[InferredMember] = []
+    for group in groups:
+        total_run = sum(max(member.run_length_m, 0.0) for member in group)
+        if total_run >= min_required_length:
+            kept.extend(group)
+    return kept
+
+
+def _sesam_out_of_plane_plate_members(
+    model: FeShellModel,
+    patch: SurfacePatch,
+    local_u: Vector3D,
+    local_v: Vector3D,
+    normal: Vector3D,
+    u_bounds: tuple[float, float],
+    v_bounds: tuple[float, float],
+    plane_tolerance: float,
+    station_tolerance: float,
+    overlap_tolerance: float,
+) -> tuple[list[InferredMember], list[InferredMember]]:
+    patch_element_ids = set(patch.element_ids)
+    u_min, u_max = u_bounds
+    v_min, v_max = v_bounds
+    u_members: list[InferredMember] = []
+    v_members: list[InferredMember] = []
+
+    for element_id, element in model.shell_elements.items():
+        if element_id in patch_element_ids:
+            continue
+        polygon = [model.nodes[node_id] for node_id in element.corner_node_ids if node_id in model.nodes]
+        if len(polygon) < 3:
+            continue
+        element_normal = _element_normal(polygon)
+        if _length(element_normal) <= 1.0e-8:
+            continue
+        if abs(_dot(_normalise(element_normal), normal)) > 0.88:
+            continue
+        for start, end in zip(polygon, [*polygon[1:], polygon[0]]):
+            start_distance = abs(_dot(start, normal) - patch.offset)
+            end_distance = abs(_dot(end, normal) - patch.offset)
+            if start_distance > plane_tolerance or end_distance > plane_tolerance:
+                continue
+            tangent_in_plane = _project_to_plane(_subtract(end, start), normal)
+            if _length(tangent_in_plane) <= 1.0e-8:
+                continue
+            tangent_in_plane = _normalise(tangent_in_plane)
+            align_u = abs(_dot(tangent_in_plane, local_u))
+            align_v = abs(_dot(tangent_in_plane, local_v))
+            if max(align_u, align_v) < 0.86:
+                continue
+            projected = [_dot(point, local_u) for point in (start, end)]
+            transverse = [_dot(point, local_v) for point in (start, end)]
+            if align_u >= align_v:
+                run_min, run_max = min(projected), max(projected)
+                station = sum(transverse) / len(transverse)
+                if max(transverse) - min(transverse) > station_tolerance * 2.0:
+                    continue
+                if station < v_min - station_tolerance or station > v_max + station_tolerance:
+                    continue
+                run_length = max(min(run_max, u_max) - max(run_min, u_min), 0.0)
+                if run_length < overlap_tolerance:
+                    continue
+                u_members.append(
+                    _sesam_plate_boundary_member(
+                        "plate_u",
+                        len(u_members) + 1,
+                        tangent_in_plane,
+                        min(max(station, v_min), v_max),
+                        element_id,
+                        run_length_m=run_length,
+                    )
+                )
+            else:
+                run_min, run_max = min(transverse), max(transverse)
+                station = sum(projected) / len(projected)
+                if max(projected) - min(projected) > station_tolerance * 2.0:
+                    continue
+                if station < u_min - station_tolerance or station > u_max + station_tolerance:
+                    continue
+                run_length = max(min(run_max, v_max) - max(run_min, v_min), 0.0)
+                if run_length < overlap_tolerance:
+                    continue
+                v_members.append(
+                    _sesam_plate_boundary_member(
+                        "plate_v",
+                        len(v_members) + 1,
+                        tangent_in_plane,
+                        min(max(station, u_min), u_max),
+                        element_id,
+                        run_length_m=run_length,
+                    )
+                )
+
+    return (
+        _merge_sesam_members(u_members, station_tolerance),
+        _merge_sesam_members(v_members, station_tolerance),
+    )
+
+
+def _sesam_internal_free_edge_members(
+    model: FeShellModel,
+    patch: SurfacePatch,
+    local_u: Vector3D,
+    local_v: Vector3D,
+    normal: Vector3D,
+    u_bounds: tuple[float, float],
+    v_bounds: tuple[float, float],
+    station_tolerance: float,
+    overlap_tolerance: float,
+) -> tuple[list[InferredMember], list[InferredMember]]:
+    patch_element_ids = set(patch.element_ids)
+    if not patch_element_ids:
+        return [], []
+    u_min, u_max = u_bounds
+    v_min, v_max = v_bounds
+    edge_to_patch_elements: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+    for element_id in patch_element_ids:
+        element = model.shell_elements.get(element_id)
+        if element is None:
+            continue
+        nodes = list(element.corner_node_ids)
+        for first, second in zip(nodes, nodes[1:] + nodes[:1]):
+            edge_to_patch_elements[tuple(sorted((first, second)))].append(element_id)
+
+    u_candidates: list[tuple[float, Vector3D, int, float]] = []
+    v_candidates: list[tuple[float, Vector3D, int, float]] = []
+    for edge, owner_ids in edge_to_patch_elements.items():
+        if len(owner_ids) != 1:
+            continue
+        if edge[0] not in model.nodes or edge[1] not in model.nodes:
+            continue
+        start = model.nodes[edge[0]]
+        end = model.nodes[edge[1]]
+        tangent_in_plane = _project_to_plane(_subtract(end, start), normal)
+        if _length(tangent_in_plane) <= 1.0e-8:
+            continue
+        tangent_in_plane = _normalise(tangent_in_plane)
+        align_u = abs(_dot(tangent_in_plane, local_u))
+        align_v = abs(_dot(tangent_in_plane, local_v))
+        if max(align_u, align_v) < 0.86:
+            continue
+        projected = [_dot(point, local_u) for point in (start, end)]
+        transverse = [_dot(point, local_v) for point in (start, end)]
+        if align_u >= align_v:
+            run_min, run_max = min(projected), max(projected)
+            station = sum(transverse) / len(transverse)
+            if max(transverse) - min(transverse) > station_tolerance * 2.0:
+                continue
+            if station <= v_min + station_tolerance or station >= v_max - station_tolerance:
+                continue
+            if min(run_max, u_max) - max(run_min, u_min) < overlap_tolerance:
+                continue
+            u_candidates.append((station, tangent_in_plane, owner_ids[0], max(run_max - run_min, 0.0)))
+        else:
+            run_min, run_max = min(transverse), max(transverse)
+            station = sum(projected) / len(projected)
+            if max(projected) - min(projected) > station_tolerance * 2.0:
+                continue
+            if station <= u_min + station_tolerance or station >= u_max - station_tolerance:
+                continue
+            if min(run_max, v_max) - max(run_min, v_min) < overlap_tolerance:
+                continue
+            v_candidates.append((station, tangent_in_plane, owner_ids[0], max(run_max - run_min, 0.0)))
+
+    return (
+        _sesam_free_edge_members_from_candidates(
+            "free_u",
+            u_candidates,
+            station_tolerance,
+            min_required_length=min(max((u_max - u_min) * 0.20, overlap_tolerance * 2.0), 0.80),
+        ),
+        _sesam_free_edge_members_from_candidates(
+            "free_v",
+            v_candidates,
+            station_tolerance,
+            min_required_length=min(max((v_max - v_min) * 0.20, overlap_tolerance * 2.0), 0.80),
+        ),
+    )
+
+
+def _sesam_free_edge_members_from_candidates(
+    prefix: str,
+    candidates: Sequence[tuple[float, Vector3D, int, float]],
+    tolerance: float,
+    *,
+    min_required_length: float,
+) -> list[InferredMember]:
+    groups: list[list[tuple[float, Vector3D, int, float]]] = []
+    for candidate in sorted(candidates, key=lambda item: item[0]):
+        for group in groups:
+            if abs(candidate[0] - group[0][0]) <= tolerance:
+                group.append(candidate)
+                break
+        else:
+            groups.append([candidate])
+
+    members: list[InferredMember] = []
+    for group in groups:
+        total_length = sum(item[3] for item in group)
+        if total_length < min_required_length:
+            continue
+        station = sum(item[0] * item[3] for item in group) / max(total_length, 1.0e-12)
+        representative = max(group, key=lambda item: item[3])
+        members.append(
+            _sesam_plate_boundary_member(
+                prefix,
+                len(members) + 1,
+                representative[1],
+                station,
+                representative[2],
+                source="SESAM sustained internal free plate edge",
+                run_length_m=total_length,
+            )
+        )
+    return members
+
+
+def _sesam_plate_boundary_member(
+    prefix: str,
+    index: int,
+    direction: Vector3D,
+    station: float,
+    element_id: int,
+    *,
+    source: str = "SESAM out-of-plane plate edge",
+    run_length_m: float = 0.0,
+) -> InferredMember:
+    return InferredMember(
+        member_id=f"{prefix}_{index:03d}",
+        role="plate_boundary",
+        section_type="plate",
+        web_patch_id=f"shell_{element_id}",
+        flange_patch_id=None,
+        direction=direction,
+        station=station,
+        web_height_m=0.0,
+        flange_width_m=None,
+        thickness_source=source,
+        run_length_m=max(float(run_length_m), 0.0),
+        diagnostics=(source,),
+    )
+
+
+def _merge_sesam_members(
+    members: Sequence[InferredMember],
+    tolerance: float,
+) -> list[InferredMember]:
+    groups: list[list[InferredMember]] = []
+    for member in sorted(members, key=lambda item: item.station):
+        for group in groups:
+            if abs(member.station - group[0].station) <= tolerance:
+                group.append(member)
+                break
+        else:
+            groups.append([member])
+    merged: list[InferredMember] = []
+    for index, group in enumerate(groups, start=1):
+        representative = max(group, key=lambda item: item.web_height_m)
+        station = sum(item.station for item in group) / len(group)
+        merged.append(
+            InferredMember(
+                member_id=f"{representative.member_id.rsplit('_', 1)[0]}_{index:03d}",
+                role=representative.role,
+                section_type=representative.section_type,
+                web_patch_id=representative.web_patch_id,
+                flange_patch_id=representative.flange_patch_id,
+                direction=representative.direction,
+                station=station,
+                web_height_m=representative.web_height_m,
+                flange_width_m=representative.flange_width_m,
+                web_thickness_m=representative.web_thickness_m,
+                flange_thickness_m=representative.flange_thickness_m,
+                thickness_source=representative.thickness_source,
+                run_length_m=sum(max(item.run_length_m, 0.0) for item in group),
+                diagnostics=representative.diagnostics + (f"merged {len(group)} collinear beam elements",),
+            )
+        )
+    return merged
+
+
+def _deduplicate_plate_field_elements(model: FeShellModel, fields: Sequence[PlateField]) -> list[PlateField]:
+    seen: set[int] = set()
+    deduplicated: list[PlateField] = []
+    for field_item in fields:
+        element_ids = tuple(element_id for element_id in field_item.element_ids if element_id not in seen)
+        if not element_ids:
+            continue
+        seen.update(element_ids)
+        if element_ids == field_item.element_ids:
+            deduplicated.append(field_item)
+            continue
+        deduplicated.append(
+            replace(
+                field_item,
+                element_ids=element_ids,
+                bbox=_bbox_for_elements(model, element_ids),
+                shell_section_thickness_m=_shell_section_thickness_for_elements(model, element_ids),
+                diagnostics=field_item.diagnostics + ("overlapping shell elements assigned to first owning panel",),
+            )
+        )
+    return deduplicated
+
+
+def _renumber_plate_fields(fields: Sequence[PlateField]) -> list[PlateField]:
+    return [
+        replace(field_item, field_id=f"field_{index:03d}")
+        for index, field_item in enumerate(fields, start=1)
+    ]
 
 
 def summarize_plate_fields(fields: Sequence[PlateField]) -> list[dict[str, Any]]:
@@ -1928,8 +3178,12 @@ def _bbox_for_elements(model: FeShellModel, element_ids: Iterable[int]) -> tuple
 
 
 def _field_element_polygons(model: FeShellModel, field_item: PlateField) -> list[list[Point3D]]:
+    return _element_polygons_for_ids(model, field_item.element_ids)
+
+
+def _element_polygons_for_ids(model: FeShellModel, element_ids: Iterable[int]) -> list[list[Point3D]]:
     polygons: list[list[Point3D]] = []
-    for element_id in field_item.element_ids:
+    for element_id in element_ids:
         element = model.shell_elements.get(element_id)
         if element is None:
             continue
@@ -1947,6 +3201,16 @@ def _field_representative_normal(model: FeShellModel, field_item: PlateField) ->
     corners = _field_bbox_representative_polygon(field_item)
     normal = _element_normal(corners)
     return _normalise(normal) if _length(normal) > 0.0 else (0.0, 0.0, 1.0)
+
+
+def _field_local_axes(model: FeShellModel, field_item: PlateField) -> tuple[Vector3D, Vector3D]:
+    polygons = _field_element_polygons(model, field_item)
+    points = [point for polygon in polygons for point in polygon]
+    normal = _field_representative_normal(model, field_item)
+    if len(points) >= 3:
+        return _patch_local_axes_from_polygons(polygons, normal)
+    corners = _field_bbox_representative_polygon(field_item)
+    return _patch_local_axes_from_points(corners, normal)
 
 
 def _field_bbox_representative_polygon(field_item: PlateField) -> list[Point3D]:
@@ -2008,16 +3272,7 @@ def _bbox_corners(
 
 
 def _shell_section_thickness_for_patch(model: FeShellModel, patch: SurfacePatch) -> float | None:
-    if not model.shell_sections:
-        return None
-    patch_elements = set(patch.element_ids)
-    for section in model.shell_sections:
-        if not section.elset:
-            continue
-        section_elements = set(model.elsets.get(section.elset, ()))
-        if patch_elements & section_elements:
-            return section.thickness_m
-    return model.shell_sections[0].thickness_m
+    return _shell_section_thickness_for_elements(model, patch.element_ids)
 
 
 def _unique_members(fields: Sequence[PlateField]) -> list[InferredMember]:
@@ -2091,6 +3346,11 @@ def _usage_key_priority(key: object) -> int:
         "utilization factor": 90,
         "utilisation factor": 90,
         "plate buckling": 85,
+        "overpressure plate side": 80,
+        "overpressure stiffener side": 80,
+        "overpressure girder side": 80,
+        "resistance between stiffeners": 80,
+        "shear capacity": 80,
         "uf": 80,
     }
     if normalized in exact:
@@ -2132,9 +3392,7 @@ def _find_usage_factor(value: object) -> float | None:
 
     visit(value)
     if candidates:
-        highest_priority = max(priority for priority, _value in candidates)
-        preferred = [number for priority, number in candidates if priority == highest_priority]
-        return max(preferred) if preferred else None
+        return max(number for _priority, number in candidates)
 
     # Compatibility fallback for APIs returning a bare scalar/list as result.
     if not isinstance(value, dict):
@@ -2183,6 +3441,28 @@ def _field_stress_samples(
     member_direction: Vector3D,
     transverse_direction: Vector3D,
 ) -> list[tuple[float, float, float, float, float]]:
+    if frd_stress.element_stress:
+        element_samples: list[tuple[float, float, float, float, float]] = []
+        for element_id in field_item.element_ids:
+            stress = frd_stress.element_stress.get(element_id)
+            node_ids = frd_stress.element_nodes.get(element_id, ())
+            points = [frd_stress.nodes[node_id] for node_id in node_ids if node_id in frd_stress.nodes]
+            if stress is None or len(points) < 3:
+                continue
+            centroid = _mean_point(points)
+            sigma_x, sigma_y, tau_xy = _project_frd_stress(
+                frd_stress.components,
+                stress,
+                member_direction,
+                transverse_direction,
+            )
+            distance_to_mid_surface = abs(_dot(centroid, base_normal) - base_offset)
+            element_samples.append(
+                (_dot(centroid, transverse_direction), sigma_x, sigma_y, tau_xy, distance_to_mid_surface)
+            )
+        if element_samples:
+            return [sample[:4] + (1.0,) for sample in element_samples]
+
     all_samples: list[tuple[float, float, float, float, float]] = []
     seen_node_ids: set[int] = set()
     for element_id in field_item.element_ids:
@@ -2226,28 +3506,39 @@ def _field_element_stress_samples(
         corner_points = [model.nodes[node_id] for node_id in element.corner_node_ids if node_id in model.nodes]
         if len(corner_points) < 3:
             continue
-        projected_values = []
-        for node_id in frd_stress.element_nodes.get(element_id, element.corner_node_ids):
-            if node_id not in frd_stress.nodal_stress:
-                continue
-            projected_values.append(
-                _project_frd_stress(
-                    frd_stress.components,
-                    frd_stress.nodal_stress[node_id],
-                    member_direction,
-                    transverse_direction,
-                )
+        if element_id in frd_stress.element_stress:
+            sigma_x, sigma_y, tau_xy = _project_frd_stress(
+                frd_stress.components,
+                frd_stress.element_stress[element_id],
+                member_direction,
+                transverse_direction,
             )
-        if not projected_values:
-            continue
+        else:
+            projected_values = []
+            for node_id in frd_stress.element_nodes.get(element_id, element.corner_node_ids):
+                if node_id not in frd_stress.nodal_stress:
+                    continue
+                projected_values.append(
+                    _project_frd_stress(
+                        frd_stress.components,
+                        frd_stress.nodal_stress[node_id],
+                        member_direction,
+                        transverse_direction,
+                    )
+                )
+            if not projected_values:
+                continue
+            sigma_x = _mean(value[0] for value in projected_values)
+            sigma_y = _mean(value[1] for value in projected_values)
+            tau_xy = _mean(value[2] for value in projected_values)
         centroid = _mean_point(corner_points)
         area = _element_area(corner_points)
         samples.append(
             (
                 _dot(centroid, transverse_direction),
-                _mean(value[0] for value in projected_values),
-                _mean(value[1] for value in projected_values),
-                _mean(value[2] for value in projected_values),
+                sigma_x,
+                sigma_y,
+                tau_xy,
                 max(area, 1.0e-12),
             )
         )
@@ -4284,6 +5575,8 @@ def create_fea_structure_buckling_session(
         return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
 
     model = read_fea_shell_model(inp_path)
+    if _is_sesam_model_path(inp_path):
+        return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
     if is_cylindrical_shell_model(model):
         return create_fea_cylinder_buckling_session(inp_path, frd_path, **kwargs)
     return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
@@ -4938,12 +6231,35 @@ def _shell_section_thickness_for_elements(
     element_ids: Iterable[int],
 ) -> float | None:
     element_set = set(element_ids)
-    if not element_set:
+    if not element_set or not model.shell_sections:
         return None
+    thickness_by_element: dict[int, float] = {}
+    fallback_thickness: float | None = None
     for section in model.shell_sections:
+        if section.thickness_m is None:
+            continue
+        if fallback_thickness is None:
+            fallback_thickness = section.thickness_m
         if not section.elset:
             continue
-        if element_set & set(model.elsets.get(section.elset, ())):
+        for element_id in model.elsets.get(section.elset, ()):
+            thickness_by_element[int(element_id)] = section.thickness_m
+
+    weighted_sum = 0.0
+    area_sum = 0.0
+    for element_id in element_set:
+        thickness = thickness_by_element.get(element_id, fallback_thickness)
+        if thickness is None:
+            continue
+        polygons = _element_polygons_for_ids(model, (element_id,))
+        area = _element_area(polygons[0]) if polygons else 1.0
+        area = max(area, 1.0e-12)
+        weighted_sum += thickness * area
+        area_sum += area
+    if area_sum > 0.0:
+        return weighted_sum / area_sum
+    for section in model.shell_sections:
+        if section.thickness_m is not None:
             return section.thickness_m
     return None
 

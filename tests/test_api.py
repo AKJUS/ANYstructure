@@ -132,6 +132,9 @@ def test_flat_structure_api_selects_all_buckling_methods():
     assert semi["CSR"] == [1, 1, 1, 1]
     assert semi["CSR color"] == "green"
     assert semi["CSR requirement"]["within_csr_proportions"] is True
+    assert "controlling limit" in semi
+    assert "critical mode" in semi
+    assert "critical failure family" in semi
 
     flat.set_buckling_parameters(calculation_method="ML-Numeric (PULS based)", buckling_acceptance="ultimate")
     ml_missing_model = flat.get_buckling_results()

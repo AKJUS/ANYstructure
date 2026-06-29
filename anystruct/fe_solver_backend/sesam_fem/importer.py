@@ -340,6 +340,8 @@ def _beam_section(section: Optional[FemSection]) -> dict[str, object]:
     if section is None:
         return {}
     data: dict[str, object] = {}
+    if section.name:
+        data["name"] = section.name
     if section.area is not None:
         data["area"] = float(section.area)
     if section.iy is not None:
@@ -356,6 +358,8 @@ def _beam_section(section: Optional[FemSection]) -> dict[str, object]:
         data["flange_width"] = float(section.flange_width)
     if section.flange_thickness is not None:
         data["flange_thickness"] = float(section.flange_thickness)
-    if data.get("flange_width", 0.0) > 0.0:
+    if section.section_type:
+        data["section_type"] = section.section_type
+    elif data.get("flange_width", 0.0) > 0.0:
         data["section_type"] = "T"
     return data

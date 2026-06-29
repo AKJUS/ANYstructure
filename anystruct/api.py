@@ -322,6 +322,9 @@ class FlatStru():
 
         buckling_raw = float(result.get("buckling_usage_factor", float("inf"))) if valid_prediction else float("inf")
         ultimate_raw = float(result.get("ultimate_usage_factor", float("inf"))) if valid_prediction else float("inf")
+        diagnostics = result.get("result", {}).get("diagnostics", {})
+        buckling_diagnostics = diagnostics.get("buckling", {}) if isinstance(diagnostics, dict) else {}
+        strength_diagnostics = diagnostics.get("buckling_strength", {}) if isinstance(diagnostics, dict) else {}
         api_result = {
             "method": "SemiAnalytical S3/U3",
             "buckling UF": buckling_raw * mat_fac,
@@ -339,6 +342,11 @@ class FlatStru():
             "CSR": result.get("csr_vector", [0, 0, 0, 0]),
             "CSR color": result.get("csr_color", "red"),
             "CSR requirement": result.get("csr_requirement", {}),
+            "controlling limit": strength_diagnostics.get("controlling_limit", ""),
+            "critical mode": buckling_diagnostics.get("critical_mode", ""),
+            "critical failure family": buckling_diagnostics.get("critical_failure_family", ""),
+            "elastic buckling UF raw": strength_diagnostics.get("elastic_usage_factor", None),
+            "ultimate control UF raw": strength_diagnostics.get("ultimate_usage_factor", None),
         }
         api_result["selected UF"] = self._selected_buckling_uf(api_result)
         return api_result
