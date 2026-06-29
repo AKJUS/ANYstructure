@@ -78,6 +78,27 @@ def _transformed_shell_sif() -> str:
     )
 
 
+def _internal_reference_transformed_shell_sif() -> str:
+    return "\n".join(
+        [
+            "IDENT          101               1",
+            "UNITS            1               1               1",
+            "MISOSEL          1  2.100000D+11  3.000000D-01  7.850000D+03",
+            "GELTH           10  2.000000D-02",
+            "BNTRCOS          7               1               0               0               0               1               0               0               0               1",
+            "GCOORD           1               0               0               0",
+            "GCOORD           2               1               0               0",
+            "GCOORD           3               1               1               0",
+            "GCOORD           4               0               1               0",
+            "GELMNT1        200              10              24               0               1               2               3               4",
+            "GELREF1         10               1               0               0               0               0               0               0              10               0               0               7",
+            "RVSTRESS         1               0              10               0              24               0    1.000000E+08               0               0    1.000000E+08               0",
+            "IEND",
+            "",
+        ]
+    )
+
+
 def _oriented_beam_fem() -> str:
     return "\n".join(
         [
@@ -116,6 +137,18 @@ def test_sif_stress_uses_explicit_bntrcos_shell_transform() -> None:
     path.write_text(_transformed_shell_sif(), encoding="ascii")
 
     stress = read_sesam_sif_stress(path).element_stress[100]
+
+    assert stress[0] == pytest.approx(0.0, abs=1.0e-6)
+    assert stress[1] == pytest.approx(100.0e6)
+    assert stress[3] == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_sif_stress_uses_internal_element_reference_for_shell_transform() -> None:
+    path = _work_dir() / "internal_ref_transformed_shell.SIF"
+    path.write_text(_internal_reference_transformed_shell_sif(), encoding="ascii")
+
+    stress_result = read_sesam_sif_stress(path)
+    stress = stress_result.element_stress[200]
 
     assert stress[0] == pytest.approx(0.0, abs=1.0e-6)
     assert stress[1] == pytest.approx(100.0e6)
@@ -178,6 +211,100 @@ def test_import_sesam_fem_builds_native_shell_model() -> None:
     assert isinstance(result.model.mesh.elements[100], ShellElement)
     assert result.model.mesh.elements[100].thickness == pytest.approx(0.02)
     assert len(result.model.boundary_conditions) == 1
+
+
+def test_sesam_access_hole_free_edges_split_vertical_plate_fields() -> None:
+    nodes = {}
+    node_id = 1
+    for z_coord in range(5):
+        for x_coord in range(5):
+            nodes[node_id] = (float(x_coord), 0.0, float(z_coord))
+            node_id += 1
+
+    def nid(x_coord: int, z_coord: int) -> int:
+        return z_coord * 5 + x_coord + 1
+
+    elements = {}
+    element_id = 1
+    for z_coord in range(4):
+        for x_coord in range(4):
+            if 1 <= x_coord <= 2 and 1 <= z_coord <= 2:
+                continue
+            elements[element_id] = fe_plate_fields.ShellElement(
+                element_id,
+                (
+                    nid(x_coord, z_coord),
+                    nid(x_coord + 1, z_coord),
+                    nid(x_coord + 1, z_coord + 1),
+                    nid(x_coord, z_coord + 1),
+                ),
+                element_type="S4",
+            )
+            element_id += 1
+
+    model = fe_plate_fields.FeShellModel(
+        nodes=nodes,
+        shell_elements=elements,
+        elsets={"plate": tuple(elements)},
+        shell_sections=(fe_plate_fields.ShellSection("plate", "S355", 0.01),),
+        source_path="access_hole.SIF",
+    )
+
+    fields = fe_plate_fields.infer_plate_fields(model)
+
+    assert len(fields) > 1
+    for field in fields:
+        central_band = [
+            fe_plate_fields._element_centroid(model, model.shell_elements[element_id])
+            for element_id in field.element_ids
+            if 1.0 <= fe_plate_fields._element_centroid(model, model.shell_elements[element_id])[0] <= 3.0
+        ]
+        if not central_band:
+            continue
+        z_values = [point[2] for point in central_band]
+        assert not (min(z_values) < 1.0 and max(z_values) > 3.0)
+
+
+def test_shell_thickness_for_elements_is_area_weighted() -> None:
+    model = fe_plate_fields.FeShellModel(
+        nodes={
+            1: (0.0, 0.0, 0.0),
+            2: (1.0, 0.0, 0.0),
+            3: (1.0, 1.0, 0.0),
+            4: (0.0, 1.0, 0.0),
+            5: (2.0, 0.0, 0.0),
+            6: (2.0, 1.0, 0.0),
+        },
+        shell_elements={
+            1: fe_plate_fields.ShellElement(1, (1, 2, 3, 4), element_type="S4"),
+            2: fe_plate_fields.ShellElement(2, (2, 5, 6, 3), element_type="S4"),
+        },
+        elsets={"thin": (1,), "thick": (2,)},
+        shell_sections=(
+            fe_plate_fields.ShellSection("thin", "S355", 0.01),
+            fe_plate_fields.ShellSection("thick", "S355", 0.03),
+        ),
+    )
+
+    assert fe_plate_fields._shell_section_thickness_for_elements(model, (1, 2)) == pytest.approx(0.02)
+
+
+def test_dnv_panel_usage_factor_uses_highest_calculated_subcheck() -> None:
+    result = {
+        "result": {
+            "Plate": {"Plate buckling": 0.243},
+            "Stiffener": {
+                "Overpressure plate side": 0.604,
+                "Overpressure stiffener side": 0.601,
+                "Resistance between stiffeners": 0.955,
+                "Shear capacity": 0.0,
+            },
+            "Girder": {"Overpressure plate side": 0.0},
+            "Local buckling": {"Stiffener": [239.0, 176.0]},
+        }
+    }
+
+    assert fe_plate_fields._selected_uf_from_buckling_result(result) == pytest.approx(0.955)
 
 
 def test_writer_roundtrip_and_no_overwrite_guard() -> None:
@@ -266,6 +393,80 @@ def test_reader_accepts_fixed_width_numeric_fields() -> None:
 
     document = read_sesam_fem_document(path)
     assert document.nodes[1].coordinates == pytest.approx((1.25, -2.5, 0.0))
+
+
+def test_reader_classifies_named_hp_bulb_sections_as_l_bulb() -> None:
+    path = _work_dir() / "hp_bulb_section.SIF"
+    path.write_text(
+        "\n".join(
+            [
+                "IDENT          101               1",
+                "TDSECT           4              10  HPbulb160x7x22x6x6",
+                "GLSEC           10    1.600000E-01    7.000000E-03    2.900000E-02    1.546379E-02",
+                "IEND",
+                "",
+            ]
+        ),
+        encoding="ascii",
+    )
+
+    document = read_sesam_fem_document(path)
+
+    assert document.sections[10].section_type == "L-bulb"
+    assert document.sections[10].web_height == pytest.approx(0.160)
+
+
+def test_sesam_split_filters_short_intersection_beams_and_keeps_sustained_boundaries() -> None:
+    short_flatbar = fe_plate_fields.InferredMember(
+        member_id="beam_u_001",
+        role="stiffener",
+        section_type="FB",
+        web_patch_id="beam_1",
+        flange_patch_id=None,
+        direction=(1.0, 0.0, 0.0),
+        station=25.84,
+        web_height_m=0.2,
+        flange_width_m=0.01,
+        run_length_m=0.15,
+    )
+    sustained_bulb = fe_plate_fields.InferredMember(
+        member_id="beam_u_002",
+        role="stiffener",
+        section_type="L-bulb",
+        web_patch_id="beam_2",
+        flange_patch_id=None,
+        direction=(1.0, 0.0, 0.0),
+        station=25.96,
+        web_height_m=0.16,
+        flange_width_m=0.029,
+        run_length_m=9.0,
+    )
+    boundary = fe_plate_fields.InferredMember(
+        member_id="plate_u_001",
+        role="plate_boundary",
+        section_type="plate",
+        web_patch_id="shell_1",
+        flange_patch_id=None,
+        direction=(1.0, 0.0, 0.0),
+        station=25.11,
+        web_height_m=0.0,
+        flange_width_m=None,
+        run_length_m=0.82,
+    )
+
+    beams = fe_plate_fields._filter_sesam_sustained_beam_members(
+        (short_flatbar, sustained_bulb),
+        tolerance=0.04,
+        min_required_length=0.60,
+    )
+    boundaries = fe_plate_fields._filter_sesam_sustained_boundary_members(
+        (boundary,),
+        tolerance=0.04,
+        min_required_length=0.60,
+    )
+
+    assert [member.section_type for member in beams] == ["L-bulb"]
+    assert boundaries == [boundary]
 
 
 @pytest.mark.skipif(not REF_CASES.exists(), reason="SESAM reference cases are not available")

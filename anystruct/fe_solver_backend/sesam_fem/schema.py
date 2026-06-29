@@ -45,7 +45,7 @@ SESAM_ELEMENT_REGISTRY: Dict[int, SesamElementSpec] = {
 METADATA_RECORDS: FrozenSet[str] = frozenset({"IDENT", "DATE", "UNITS", "IEND"})
 
 MATERIAL_SECTION_RECORDS: FrozenSet[str] = frozenset(
-    {"TDMATER", "MISOSEL", "TDSECT", "GELTH", "GBEAMG", "GIORH", "GBARM"}
+    {"TDMATER", "MISOSEL", "TDSECT", "GELTH", "GBEAMG", "GIORH", "GBARM", "GBOX", "GLSEC", "GPIPE"}
 )
 
 CONCEPT_RECORDS: FrozenSet[str] = frozenset({"TDSCONC", "SCONCEPT", "SCONMESH"})

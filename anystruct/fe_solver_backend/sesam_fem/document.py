@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -45,6 +46,7 @@ class FemSection:
     web_thickness: Optional[float] = None
     flange_width: Optional[float] = None
     flange_thickness: Optional[float] = None
+    section_type: Optional[str] = None
     raw_values: tuple[float, ...] = ()
 
 
@@ -341,31 +343,86 @@ def _parse_sections(
                     raw_values=values,
                 )
         elif record.name == "TDSECT" and record.numeric_fields:
-            section_id = _int_field(record.numeric_fields[0], "section id", record, diagnostics)
+            values = record.numeric_fields
+            section_id_index = 1 if len(values) > 1 and int(round(values[0])) == 4 else 0
+            section_id = _int_field(values[section_id_index], "section id", record, diagnostics)
             if section_id is not None and record.text_fields:
                 names[section_id] = " ".join(record.text_fields)
-        elif record.name == "GIORH" and record.numeric_fields:
+        elif record.name in {"GBARM", "GBOX", "GIORH", "GLSEC", "GPIPE"} and record.numeric_fields:
             section_id = _int_field(record.numeric_fields[0], "section id", record, diagnostics)
             if section_id is not None:
                 values = record.numeric_fields
                 dim: dict[str, float] = {}
-                if len(values) > 1 and values[1] > 0.0:
-                    dim["web_height"] = float(values[1])
-                if len(values) > 2 and values[2] > 0.0:
-                    dim["web_thickness"] = float(values[2])
-                if len(values) > 5 and values[5] > 0.0:
-                    dim["flange_width"] = float(values[5])
-                if len(values) > 6 and values[6] > 0.0:
-                    dim["flange_thickness"] = float(values[6])
-                if dim:
-                    dimensions[section_id] = dim
+                text_dim: dict[str, object] = {}
+                if record.name == "GBARM":
+                    if len(values) > 1 and values[1] > 0.0:
+                        dim["web_height"] = float(values[1])
+                    if len(values) > 2 and values[2] > 0.0:
+                        dim["web_thickness"] = float(values[2])
+                    text_dim["section_type"] = "FB"
+                elif record.name == "GBOX":
+                    if len(values) > 1 and values[1] > 0.0:
+                        dim["web_height"] = float(values[1])
+                        dim["flange_width"] = float(values[1])
+                    if len(values) > 2 and values[2] > 0.0:
+                        dim["web_thickness"] = float(values[2])
+                    if len(values) > 3 and values[3] > 0.0:
+                        dim["flange_thickness"] = float(values[3])
+                    text_dim["section_type"] = "Box"
+                elif record.name == "GIORH":
+                    if len(values) > 1 and values[1] > 0.0:
+                        dim["web_height"] = float(values[1])
+                    if len(values) > 2 and values[2] > 0.0:
+                        dim["web_thickness"] = float(values[2])
+                    if len(values) > 5 and values[5] > 0.0:
+                        dim["flange_width"] = float(values[5])
+                    elif len(values) > 3 and values[3] > 0.0:
+                        dim["flange_width"] = float(values[3])
+                    if len(values) > 6 and values[6] > 0.0:
+                        dim["flange_thickness"] = float(values[6])
+                    elif len(values) > 4 and values[4] > 0.0:
+                        dim["flange_thickness"] = float(values[4])
+                    text_dim["section_type"] = "T"
+                elif record.name == "GLSEC":
+                    if len(values) > 1 and values[1] > 0.0:
+                        dim["web_height"] = float(values[1])
+                    if len(values) > 2 and values[2] > 0.0:
+                        dim["web_thickness"] = float(values[2])
+                    if len(values) > 3 and values[3] > 0.0:
+                        dim["flange_width"] = float(values[3])
+                    if len(values) > 4 and values[4] > 0.0:
+                        dim["flange_thickness"] = float(values[4])
+                    text_dim["section_type"] = "L"
+                elif record.name == "GPIPE":
+                    outer = values[2] if len(values) > 2 and values[2] > 0.0 else None
+                    wall = values[3] if len(values) > 3 and values[3] > 0.0 else None
+                    if outer is not None:
+                        dim["web_height"] = float(outer)
+                        dim["flange_width"] = float(outer)
+                    if wall is not None:
+                        dim["web_thickness"] = float(wall)
+                        dim["flange_thickness"] = float(wall)
+                    text_dim["section_type"] = "Pipe"
+                if dim or text_dim:
+                    dimensions[section_id] = {**dim, **text_dim}  # type: ignore[dict-item]
 
     for section_id, dim in dimensions.items():
+        name_text = names.get(section_id, "")
+        if _is_bulb_section_name(name_text):
+            dim["section_type"] = "L-bulb"
         if section_id in sections:
             from dataclasses import replace
             sections[section_id] = replace(sections[section_id], **dim)
+        else:
+            sections[section_id] = FemSection(section_id=section_id, kind="beam_section", **dim)
 
     return sections, names
+
+
+def _is_bulb_section_name(name: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
+    words = set(normalized.split())
+    return "bulb" in words or "hpbulb" in normalized.replace(" ", "") or "hp" in words
 
 
 def _parse_coordinates(
@@ -608,7 +665,13 @@ def _parse_elements(
                 node_ids.append(node_id)
         if len(node_ids) != spec.node_count:
             continue
-        reference = references.get(element_id)
+        internal_id = _int_field(values[1], "element internal id", record, diagnostics) if len(values) > 1 else None
+        if spec.is_shell and internal_id is not None:
+            reference = references.get(internal_id) or references.get(element_id)
+        elif spec.is_beam and internal_id is not None:
+            reference = references.get(element_id) or references.get(internal_id)
+        else:
+            reference = references.get(element_id)
         elements[element_id] = FemElement(
             element_id=element_id,
             type_code=type_code,

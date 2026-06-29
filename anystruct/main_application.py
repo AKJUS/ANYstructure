@@ -45,6 +45,7 @@ try:
     import anystruct.fe_plate_fields as fe_plate_fields
     import anystruct.fe_runtime_solver as fe_runtime_solver
     import anystruct.representation_geometry as representation_geometry
+    import anystruct.tkinter_3d_canvas_thickness_v6 as tkinter_3d_canvas
 except ModuleNotFoundError:
     # This is due to pyinstaller issues.
     from ANYstructure.anystruct.calc_structure import *
@@ -70,6 +71,7 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.fe_plate_fields as fe_plate_fields
     import ANYstructure.anystruct.fe_runtime_solver as fe_runtime_solver
     import ANYstructure.anystruct.representation_geometry as representation_geometry
+    import ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 as tkinter_3d_canvas
 
 
 @dataclass(frozen=True)
@@ -344,6 +346,8 @@ class Application():
         self._fea_last_runtime_result = None
         self._fea_panel_canvas_items = {}
         self._fea_3d_panel_artists = {}
+        self._fea_3d_panel_records = {}
+        self._fea_3d_selected_overlay = None
         self._fea_buckling_created = []
         self._fea_panel_line_by_field = {}
         self._fea_imported_line_names = []
@@ -5438,6 +5442,9 @@ class Application():
                     semi_analytical_buc_uf = semi_analytical_buc_raw * semi_analytical_mat_fac
                     semi_analytical_ult_uf = semi_analytical_ult_raw * semi_analytical_mat_fac
                     semi_analytical_acceptance = 1.0
+                    semi_analytical_diagnostics = semi_analytical_result.get('result', {}).get('diagnostics', {})
+                    semi_analytical_buckling = semi_analytical_diagnostics.get('buckling', {})
+                    semi_analytical_strength = semi_analytical_diagnostics.get('buckling_strength', {})
 
                     if semi_analytical_valid:
                         semi_analytical_buc_color = self._semi_analytical_uf_color(semi_analytical_buc_uf)
@@ -5464,6 +5471,11 @@ class Application():
                         'panel family': semi_analytical_result.get('panel_family', None),
                         'confidence': semi_analytical_result.get('confidence', None),
                         'error': semi_analytical_error,
+                        'controlling limit': semi_analytical_strength.get('controlling_limit', ''),
+                        'critical mode': semi_analytical_buckling.get('critical_mode', ''),
+                        'critical failure family': semi_analytical_buckling.get('critical_failure_family', ''),
+                        'elastic buckling UF raw': semi_analytical_strength.get('elastic_usage_factor', None),
+                        'ultimate control UF raw': semi_analytical_strength.get('ultimate_usage_factor', None),
                     }
 
                     return_dict['SemiAnalytical valid'][current_line] = {
@@ -5891,6 +5903,8 @@ class Application():
         if panel is not None and panel.usage_factor is not None:
             uf_min, uf_max = self._fea_uf_color_limits()
             value = max(min(float(panel.usage_factor), uf_max), uf_min)
+            if hasattr(tkinter_3d_canvas, '_interpolate_thickness_color'):
+                return tkinter_3d_canvas._interpolate_thickness_color(value, uf_min, uf_max)
             rgba = plt.get_cmap('jet')((value - uf_min) / max(uf_max - uf_min, 1.0e-9))
             return matplotlib.colors.rgb2hex(rgba)
         return '#d9d9d9'
@@ -5911,6 +5925,253 @@ class Application():
         if upper <= lower:
             upper = lower + 1.0
         return lower, upper
+
+    def _embed_fea_buckling_tk3d_canvas(self, records, default_view='iso'):
+        """Embed the pure-Tk 3D FE buckling panel viewer in the main drawing pane."""
+        self._prop_3d_axes = None
+        self._prop_3d_fig_canvas = None
+        self._prop_3d_toolbar = None
+        self._prop_3d_default_view = default_view
+        self._fea_tk3d_panel_records = {
+            record.get('field_id'): record
+            for record in records
+            if record.get('field_id') is not None
+        }
+
+        place = {
+            'relx': self._place_info_float(self._main_canvas, 'relx', 0.26),
+            'rely': self._place_info_float(self._main_canvas, 'rely', 0),
+            'relwidth': self._place_info_float(self._main_canvas, 'relwidth', 0.523),
+            'relheight': self._place_info_float(self._main_canvas, 'relheight', 0.73),
+        }
+        self._prop_3d_frame = tk.Frame(
+            self._main_fr,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        self._prop_3d_frame.place(**place)
+        tk.Misc.lift(self._prop_3d_frame)
+
+        toolbar_row = tk.Frame(
+            self._prop_3d_frame,
+            background=self._style.lookup('TFrame', 'background'),
+            bd=0,
+            highlightthickness=0,
+        )
+        toolbar_row.pack(side=tk.TOP, fill=tk.X)
+
+        view_row = tk.Frame(toolbar_row, background=self._style.lookup('TFrame', 'background'), bd=0,
+                            highlightthickness=0)
+        view_row.pack(side=tk.RIGHT)
+        ttk.Button(view_row, text='Iso', width=4,
+                   command=lambda: self._set_fea_tk3d_view('iso')).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Top', width=4,
+                   command=lambda: self._set_fea_tk3d_view('top')).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Side', width=5,
+                   command=lambda: self._set_fea_tk3d_view('side')).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Fit', width=4,
+                   command=lambda: self._fit_fea_tk3d_canvas()).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Import', width=7, command=self.open_fea_buckling_files).pack(side=tk.LEFT,
+                                                                                                 padx=(8, 0))
+        ttk.Button(view_row, text='Reimport', width=8, command=self.reimport_fea_buckling_files).pack(side=tk.LEFT)
+
+        width = max(int(self._main_canvas.winfo_width() or 900), 300)
+        height = max(int(self._main_canvas.winfo_height() or 600), 220)
+        tk3d = tkinter_3d_canvas.Tkinter3DCanvas(
+            self._prop_3d_frame,
+            width=width,
+            height=height,
+            bg='white',
+        )
+        self._fea_tk3d_canvas = tk3d
+        self._prop_3d_canvas_widget = tk3d.canvas
+        tk3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        tk3d.canvas.bind('<ButtonPress-1>', self._on_fea_tk3d_mouse_press, add='+')
+        tk3d.canvas.bind('<ButtonRelease-1>', self._on_fea_tk3d_mouse_release, add='+')
+        self._populate_fea_buckling_tk3d_canvas(fit_view=True)
+
+    def _set_fea_tk3d_view(self, view_name):
+        tk3d = getattr(self, '_fea_tk3d_canvas', None)
+        if tk3d is None:
+            return
+        try:
+            if view_name == 'top':
+                tk3d.set_top_view()
+            elif view_name == 'side':
+                tk3d.set_side_view()
+            else:
+                tk3d.set_iso_view()
+        except Exception:
+            pass
+
+    def _fit_fea_tk3d_canvas(self):
+        tk3d = getattr(self, '_fea_tk3d_canvas', None)
+        if tk3d is None:
+            return
+        try:
+            tk3d.fit_to_scene(padding=1.18)
+        except Exception:
+            pass
+
+    def _populate_fea_buckling_tk3d_canvas(self, fit_view=False):
+        tk3d = getattr(self, '_fea_tk3d_canvas', None)
+        session = self._fea_buckling_session
+        if tk3d is None or session is None:
+            return
+        try:
+            tk3d.clear()
+        except Exception:
+            return
+        try:
+            if self._fea_color_code.get():
+                uf_min, uf_max = self._fea_uf_color_limits()
+                tk3d.set_thickness_legend(
+                    list(session.usage_factors().values()),
+                    unit='',
+                    title='UF',
+                    width=125,
+                    value_range=(uf_min, uf_max),
+                )
+            else:
+                tk3d.clear_thickness_legend()
+        except Exception:
+            pass
+
+        for field_id, record in getattr(self, '_fea_tk3d_panel_records', {}).items():
+            try:
+                panel = session.panel(field_id)
+            except Exception:
+                panel = None
+            selected = field_id == self._fea_selected_panel_id
+            color = '#ffd54f' if selected else self._fea_panel_canvas_color(panel, record.get('index', 0))
+            outline = 'red' if selected else ('#333333' if self._fea_show_mesh.get() else '')
+            width = 2 if selected else (1 if self._fea_show_mesh.get() else 0)
+            layer = 45 if selected else 5
+            for polygon in record.get('polygons', []):
+                vertices = [tkinter_3d_canvas.Point3D(point[0], point[1], point[2]) for point in polygon]
+                tk3d.add_polygon(
+                    vertices,
+                    color=color,
+                    outline=outline,
+                    width=width,
+                    cull_backface=False,
+                    layer=layer,
+                    tags=f'fea_panel {field_id}',
+                )
+            self._add_fea_tk3d_local_axes(record)
+
+        if fit_view:
+            try:
+                tk3d.after_idle(lambda: tk3d.fit_to_scene(padding=1.18))
+            except Exception:
+                self._fit_fea_tk3d_canvas()
+
+    def _add_fea_tk3d_local_axes(self, record):
+        tk3d = getattr(self, '_fea_tk3d_canvas', None)
+        if tk3d is None:
+            return
+        show_x = bool(self._fea_show_local_x_arrow.get())
+        show_y = bool(self._fea_show_local_y_arrow.get())
+        if not show_x and not show_y:
+            return
+        centroid = record.get('centroid', (0.0, 0.0, 0.0))
+        normal = record.get('normal', (0.0, 0.0, 1.0))
+        arrow_length = max(min(float(record.get('span_m', record.get('axial_length_m', 1.0))),
+                               float(record.get('spacing_m', record.get('circumferential_spacing_m', 1.0)))) * 0.28,
+                           0.05)
+        origin = (
+            centroid[0] + normal[0] * 0.02,
+            centroid[1] + normal[1] * 0.02,
+            centroid[2] + normal[2] * 0.02,
+        )
+        origin_point = tkinter_3d_canvas.Point3D(*origin)
+        if show_x:
+            local_x = record.get('local_x', (1.0, 0.0, 0.0))
+            tk3d.add_line(
+                origin_point,
+                tkinter_3d_canvas.Point3D(
+                    origin[0] + local_x[0] * arrow_length,
+                    origin[1] + local_x[1] * arrow_length,
+                    origin[2] + local_x[2] * arrow_length,
+                ),
+                color='#1f77b4',
+                width=2,
+                layer=55,
+            )
+        if show_y:
+            local_y = record.get('local_y', (0.0, 1.0, 0.0))
+            tk3d.add_line(
+                origin_point,
+                tkinter_3d_canvas.Point3D(
+                    origin[0] + local_y[0] * arrow_length,
+                    origin[1] + local_y[1] * arrow_length,
+                    origin[2] + local_y[2] * arrow_length,
+                ),
+                color='#ff7f0e',
+                width=2,
+                layer=55,
+            )
+
+    def _on_fea_tk3d_mouse_press(self, event):
+        self._fea_tk3d_click_origin = (event.x, event.y)
+
+    def _on_fea_tk3d_mouse_release(self, event):
+        origin = getattr(self, '_fea_tk3d_click_origin', None)
+        self._fea_tk3d_click_origin = None
+        if origin is None:
+            return
+        if math.hypot(event.x - origin[0], event.y - origin[1]) > 5.0:
+            return
+        field_id = self._pick_fea_tk3d_panel(event.x, event.y)
+        if field_id:
+            self._select_fea_panel(field_id)
+
+    def _pick_fea_tk3d_panel(self, x, y):
+        tk3d = getattr(self, '_fea_tk3d_canvas', None)
+        if tk3d is None:
+            return None
+        width = max(1, int(tk3d._plot_width()))
+        height = max(1, int(tk3d.canvas.winfo_height() or tk3d.height))
+        best_field_id = None
+        best_depth = float('inf')
+        for field_id, record in getattr(self, '_fea_tk3d_panel_records', {}).items():
+            for polygon in record.get('polygons', []):
+                projected = []
+                depths = []
+                for point in polygon:
+                    point3d = tkinter_3d_canvas.Point3D(point[0], point[1], point[2])
+                    screen_point = tk3d.camera.project_point(point3d, width, height)
+                    if screen_point is None:
+                        projected = []
+                        break
+                    _camera_x, _camera_y, camera_z = tk3d.camera.world_to_camera(point3d)
+                    projected.append(screen_point)
+                    depths.append(-camera_z)
+                if not projected or not self._point_in_screen_polygon(x, y, projected):
+                    continue
+                depth = sum(depths) / max(len(depths), 1)
+                if depth < best_depth:
+                    best_depth = depth
+                    best_field_id = field_id
+        return best_field_id
+
+    @staticmethod
+    def _point_in_screen_polygon(x, y, polygon):
+        inside = False
+        count = len(polygon)
+        if count < 3:
+            return False
+        previous_x, previous_y = polygon[-1]
+        for current_x, current_y in polygon:
+            intersects = (
+                (current_y > y) != (previous_y > y)
+                and x < (previous_x - current_x) * (y - current_y) / (previous_y - current_y + 1.0e-12) + current_x
+            )
+            if intersects:
+                inside = not inside
+            previous_x, previous_y = current_x, current_y
+        return inside
 
     def _embed_fea_buckling_3d_figure(self, fig, ax, default_view=(24, -55)):
         """Embed the FEA buckling-panel-only 3D view in the main drawing pane."""
@@ -5996,7 +6257,7 @@ class Application():
             field_id = event.artist.get_gid()
         except Exception:
             field_id = None
-        if field_id:
+        if field_id and field_id != '__selected_fea_panel_overlay__':
             self._select_fea_panel_after_matplotlib_event(field_id)
 
     def _update_fea_3d_selection(self):
@@ -6004,14 +6265,46 @@ class Application():
         session = self._fea_buckling_session
         if session is None:
             return
+        if getattr(self, '_fea_tk3d_canvas', None) is not None:
+            self._populate_fea_buckling_tk3d_canvas(fit_view=False)
+            return
+        try:
+            overlay = getattr(self, '_fea_3d_selected_overlay', None)
+            if overlay is not None:
+                overlay.remove()
+        except Exception:
+            pass
+        self._fea_3d_selected_overlay = None
         for field_id, collection in getattr(self, '_fea_3d_panel_artists', {}).items():
             selected = field_id == self._fea_selected_panel_id
             try:
                 collection.set_edgecolor('red' if selected else ('#333333' if self._fea_show_mesh.get() else 'none'))
                 collection.set_linewidth(1.8 if selected else (0.25 if self._fea_show_mesh.get() else 0.0))
-                collection.set_alpha(0.92 if selected else 0.82)
+                collection.set_alpha(0.42 if selected else 0.82)
             except Exception:
                 pass
+        record = getattr(self, '_fea_3d_panel_records', {}).get(self._fea_selected_panel_id)
+        ax = getattr(self, '_prop_3d_axes', None)
+        if record is not None and ax is not None:
+            try:
+                overlay = Poly3DCollection(
+                    record.get('polygons', []),
+                    facecolor=(1.0, 0.78, 0.15, 0.28),
+                    edgecolor='red',
+                    linewidth=2.2,
+                    alpha=0.95,
+                )
+                overlay.set_gid('__selected_fea_panel_overlay__')
+                overlay.set_picker(False)
+                try:
+                    overlay.set_zorder(1000)
+                except Exception:
+                    pass
+                ax.add_collection3d(overlay)
+                self._fea_3d_selected_overlay = overlay
+                self._disable_prop_3d_artist_clipping(ax)
+            except Exception:
+                self._fea_3d_selected_overlay = None
         try:
             self._prop_3d_fig_canvas.draw_idle()
         except Exception:
@@ -6317,6 +6610,8 @@ class Application():
         if session is None or not session.panels:
             self.clear_prop_3d()
             self._fea_3d_panel_artists = {}
+            self._fea_3d_panel_records = {}
+            self._fea_3d_selected_overlay = None
             self._main_canvas.create_text(
                 width / 2,
                 height / 2 - 20,
@@ -6335,9 +6630,18 @@ class Application():
 
         self.clear_prop_3d()
         self._fea_3d_panel_artists = {}
+        self._fea_3d_panel_records = {}
+        self._fea_3d_selected_overlay = None
         records = fe_plate_fields.panel_3d_records(session.model, session.fields, session.usage_factors())
         if not records:
             return
+        self._fea_3d_panel_records = {
+            record.get('field_id'): record
+            for record in records
+            if record.get('field_id') is not None
+        }
+        self._embed_fea_buckling_tk3d_canvas(records, default_view='iso')
+        return
         fig = plt.Figure(figsize=(9.8, 5.8), dpi=100)
         ax_width = 0.86 if self._fea_color_code.get() else 0.96
         ax = fig.add_axes([0.01, 0.06, ax_width, 0.88], projection='3d')
@@ -6349,15 +6653,16 @@ class Application():
             field_id = record['field_id']
             panel = session.panel(field_id)
             selected = field_id == self._fea_selected_panel_id
+            self._fea_3d_panel_records[field_id] = record
             collection = Poly3DCollection(
                 record['polygons'],
                 facecolor=self._fea_panel_canvas_color(panel, record['index']),
                 edgecolor='red' if selected else ('#333333' if self._fea_show_mesh.get() else 'none'),
                 linewidth=1.8 if selected else (0.25 if self._fea_show_mesh.get() else 0.0),
-                alpha=0.82 if panel.usage_factor is not None else 0.58,
+                alpha=0.42 if selected else (0.82 if panel.usage_factor is not None else 0.58),
             )
             collection.set_gid(field_id)
-            collection.set_picker(True)
+            collection.set_picker(5)
             ax.add_collection3d(collection)
             self._fea_3d_panel_artists[field_id] = collection
             centroid = record['centroid']
@@ -6428,6 +6733,7 @@ class Application():
             colorbar.set_label('UF', fontsize=7)
             colorbar.ax.tick_params(labelsize=6)
         self._embed_fea_buckling_3d_figure(fig, ax, default_view=(24, -55))
+        self._update_fea_3d_selection()
 
     def draw_canvas(self, state=None, event=None):
         '''
@@ -7629,6 +7935,33 @@ class Application():
                                 fill=self._color_text if semi_analytical_is_valid else 'red',
                             )
                             line_offset += 1
+                            if semi_analytical_is_valid:
+                                controlling_limit = semi_analytical.get('controlling limit', '')
+                                critical_mode = semi_analytical.get('critical mode', '')
+                                critical_family = semi_analytical.get('critical failure family', '')
+                                if controlling_limit or critical_mode:
+                                    control_text = 'SemiAnalytical control: '
+                                    if controlling_limit:
+                                        control_text += str(controlling_limit).replace('_', ' ')
+                                    if critical_mode:
+                                        control_text += ' / ' + str(critical_mode).replace('_', ' ')
+                                    self._result_canvas.create_text(
+                                        [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                        text=control_text,
+                                        font=self._text_size["Text 9"],
+                                        anchor='nw',
+                                        fill=self._color_text,
+                                    )
+                                    line_offset += 1
+                                if critical_family:
+                                    self._result_canvas.create_text(
+                                        [x * 1, (y + (start_y + line_offset) * dy) * 1],
+                                        text='SemiAnalytical failure family: ' + str(critical_family).replace('_', ' '),
+                                        font=self._text_size["Text 9"],
+                                        anchor='nw',
+                                        fill=self._color_text,
+                                    )
+                                    line_offset += 1
 
                         else:
                             self._result_canvas.create_text(
@@ -7995,6 +8328,11 @@ class Application():
         self._prop_3d_toolbar = None
         self._prop_3d_axes = None
         self._prop_3d_default_view = (22, -55)
+        self._fea_tk3d_canvas = None
+        self._fea_tk3d_panel_records = {}
+        self._fea_tk3d_click_origin = None
+        self._fea_3d_selected_overlay = None
+        self._fea_3d_panel_records = {}
 
     def _place_info_float(self, widget, key, default=0.0):
         """Return a numeric place() value, handling Tk's string values safely."""

@@ -104,6 +104,16 @@ def _project_axis_to_plane(axis: np.ndarray, normal: np.ndarray) -> np.ndarray |
     return _normalise_array(axis - np.dot(axis, normal) * normal)
 
 
+def _element_reference(document, element):
+    reference = document.element_references.get(element.element_id)
+    if reference is not None:
+        return reference
+    if len(element.raw_values) > 1:
+        internal_id = int(round(element.raw_values[1]))
+        return document.element_references.get(internal_id)
+    return None
+
+
 def _mean_transform_axes(document, transform_ids: Sequence[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
     rows_x: list[np.ndarray] = []
     rows_y: list[np.ndarray] = []
@@ -128,8 +138,20 @@ def _mean_transform_axes(document, transform_ids: Sequence[int]) -> tuple[np.nda
     return x_axis, y_axis, z_axis
 
 
+def _mean_unit_vector_axis(document, transform_ids: Sequence[int]) -> np.ndarray | None:
+    vectors: list[np.ndarray] = []
+    for transform_id in transform_ids:
+        unit_vector = document.unit_vectors.get(transform_id)
+        if unit_vector is None:
+            continue
+        vectors.append(np.asarray(unit_vector.vector, dtype=float))
+    if not vectors:
+        return None
+    return _normalise_array(np.sum(vectors, axis=0))
+
+
 def _explicit_shell_local_frame(document, element, normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    reference = document.element_references.get(element.element_id)
+    reference = _element_reference(document, element)
     if reference is None:
         return None
     transform_ids = reference.nodal_transform_ids or (() if reference.transform_id is None else (reference.transform_id,))
@@ -161,6 +183,27 @@ def _explicit_shell_local_frame(document, element, normal: np.ndarray) -> tuple[
     return x_axis, y_axis, normal
 
 
+def _unit_vector_shell_local_frame(document, element, normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    reference = _element_reference(document, element)
+    if reference is None:
+        return None
+    transform_ids = reference.nodal_transform_ids or (() if reference.transform_id is None else (reference.transform_id,))
+    if not transform_ids:
+        return None
+    raw_y = _mean_unit_vector_axis(document, transform_ids)
+    if raw_y is None:
+        return None
+    y_axis = _project_axis_to_plane(raw_y, normal)
+    if y_axis is None:
+        return None
+    x_axis = _normalise_array(np.cross(y_axis, normal))
+    if x_axis is None:
+        return None
+    if np.dot(np.cross(x_axis, y_axis), normal) < 0.0:
+        x_axis = -x_axis
+    return x_axis, y_axis, normal
+
+
 def _element_local_frame(document, element) -> tuple[tuple[float,...], tuple[float,...], tuple[float,...]] | None:
     spec = get_element_spec(element.type_code)
     if spec is None:
@@ -177,10 +220,17 @@ def _element_local_frame(document, element) -> tuple[tuple[float,...], tuple[flo
         if explicit_frame is not None:
             x_axis, y_axis, normal = explicit_frame
             return tuple(x_axis.tolist()), tuple(y_axis.tolist()), tuple(normal.tolist())
+        unit_vector_frame = _unit_vector_shell_local_frame(document, element, normal)
+        if unit_vector_frame is not None:
+            x_axis, y_axis, normal = unit_vector_frame
+            return tuple(x_axis.tolist()), tuple(y_axis.tolist()), tuple(normal.tolist())
 
     p0 = np.asarray(points[0], dtype=float)
     p1 = np.asarray(points[1], dtype=float)
-    # SESAM RVSTRESS shell SIGYY follows the first element edge when no explicit shell transform is present.
+    # In SESAM shell result records without explicit transforms, the in-plane
+    # local y direction follows the first element edge.  The local x direction
+    # is completed from y x normal so local membrane components can be rotated
+    # into the global tensor before panel-axis projection.
     y_axis = _normalise_array(p1 - p0)
     if y_axis is None:
         return None
@@ -227,11 +277,21 @@ def read_sesam_sif_stress(path: str | os.PathLike[str]) -> SesamStressResult:
     nodal_counts: defaultdict[int, int] = defaultdict(int)
     element_stress: dict[int, tuple[float, ...]] = {}
 
-    for record in read_raw_records(Path(path_text), strict=False):
+    raw_records = read_raw_records(Path(path_text), strict=False)
+    internal_to_external: dict[int, int] = {}
+    for record in raw_records:
+        if record.name != "GELMNT1" or len(record.numeric_fields) < 2:
+            continue
+        external_id = int(round(record.numeric_fields[0]))
+        internal_id = int(round(record.numeric_fields[1]))
+        internal_to_external[internal_id] = external_id
+
+    for record in raw_records:
         if record.name != "RVSTRESS" or not record.numeric_fields or len(record.numeric_fields) < 8:
             continue
         values = record.numeric_fields
-        element_id = int(values[2]) if values[2].is_integer() else int(round(values[2]))
+        result_element_id = int(values[2]) if values[2].is_integer() else int(round(values[2]))
+        element_id = internal_to_external.get(result_element_id, result_element_id)
         type_code = int(values[4]) if values[4].is_integer() else int(round(values[4]))
         
         element = document.elements.get(element_id)

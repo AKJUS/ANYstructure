@@ -21,6 +21,7 @@ Improvements in this version
   complete cylindrical shell remains visible.
 * Shell plates can be colour-coded by thickness, with a fixed legend rendered
   in a reserved panel on the right side of the canvas.
+* A fixed global X/Y/Z axis indicator is rendered as a view-orientation overlay.
 
 The cylinder axis is the global Z axis.
 """
@@ -332,6 +333,7 @@ class Tkinter3DCanvas(tk.Frame):
         # Optional fixed 2D legend.  The 3D projection reserves space for it,
         # so the legend never covers the model.
         self._thickness_legend: Optional[Dict[str, Any]] = None
+        self._show_axis_indicator = True
 
         canvas_kwargs.setdefault("highlightthickness", 0)
         canvas_kwargs.setdefault("borderwidth", 0)
@@ -423,6 +425,10 @@ class Tkinter3DCanvas(tk.Frame):
     def clear_thickness_legend(self) -> None:
         self._thickness_legend = None
         self._invalidate_geometry_cache()
+        self._request_redraw()
+
+    def set_axis_indicator(self, visible: bool = True) -> None:
+        self._show_axis_indicator = bool(visible)
         self._request_redraw()
 
     def thickness_color(
@@ -563,6 +569,69 @@ class Tkinter3DCanvas(tk.Frame):
                 text=self._format_legend_value(value),
                 anchor="w",
                 fill="#202020",
+            )
+
+    def _draw_axis_indicator(self) -> None:
+        if not self._show_axis_indicator:
+            return
+
+        plot_width = self._plot_width()
+        if plot_width < 95 or self.height < 95:
+            return
+
+        origin_x = min(max(58.0, plot_width * 0.065), max(58.0, plot_width - 78.0))
+        origin_y = max(58.0, self.height - 64.0)
+        axis_length = min(58.0, max(34.0, min(plot_width, self.height) * 0.085))
+        right, camera_up, forward = self.camera.basis()
+
+        axes = [
+            ("X", Point3D(1.0, 0.0, 0.0), "#9b111e"),
+            ("Y", Point3D(0.0, 1.0, 0.0), "#159447"),
+            ("Z", Point3D(0.0, 0.0, 1.0), "#0d47a1"),
+        ]
+
+        def screen_delta(vector: Point3D) -> Tuple[float, float]:
+            return (
+                vector.dot(right) * axis_length,
+                -vector.dot(camera_up) * axis_length,
+            )
+
+        # Draw the visually deeper axis first so overlapping arrows read like a
+        # small 3D triad instead of a flat logo.
+        axes = sorted(axes, key=lambda item: item[1].dot(forward), reverse=True)
+
+        self.canvas.create_oval(
+            origin_x - 2,
+            origin_y - 2,
+            origin_x + 2,
+            origin_y + 2,
+            fill="#202020",
+            outline="",
+        )
+        for label, vector, color in axes:
+            dx, dy = screen_delta(vector)
+            end_x = origin_x + dx
+            end_y = origin_y + dy
+            if abs(dx) + abs(dy) < 3.0:
+                continue
+            self.canvas.create_line(
+                origin_x,
+                origin_y,
+                end_x,
+                end_y,
+                fill=color,
+                width=2,
+                arrow=tk.LAST,
+                arrowshape=(9, 11, 4),
+            )
+            label_offset = 11.0
+            length = max(math.hypot(dx, dy), 1.0)
+            self.canvas.create_text(
+                end_x + label_offset * dx / length,
+                end_y + label_offset * dy / length,
+                text=label,
+                fill=color,
+                font=("TkDefaultFont", 10, "bold"),
             )
 
     # ------------------------------------------------------------------
@@ -866,6 +935,7 @@ class Tkinter3DCanvas(tk.Frame):
 
         if not interactive:
             self._draw_thickness_legend()
+        self._draw_axis_indicator()
 
     def _get_world_primitives(self, quality: str) -> List[Dict[str, Any]]:
         cached = self._world_primitive_cache.get(quality)
