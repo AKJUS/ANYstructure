@@ -3,4 +3,4 @@
 __title__ = 'ANYstructure'
 __version__ = '6.1.1'
 __author__ = 'Audun Arnesen Nyhus'
-__license__ = 'MIT'
+__license__ = 'GPL-3.0-or-later'
