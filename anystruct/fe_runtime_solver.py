@@ -60,6 +60,8 @@ class RuntimeFEMLineSnapshot:
     line_points: Any
     structure_bundle: Any
     pressure_pa: float = 0.0
+    axial_force_n: float = 0.0
+    top_bottom_moment_nm: float = 0.0
     domain: str = ""
     is_cylinder: bool = False
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
@@ -201,6 +203,23 @@ def _read_attr_or_call(obj: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
+def _read_tk_var_or_value(obj: Any, name: str, default: Any = None) -> Any:
+    value = getattr(obj, name, default)
+    try:
+        return value.get() if hasattr(value, "get") else value
+    except Exception:
+        return default
+
+
+def _dict_value(data: Any, key: str, default: Any = None) -> Any:
+    if not isinstance(data, dict) or key not in data:
+        return default
+    value = data.get(key)
+    if isinstance(value, (list, tuple)) and value:
+        return value[0]
+    return value
+
+
 def _mm_or_m_to_m(value: Any, default: float = 0.0) -> float:
     number = _safe_float(value, default)
     if number <= 0.0:
@@ -312,6 +331,59 @@ def _plate_edge_supports_from_line_properties(plate: Any) -> tuple[str, str, str
     return tuple("fixed" if letter == "C" else "simply supported" for letter in text[:4])  # type: ignore[return-value]
 
 
+def _structure_pressure_pa(bundle: Any, cylinder_obj: Any | None) -> float:
+    if cylinder_obj is not None:
+        pressure = _safe_float(_read_attr_or_call(cylinder_obj, "psd", "_psd", default=0.0), 0.0)
+        return abs(pressure)
+    all_obj = bundle[0] if bundle and len(bundle) > 0 else None
+    pressure_mpa = _safe_float(_read_attr_or_call(all_obj, "lat_press", "_lat_press", default=0.0), 0.0)
+    return abs(pressure_mpa) * 1.0e6
+
+
+def _cylinder_pressure_pa_from_app(app: Any) -> float:
+    pressure_n_per_mm2 = _safe_float(_read_tk_var_or_value(app, "_new_shell_psd", None), 0.0)
+    return abs(pressure_n_per_mm2) * 1.0e6
+
+
+def _cylinder_force_defaults_from_properties(cylinder_obj: Any | None) -> tuple[float, float]:
+    if cylinder_obj is None:
+        return (0.0, 0.0)
+    main_properties: dict[str, Any] = {}
+    try:
+        main_properties = cylinder_obj.get_main_properties()
+    except Exception:
+        try:
+            main_properties = (cylinder_obj.get_all_properties() or {}).get("Main class", {})
+        except Exception:
+            main_properties = {}
+    axial_kn = _safe_float(
+        _dict_value(main_properties, "cone Nsd", _read_attr_or_call(cylinder_obj, "_cone_Nsd", default=0.0)),
+        0.0,
+    )
+    moment_knm = _safe_float(
+        _dict_value(main_properties, "cone M1sd", _read_attr_or_call(cylinder_obj, "_cone_M1sd", default=0.0)),
+        0.0,
+    )
+    return (axial_kn * 1000.0, moment_knm * 1000.0)
+
+
+def _cylinder_force_defaults_from_app(app: Any) -> tuple[float, float]:
+    axial = _safe_float(_read_tk_var_or_value(app, "_new_shell_Nsd", None), 0.0) * 1000.0
+    moment = _safe_float(_read_tk_var_or_value(app, "_new_shell_Msd", None), 0.0) * 1000.0
+    return (axial, moment)
+
+
+def _runtime_line_load_defaults(app: Any, cylinder_obj: Any | None) -> tuple[float, float]:
+    if cylinder_obj is None:
+        return (0.0, 0.0)
+    property_axial, property_moment = _cylinder_force_defaults_from_properties(cylinder_obj)
+    app_axial, app_moment = _cylinder_force_defaults_from_app(app)
+    return (
+        app_axial if abs(app_axial) > 0.0 else property_axial,
+        app_moment if abs(app_moment) > 0.0 else property_moment,
+    )
+
+
 def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
     """Collect current active-line data for the experimental runtime FEM mode."""
 
@@ -349,11 +421,23 @@ def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
     except Exception:
         domain = ""
 
+    structure_pressure = _structure_pressure_pa(bundle, cylinder_obj)
+    app_cylinder_pressure = _cylinder_pressure_pa_from_app(app) if cylinder_obj is not None else 0.0
+    if cylinder_obj is not None and app_cylinder_pressure > 0.0:
+        pressure = app_cylinder_pressure
+    elif cylinder_obj is not None and structure_pressure > 0.0:
+        pressure = structure_pressure
+    elif abs(pressure) <= 1.0e-12 and structure_pressure > 0.0:
+        pressure = structure_pressure
+    axial_force_n, top_bottom_moment_nm = _runtime_line_load_defaults(app, cylinder_obj)
+
     return RuntimeFEMLineSnapshot(
         line_name=active_line,
         line_points=line_dict[active_line],
         structure_bundle=bundle,
         pressure_pa=pressure,
+        axial_force_n=axial_force_n,
+        top_bottom_moment_nm=top_bottom_moment_nm,
         domain=domain,
         is_cylinder=cylinder_obj is not None,
         diagnostics=tuple(diagnostics),
@@ -2485,8 +2569,11 @@ class RuntimeFEMWindow:
         self.mesh_size_m = tk.DoubleVar(value=0.0)
         self.load_scale = tk.DoubleVar(value=1.0)
         self.pressure_pa = tk.DoubleVar(value=self.snapshot.pressure_pa)
+        snapshot_moment_nm = _safe_float(self.snapshot.top_bottom_moment_nm, 0.0)
+        fallback_moment_nm = _safe_float(getattr(app, "_fem_default_top_bottom_moment_nm", 0.0))
         self.top_bottom_moment_nm = tk.DoubleVar(
-            value=_safe_float(getattr(app, "_fem_default_top_bottom_moment_nm", 0.0)))
+            value=snapshot_moment_nm if abs(snapshot_moment_nm) > 0.0 else fallback_moment_nm
+        )
         self.include_stiffeners = tk.BooleanVar(value=True)
         self.include_girders = tk.BooleanVar(value=True)
         self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
@@ -2499,7 +2586,7 @@ class RuntimeFEMWindow:
         self.analysis_type = tk.StringVar(value="linear eigenvalue")
         self.buckling_analysis_type = tk.StringVar(value="linear eigenvalue")
         self.pressure_direction = tk.StringVar(value="external")
-        self.axial_force_n = tk.DoubleVar(value=0.0)
+        self.axial_force_n = tk.DoubleVar(value=_safe_float(self.snapshot.axial_force_n, 0.0))
         self.enforced_displacement_m = tk.DoubleVar(value=0.0)
         self.stiffener_eccentricity_m = tk.DoubleVar(value=0.0)
         self.girder_eccentricity_m = tk.DoubleVar(value=0.0)

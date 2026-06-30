@@ -98,14 +98,56 @@ class _FakeAppFlatMembers(_FakeApp):
     _line_to_struc = {"line1": [_AllStructureWithFlatMembers(), None, None, object(), None, None]}
 
 
+class _SimpleVar:
+    def __init__(self, value):
+        self._value = value
+
+    def get(self):
+        return self._value
+
+
+class _CylinderForces:
+    geometry = 7
+    psd = -200000.0
+
+    def get_main_properties(self):
+        return {
+            "psd": [-200000.0, "Pa"],
+            "cone Nsd": [1234.0, "kN"],
+            "cone M1sd": [5678.0, "kNm"],
+        }
+
+
+class _FakeCylinderForceApp(_FakeApp):
+    _line_to_struc = {"line1": [None, None, None, None, None, _CylinderForces()]}
+    _new_shell_Nsd = _SimpleVar(499999.999)
+    _new_shell_Msd = _SimpleVar(500000.0)
+    _new_shell_psd = _SimpleVar(-0.3)
+
+    def get_highest_pressure(self, line):
+        assert line == "line1"
+        return {"normal": 0.0}
+
+
 def test_active_line_snapshot_uses_current_anystructure_line():
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
 
     assert snapshot.line_name == "line1"
     assert snapshot.line_points == [1, 2]
     assert snapshot.pressure_pa == 12345.0
+    assert snapshot.axial_force_n == 0.0
+    assert snapshot.top_bottom_moment_nm == 0.0
     assert snapshot.domain == "Flat plate, stiffened"
     assert snapshot.is_cylinder is False
+
+
+def test_active_line_snapshot_transfers_selected_cylinder_force_loads_to_fem_defaults():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeCylinderForceApp())
+
+    assert snapshot.pressure_pa == pytest.approx(300000.0)
+    assert snapshot.axial_force_n == pytest.approx(499999999.0)
+    assert snapshot.top_bottom_moment_nm == pytest.approx(500000000.0)
+    assert snapshot.is_cylinder is True
 
 
 def test_runtime_geometry_summary_reads_flat_panel_dimensions_and_members():
@@ -818,7 +860,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.member_model = tk.StringVar(value=\"plates as shell, girders as beams\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
     assert "self.pressure_direction = tk.StringVar(value=\"external\")" in source
-    assert "self.axial_force_n = tk.DoubleVar(value=0.0)" in source
+    assert "self.axial_force_n = tk.DoubleVar(value=_safe_float(self.snapshot.axial_force_n, 0.0))" in source
     assert "self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)" in source
     assert "self.plate_alpha_vis = tk.StringVar(value=\"0.99\")" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
