@@ -628,7 +628,7 @@ class ShellElement(Element):
         thickness: float = 0.01,
         drilling_stabilization: float = 1.0e-3,
         reduced_integration: bool = False,
-        hourglass_stabilization: float = 1.0e-6,
+        hourglass_stabilization: float = 1.0e-8,
     ):
         super().__init__(element_id, node_ids, material_name)
         if len(set(node_ids)) != len(node_ids):
@@ -1064,6 +1064,24 @@ class ShellElement(Element):
         rho = material.density
         h = self.thickness
         M = np.zeros((self.total_dofs, self.total_dofs), dtype=float)
+        if self._is_8node and self.reduced_integration:
+            area = 0.0
+            for (xi, eta), weight in zip(self.gauss_points, self.gauss_weights):
+                _N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
+                _R, _dN_dx, _dN_dy, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)
+                area += float(det_j) * float(weight)
+            translational = float(rho) * float(h) * max(area, 0.0) / max(self.num_nodes, 1)
+            rotational = float(rho) * float(h) ** 3 / 12.0 * max(area, 0.0) / max(self.num_nodes, 1)
+            for i in range(self.num_nodes):
+                base = 6 * i
+                M[base + 0, base + 0] = translational
+                M[base + 1, base + 1] = translational
+                M[base + 2, base + 2] = translational
+                M[base + 3, base + 3] = rotational
+                M[base + 4, base + 4] = rotational
+                M[base + 5, base + 5] = rotational
+            self._mass_matrix = M
+            return M
         for (xi, eta), weight in zip(self.gauss_points, self.gauss_weights):
             N, dN_dxi, dN_deta = self.compute_shape_functions(float(xi), float(eta))
             R, _, _, det_j = self._local_frame_and_derivatives(coords, dN_dxi, dN_deta)

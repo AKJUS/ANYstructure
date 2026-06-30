@@ -30,6 +30,7 @@ solution and reports the imbalance through solver diagnostics.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
@@ -610,10 +611,26 @@ def solve_linear_many(
 
     start = time.time()
     local_cache = factorization_cache or FactorizationCache(name="linear_static_many", max_entries=1)
+    revisions = getattr(model, "revision_signature", lambda: getattr(model.mesh, "revision_signature", lambda: {})())()
+    stiffness_signature = json.dumps(
+        {
+            "analysis": "linear_static_many",
+            "matrix": "K_reduced",
+            "shape": tuple(int(v) for v in K_red.shape),
+            "nnz": int(K_red.nnz),
+            "model_revision": revisions,
+            "constraint_method": constraint_info.get("method"),
+            "num_independent_dofs": int(len(independent_dofs)),
+        },
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    )
     handle = factorize_cached(
         K_red,
         MatrixClass.GENERAL,
         cache=local_cache,
+        signature=stiffness_signature,
     )
     if handle.status != "ok":
         info = {
