@@ -17,6 +17,7 @@ import math
 import os
 import sys
 import threading
+import time
 import types
 
 import tkinter as tk
@@ -181,6 +182,137 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+_FE_KERNEL_WARMUP_LOCK = threading.RLock()
+_FE_KERNEL_WARMUP_STATE: dict[str, Any] = {
+    "status": "not_started",
+    "shell_orders": (),
+    "total_seconds": 0.0,
+    "message": "",
+}
+
+
+def _warmup_disabled() -> bool:
+    raw = os.environ.get("ANYSTRUCTURE_FE_SOLVER_WARMUP", "")
+    return str(raw).strip().lower() in {"0", "false", "no", "off", "disable", "disabled"}
+
+
+def _summarize_kernel_warmup_report(report: dict[str, Any], shell_orders: tuple[str, ...]) -> dict[str, Any]:
+    warmed = report.get("shell_orders") if isinstance(report, dict) else {}
+    warmed = warmed if isinstance(warmed, dict) else {}
+    max_difference = 0.0
+    for item in warmed.values():
+        if isinstance(item, dict):
+            max_difference = max(max_difference, _safe_float(item.get("matrix_difference_norm"), 0.0))
+    return {
+        "status": str(report.get("status", "completed") if isinstance(report, dict) else "completed"),
+        "shell_orders": tuple(str(key) for key in warmed.keys()) or shell_orders,
+        "total_seconds": _safe_float(report.get("total_seconds"), 0.0) if isinstance(report, dict) else 0.0,
+        "jit_enabled": bool((report.get("jit") or {}).get("enabled")) if isinstance(report, dict) else False,
+        "parallel_threads": (report.get("jit") or {}).get("num_threads") if isinstance(report, dict) else None,
+        "max_matrix_difference_norm": float(max_difference),
+        "message": "",
+    }
+
+
+def fe_solver_kernel_warmup_status() -> dict[str, Any]:
+    """Return the process-wide FE kernel warmup state for runtime diagnostics."""
+
+    with _FE_KERNEL_WARMUP_LOCK:
+        return dict(_FE_KERNEL_WARMUP_STATE)
+
+
+def start_fe_solver_kernel_warmup(
+    shell_orders: tuple[str, ...] = ("S4", "Q8", "Q8R"),
+    *,
+    background: bool = True,
+    status_callback=None,
+) -> dict[str, Any]:
+    """Start optional FE backend kernel warmup once per process."""
+
+    requested = tuple(str(order).upper() for order in shell_orders)
+    if _warmup_disabled():
+        with _FE_KERNEL_WARMUP_LOCK:
+            _FE_KERNEL_WARMUP_STATE.update(
+                {
+                    "status": "disabled",
+                    "shell_orders": requested,
+                    "total_seconds": 0.0,
+                    "message": "Disabled by ANYSTRUCTURE_FE_SOLVER_WARMUP.",
+                }
+            )
+            return dict(_FE_KERNEL_WARMUP_STATE)
+
+    with _FE_KERNEL_WARMUP_LOCK:
+        status = str(_FE_KERNEL_WARMUP_STATE.get("status", "not_started"))
+        if status in {"running", "completed", "failed", "backend_unavailable", "disabled"}:
+            return dict(_FE_KERNEL_WARMUP_STATE)
+        _FE_KERNEL_WARMUP_STATE.update(
+            {
+                "status": "running",
+                "shell_orders": requested,
+                "total_seconds": 0.0,
+                "message": "FE solver kernel warmup is running.",
+                "started_at": time.time(),
+            }
+        )
+
+    def worker() -> None:
+        start = time.perf_counter()
+        try:
+            if status_callback is not None:
+                status_callback("Warming FE solver shell kernels...")
+            report = fe_solver.warm_fe_solver_kernels(requested)
+            summary = _summarize_kernel_warmup_report(report, requested)
+            summary["total_seconds"] = summary["total_seconds"] or float(time.perf_counter() - start)
+            with _FE_KERNEL_WARMUP_LOCK:
+                _FE_KERNEL_WARMUP_STATE.update(summary)
+                _FE_KERNEL_WARMUP_STATE["completed_at"] = time.time()
+            if status_callback is not None:
+                status_callback("FE solver kernel warmup " + str(summary["status"]).replace("_", " ") + ".")
+        except Exception as exc:
+            with _FE_KERNEL_WARMUP_LOCK:
+                _FE_KERNEL_WARMUP_STATE.update(
+                    {
+                        "status": "failed",
+                        "shell_orders": requested,
+                        "total_seconds": float(time.perf_counter() - start),
+                        "message": str(exc),
+                        "completed_at": time.time(),
+                    }
+                )
+            if status_callback is not None:
+                status_callback("FE solver kernel warmup failed: " + str(exc))
+
+    if background:
+        threading.Thread(target=worker, name="ANYstructureFEKernelWarmup", daemon=True).start()
+    else:
+        worker()
+    return fe_solver_kernel_warmup_status()
+
+
+def _warmup_diagnostics() -> list[str]:
+    state = fe_solver_kernel_warmup_status()
+    status = str(state.get("status", "not_started"))
+    if status == "not_started":
+        return ["FE solver kernel warmup: not started."]
+    orders = ", ".join(str(order) for order in state.get("shell_orders", ()) or ())
+    seconds = _safe_float(state.get("total_seconds"), 0.0)
+    text = "FE solver kernel warmup: " + status.replace("_", " ")
+    if orders:
+        text += " for " + orders
+    if seconds > 0.0:
+        text += " in " + str(round(seconds, 3)) + " s"
+    if status == "completed":
+        text += "; max matrix difference " + str(round(_safe_float(state.get("max_matrix_difference_norm")), 12))
+        if state.get("jit_enabled") is not None:
+            text += "; JIT " + ("enabled" if state.get("jit_enabled") else "disabled")
+        if state.get("parallel_threads") is not None:
+            text += "; threads " + str(state.get("parallel_threads"))
+    if state.get("message") and status not in {"running", "completed"}:
+        text += " (" + str(state.get("message")) + ")"
+    return [text + "."]
 
 
 def _nearest_nonlinear_layer_count(value: Any) -> int:
@@ -691,9 +823,11 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
     else:
         solver_result = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
     diagnostics.extend(solver_result.diagnostics)
+    diagnostics.extend(_warmup_diagnostics())
 
     custom_patches = _runtime_custom_pressure_patches(options)
     custom_edges = _runtime_custom_edges(options)
+    warmup_state = fe_solver_kernel_warmup_status()
 
     summary = {
         **geometry,
@@ -787,6 +921,12 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "memory_limit_mb": float(options.memory_limit_mb),
         "capacity_buckling_mode_number": int(options.capacity_buckling_mode_number),
         "capacity_mesh_min_elements_per_half_wave": int(options.capacity_mesh_min_elements_per_half_wave),
+        "kernel_warmup_status": str(warmup_state.get("status", "not_started")),
+        "kernel_warmup_shell_orders": tuple(str(order) for order in warmup_state.get("shell_orders", ()) or ()),
+        "kernel_warmup_total_seconds": _safe_float(warmup_state.get("total_seconds"), 0.0),
+        "kernel_warmup_jit_enabled": bool(warmup_state.get("jit_enabled", False)),
+        "kernel_warmup_parallel_threads": warmup_state.get("parallel_threads"),
+        "kernel_warmup_max_matrix_difference_norm": _safe_float(warmup_state.get("max_matrix_difference_norm"), 0.0),
         "solver": solver_result.solver_name,
         "mesh_info": dict(solver_result.mesh_info),
         "max_displacement_m": solver_result.displacement_max_m,
@@ -835,6 +975,15 @@ def _alpha_to_stipple(alpha: float) -> str:
     if alpha >= 0.18:
         return "gray25"
     return "gray12"
+
+
+def _crisp_canvas_alpha(value: Any, default: float = 1.0) -> float:
+    """Avoid soft-looking near-opaque Tk canvas surfaces."""
+
+    alpha = _clamped_alpha(value, default)
+    if alpha >= 0.98:
+        return 1.0
+    return alpha
 
 
 def _blend_hex_color(color: str, alpha: float, background: str = "#ffffff") -> str:
@@ -1768,6 +1917,19 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         )
     if result.buckling_factors:
         lines.append("Critical load factor: " + str(round(result.buckling_factors[0], 4)))
+    warmup_status = str(summary.get("kernel_warmup_status", "") or "")
+    if warmup_status:
+        orders = ", ".join(str(order) for order in summary.get("kernel_warmup_shell_orders", ()) or ())
+        lines.extend(["", "FE solver kernel warmup:"])
+        lines.append(" - status: " + warmup_status.replace("_", " "))
+        if orders:
+            lines.append(" - shell orders: " + orders)
+        if _safe_float(summary.get("kernel_warmup_total_seconds"), 0.0) > 0.0:
+            lines.append(" - time [s]: " + str(round(_safe_float(summary.get("kernel_warmup_total_seconds")), 3)))
+        lines.append(" - JIT: " + ("enabled" if bool(summary.get("kernel_warmup_jit_enabled")) else "disabled or unavailable"))
+        if summary.get("kernel_warmup_parallel_threads") is not None:
+            lines.append(" - threads: " + str(summary.get("kernel_warmup_parallel_threads")))
+        lines.append(" - max matrix difference: " + str(round(_safe_float(summary.get("kernel_warmup_max_matrix_difference_norm")), 12)))
     mesh_info = summary.get("mesh_info") or {}
     if mesh_info:
         lines.extend([
@@ -2700,8 +2862,8 @@ class RuntimeFEMWindow:
         self.show_plate_vis = tk.BooleanVar(value=True)
         self.show_stiffener_vis = tk.BooleanVar(value=True)
         self.show_girder_vis = tk.BooleanVar(value=True)
-        self.plate_alpha_vis = tk.StringVar(value="0.99")
-        self.member_alpha_vis = tk.StringVar(value="0.95")
+        self.plate_alpha_vis = tk.StringVar(value="1.0")
+        self.member_alpha_vis = tk.StringVar(value="1.0")
         self.colormap_vis = tk.StringVar(value="jet")
         self.upper_result_frame = None
         self.upper_result_text = None
@@ -2715,6 +2877,7 @@ class RuntimeFEMWindow:
         self._build()
         self._bind_plot_configuration_traces()
         self._show_as_normal_maximizable_window()
+        self._start_kernel_warmup()
 
     def _bind_plot_configuration_traces(self) -> None:
         """Redraw both the base model and solved result when plot options change."""
@@ -2734,6 +2897,27 @@ class RuntimeFEMWindow:
                 self._plot_trace_ids.append((variable, trace_id))
             except Exception:
                 pass
+
+    def _start_kernel_warmup(self) -> None:
+        state = start_fe_solver_kernel_warmup(background=True)
+        status = str(state.get("status", "not_started"))
+        if status in {"running", "completed", "disabled", "backend_unavailable", "failed"}:
+            self._write_status(_warmup_diagnostics()[0], keep_run_results=True)
+        if status == "running":
+            try:
+                self.window.after(600, self._poll_kernel_warmup)
+            except Exception:
+                pass
+
+    def _poll_kernel_warmup(self) -> None:
+        state = fe_solver_kernel_warmup_status()
+        if str(state.get("status", "")) == "running":
+            try:
+                self.window.after(600, self._poll_kernel_warmup)
+            except Exception:
+                pass
+            return
+        self._write_status(_warmup_diagnostics()[0], keep_run_results=True)
 
     def _schedule_plot_refresh(self, *_args: Any) -> None:
         """Debounce entry edits so typing does not rebuild the 3D scene per key."""
@@ -3584,8 +3768,8 @@ class RuntimeFEMWindow:
         plate_alpha_var = getattr(self, "plate_alpha_vis", None)
         member_alpha_var = getattr(self, "member_alpha_vis", None)
         colormap_var = getattr(self, "colormap_vis", None)
-        plate_alpha = _clamped_alpha(plate_alpha_var.get() if plate_alpha_var is not None else 1.0, 1.0)
-        member_alpha = _clamped_alpha(member_alpha_var.get() if member_alpha_var is not None else 0.95, 0.95)
+        plate_alpha = _crisp_canvas_alpha(plate_alpha_var.get() if plate_alpha_var is not None else 1.0, 1.0)
+        member_alpha = _crisp_canvas_alpha(member_alpha_var.get() if member_alpha_var is not None else 1.0, 1.0)
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
         _configure_tk_canvas_colormap(str(colormap_var.get() if colormap_var is not None else "jet"))
@@ -3790,8 +3974,8 @@ class RuntimeFEMWindow:
         display_mode = self._selected_display_mode()
         deformation_scale = max(_safe_float(self.deformation_scale.get(), 0.0), 0.0)
         component = self._selected_component()
-        plate_alpha = _clamped_alpha(self.plate_alpha_vis.get(), 1.0)
-        member_alpha = _clamped_alpha(self.member_alpha_vis.get(), 0.95)
+        plate_alpha = _crisp_canvas_alpha(self.plate_alpha_vis.get(), 1.0)
+        member_alpha = _crisp_canvas_alpha(self.member_alpha_vis.get(), 1.0)
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
         _configure_tk_canvas_colormap(str(self.colormap_vis.get()))

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from typing import Tuple
 import numpy as np
-from .jit_compiler import njit
+from .jit_compiler import njit, prange
 
 _SMALL = 1.0e-12
 
-@njit
+@njit(cache=True)
 def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.array([
         a[1]*b[2] - a[2]*b[1],
@@ -20,14 +20,14 @@ def _cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a[0]*b[1] - a[1]*b[0]
     ])
 
-@njit
+@njit(cache=True)
 def _normalize(vector: np.ndarray) -> Tuple[np.ndarray, float]:
     norm = float(np.sqrt(np.dot(vector, vector)))
     if norm < _SMALL:
         return np.zeros(3, dtype=float), norm
     return vector / norm, norm
 
-@njit
+@njit(cache=True)
 def _inv2(matrix: np.ndarray) -> Tuple[np.ndarray, float]:
     det = matrix[0, 0] * matrix[1, 1] - matrix[0, 1] * matrix[1, 0]
     if abs(det) < _SMALL:
@@ -38,7 +38,7 @@ def _inv2(matrix: np.ndarray) -> Tuple[np.ndarray, float]:
     ]) / det
     return inv, float(det)
 
-@njit
+@njit(cache=True)
 def _compute_4node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     N = np.array([
         0.25 * (1.0 - xi) * (1.0 - eta),
@@ -60,7 +60,7 @@ def _compute_4node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarray, n
     ])
     return N, dN_dxi, dN_deta
 
-@njit
+@njit(cache=True)
 def _compute_8node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     N = np.zeros(8)
     N[0] = -0.25 * (1.0 - xi) * (1.0 - eta) * (1.0 + xi + eta)
@@ -93,7 +93,7 @@ def _compute_8node_shape_functions(xi: float, eta: float) -> Tuple[np.ndarray, n
     dN_deta[7] = -eta * (1.0 - xi)
     return N, dN_dxi, dN_deta
 
-@njit
+@njit(cache=True)
 def _fallback_edge_direction_jit(coords: np.ndarray, normal: np.ndarray) -> np.ndarray:
     num_nodes = coords.shape[0]
     if num_nodes >= 2:
@@ -120,7 +120,7 @@ def _fallback_edge_direction_jit(coords: np.ndarray, normal: np.ndarray) -> np.n
             return e1
     raise ValueError("Shell element has no valid in-plane direction")
 
-@njit
+@njit(cache=True)
 def _local_frame_and_derivatives_jit(
     coords: np.ndarray,
     dN_dxi: np.ndarray,
@@ -161,7 +161,7 @@ def _local_frame_and_derivatives_jit(
     dN_dy = inv_j_local[1, 0] * dN_dxi + inv_j_local[1, 1] * dN_deta
     return R, dN_dx, dN_dy, det_j
 
-@njit
+@njit(cache=True)
 def _build_shell_b_matrices_jit(
     N: np.ndarray,
     dN_dx: np.ndarray,
@@ -188,7 +188,7 @@ def _build_shell_b_matrices_jit(
     B_s[1, 3::6] = -N
     return B_m, B_b, B_s
 
-@njit
+@njit(cache=True)
 def _build_drilling_b_matrix_jit(
     N: np.ndarray,
     dN_dx: np.ndarray,
@@ -201,7 +201,7 @@ def _build_drilling_b_matrix_jit(
     B_d[0, 5::6] = N
     return B_d
 
-@njit
+@njit(cache=True)
 def _mitc4_shear_samples_jit(
     coords: np.ndarray,
     R: np.ndarray,
@@ -252,7 +252,7 @@ def _mitc4_shear_samples_jit(
         
     return planar, samples_arr
 
-@njit
+@njit(cache=True)
 def _mitc4_shear_b_matrix_jit(
     planar: np.ndarray,
     samples_arr: np.ndarray,
@@ -285,7 +285,7 @@ def _mitc4_shear_b_matrix_jit(
             
     return res, det_j
 
-@njit
+@njit(cache=True, parallel=True)
 def compute_shell_stiffness_matrices_jit(
     coords_all: np.ndarray,      # (N, num_nodes, 3)
     is_4node: bool,
@@ -323,7 +323,7 @@ def compute_shell_stiffness_matrices_jit(
     
     K_all = np.zeros((N_elem, total_dofs, total_dofs))
     
-    for e in range(N_elem):
+    for e in prange(N_elem):
         coords = coords_all[e]
         K = np.zeros((total_dofs, total_dofs))
         

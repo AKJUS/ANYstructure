@@ -157,8 +157,10 @@ def _assemble_element_matrix(
 
     # Precompute shell stiffnesses in a JIT-compiled batch if doing stiffness matrix assembly
     precomputed = {}
+    vectorized_shell_groups = []
     if matrix_type == "stiffness":
         from .elements import ShellElement
+        from .jit_compiler import JIT_ENABLED, JIT_DISABLED_REASON, jit_diagnostics
         from .vectorized_stiffness import compute_shell_stiffness_matrices_jit
 
         groups = {}
@@ -219,6 +221,22 @@ def _assemble_element_matrix(
 
             for idx, (elem_id, element) in enumerate(elem_list):
                 precomputed[elem_id] = stiffnesses[idx]
+            jit_info = jit_diagnostics()
+            vectorized_shell_groups.append(
+                {
+                    "shell_order": "S4" if is_4node else "Q8",
+                    "num_elements": int(n_elem),
+                    "num_nodes": int(num_nodes),
+                    "material": str(material_name),
+                    "thickness": float(thickness),
+                    "jit_enabled": bool(JIT_ENABLED),
+                    "jit_disabled_reason": JIT_DISABLED_REASON,
+                    "kernel": "compute_shell_stiffness_matrices_jit",
+                    "parallel_kernel": True,
+                    "parallel_threads": jit_info.get("num_threads"),
+                    "backend": jit_info.get("backend"),
+                }
+            )
 
     # Retrieve or build cached sparsity pattern
     rows_concat, cols_concat = _get_cached_sparsity_pattern(mesh, matrix_type)
@@ -270,6 +288,10 @@ def _assemble_element_matrix(
     )
     matrix = coo.tocsr()
     info["diagnostics"]["assembled_symmetry_error"] = _relative_symmetry_error(matrix)
+    if matrix_type == "stiffness":
+        info["diagnostics"]["vectorized_shell_groups"] = vectorized_shell_groups
+        info["diagnostics"]["vectorized_shell_element_count"] = int(len(precomputed))
+        info["diagnostics"]["scalar_shell_element_count"] = int(info["num_elements"] - len(precomputed))
     info["sparsity_signature"] = _topology_signature(mesh, matrix_type)
     return matrix, info
 

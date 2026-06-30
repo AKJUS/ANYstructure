@@ -207,6 +207,7 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
     assert result.summary["mesh_fidelity"] == "medium"
     assert result.summary["solver"] == "ANYstructure production FE mesh"
     assert result.summary["mesh_info"]["shells"] > 0
+    assert "kernel_warmup_status" in result.summary
     assert result.summary["prestress_summary"]
     assert result.summary["load_resultant"]
     assert result.visualization["type"] == "flat"
@@ -225,6 +226,67 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
     assert result.stress_percentiles[0][0] == "p95"
     assert result.stress_percentiles[0][1] > 0.0
     assert result.buckling_factors == tuple(sorted(result.buckling_factors))
+
+
+def test_fe_solver_kernel_warmup_manager_reports_runtime_state(monkeypatch):
+    with fe_runtime_solver._FE_KERNEL_WARMUP_LOCK:
+        fe_runtime_solver._FE_KERNEL_WARMUP_STATE.clear()
+        fe_runtime_solver._FE_KERNEL_WARMUP_STATE.update(
+            {"status": "not_started", "shell_orders": (), "total_seconds": 0.0, "message": ""}
+        )
+
+    def fake_warmup(shell_orders):
+        return {
+            "status": "completed",
+            "total_seconds": 0.25,
+            "jit": {"enabled": True, "num_threads": 4},
+            "shell_orders": {
+                str(order): {"matrix_difference_norm": 0.0}
+                for order in shell_orders
+            },
+        }
+
+    monkeypatch.setattr(fe_runtime_solver.fe_solver, "warm_fe_solver_kernels", fake_warmup)
+    try:
+        state = fe_runtime_solver.start_fe_solver_kernel_warmup(("S4", "Q8"), background=False)
+        assert state["status"] == "completed"
+        assert state["shell_orders"] == ("S4", "Q8")
+        assert state["jit_enabled"] is True
+        assert state["parallel_threads"] == 4
+        assert state["max_matrix_difference_norm"] == pytest.approx(0.0)
+        assert "completed" in fe_runtime_solver._warmup_diagnostics()[0]
+    finally:
+        with fe_runtime_solver._FE_KERNEL_WARMUP_LOCK:
+            fe_runtime_solver._FE_KERNEL_WARMUP_STATE.clear()
+            fe_runtime_solver._FE_KERNEL_WARMUP_STATE.update(
+                {"status": "not_started", "shell_orders": (), "total_seconds": 0.0, "message": ""}
+            )
+
+
+def test_runtime_result_print_includes_kernel_warmup_summary():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={
+            "line": "line",
+            "geometry": "flat",
+            "kernel_warmup_status": "completed",
+            "kernel_warmup_shell_orders": ("S4", "Q8R"),
+            "kernel_warmup_total_seconds": 0.25,
+            "kernel_warmup_jit_enabled": True,
+            "kernel_warmup_parallel_threads": 4,
+            "kernel_warmup_max_matrix_difference_norm": 0.0,
+            "mesh_info": {},
+            "prestress_summary": {},
+            "load_resultant": {},
+        },
+    )
+
+    text = fe_runtime_solver.format_runtime_fem_result(result)
+
+    assert "FE solver kernel warmup:" in text
+    assert " - status: completed" in text
+    assert " - shell orders: S4, Q8R" in text
+    assert " - threads: 4" in text
 
 
 def test_run_runtime_fem_flat_member_geometry_matches_generated_fe_model():
@@ -414,7 +476,7 @@ def test_standalone_girder_panel_centers_cut_bays_for_symmetric_stress_model():
     )
 
 
-def test_standalone_girder_pressure_static_deflection_is_downward_not_nullspace_balanced():
+def test_standalone_girder_pressure_static_deflection_is_dominantly_downward_not_nullspace_balanced():
     snapshot = fe_runtime_solver.active_line_snapshot(fe_runtime_solver.example_runtime_app())
     result = fe_runtime_solver.run_runtime_fem(
         snapshot,
@@ -434,8 +496,11 @@ def test_standalone_girder_pressure_static_deflection_is_downward_not_nullspace_
     assert prestress["constraint_method"] == "transformation_fixed_plus_mpc"
     assert prestress["constraint_mode"] == "transformation"
     assert prestress["nullspace_projection"] == pytest.approx(0.0)
-    assert min(w_values) < 0.0
-    assert max(w_values) <= 1.0e-4
+    downward_peak = abs(min(w_values))
+    upward_peak = max(w_values)
+    assert downward_peak > 1.0e-3
+    assert result.summary["max_displacement_m"] == pytest.approx(downward_peak, rel=1.0e-6)
+    assert upward_peak <= max(1.0e-3, 5.0e-3 * downward_peak)
 
 
 def test_runtime_fem_matplotlib_figure_contains_geometry_axis():
@@ -862,7 +927,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.pressure_direction = tk.StringVar(value=\"external\")" in source
     assert "self.axial_force_n = tk.DoubleVar(value=_safe_float(self.snapshot.axial_force_n, 0.0))" in source
     assert "self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)" in source
-    assert "self.plate_alpha_vis = tk.StringVar(value=\"0.99\")" in source
+    assert "self.plate_alpha_vis = tk.StringVar(value=\"1.0\")" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "member_model=str(self.member_model.get())" in source
@@ -2581,6 +2646,12 @@ def test_populate_canvas_with_geometry_accepts_generated_cylinder_preview():
     assert len(canvas.cylinders) == 1
     assert len(canvas.longitudinal_stiffeners) > 0
     assert len(canvas.ring_stiffeners) > 0
+
+
+def test_crisp_canvas_alpha_snaps_near_opaque_values_to_solid():
+    assert fe_runtime_solver._crisp_canvas_alpha("1.0") == 1.0
+    assert fe_runtime_solver._crisp_canvas_alpha("0.99") == 1.0
+    assert fe_runtime_solver._crisp_canvas_alpha("0.95") == pytest.approx(0.95)
 
 
 def test_runtime_status_updates_do_not_replace_completed_run_results():

@@ -32,6 +32,7 @@ try:
     from anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
     from anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
     from anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
+    from anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
     try:
@@ -45,6 +46,7 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
         from ANYstructure.anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
         from ANYstructure.anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
+        from ANYstructure.anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
         _full_backend = None
@@ -57,6 +59,7 @@ except ModuleNotFoundError:
         _backend_arc_length_control = None
         _backend_solve_static_arc_length = None
         _backend_solve_transient_newmark = None
+        _backend_warm_fe_solver_kernels = None
         _backend_load_case_resultant = None
 
 
@@ -4407,9 +4410,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 if nonlinear_static_result.steps:
                     prestress_summary["nonlinear_static_max_plastic_strain"] = float(
                         max(step.max_equivalent_plastic_strain for step in nonlinear_static_result.steps)
-                    )
+                )
                 plastic_strain_by_node = _nodal_engineering_plastic_strain(model, nonlinear_static_result.element_states)
                 diagnostics.append("Ran " + nonlinear_control + " geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
+                diagnostics.append("Ran incremental geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
                 if nonlinear_static_result.converged:
                     displacements = np.asarray(nonlinear_static_result.displacements, dtype=float)
                     prestress_states, recovered = _full_backend.recover_prestress_from_static_result(model, displacements)
@@ -4675,3 +4679,15 @@ def full_backend_api():
     if _full_backend is None:
         raise RuntimeError("The vendored full FE solver backend is not available.")
     return _full_backend
+
+
+def warm_fe_solver_kernels(shell_orders=("S4", "Q8", "Q8R")) -> dict[str, object]:
+    """Warm optional compiled FE backend kernels for runtime use."""
+
+    if _backend_warm_fe_solver_kernels is None:
+        return {
+            "status": "backend_unavailable",
+            "shell_orders": {},
+            "message": "The vendored full FE solver backend warmup helper is not available.",
+        }
+    return _backend_warm_fe_solver_kernels(shell_orders)
