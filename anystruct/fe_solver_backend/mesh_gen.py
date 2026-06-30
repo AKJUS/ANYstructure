@@ -269,6 +269,19 @@ class InterpolatedBeamShellMPCElement:
     def compute_geometric_stiffness_matrix(self, mesh: "FEMesh", material: "Material", state: Any = None) -> np.ndarray:
         return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
 
+    def compute_nonlinear_response(
+        self,
+        mesh: "FEMesh",
+        material: "Material",
+        u_elem: np.ndarray,
+        state: Any = None,
+        num_layers: int = 5,
+        tangent: bool = True,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], Any]:
+        force = np.zeros(self.total_dofs, dtype=float)
+        stiffness = np.zeros((self.total_dofs, self.total_dofs), dtype=float) if tangent else None
+        return force, stiffness, state
+
     def compute_stresses(
         self,
         mesh: "FEMesh",

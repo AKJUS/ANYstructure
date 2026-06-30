@@ -304,14 +304,24 @@ class NonlinearStaticResult:
     def failure_reason(self) -> Optional[str]:
         return self.info.get("failure_reason")
 
+    @property
+    def status_category(self) -> str:
+        return str(self.info.get("status_category", self.status))
+
+    @property
+    def stop_reason(self) -> Optional[str]:
+        return self.info.get("stop_reason", self.failure_reason)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,
+            "status_category": self.status_category,
             "converged": self.converged,
             "load_factor": self.load_factor,
             "peak_load_factor": self.peak_load_factor,
             "last_converged_load_factor": self.last_converged_load_factor,
             "failure_reason": self.failure_reason,
+            "stop_reason": self.stop_reason,
             "info": self.info,
             "steps": [step.to_dict() for step in self.steps],
         }
@@ -558,6 +568,25 @@ def _copy_initial_states(initial_element_states: Optional[Mapping[int, Any]]) ->
     return copy.deepcopy(dict(initial_element_states or {}))
 
 
+def _nonlinear_status_category(status: str, failure_reason: Optional[str]) -> str:
+    if status == "completed":
+        return "converged"
+    if status == "empty_reduced_system":
+        return "invalid_model"
+    reason = str(failure_reason or "")
+    if "singular" in reason or "factorization" in reason:
+        return "singular_tangent"
+    if "nonfinite" in reason:
+        return "numerical_instability"
+    if "maximum_iterations" in reason:
+        return "iteration_failure"
+    if "minimum_load_increment" in reason:
+        return "limit_point_or_nonconvergence"
+    if status == "stopped_at_limit":
+        return "limit_point_or_nonconvergence"
+    return "failed"
+
+
 def _solve_static_displacement_control(
     *,
     model: "FEModel",
@@ -707,6 +736,8 @@ def _solve_static_displacement_control(
 
     u_final = np.asarray(T @ q + u0, dtype=float).reshape(-1)
     info["failure_reason"] = failure_reason
+    info["stop_reason"] = "target_displacement_reached" if failure_reason is None else failure_reason
+    info["status_category"] = _nonlinear_status_category(status, failure_reason)
     info["last_converged_load_factor"] = float(lam)
     info["peak_load_factor"] = max((step.load_factor for step in steps), default=float(lam))
     info["force_displacement_history"] = history
@@ -803,8 +834,15 @@ def solve_static_nonlinear(
     if imperfection is not None:
         info["imperfection"] = getattr(model, "imperfection_metadata", [])
 
+    control_name = str(control).lower()
+    if control_name not in {"force", "displacement"}:
+        raise ValueError("control must be 'force' or 'displacement'")
+
     n_red = int(T.shape[1])
     if n_red == 0:
+        info["failure_reason"] = "empty_reduced_system"
+        info["stop_reason"] = "empty_reduced_system"
+        info["status_category"] = _nonlinear_status_category("empty_reduced_system", "empty_reduced_system")
         info["result_case"] = make_result_case(
             name="nonlinear_static",
             analysis_type="nonlinear_static",
@@ -825,10 +863,6 @@ def solve_static_nonlinear(
         target_load_factor = load_program.total_factor
     else:
         target_load_factor = float(max_load_factor)
-
-    control_name = str(control).lower()
-    if control_name not in {"force", "displacement"}:
-        raise ValueError("control must be 'force' or 'displacement'")
 
     def external_load_at(path_factor: float) -> Tuple[np.ndarray, Dict[str, float], Optional[str]]:
         if load_program is None:
@@ -872,7 +906,7 @@ def solve_static_nonlinear(
     def newton_increment(q_start, F_ext_red, reference, line_search):
         """One load increment.  Plain full Newton when ``line_search`` is
         False (the fast path); backtracking-line-search Newton otherwise.
-        Returns (converged, q, states, residual_norm, iterations_used).
+        Returns (converged, q, states, residual_norm, iterations_used, failure_reason).
         """
         nonlocal total_iterations
         q_trial = q_start.copy()
@@ -886,7 +920,7 @@ def solve_static_nonlinear(
         for iteration in range(1, max_iterations + 1):
             total_iterations += 1
             if residual_norm <= tolerance * reference:
-                return True, q_trial, trial_states, residual_norm, iteration
+                return True, q_trial, trial_states, residual_norm, iteration, None
 
             K_red = (T.T @ K_T @ T).tocsr()
             try:
@@ -898,9 +932,9 @@ def solve_static_nonlinear(
                     )
                     dq = np.asarray(handle.solve(residual), dtype=float).reshape(-1)
             except Exception:
-                return False, q_start, committed_states, residual_norm, iteration
+                return False, q_start, committed_states, residual_norm, iteration, "singular_tangent_factorization"
             if np.any(~np.isfinite(dq)):
-                return False, q_start, committed_states, residual_norm, iteration
+                return False, q_start, committed_states, residual_norm, iteration, "nonfinite_newton_increment"
 
             if not line_search:
                 q_trial = q_trial + dq
@@ -911,7 +945,7 @@ def solve_static_nonlinear(
                 residual = F_ext_red - np.asarray(T.T @ F_int, dtype=float).reshape(-1)
                 residual_norm = float(np.linalg.norm(residual))
                 if not np.isfinite(residual_norm):
-                    return False, q_start, committed_states, residual_norm, iteration
+                    return False, q_start, committed_states, residual_norm, iteration, "nonfinite_residual"
                 continue
 
             # Backtracking line search on the residual norm.  Von Karman
@@ -944,9 +978,9 @@ def solve_static_nonlinear(
                     break
                 scale *= settings.line_search_reduction
             if not accepted:
-                return False, q_start, committed_states, residual_norm, iteration
+                return False, q_start, committed_states, residual_norm, iteration, "line_search_failed"
 
-        return False, q_start, committed_states, residual_norm, max_iterations
+        return False, q_start, committed_states, residual_norm, max_iterations, "maximum_iterations_reached"
 
     force_displacement_history: List[Dict[str, Any]] = []
     convergence_adaptation: List[Dict[str, Any]] = []
@@ -966,14 +1000,14 @@ def solve_static_nonlinear(
             line_search_first = policy == "always" or (
                 policy == "auto" and (force_line_search_next or attempted_step_size > base_step * 1.000001)
             )
-            converged, q_new, states_new, residual_norm, iterations_used = newton_increment(
+            converged, q_new, states_new, residual_norm, iterations_used, failure_reason = newton_increment(
                 q, F_ext_red, reference, line_search=line_search_first
             )
             line_search_used = bool(line_search_first)
             if not converged and not line_search_first and policy in {"rescue", "auto", "always"}:
                 # Rescue retry with globalized (line-search) Newton before
                 # cutting the load increment.
-                converged, q_new, states_new, residual_norm, extra = newton_increment(
+                converged, q_new, states_new, residual_norm, extra, failure_reason = newton_increment(
                     q, F_ext_red, reference, line_search=True
                 )
                 iterations_used += extra
@@ -1055,11 +1089,17 @@ def solve_static_nonlinear(
                 if step_size < min_step:
                     status = "stopped_at_limit" if steps else "diverged"
                     info["failure_reason"] = "minimum_load_increment_reached"
+                    info["first_failed_load_factor"] = float(lam_trial)
+                    info["first_failed_step_size"] = float(attempted_step_size)
+                    info["first_failed_iteration_reason"] = failure_reason
                     break
 
     u_final = np.asarray(T @ q + u0, dtype=float).reshape(-1)
     if "failure_reason" not in info and status == "completed":
         info["failure_reason"] = None
+    failure_reason = info.get("failure_reason")
+    info["stop_reason"] = "target_load_factor_reached" if failure_reason is None else failure_reason
+    info["status_category"] = _nonlinear_status_category(status, failure_reason)
     info["last_converged_load_factor"] = float(lam)
     info["peak_load_factor"] = max((step.load_factor for step in steps), default=float(lam))
     info["force_displacement_history"] = force_displacement_history

@@ -163,7 +163,11 @@ def _assemble_element_matrix(
 
         groups = {}
         for elem_id, element in mesh.elements.items():
-            if isinstance(element, ShellElement) and getattr(element, "_is_quadrilateral", False):
+            if (
+                isinstance(element, ShellElement)
+                and getattr(element, "_is_quadrilateral", False)
+                and not (getattr(element, "_is_8node", False) and bool(getattr(element, "reduced_integration", False)))
+            ):
                 key = (
                     element.num_nodes,
                     element.thickness,
