@@ -9,7 +9,7 @@ and can later be copied into that local module without changing this GUI layer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable
 import argparse
 import json
 import queue
@@ -53,6 +53,19 @@ Point3D = _tk3d_canvas_module.Point3D
 _interpolate_thickness_color = _tk3d_canvas_module._interpolate_thickness_color
 
 
+def _normalise_pressure_side(value: Any) -> str:
+    """Return the user-facing pressure side while accepting legacy inputs."""
+
+    side = str(value or "front").strip().lower()
+    if side in {"back", "internal", "inside", "inward side", "positive normal", "outward"}:
+        return "back"
+    return "front"
+
+
+def _pressure_surface_sign(value: Any) -> float:
+    return -1.0 if _normalise_pressure_side(value) == "back" else 1.0
+
+
 @dataclass(frozen=True)
 class RuntimeFEMLineSnapshot:
     """Minimal active-line payload passed from ANYstructure to the runtime FEM UI."""
@@ -88,7 +101,7 @@ class RuntimeFEMOptions:
     member_model: str = "plates as shell, girders as beams"
     analysis_type: str = "linear eigenvalue"
     buckling_analysis_type: str = "linear eigenvalue"
-    pressure_direction: str = "external"
+    pressure_direction: str = "front"
     axial_force_n: float = 0.0
     enforced_displacement_m: float = 0.0
     stiffener_eccentricity_m: float = 0.0
@@ -135,6 +148,7 @@ class RuntimeFEMOptions:
     custom_time_domain_duration_s: float = 0.01
     custom_time_domain_total_time_s: float = 0.05
     custom_time_domain_dt_s: float = 0.0005
+    custom_time_domain_result_interval_s: float = 0.0
     custom_time_domain_include_static_load: bool = False
     imperfection_enabled: bool = False
     imperfection_shape: str = "standard plate/cylinder"
@@ -721,6 +735,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
 
     geometry = runtime_geometry_summary(snapshot)
     diagnostics = list(snapshot.diagnostics)
+    pressure_side = _normalise_pressure_side(options.pressure_direction)
     custom_load_entries = _runtime_custom_load_entries(options.custom_loads_json)
     listed_pressure = sum(
         abs(_safe_float(entry.get("pressure_pa"), 0.0))
@@ -748,7 +763,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         member_model=options.member_model,
         analysis_type=options.analysis_type,
         buckling_analysis_type=options.buckling_analysis_type,
-        pressure_direction=options.pressure_direction,
+        pressure_direction=pressure_side,
         axial_force_n=options.axial_force_n,
         enforced_displacement_m=options.enforced_displacement_m,
         stiffener_eccentricity_m=options.stiffener_eccentricity_m,
@@ -794,6 +809,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         custom_time_domain_duration_s=options.custom_time_domain_duration_s,
         custom_time_domain_total_time_s=options.custom_time_domain_total_time_s,
         custom_time_domain_dt_s=options.custom_time_domain_dt_s,
+        custom_time_domain_result_interval_s=options.custom_time_domain_result_interval_s,
         custom_time_domain_include_static_load=options.custom_time_domain_include_static_load,
         imperfection_enabled=options.imperfection_enabled,
         imperfection_shape=options.imperfection_shape,
@@ -848,7 +864,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "member_model": str(options.member_model),
         "analysis_type": str(options.analysis_type),
         "buckling_analysis_type": str(options.buckling_analysis_type),
-        "pressure_direction": str(options.pressure_direction),
+        "pressure_direction": pressure_side,
+        "pressure_side": pressure_side,
         "axial_force_n": float(options.axial_force_n),
         "enforced_displacement_m": float(options.enforced_displacement_m),
         "stiffener_eccentricity_m": float(options.stiffener_eccentricity_m),
@@ -903,6 +920,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "custom_time_domain_duration_s": float(options.custom_time_domain_duration_s),
         "custom_time_domain_total_time_s": float(options.custom_time_domain_total_time_s),
         "custom_time_domain_dt_s": float(options.custom_time_domain_dt_s),
+        "custom_time_domain_result_interval_s": float(options.custom_time_domain_result_interval_s),
         "custom_time_domain_include_static_load": bool(options.custom_time_domain_include_static_load),
         "imperfection_enabled": bool(options.imperfection_enabled),
         "imperfection_shape": str(options.imperfection_shape),
@@ -998,6 +1016,17 @@ def _blend_hex_color(color: str, alpha: float, background: str = "#ffffff") -> s
         return color
 
 
+def _tk_color_value(value: Any, default: str) -> str:
+    color = str(value or "").strip()
+    if not color:
+        return default
+    try:
+        mcolors.to_rgb(color)
+    except ValueError:
+        return default
+    return color
+
+
 def _configure_tk_canvas_colormap(colormap: str) -> None:
     """Keep the interactive canvas surface colours and legend in sync."""
 
@@ -1014,13 +1043,65 @@ def _configure_tk_canvas_colormap(colormap: str) -> None:
         pass
 
 
-def _surface_facecolors(values_grid: list[list[float]], colormap: str = "jet", extra_values: list[float] | None = None):
+def _finite_values(values: Iterable[float]) -> list[float]:
+    result = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            result.append(number)
+    return result
+
+
+def _finite_value_range(values: Iterable[float], default: tuple[float, float] = (0.0, 1.0)) -> tuple[float, float]:
+    clean = _finite_values(values)
+    if not clean:
+        return default
+    minimum = min(clean)
+    maximum = max(clean)
+    if maximum <= minimum:
+        pad = max(abs(minimum) * 0.05, 1.0e-9)
+        return minimum - pad, maximum + pad
+    return minimum, maximum
+
+
+def _resolved_color_limits(
+        values: Iterable[float],
+        manual_limits: tuple[float | None, float | None] | None = None,
+) -> tuple[float, float]:
+    data_min, data_max = _finite_value_range(values)
+    if manual_limits is None:
+        return data_min, data_max
+    lower, upper = manual_limits
+    if lower is None and upper is None:
+        return data_min, data_max
+    vmin = data_min if lower is None else float(lower)
+    vmax = data_max if upper is None else float(upper)
+    if vmax < vmin:
+        vmin, vmax = vmax, vmin
+    if vmax <= vmin:
+        pad = max(abs(vmin) * 0.05, 1.0e-9)
+        vmin -= pad
+        vmax += pad
+    return vmin, vmax
+
+
+def _surface_facecolors(
+        values_grid: list[list[float]],
+        colormap: str = "jet",
+        extra_values: list[float] | None = None,
+        value_range: tuple[float, float] | None = None,
+):
     values = _all_grid_values(values_grid)
     if extra_values:
         values.extend(float(value) for value in extra_values)
-    if not values:
-        values = [0.0]
-    norm = mcolors.Normalize(vmin=min(values), vmax=max(values) if max(values) > min(values) else min(values) + 1.0)
+    if value_range is None:
+        vmin, vmax = _finite_value_range(values)
+    else:
+        vmin, vmax = _resolved_color_limits(values, value_range)
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax, clip=True)
     cmap = colormaps.get(colormap, colormaps["jet"])
     return [[cmap(norm(value)) for value in row] for row in values_grid], norm, cmap
 
@@ -1176,12 +1257,50 @@ def _member_component_value(line: dict[str, Any], component: str, *, is_mode: bo
     return _safe_float(line.get("von_mises"), 0.0) / 1.0e6
 
 
+_SHELL_FIELD_COMPONENTS = {
+    "von_mises_pa",
+    "stress_x_membrane_pa",
+    "stress_y_membrane_pa",
+    "stress_xy_membrane_pa",
+    "strain_x_membrane",
+    "strain_y_membrane",
+    "strain_xy_membrane",
+    "plastic_strain",
+}
+
+
+def _summary_uses_nonlinear_material(summary: dict[str, Any] | None) -> bool:
+    text = str((summary or {}).get("material_model", "")).lower()
+    prestress = (summary or {}).get("prestress_summary", {}) or {}
+    return "dnv-rp-c208" in text or str(prestress.get("material_model", "")).upper() == "DNV-RP-C208"
+
+
+def _include_member_component_in_color_range(
+    summary: dict[str, Any] | None,
+    component: str,
+    *,
+    is_mode: bool,
+) -> bool:
+    if is_mode or component.startswith("disp"):
+        return True
+    if component in {"plastic_strain", "strain_x_membrane", "strain_y_membrane", "strain_xy_membrane"}:
+        return False
+    if component in {"stress_x_membrane_pa", "stress_y_membrane_pa", "stress_xy_membrane_pa"}:
+        return False
+    if component == "von_mises_pa" and _summary_uses_nonlinear_material(summary):
+        return False
+    return True
+
+
 def _shell_surface_component_value(surface: dict[str, Any], component: str, *, is_mode: bool) -> float:
     values = surface.get("field_values", {}) or {}
     if is_mode:
         return _safe_float(values.get(component), _safe_float(values.get("disp_mag"), 0.0))
-    value = _safe_float(values.get(component))
-    if value is None:
+    if component in values:
+        value = _safe_float(values.get(component), 0.0)
+    elif component in _SHELL_FIELD_COMPONENTS or component.startswith("disp"):
+        value = 0.0
+    else:
         value = _safe_float(values.get("von_mises_pa"), 0.0)
     if component.endswith("_pa"):
         return value / 1.0e6
@@ -1234,6 +1353,11 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
         vis["scalar_label"] = "equiv. engineering plastic strain unavailable [-]"
         vis["scalar_kind"] = "raw"
 
+    def _set_unavailable_component(vis: dict[str, Any], label: str) -> None:
+        vis["stress_pa"] = _zero_scalar_like(vis)
+        vis["scalar_label"] = label + " unavailable"
+        vis["scalar_kind"] = "raw"
+
     if display_mode == "plastic":
         visualization = dict(result.visualization or {})
         if visualization.get("plastic_strain"):
@@ -1255,12 +1379,16 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 vis["scalar_kind"] = "raw"
             else:
                 _set_unavailable_plastic(vis)
+        elif component == "von_mises_pa" and vis.get("stress_pa"):
+            vis["scalar_label"] = vis.get("scalar_label", "stress [Pa]")
         elif component in fields:
             vis["stress_pa"] = fields[component]
             vis["scalar_label"] = component.replace("_", " ")
         elif component in disps:
             vis["stress_pa"] = disps[component]
             vis["scalar_label"] = component.replace("_", " ") + " [m]"
+        elif component in _SHELL_FIELD_COMPONENTS:
+            _set_unavailable_component(vis, component.replace("_", " "))
         return vis, title
 
     if display_mode.startswith("mode:"):
@@ -1275,8 +1403,76 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 vis, _ = apply_component(dict(mode.get("shape") or {}), title)
                 return vis, title, True
 
+    if display_mode.startswith("time:"):
+        try:
+            step_index = int(display_mode.split(":", 1)[1])
+        except (IndexError, ValueError):
+            step_index = -1
+        time_domain = (result.visualization or {}).get("time_domain", {}) or {}
+        snapshots = tuple(time_domain.get("snapshots") or ())
+        if 0 <= step_index < len(snapshots):
+            snapshot_vis = dict(snapshots[step_index] or {})
+            time_value = _safe_float(snapshot_vis.get("time_s"), 0.0)
+            vis, _ = apply_component(snapshot_vis, "Time-domain t=" + f"{time_value:.6g}" + " s")
+            return vis, "Time-domain t=" + f"{time_value:.6g}" + " s", False
+
     vis, title = apply_component(dict(result.visualization or {}), "Static stress/displacement")
     return vis, title, False
+
+
+def _visualization_color_grid_and_label(
+        visualization: dict[str, Any],
+        component: str,
+        is_mode: bool,
+) -> tuple[list[list[float]], str]:
+    scalar_values = _plot_grid_values(visualization.get("stress_pa"))
+    if is_mode:
+        return scalar_values, str(visualization.get("scalar_label") or "mode amplitude")
+    if visualization.get("scalar_kind") == "raw":
+        return scalar_values, str(visualization.get("scalar_label") or "value")
+    if component.endswith("_pa"):
+        return (
+            [[value / 1.0e6 for value in row] for row in scalar_values],
+            str(visualization.get("scalar_label", "stress")).replace("_pa", "") + " [MPa]",
+        )
+    if "disp" in component:
+        return (
+            [[value * 1000.0 for value in row] for row in scalar_values],
+            str(visualization.get("scalar_label", "displacement")).replace(" [m]", " [mm]"),
+        )
+    return scalar_values, str(visualization.get("scalar_label", component))
+
+
+def _visualization_color_values(
+        visualization: dict[str, Any],
+        component: str,
+        is_mode: bool,
+        summary: dict[str, Any] | None = None,
+        show_stiffeners: bool = True,
+        show_girders: bool = True,
+        include_members: bool = True,
+) -> tuple[list[float], list[list[float]], str]:
+    color_grid, colorbar_label = _visualization_color_grid_and_label(visualization, component, is_mode)
+    values = _all_grid_values(color_grid)
+    for surface in visualization.get("skin_shell_surfaces") or ():
+        values.append(_shell_surface_component_value(surface, component, is_mode=is_mode))
+    if include_members:
+        include_member_range = _include_member_component_in_color_range(summary, component, is_mode=is_mode)
+        if include_member_range:
+            for line in visualization.get("member_lines") or ():
+                role = str(line.get("role", "member")).lower()
+                if role == "stiffener" and not show_stiffeners:
+                    continue
+                if role == "girder" and not show_girders:
+                    continue
+                values.append(_member_component_value(line, component, is_mode=is_mode, flange=False))
+                if _safe_float(line.get("flange_width"), 0.0) > 0.0:
+                    values.append(_member_component_value(line, component, is_mode=is_mode, flange=True))
+        for surface in visualization.get("shell_surfaces") or ():
+            if not _shell_surface_role_visible(surface, show_stiffeners, show_girders):
+                continue
+            values.append(_shell_surface_component_value(surface, component, is_mode=is_mode))
+    return values, color_grid, colorbar_label
 
 
 def _plot_visualization_surface(
@@ -1293,27 +1489,20 @@ def _plot_visualization_surface(
         member_alpha: float = 0.95,
         colormap: str = "jet",
         component: str = "von_mises_pa",
+        color_limits: tuple[float | None, float | None] | None = None,
 ) -> None:
     plate_alpha = _clamped_alpha(plate_alpha, 1.0)
     member_alpha = _clamped_alpha(member_alpha, 0.95)
     visualization, title, is_mode = _selected_visualization(result, display_mode, component)
-    scalar_values = _plot_grid_values(visualization.get("stress_pa"))
-    if is_mode:
-        color_grid = scalar_values
-        colorbar_label = str(visualization.get("scalar_label") or "mode amplitude")
-    elif visualization.get("scalar_kind") == "raw":
-        color_grid = scalar_values
-        colorbar_label = str(visualization.get("scalar_label") or "value")
-    else:
-        if component.endswith("_pa"):
-            color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
-            colorbar_label = str(visualization.get("scalar_label", "stress")).replace("_pa", "") + " [MPa]"
-        elif "disp" in component:
-            color_grid = [[value * 1000.0 for value in row] for row in scalar_values]
-            colorbar_label = str(visualization.get("scalar_label", "displacement")).replace(" [m]", " [mm]")
-        else:
-            color_grid = scalar_values
-            colorbar_label = str(visualization.get("scalar_label", component))
+    _all_values, color_grid, colorbar_label = _visualization_color_values(
+        visualization,
+        component,
+        is_mode,
+        geometry,
+        show_stiffeners,
+        show_girders,
+        include_members=member_alpha > 0.0,
+    )
     scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
     skin_polygons = []
     skin_values = []
@@ -1338,7 +1527,8 @@ def _plot_visualization_surface(
         shell_values.append(value)
 
     surface_values = skin_values + shell_values
-    facecolors, norm, cmap = _surface_facecolors(color_grid, colormap, surface_values)
+    value_range = _resolved_color_limits(_all_values, color_limits)
+    facecolors, norm, cmap = _surface_facecolors(color_grid, colormap, surface_values, value_range)
     skin_colors = [cmap(norm(value)) for value in skin_values]
     shell_colors = [cmap(norm(value)) for value in shell_values]
 
@@ -1633,6 +1823,83 @@ def _plot_base_geometry_surface(
         axis.text2D(0.08, 0.56, "All model display items are hidden.", transform=axis.transAxes)
 
 
+def _history_component_series(
+        histories: dict[Any, Any],
+        requested_id: int | None,
+        component: str,
+) -> tuple[int | None, tuple[float, ...]]:
+    if not isinstance(histories, dict) or not histories:
+        return None, ()
+    selected_id = requested_id if requested_id in histories else None
+    if selected_id is None:
+        try:
+            selected_id = int(next(iter(histories)))
+        except Exception:
+            return None, ()
+    values = histories.get(selected_id, {}) or histories.get(str(selected_id), {}) or {}
+    if not isinstance(values, dict):
+        return selected_id, ()
+    series = tuple(float(value) for value in values.get(component, ()) or ())
+    return selected_id, series
+
+
+def _history_plot_units(component: str) -> tuple[str, float]:
+    if component.endswith("_pa"):
+        return "MPa", 1.0e-6
+    if component.startswith("disp"):
+        return "mm", 1000.0
+    return "-", 1.0
+
+
+def _plot_time_history(
+        axis: Any,
+        result: RuntimeFEMRunResult | None,
+        component: str,
+        probe_node_id: int | None = None,
+        probe_element_id: int | None = None,
+) -> None:
+    time_domain = ((result.visualization if result is not None else {}) or {}).get("time_domain", {}) or {}
+    times = tuple(float(value) for value in time_domain.get("times_s", ()) or ())
+    if not times:
+        axis.text(0.05, 0.55, "No time-domain history is available.", transform=axis.transAxes)
+        axis.set_axis_off()
+        return
+
+    if component.startswith("disp"):
+        selected_id, series = _history_component_series(
+            time_domain.get("node_histories", {}) or {},
+            probe_node_id,
+            component,
+        )
+        target = "node"
+    else:
+        selected_id, series = _history_component_series(
+            time_domain.get("element_histories", {}) or {},
+            probe_element_id,
+            component,
+        )
+        target = "element"
+
+    if not series:
+        axis.text(
+            0.05,
+            0.55,
+            "No " + target + " history is available for " + component.replace("_", " ") + ".",
+            transform=axis.transAxes,
+        )
+        axis.set_axis_off()
+        return
+
+    count = min(len(times), len(series))
+    unit, scale = _history_plot_units(component)
+    y_values = [float(value) * scale for value in series[:count]]
+    axis.plot(times[:count], y_values, color="#2563eb", linewidth=1.8)
+    axis.set_xlabel("time [s]")
+    axis.set_ylabel(component.replace("_", " ") + " [" + unit + "]")
+    axis.set_title("Time history: " + target + " " + str(selected_id))
+    axis.grid(True, color="#d1d5db", linewidth=0.7)
+
+
 def create_runtime_fem_result_figure(
         snapshot: RuntimeFEMLineSnapshot,
         result: RuntimeFEMRunResult | None = None,
@@ -1645,10 +1912,19 @@ def create_runtime_fem_result_figure(
         member_alpha: float = 0.95,
         colormap: str = "jet",
         component: str = "von_mises_pa",
+        color_limits: tuple[float | None, float | None] | None = None,
+        probe_node_id: int | None = None,
+        probe_element_id: int | None = None,
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
     figure = Figure(figsize=(8.0, 4.1), dpi=100)
+    if display_mode == "time_history":
+        axis = figure.add_subplot(111)
+        _plot_time_history(axis, result, component, probe_node_id, probe_element_id)
+        figure.tight_layout()
+        return figure
+
     geometry_ax = figure.add_subplot(111, projection="3d")
     geometry = runtime_geometry_summary(snapshot) if result is None else result.summary
 
@@ -1668,7 +1944,7 @@ def create_runtime_fem_result_figure(
             figure, geometry_ax, geometry, result, display_mode, deformation_scale,
             show_plate=show_plate, show_stiffeners=show_stiffeners, show_girders=show_girders,
             plate_alpha=plate_alpha, member_alpha=member_alpha, colormap=colormap,
-            component=component
+            component=component, color_limits=color_limits,
         )
 
     figure.tight_layout()
@@ -1781,7 +2057,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Runtime solver: " + str(summary.get("runtime_solver", "stepwise")),
         "Linear solver: " + str(summary.get("solver_type", "")),
         "Pressure [Pa]: " + str(round(_safe_float(summary.get("pressure_pa")), 3)),
-        "Pressure direction: " + str(summary.get("pressure_direction", "")),
+        "Pressure side: " + str(summary.get("pressure_side", summary.get("pressure_direction", ""))),
         "Axial force [N]: " + str(round(_safe_float(summary.get("axial_force_n")), 3)),
         "Enforced displacement [m]: " + str(round(_safe_float(summary.get("enforced_displacement_m")), 6)),
         "Mesh size override [m]: " + str(round(_safe_float(summary.get("mesh_size_m")), 4)),
@@ -1887,6 +2163,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 + " / "
                 + str(round(_safe_float(summary.get("custom_time_domain_total_time_s")), 6)),
                 " - dt [s]: " + str(round(_safe_float(summary.get("custom_time_domain_dt_s")), 8)),
+                " - result interval [s]: " + (
+                    "auto" if _safe_float(summary.get("custom_time_domain_result_interval_s"), 0.0) <= 0.0
+                    else str(round(_safe_float(summary.get("custom_time_domain_result_interval_s")), 8))
+                ),
                 " - selected patches: " + str(_safe_int(summary.get("custom_pressure_patch_count"), 0)),
                 " - selected patch area [m2]: " + str(round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)),
                 " - include static load in time domain: " + str(bool(summary.get("custom_time_domain_include_static_load"))),
@@ -2023,6 +2303,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "custom_time_domain_selected_shells",
             "custom_time_domain_peak_displacement_m",
             "custom_time_domain_peak_von_mises_pa",
+            "custom_time_domain_result_interval_s",
+            "custom_time_domain_saved_steps",
         }
         runtime_keys = {
             "runtime_solver",
@@ -2155,6 +2437,11 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 round(1000.0 * _safe_float(prestress.get("custom_time_domain_peak_displacement_m")), 4)))
             lines.append(" - peak von Mises [MPa]: " + str(
                 round(_safe_float(prestress.get("custom_time_domain_peak_von_mises_pa")) / 1.0e6, 3)))
+            if _safe_float(prestress.get("custom_time_domain_saved_steps"), 0.0) > 0.0:
+                lines.append(" - saved result steps: " + str(_safe_int(prestress.get("custom_time_domain_saved_steps"), 0)))
+            if _safe_float(prestress.get("custom_time_domain_result_interval_s"), 0.0) > 0.0:
+                lines.append(" - result interval [s]: " + str(
+                    round(_safe_float(prestress.get("custom_time_domain_result_interval_s")), 8)))
             lines.append(
                 " - meaning: this is a linear Newmark response to the prescribed pressure pulse; it is reported separately from the static buckling prestress.")
         for key, value in prestress.items():
@@ -2246,6 +2533,13 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "use": "The transient solver reuses the effective stiffness factorization when possible, but the number of steps still scales with total_time / dt.",
         "output": "Affects transient accuracy and runtime.",
         "caution": "The Newmark method is stable for the default parameters, but a coarse time step can miss the pressure pulse and peak response.",
+    },
+    "custom_time_domain_result_interval_s": {
+        "title": "Custom Load Result Interval",
+        "purpose": "Time spacing for saved transient result snapshots and probe history points.",
+        "use": "Set a positive interval to choose the saved time-domain result spacing. Leave 0 for automatic decimation.",
+        "output": "Controls which time steps appear in the result-case selector and node/element history graphs.",
+        "caution": "Small intervals on fine meshes increase stress recovery time and stored result size.",
     },
     "custom_pressure_patch_center": {
         "title": "Custom Pressure Patch Centre",
@@ -2451,11 +2745,11 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "caution": "Eigenvalue factors are elastic bifurcation factors around the current prestress state. Nonlinear limit estimates include tangent-stiffness degradation in the current simplified solver, but they are not a full post-buckling collapse trace.",
     },
     "pressure_direction": {
-        "title": "Pressure Direction",
-        "purpose": "Selects whether pressure acts with or against the shell normal.",
-        "use": "External pressure is destabilizing for typical cylinders; internal pressure reverses the sign.",
+        "title": "Pressure Side",
+        "purpose": "Selects the plate side where pressure is applied.",
+        "use": "Front is the generated shell-normal side shown by the front marker in the 3D view. Back is the opposite side. Legacy external/internal values are accepted and mapped to front/back.",
         "output": "Changes load resultant, stress signs and buckling prestress.",
-        "caution": "Shell normal direction follows generated element ordering. Verify sign using displacement direction and diagnostics.",
+        "caution": "The 3D side markers follow generated element ordering. Verify the active side using the red pressure arrows in the preview.",
     },
     "axial_force_n": {
         "title": "Axial Force",
@@ -2611,6 +2905,20 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Only affects plotting; it does not rerun the solver.",
         "caution": "Mode amplitudes are normalized for visualization, not physical displacement magnitudes.",
     },
+    "plate_front_color": {
+        "title": "Plate Front Colour",
+        "purpose": "Sets the colour used for the generated plate front side in the base 3D view.",
+        "use": "Enter a colour name such as grey or a hex value such as #d1d5db.",
+        "output": "Only changes the base 3D preview. Result contour colours are unchanged.",
+        "caution": "Invalid colour text falls back to the default front grey.",
+    },
+    "plate_back_color": {
+        "title": "Plate Back Colour",
+        "purpose": "Sets the colour used for the generated plate back side in the base 3D view.",
+        "use": "Enter a colour name such as brown or a hex value such as #8b5e3c.",
+        "output": "Only changes the base 3D preview. Result contour colours are unchanged.",
+        "caution": "Invalid colour text falls back to the default back brown.",
+    },
     "deformation_scale": {
         "title": "Deformation Scale",
         "purpose": "Controls the visual magnification of displacement in the 3D result plot.",
@@ -2747,7 +3055,7 @@ class RuntimeFEMWindow:
         self.member_model = tk.StringVar(value="plates as shell, girders as beams")
         self.analysis_type = tk.StringVar(value="linear eigenvalue")
         self.buckling_analysis_type = tk.StringVar(value="linear eigenvalue")
-        self.pressure_direction = tk.StringVar(value="external")
+        self.pressure_direction = tk.StringVar(value="front")
         self.axial_force_n = tk.DoubleVar(value=_safe_float(self.snapshot.axial_force_n, 0.0))
         self.enforced_displacement_m = tk.DoubleVar(value=0.0)
         self.stiffener_eccentricity_m = tk.DoubleVar(value=0.0)
@@ -2790,6 +3098,7 @@ class RuntimeFEMWindow:
         self.custom_time_domain_duration_s = tk.DoubleVar(value=0.01)
         self.custom_time_domain_total_time_s = tk.DoubleVar(value=0.05)
         self.custom_time_domain_dt_s = tk.DoubleVar(value=0.0005)
+        self.custom_time_domain_result_interval_s = tk.DoubleVar(value=0.0)
         self.custom_loads_json = tk.StringVar(value="[]")
         self.custom_pressure_patches_json = tk.StringVar(value="[]")
         self.custom_edge_segments_json = tk.StringVar(value="[]")
@@ -2852,6 +3161,17 @@ class RuntimeFEMWindow:
         self._last_run_result_status_text = ""
         self.result_case_selector = None
         self.component_selector = None
+        self.probe_node_id = tk.StringVar(value="")
+        self.probe_element_id = tk.StringVar(value="")
+        self.color_min_vis = tk.StringVar(value="")
+        self.color_max_vis = tk.StringVar(value="")
+        self.color_min_slider = tk.DoubleVar(value=0.0)
+        self.color_max_slider = tk.DoubleVar(value=1.0)
+        self.color_min_scale = None
+        self.color_max_scale = None
+        self._color_limit_signature: tuple[str, str] | None = None
+        self._color_limit_range: tuple[float, float] = (0.0, 1.0)
+        self._color_limit_syncing = False
         self.run_button = None
         self.cancel_button = None
         self.use_for_buckling_button = None
@@ -2863,6 +3183,8 @@ class RuntimeFEMWindow:
         self.show_stiffener_vis = tk.BooleanVar(value=True)
         self.show_girder_vis = tk.BooleanVar(value=True)
         self.plate_alpha_vis = tk.StringVar(value="1.0")
+        self.plate_front_color_vis = tk.StringVar(value="#d1d5db")
+        self.plate_back_color_vis = tk.StringVar(value="#8b5e3c")
         self.member_alpha_vis = tk.StringVar(value="1.0")
         self.colormap_vis = tk.StringVar(value="jet")
         self.upper_result_frame = None
@@ -2888,6 +3210,8 @@ class RuntimeFEMWindow:
             self.show_stiffener_vis,
             self.show_girder_vis,
             self.plate_alpha_vis,
+            self.plate_front_color_vis,
+            self.plate_back_color_vis,
             self.member_alpha_vis,
             self.colormap_vis,
         )
@@ -3206,8 +3530,8 @@ class RuntimeFEMWindow:
                              ("auto", "free", "simply supported", "pinned", "clamped"))
         self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode,
                              ("none", "x", "y", "z", "cyclic"))
-        self._add_option_row(constraints, 2, "pressure_direction", "Pressure dir.", self.pressure_direction,
-                             ("external", "internal"))
+        self._add_option_row(constraints, 2, "pressure_direction", "Pressure side", self.pressure_direction,
+                             ("front", "back"))
         self._add_entry_row(constraints, 3, "axial_force_n", "Axial force [N]", self.axial_force_n)
         self._add_entry_row(constraints, 4, "enforced_displacement_m", "Enforced disp. [m]",
                             self.enforced_displacement_m)
@@ -3347,6 +3671,7 @@ class RuntimeFEMWindow:
         self._add_entry_row(time_domain, 2, "custom_time_domain_duration_s", "Duration [s]", self.custom_time_domain_duration_s)
         self._add_entry_row(time_domain, 3, "custom_time_domain_total_time_s", "Total time [s]", self.custom_time_domain_total_time_s)
         self._add_entry_row(time_domain, 4, "custom_time_domain_dt_s", "dt [s]", self.custom_time_domain_dt_s)
+        self._add_entry_row(time_domain, 5, "custom_time_domain_result_interval_s", "Result interval [s]", self.custom_time_domain_result_interval_s)
 
         time_domain.columnconfigure(3, weight=1)
 
@@ -3461,15 +3786,17 @@ class RuntimeFEMWindow:
         self._add_check_row(vis_group, 1, "show_stiffeners", "Show stiffeners", self.show_stiffener_vis)
         self._add_check_row(vis_group, 2, "show_girders", "Show girders/frames", self.show_girder_vis)
         self._add_entry_row(vis_group, 3, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
-        self._add_entry_row(vis_group, 4, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
-        self._add_option_row(vis_group, 5, "colormap", "Colormap", self.colormap_vis,
+        self._add_entry_row(vis_group, 4, "plate_front_color", "Plate front", self.plate_front_color_vis, width=10)
+        self._add_entry_row(vis_group, 5, "plate_back_color", "Plate back", self.plate_back_color_vis, width=10)
+        self._add_entry_row(vis_group, 6, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
+        self._add_option_row(vis_group, 7, "colormap", "Colormap", self.colormap_vis,
                              ("jet", "viridis", "plasma", "inferno", "coolwarm"))
         vis_actions = ttk.Frame(vis_group)
-        vis_actions.grid(row=6, column=0, columnspan=3, sticky=tk.W, padx=8, pady=4)
+        vis_actions.grid(row=8, column=0, columnspan=3, sticky=tk.W, padx=8, pady=4)
         ttk.Button(vis_actions, text="Redraw base 3D", command=self._redraw_base_3d).pack(side=tk.LEFT)
         ttk.Button(vis_actions, text="Show results", command=self._show_results).pack(side=tk.LEFT, padx=(6, 0))
         view_actions = ttk.Frame(vis_group)
-        view_actions.grid(row=7, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
+        view_actions.grid(row=9, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
         ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(view_actions, text="ISO", command=lambda: self._set_runtime_3d_view("iso")).pack(side=tk.LEFT, padx=(0, 4))
@@ -3503,7 +3830,7 @@ class RuntimeFEMWindow:
             width=20,
         )
         self.result_case_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.result_case_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure(preserve_view=True))
+        self.result_case_selector.bind("<<ComboboxSelected>>", self._on_visualization_choice_changed)
 
         ttk.Label(selector_bar, text=" Component:").pack(side=tk.LEFT, padx=(6, 6))
         self.component_selector = ttk.Combobox(
@@ -3514,7 +3841,7 @@ class RuntimeFEMWindow:
             width=26,
         )
         self.component_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.component_selector.bind("<<ComboboxSelected>>", lambda _event: self._refresh_figure(preserve_view=True))
+        self.component_selector.bind("<<ComboboxSelected>>", self._on_visualization_choice_changed)
         self.interactive_3d_checkbox = ttk.Checkbutton(
             selector_bar,
             text="Interactive 3D",
@@ -3522,6 +3849,45 @@ class RuntimeFEMWindow:
             command=self._refresh_figure,
         )
         self.interactive_3d_checkbox.pack(side=tk.RIGHT, padx=6)
+
+        probe_bar = ttk.Frame(plot_holder)
+        probe_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        ttk.Label(probe_bar, text="Node:").pack(side=tk.LEFT, padx=(0, 4))
+        node_entry = ttk.Entry(probe_bar, textvariable=self.probe_node_id, width=8)
+        node_entry.pack(side=tk.LEFT)
+        node_entry.bind("<Return>", lambda _event: self._show_probe_history())
+        ttk.Label(probe_bar, text=" Element:").pack(side=tk.LEFT, padx=(8, 4))
+        element_entry = ttk.Entry(probe_bar, textvariable=self.probe_element_id, width=8)
+        element_entry.pack(side=tk.LEFT)
+        element_entry.bind("<Return>", lambda _event: self._show_probe_history())
+        ttk.Button(probe_bar, text="Show history", command=self._show_probe_history).pack(side=tk.LEFT, padx=(8, 0))
+
+        color_bar = ttk.Frame(plot_holder)
+        color_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        ttk.Label(color_bar, text="Color min:").pack(side=tk.LEFT, padx=(0, 4))
+        color_min_entry = ttk.Entry(color_bar, textvariable=self.color_min_vis, width=10)
+        color_min_entry.pack(side=tk.LEFT)
+        color_min_entry.bind("<Return>", self._on_color_entry_changed)
+        color_min_entry.bind("<FocusOut>", self._on_color_entry_changed)
+        self.color_min_scale = ttk.Scale(
+            color_bar,
+            orient=tk.HORIZONTAL,
+            variable=self.color_min_slider,
+            command=lambda value: self._on_color_slider("min", value),
+        )
+        self.color_min_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 8))
+        ttk.Label(color_bar, text="Max:").pack(side=tk.LEFT, padx=(0, 4))
+        color_max_entry = ttk.Entry(color_bar, textvariable=self.color_max_vis, width=10)
+        color_max_entry.pack(side=tk.LEFT)
+        color_max_entry.bind("<Return>", self._on_color_entry_changed)
+        color_max_entry.bind("<FocusOut>", self._on_color_entry_changed)
+        self.color_max_scale = ttk.Scale(
+            color_bar,
+            orient=tk.HORIZONTAL,
+            variable=self.color_max_slider,
+            command=lambda value: self._on_color_slider("max", value),
+        )
+        self.color_max_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
         self._refresh_figure()
         self._write_status("Ready. ANYstructure production FE mesh solver is available.")
 
@@ -3715,12 +4081,20 @@ class RuntimeFEMWindow:
 
     def _set_display_modes(self, result: RuntimeFEMRunResult) -> None:
         has_plastic = bool((result.visualization or {}).get("plastic_strain"))
+        uses_nonlinear_material = _summary_uses_nonlinear_material(result.summary)
         labels = {"Static displacement/stress": "static"}
         for mode in _buckling_mode_shapes(result):
             mode_number = int(mode.get("mode_number", 0))
             load_factor = _safe_float(mode.get("load_factor"))
             label = "Mode " + str(mode_number) + "  LF " + str(round(load_factor, 4))
             labels[label] = "mode:" + str(mode_number)
+        time_domain = (result.visualization or {}).get("time_domain", {}) or {}
+        snapshots = tuple(time_domain.get("snapshots") or ())
+        if snapshots:
+            labels["Time history graph"] = "time_history"
+        for index, snapshot in enumerate(snapshots):
+            time_value = _safe_float((snapshot or {}).get("time_s"), 0.0)
+            labels["Time t=" + f"{time_value:.6g}" + " s"] = "time:" + str(index)
         self.result_case_labels = labels
         self.result_case_choice.set("Static displacement/stress")
         if self.result_case_selector is not None:
@@ -3739,7 +4113,7 @@ class RuntimeFEMWindow:
             "Strain Y (membrane)": "strain_y_membrane",
             "Strain XY (membrane)": "strain_xy_membrane",
         }
-        if has_plastic:
+        if has_plastic or uses_nonlinear_material:
             component_labels["Equivalent Plastic Strain"] = "plastic_strain"
         self.component_labels = component_labels
         if self.component_choice.get() not in component_labels:
@@ -3757,6 +4131,108 @@ class RuntimeFEMWindow:
         else:
             return np.array([0.0, 0.0, 1.0], dtype=float)
 
+    @staticmethod
+    def _add_runtime_arrow(
+            canvas: Tkinter3DCanvas,
+            start: Point3D,
+            end: Point3D,
+            color: str,
+            width: int = 3,
+    ) -> None:
+        direction = (end - start).normalized()
+        if direction.length() <= 1.0e-12:
+            return
+        length = (end - start).length()
+        head_length = max(length * 0.22, 1.0e-5)
+        tangent = direction.cross(Point3D(0.0, 0.0, 1.0))
+        if tangent.length() <= 1.0e-9:
+            tangent = direction.cross(Point3D(0.0, 1.0, 0.0))
+        tangent = tangent.normalized() * (0.45 * head_length)
+        base = end - direction * head_length
+        canvas.add_line(start, end, color=color, width=width, draw_overlay=True)
+        canvas.add_line(end, base + tangent, color=color, width=max(1, width - 1), draw_overlay=True)
+        canvas.add_line(end, base - tangent, color=color, width=max(1, width - 1), draw_overlay=True)
+
+    def _draw_pressure_side_indicators(
+            self,
+            canvas: Tkinter3DCanvas,
+            geometry: dict[str, Any],
+    ) -> None:
+        side_var = getattr(self, "pressure_direction", None)
+        side_value = side_var.get() if side_var is not None and hasattr(side_var, "get") else "front"
+        side = _normalise_pressure_side(side_value)
+        surface_sign = _pressure_surface_sign(side)
+        active_color = "#dc2626"
+        front_color = "#0891b2"
+        back_color = "#a16207"
+
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+            arrow_length = max(radius * 0.22, length * 0.025, 0.02)
+            z_mid = 0.0
+            for angle in (math.radians(25.0), math.radians(145.0), math.radians(265.0)):
+                radial = Point3D(math.cos(angle), math.sin(angle), 0.0)
+                surface = radial * (radius + surface_sign * arrow_length * 0.08) + Point3D(0.0, 0.0, z_mid)
+                start = radial * (radius + surface_sign * arrow_length) + Point3D(0.0, 0.0, z_mid)
+                self._add_runtime_arrow(canvas, start, surface, active_color)
+
+            label_angle = math.radians(55.0)
+            radial = Point3D(math.cos(label_angle), math.sin(label_angle), 0.0)
+            canvas.add_text(
+                radial * (radius + arrow_length * 1.35) + Point3D(0.0, 0.0, 0.25 * length),
+                "Front",
+                color=front_color,
+                draw_overlay=True,
+            )
+            canvas.add_text(
+                radial * max(radius - arrow_length * 1.35, radius * 0.35) + Point3D(0.0, 0.0, -0.25 * length),
+                "Back",
+                color=back_color,
+                draw_overlay=True,
+            )
+            return
+
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
+        reference = max(length, width, 1.0)
+        side_offset = reference * 0.12
+        label_offset = reference * 0.18
+        x0 = 0.08 * length
+        y0 = 0.08 * width
+        canvas.add_line(
+            Point3D(x0, y0, 0.0),
+            Point3D(x0, y0, label_offset),
+            color=front_color,
+            width=3,
+            draw_overlay=True,
+        )
+        canvas.add_line(
+            Point3D(x0 + 0.05 * length, y0, 0.0),
+            Point3D(x0 + 0.05 * length, y0, -label_offset),
+            color=back_color,
+            width=3,
+            draw_overlay=True,
+        )
+        canvas.add_text(Point3D(x0, y0, label_offset * 1.08), "Front", color=front_color, draw_overlay=True)
+        canvas.add_text(
+            Point3D(x0 + 0.05 * length, y0, -label_offset * 1.08),
+            "Back",
+            color=back_color,
+            draw_overlay=True,
+        )
+
+        arrow_z = surface_sign * side_offset
+        target_z = surface_sign * side_offset * 0.08
+        for fx in (0.28, 0.50, 0.72):
+            for fy in (0.35, 0.65):
+                self._add_runtime_arrow(
+                    canvas,
+                    Point3D(length * fx, width * fy, arrow_z),
+                    Point3D(length * fx, width * fy, target_z),
+                    active_color,
+                )
+
     def _populate_canvas_with_geometry(self, canvas: Tkinter3DCanvas, fit_view: bool = True) -> None:
         geometry = runtime_geometry_summary(self.snapshot)
         show_plate_var = getattr(self, "show_plate_vis", None)
@@ -3772,6 +4248,14 @@ class RuntimeFEMWindow:
         member_alpha = _crisp_canvas_alpha(member_alpha_var.get() if member_alpha_var is not None else 1.0, 1.0)
         plate_stipple = _alpha_to_stipple(plate_alpha)
         member_stipple = _alpha_to_stipple(member_alpha)
+        plate_front_color = _tk_color_value(
+            getattr(getattr(self, "plate_front_color_vis", None), "get", lambda: "#d1d5db")(),
+            "#d1d5db",
+        )
+        plate_back_color = _tk_color_value(
+            getattr(getattr(self, "plate_back_color_vis", None), "get", lambda: "#8b5e3c")(),
+            "#8b5e3c",
+        )
         _configure_tk_canvas_colormap(str(colormap_var.get() if colormap_var is not None else "jet"))
 
         if hasattr(self, "imported_fem_model") and self.imported_fem_model is not None:
@@ -3784,7 +4268,8 @@ class RuntimeFEMWindow:
                         canvas.add_polygon(
                             [Point3D(*n.coords()) for n in nodes],
                             outline="gray",
-                            color="#d8e2ea",
+                            color=plate_front_color,
+                            back_color=plate_back_color,
                             stipple=plate_stipple,
                         )
                 elif element.__class__.__name__ == "BeamElement":
@@ -3806,13 +4291,14 @@ class RuntimeFEMWindow:
                     radius=radius,
                     height=length,
                     center=Point3D(0.0, 0.0, 0.0),
-                    color="#d8e2ea",
+                    color=plate_front_color,
+                    back_color=plate_back_color,
                     outline="",
                     segments=32,
                     height_segments=12,
                     capped=False,
                     opacity=plate_alpha,
-                    show_backfaces=plate_alpha < 0.94,
+                    show_backfaces=bool(plate_back_color) or plate_alpha < 0.94,
                     show_thickness_legend=False
                 )
             if show_stiffeners and member_alpha > 0.0 and geometry.get("has_stiffener"):
@@ -3881,7 +4367,8 @@ class RuntimeFEMWindow:
                         Point3D(length, width, 0.0),
                         Point3D(0.0, width, 0.0)
                     ],
-                    color="#d1d5db",
+                    color=plate_front_color,
+                    back_color=plate_back_color,
                     outline="#64748b",
                     layer=5,
                     stipple=plate_stipple
@@ -3963,6 +4450,8 @@ class RuntimeFEMWindow:
                             layer=13,
                             stipple=member_stipple
                         )
+        if callable(getattr(canvas, "add_line", None)) and callable(getattr(canvas, "add_text", None)):
+            RuntimeFEMWindow._draw_pressure_side_indicators(self, canvas, geometry)
         if hasattr(self, "_custom_load_patches"):
             self._draw_custom_load_patch_outlines(canvas)
         if fit_view:
@@ -3998,51 +4487,18 @@ class RuntimeFEMWindow:
 
         visualization, title, is_mode = _selected_visualization(result, display_mode, component)
 
-        scalar_values = _plot_grid_values(visualization.get("stress_pa"))
-        if is_mode:
-            color_grid = scalar_values
-            colorbar_label = str(visualization.get("scalar_label") or "mode amplitude")
-        elif visualization.get("scalar_kind") == "raw":
-            color_grid = scalar_values
-            colorbar_label = str(visualization.get("scalar_label") or "value")
-        else:
-            if component.endswith("_pa"):
-                color_grid = [[value / 1.0e6 for value in row] for row in scalar_values]
-                colorbar_label = str(visualization.get("scalar_label", "stress")).replace("_pa", "") + " [MPa]"
-            elif "disp" in component:
-                color_grid = [[value * 1000.0 for value in row] for row in scalar_values]
-                colorbar_label = str(visualization.get("scalar_label", "displacement")).replace(" [m]", " [mm]")
-            else:
-                color_grid = scalar_values
-                colorbar_label = str(visualization.get("scalar_label", component))
-
-        all_vals = _all_grid_values(color_grid)
-        for surface in visualization.get("skin_shell_surfaces") or ():
-            all_vals.append(_shell_surface_component_value(surface, component, is_mode=is_mode))
         show_stiffeners_for_range = self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis", None) is not None else True
         show_girders_for_range = self.show_girder_vis.get() if getattr(self, "show_girder_vis", None) is not None else True
-        if member_alpha > 0.0:
-            for line in visualization.get("member_lines") or ():
-                role = str(line.get("role", "member")).lower()
-                if role == "stiffener" and not show_stiffeners_for_range:
-                    continue
-                if role == "girder" and not show_girders_for_range:
-                    continue
-                all_vals.append(_member_component_value(line, component, is_mode=is_mode, flange=False))
-                if _safe_float(line.get("flange_width"), 0.0) > 0.0:
-                    all_vals.append(_member_component_value(line, component, is_mode=is_mode, flange=True))
-            for surface in visualization.get("shell_surfaces") or ():
-                if not _shell_surface_role_visible(surface, show_stiffeners_for_range, show_girders_for_range):
-                    continue
-                all_vals.append(_shell_surface_component_value(surface, component, is_mode=is_mode))
-        if all_vals:
-            vmin = min(all_vals)
-            vmax = max(all_vals)
-        else:
-            vmin, vmax = 0.0, 1.0
-
-        if vmax <= vmin:
-            vmax = vmin + 1.0
+        all_vals, color_grid, colorbar_label = _visualization_color_values(
+            visualization,
+            component,
+            is_mode,
+            geometry,
+            show_stiffeners_for_range,
+            show_girders_for_range,
+            include_members=member_alpha > 0.0,
+        )
+        vmin, vmax = _resolved_color_limits(all_vals, self._manual_color_limits())
 
         scale = _displacement_plot_scale(geometry, result, visualization, deformation_scale)
 
@@ -4265,8 +4721,10 @@ class RuntimeFEMWindow:
 
         canvas.set_thickness_legend(
             values=all_vals,
-            unit=colorbar_label,
-            title=title
+            unit="",
+            title=colorbar_label,
+            width=210,
+            value_range=(vmin, vmax),
         )
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
@@ -4337,12 +4795,113 @@ class RuntimeFEMWindow:
         self.upper_result_text.insert(tk.END, "\n".join(lines))
         self.upper_result_text.config(state=tk.DISABLED)
 
+    def _parse_probe_id(self, variable: tk.StringVar) -> int | None:
+        value = str(variable.get() or "").strip()
+        if not value:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _manual_color_limits(self) -> tuple[float | None, float | None]:
+        def parse(value: Any) -> float | None:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                number = float(text)
+            except (TypeError, ValueError):
+                return None
+            return number if math.isfinite(number) else None
+
+        return parse(self.color_min_vis.get()), parse(self.color_max_vis.get())
+
+    def _selected_color_data_range(self) -> tuple[float, float]:
+        if self.current_result is None:
+            return (0.0, 1.0)
+        display_mode = self._selected_display_mode()
+        if display_mode == "time_history":
+            return (0.0, 1.0)
+        component = self._selected_component()
+        visualization, _title, is_mode = _selected_visualization(self.current_result, display_mode, component)
+        values, _grid, _label = _visualization_color_values(
+            visualization,
+            component,
+            is_mode,
+            self.current_result.summary,
+            self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis", None) is not None else True,
+            self.show_girder_vis.get() if getattr(self, "show_girder_vis", None) is not None else True,
+            include_members=_safe_float(self.member_alpha_vis.get(), 1.0) > 0.0,
+        )
+        return _finite_value_range(values)
+
+    def _sync_color_limit_controls(self, force: bool = False) -> None:
+        signature = (self._selected_display_mode(), self._selected_component())
+        data_min, data_max = self._selected_color_data_range()
+        if data_max <= data_min:
+            data_max = data_min + 1.0
+        changed = force or signature != self._color_limit_signature
+        self._color_limit_signature = signature
+        self._color_limit_range = (data_min, data_max)
+        self._color_limit_syncing = True
+        try:
+            if changed or not str(self.color_min_vis.get()).strip():
+                self.color_min_vis.set(f"{data_min:.6g}")
+            if changed or not str(self.color_max_vis.get()).strip():
+                self.color_max_vis.set(f"{data_max:.6g}")
+            for scale in (self.color_min_scale, self.color_max_scale):
+                if scale is not None:
+                    scale.configure(from_=data_min, to=data_max)
+            self.color_min_slider.set(_safe_float(self.color_min_vis.get(), data_min))
+            self.color_max_slider.set(_safe_float(self.color_max_vis.get(), data_max))
+        finally:
+            self._color_limit_syncing = False
+
+    def _on_visualization_choice_changed(self, _event: Any = None) -> None:
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+
+    def _on_color_entry_changed(self, _event: Any = None) -> None:
+        if self._color_limit_syncing:
+            return
+        self._sync_color_limit_controls(force=False)
+        self._refresh_figure(preserve_view=True)
+
+    def _on_color_slider(self, which: str, value: Any) -> None:
+        if self._color_limit_syncing:
+            return
+        self._color_limit_syncing = True
+        try:
+            number = _safe_float(value, 0.0)
+            if which == "min":
+                self.color_min_vis.set(f"{number:.6g}")
+            else:
+                self.color_max_vis.set(f"{number:.6g}")
+        finally:
+            self._color_limit_syncing = False
+        self._refresh_figure(preserve_view=True)
+
+    def _show_probe_history(self) -> None:
+        if self.current_result is None:
+            self._write_status("Run FEM before showing a node or element history.", keep_run_results=True)
+            return
+        self.result_case_labels.setdefault("Time history graph", "time_history")
+        if self.result_case_selector is not None:
+            self.result_case_selector.configure(values=tuple(self.result_case_labels))
+        self.result_case_choice.set("Time history graph")
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+
     def _refresh_figure(self, preserve_view: bool = False) -> None:
         self._update_result_text()
         if self.figure_parent is None:
             return
 
         show_base_geometry = self.current_result is None or self._display_base_geometry
+        display_mode = self._selected_display_mode()
+        if not show_base_geometry:
+            self._sync_color_limit_controls(force=False)
 
         if hasattr(self, "preview_canvas") and self.preview_canvas is not None:
             try:
@@ -4351,7 +4910,7 @@ class RuntimeFEMWindow:
                 pass
             self.preview_canvas = None
 
-        if self.use_interactive_3d.get():
+        if self.use_interactive_3d.get() and display_mode != "time_history":
             if self.figure_canvas is not None:
                 try:
                     self.figure_canvas.get_tk_widget().destroy()
@@ -4415,6 +4974,9 @@ class RuntimeFEMWindow:
                     member_alpha=_clamped_alpha(self.member_alpha_vis.get(), 0.95),
                     colormap=str(self.colormap_vis.get()),
                     component=self._selected_component(),
+                    color_limits=self._manual_color_limits(),
+                    probe_node_id=self._parse_probe_id(self.probe_node_id),
+                    probe_element_id=self._parse_probe_id(self.probe_element_id),
                 ),
                 self.figure_parent,
             )
@@ -4484,7 +5046,7 @@ class RuntimeFEMWindow:
             member_model=str(self.member_model.get()),
             analysis_type=str(self.analysis_type.get()),
             buckling_analysis_type=str(self.buckling_analysis_type.get()),
-            pressure_direction=str(self.pressure_direction.get()),
+            pressure_direction=_normalise_pressure_side(self.pressure_direction.get()),
             axial_force_n=_safe_float(self.axial_force_n.get(), 0.0),
             enforced_displacement_m=_safe_float(self.enforced_displacement_m.get(), 0.0),
             stiffener_eccentricity_m=_safe_float(self.stiffener_eccentricity_m.get(), 0.0),
@@ -4531,6 +5093,7 @@ class RuntimeFEMWindow:
             custom_time_domain_duration_s=max(_safe_float(self.custom_time_domain_duration_s.get(), 0.01), 0.0),
             custom_time_domain_total_time_s=max(_safe_float(self.custom_time_domain_total_time_s.get(), 0.05), 0.0),
             custom_time_domain_dt_s=max(_safe_float(self.custom_time_domain_dt_s.get(), 0.0005), 1.0e-9),
+            custom_time_domain_result_interval_s=max(_safe_float(self.custom_time_domain_result_interval_s.get(), 0.0), 0.0),
             custom_time_domain_include_static_load=bool(self.custom_time_domain_include_static_load.get()),
             imperfection_enabled=bool(self.imperfection_enabled.get()),
             imperfection_shape=str(self.imperfection_shape.get()),
@@ -4576,6 +5139,7 @@ class RuntimeFEMWindow:
             self.custom_time_domain_duration_s,
             self.custom_time_domain_total_time_s,
             self.custom_time_domain_dt_s,
+            self.custom_time_domain_result_interval_s,
             self.custom_time_domain_include_static_load,
         )
         for variable in variables:
@@ -4632,6 +5196,9 @@ class RuntimeFEMWindow:
                 + f"{_safe_float(self.custom_time_domain_total_time_s.get(), 0.0):g}"
                 + " s"
             )
+            interval = _safe_float(self.custom_time_domain_result_interval_s.get(), 0.0)
+            if interval > 0.0:
+                time_domain += ", result interval=" + f"{interval:g}" + " s"
             if bool(self.custom_time_domain_include_static_load.get()):
                 time_domain += ", static included"
         return supports, "; ".join(flags + [edge_loads, time_domain])
@@ -4821,6 +5388,7 @@ class RuntimeFEMWindow:
         self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
         self._set_display_modes(result)
+        self._sync_color_limit_controls(force=True)
         self._last_run_result_status_text = format_runtime_fem_result(result)
         self._write_status(self._last_run_result_status_text)
         self._refresh_figure()
@@ -5183,9 +5751,12 @@ class RuntimeFEMWindow:
 
     def _custom_load_selection_visual_offset(self) -> float:
         geometry = runtime_geometry_summary(self.snapshot)
+        side_var = getattr(self, "pressure_direction", None)
+        side_value = side_var.get() if side_var is not None and hasattr(side_var, "get") else "front"
+        side_sign = _pressure_surface_sign(side_value)
         if self.snapshot.is_cylinder:
-            return max(_safe_float(geometry.get("radius_m"), 1.0) * 2.0e-3, 2.0e-4)
-        return max(
+            return side_sign * max(_safe_float(geometry.get("radius_m"), 1.0) * 2.0e-3, 2.0e-4)
+        return side_sign * max(
             _safe_float(geometry.get("length_m"), 1.0),
             _safe_float(geometry.get("width_m"), 1.0),
         ) * 2.0e-4

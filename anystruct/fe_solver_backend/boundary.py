@@ -166,6 +166,8 @@ class LoadCase:
             if moments is None:
                 moments = np.zeros(3)
             load = np.concatenate([np.asarray(forces, dtype=float)[:3], np.asarray(moments, dtype=float)[:3]])
+        elif moments is not None:
+            load = np.concatenate([np.zeros(3), np.asarray(moments, dtype=float)[:3]])
         else:
             load = np.zeros(6)
 

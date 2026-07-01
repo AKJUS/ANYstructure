@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import math
 
+import numpy as np
 import pytest
 
 from anystruct import api, fe_plate_fields, fe_runtime_solver, fe_solver
@@ -525,6 +526,62 @@ def test_runtime_fem_matplotlib_figure_contains_geometry_axis():
     assert figure.axes[0].lines
 
 
+def test_missing_shell_strain_component_does_not_reuse_von_mises_values():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={},
+        visualization={
+            "type": "flat",
+            "stress_pa": ((480.0e6, 500.0e6),),
+            "fields": {},
+        },
+    )
+
+    visualization, _title, _is_mode = fe_runtime_solver._selected_visualization(
+        result,
+        "static",
+        "strain_xy_membrane",
+    )
+
+    assert visualization["scalar_kind"] == "raw"
+    assert visualization["stress_pa"][0][0] == pytest.approx(0.0)
+    assert fe_runtime_solver._shell_surface_component_value(
+        {"field_values": {"von_mises_pa": 480.0e6}},
+        "strain_xy_membrane",
+        is_mode=False,
+    ) == pytest.approx(0.0)
+
+
+def test_display_modes_keep_equivalent_plastic_strain_for_dnv_material():
+    class Var:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    class DummyWindow:
+        result_case_choice = Var("Static displacement/stress")
+        component_choice = Var("Stress von Mises")
+        result_case_selector = None
+        component_selector = None
+
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={"material_model": "DNV-RP-C208 steel"},
+        visualization={},
+    )
+
+    window = DummyWindow()
+
+    fe_runtime_solver.RuntimeFEMWindow._set_display_modes(window, result)
+
+    assert window.component_labels["Equivalent Plastic Strain"] == "plastic_strain"
+
+
 def test_runtime_fem_result_print_explains_unavailable_nonlinear_factor():
     result = fe_runtime_solver.RuntimeFEMRunResult(
         status="ok",
@@ -539,7 +596,8 @@ def test_runtime_fem_result_print_explains_unavailable_nonlinear_factor():
             "buckling_analysis_type": "nonlinear limit",
             "solver_type": "direct",
             "pressure_pa": 1000.0,
-            "pressure_direction": "external",
+            "pressure_side": "front",
+            "pressure_direction": "front",
             "axial_force_n": 0.0,
             "enforced_displacement_m": 0.0,
             "mesh_size_m": 0.0,
@@ -591,7 +649,8 @@ def test_runtime_fem_result_print_explains_nullspace_projection():
             "buckling_analysis_type": "linear eigenvalue",
             "solver_type": "direct",
             "pressure_pa": 1000.0,
-            "pressure_direction": "external",
+            "pressure_side": "front",
+            "pressure_direction": "front",
             "axial_force_n": 0.0,
             "enforced_displacement_m": 0.0,
             "mesh_size_m": 0.0,
@@ -645,6 +704,45 @@ def test_dnv_c208_steel_properties_use_grade_and_thickness_class():
     assert props["eps_p_y2"] == pytest.approx(0.015)
     assert props["K"] == pytest.approx(740.0e6)
     assert props["n"] == pytest.approx(0.166)
+
+
+def test_nonlinear_shell_display_stresses_use_committed_plastic_state():
+    class ShellElement:
+        material_name = "steel"
+        gauss_points = ((0.0, 0.0),)
+
+    class Mesh:
+        def __init__(self):
+            self._element = ShellElement()
+
+        def get_element(self, element_id):
+            return self._element if element_id == 1 else None
+
+    class Material:
+        elastic_modulus = 210.0e9
+        poisson_ratio = 0.3
+
+    class Model:
+        mesh = Mesh()
+
+        def get_material(self, _name):
+            return Material()
+
+    states = {
+        1: {
+            "layer_strain": np.asarray([[0.003, 0.0, 0.0004]], dtype=float),
+            "plastic_strain": np.asarray([[0.002, 0.0, 0.0001]], dtype=float),
+            "alpha": np.asarray([0.002], dtype=float),
+        }
+    }
+
+    stresses = fe_solver._nonlinear_shell_stresses_from_states(Model(), states)
+
+    elastic_overstress = 210.0e9 / (1.0 - 0.3**2) * 0.003
+    assert stresses[1]["membrane_strain_xx"][0] == pytest.approx(0.003)
+    assert stresses[1]["membrane_strain_xy"][0] == pytest.approx(0.0004)
+    assert stresses[1]["membrane_xx"][0] < elastic_overstress
+    assert stresses[1]["von_mises"][0] > 0.0
 
 
 def test_production_solver_runs_incremental_material_nonlinear_static_path():
@@ -815,7 +913,8 @@ def test_runtime_result_print_includes_dnv_curve_and_nonlinear_static_summary():
             "buckling_analysis_type": "linear eigenvalue",
             "solver_type": "direct",
             "pressure_pa": 1000.0,
-            "pressure_direction": "external",
+            "pressure_side": "front",
+            "pressure_direction": "front",
             "axial_force_n": 0.0,
             "enforced_displacement_m": 0.0,
             "mesh_size_m": 0.0,
@@ -924,10 +1023,18 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.beam_element_order = tk.StringVar(value=\"B2\")" in source
     assert "self.member_model = tk.StringVar(value=\"plates as shell, girders as beams\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
-    assert "self.pressure_direction = tk.StringVar(value=\"external\")" in source
+    assert "self.pressure_direction = tk.StringVar(value=\"front\")" in source
+    assert "self._add_option_row(constraints, 2, \"pressure_direction\", \"Pressure side\", self.pressure_direction" in source
+    assert "(\"front\", \"back\")" in source
+    assert "def _draw_pressure_side_indicators(" in source
+    assert "RuntimeFEMWindow._draw_pressure_side_indicators(self, canvas, geometry)" in source
     assert "self.axial_force_n = tk.DoubleVar(value=_safe_float(self.snapshot.axial_force_n, 0.0))" in source
     assert "self.elastic_modulus_gpa = tk.DoubleVar(value=210.0)" in source
     assert "self.plate_alpha_vis = tk.StringVar(value=\"1.0\")" in source
+    assert "self.plate_front_color_vis = tk.StringVar(value=\"#d1d5db\")" in source
+    assert "self.plate_back_color_vis = tk.StringVar(value=\"#8b5e3c\")" in source
+    assert "self._add_entry_row(vis_group, 4, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
+    assert "self._add_entry_row(vis_group, 5, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "member_model=str(self.member_model.get())" in source
@@ -948,6 +1055,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.custom_loads_json = tk.StringVar(value=\"[]\")" in source
     assert "self._custom_load_entries: list[dict[str, Any]] = []" in source
     assert "self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()" in source
+
     assert "self.deformation_scale = tk.StringVar(value=\"0.0\")" in source
     assert "custom = ttk.LabelFrame(tab_advanced, text=\"Custom loads and boundary conditions\")" in source
     assert "selection = ttk.LabelFrame(custom, text=\"Panel and edge selection\")" in source
@@ -974,6 +1082,52 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
     assert "\"nullspace_projection\"" in source
     assert "horizontal_span" not in source
+
+
+def test_tkinter_3d_canvas_supports_plate_front_back_colours():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "anystruct"
+        / "tkinter_3d_canvas_thickness_v6.py"
+    ).read_text(encoding="utf-8")
+
+    assert "back_color: str = \"\"" in source
+    assert "\"back_color\": back_color" in source
+    assert "fill_color = primitive[\"color\"]" in source
+    assert "fill_color = primitive.get(\"back_color\") or fill_color" in source
+    assert "needs_facing = (" in source
+    assert "show_backfaces = bool(back_color) or opacity < 0.90" in source
+    assert "render_phase = 1" in source
+    assert "render_phase = 2 if primitive.get(\"_front_facing\", True) else 0" in source
+    assert "primitive[\"two_sided_shell\"] = bool(back_color)" in source
+    assert "if bool(show_backfaces):" in source
+
+
+def test_tkinter_3d_two_sided_cylinder_shell_does_not_occlude_backside_members():
+    from anystruct.tkinter_3d_canvas_thickness_v6 import Point3D, Tkinter3DCanvas
+
+    canvas = Tkinter3DCanvas.__new__(Tkinter3DCanvas)
+    canvas._explicit_opaque_cylinder_occluders = []
+    canvas.objects = [
+        {
+            "type": "cylinder",
+            "radius": 1.0,
+            "height": 10.0,
+            "center": Point3D(0.0, 0.0, 0.0),
+            "opacity": 1.0,
+            "show_backfaces": True,
+            "back_color": "brown",
+        }
+    ]
+
+    assert canvas._collect_opaque_cylinder_occluders() == []
+
+    occluder = {"radius": 1.0, "height": 10.0, "center": Point3D(0.0, 0.0, 0.0)}
+    assert canvas._primitive_hidden_by_opaque_cylinder(
+        {"kind": "polygon", "layer": 20, "center": Point3D(0.0, -0.5, 0.0)},
+        (occluder,),
+        Point3D(0.0, -4.0, 0.0),
+    )
 
 
 def test_runtime_fem_standalone_example_uses_main_application_section_preview():
@@ -2165,7 +2319,7 @@ def test_runtime_solver_records_new_analysis_material_and_load_options():
         },
         fe_solver.LightweightFEMConfig(
             pressure_pa=10_000.0,
-            pressure_direction="internal",
+            pressure_direction="back",
             axial_force_n=25_000.0,
             shell_element_order="S8",
             analysis_type="nonlinear stability",
@@ -2382,6 +2536,10 @@ def test_production_solver_runs_custom_time_domain_response_and_stress_free_impe
     assert prestress["custom_time_domain_status"] == "completed"
     assert prestress["custom_time_domain_selected_shells"] == pytest.approx(result.mesh_info["shells"])
     assert prestress["custom_time_domain_peak_displacement_m"] > 0.0
+    assert prestress["custom_time_domain_saved_steps"] >= 2.0
+    assert result.visualization["time_domain"]["snapshots"]
+    assert result.visualization["time_domain"]["node_histories"]
+    assert result.visualization["time_domain"]["element_histories"]
     assert any("Custom time-domain response completed" in item for item in result.diagnostics)
 
 
@@ -2399,7 +2557,8 @@ def test_runtime_result_print_and_gui_source_include_custom_time_domain_and_impe
             "buckling_analysis_type": "linear eigenvalue",
             "solver_type": "direct",
             "pressure_pa": 0.0,
-            "pressure_direction": "external",
+            "pressure_side": "front",
+            "pressure_direction": "front",
             "axial_force_n": 0.0,
             "enforced_displacement_m": 0.0,
             "mesh_size_m": 0.0,
@@ -2435,6 +2594,7 @@ def test_runtime_result_print_and_gui_source_include_custom_time_domain_and_impe
             "custom_time_domain_duration_s": 0.001,
             "custom_time_domain_total_time_s": 0.002,
             "custom_time_domain_dt_s": 0.001,
+            "custom_time_domain_result_interval_s": 0.001,
             "custom_pressure_patch_count": 1,
             "custom_pressure_patch_area_m2": 0.18,
             "custom_edge_segment_count": 2,
@@ -2463,9 +2623,15 @@ def test_runtime_result_print_and_gui_source_include_custom_time_domain_and_impe
     assert "Applied geometric imperfection:" in text
     assert "Custom time-domain response:" in text
     assert "self.custom_time_domain_enabled = tk.BooleanVar(value=False)" in source
+    assert "self.custom_time_domain_result_interval_s = tk.DoubleVar(value=0.0)" in source
+    assert "\"custom_time_domain_result_interval_s\"" in source
     assert "self.imperfection_enabled = tk.BooleanVar(value=False)" in source
     assert "Custom time-domain load" in source
     assert "Imperfections" in source
+    assert "Time history graph" in source
+    assert "self.probe_node_id = tk.StringVar(value=\"\")" in source
+    assert "self.color_min_vis = tk.StringVar(value=\"\")" in source
+    assert "self.color_min_scale = ttk.Scale(" in source
 
 
 def test_runtime_fem_module_has_ready_to_run_main_example():
@@ -2644,6 +2810,8 @@ def test_populate_canvas_with_geometry_accepts_generated_cylinder_preview():
     window._populate_canvas_with_geometry(canvas)
 
     assert len(canvas.cylinders) == 1
+    assert canvas.cylinders[0][1]["back_color"] == "#8b5e3c"
+    assert canvas.cylinders[0][1]["show_backfaces"] is True
     assert len(canvas.longitudinal_stiffeners) > 0
     assert len(canvas.ring_stiffeners) > 0
 
