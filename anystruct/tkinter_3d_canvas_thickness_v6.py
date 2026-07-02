@@ -460,6 +460,29 @@ class Tkinter3DCanvas(tk.Frame):
             return f"{value:.6f}".rstrip("0").rstrip(".")
         return f"{value:.3e}"
 
+    @staticmethod
+    def _legend_text_lines(text: str, max_chars: int, max_lines: int = 3) -> List[str]:
+        words = str(text).split()
+        if not words:
+            return [""]
+        lines: List[str] = []
+        current = ""
+        for word in words:
+            candidate = word if not current else current + " " + word
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+            current = word
+            if len(lines) >= max_lines:
+                break
+        if current and len(lines) < max_lines:
+            lines.append(current)
+        if len(lines) == max_lines and len(" ".join(words)) > len(" ".join(lines)):
+            lines[-1] = lines[-1].rstrip(".") + "..."
+        return lines
+
     def _draw_thickness_legend(self) -> None:
         legend = self._thickness_legend
         if legend is None:
@@ -485,26 +508,32 @@ class Tkinter3DCanvas(tk.Frame):
         title = str(legend.get("title", "Plate thickness"))
         unit = str(legend.get("unit", ""))
         title_text = f"{title} [{unit}]" if unit else title
-        self.canvas.create_text(
-            left + padding,
-            18,
-            text=title_text,
-            anchor="nw",
-            font=("TkDefaultFont", 10, "bold"),
-            fill="#202020",
-        )
+        max_title_chars = max(12, int((panel_width - 2 * padding) / 7))
+        title_lines = self._legend_text_lines(title_text, max_title_chars)
+        title_y = 18
+        for line in title_lines:
+            self.canvas.create_text(
+                left + padding,
+                title_y,
+                text=line,
+                anchor="nw",
+                font=("TkDefaultFont", 10, "bold"),
+                fill="#202020",
+            )
+            title_y += 15
 
         values = list(legend.get("values", []))
         minimum = float(legend["minimum"])
         maximum = float(legend["maximum"])
-        available_height = max(80, self.height - 70)
+        bar_top = max(54, title_y + 8)
+        available_height = max(80, self.height - (bar_top + 16))
 
         # A short set of distinct thicknesses is clearer as labelled swatches.
         if 1 <= len(values) <= 10:
             values = sorted(values, reverse=True)
             row_height = min(34, max(23, available_height // len(values)))
             swatch_width = 34
-            y_coord = 54
+            y_coord = bar_top
             for value in values:
                 color = _interpolate_thickness_color(value, minimum, maximum)
                 self.canvas.create_rectangle(
@@ -527,7 +556,6 @@ class Tkinter3DCanvas(tk.Frame):
             return
 
         # Continuous or highly populated scales are rendered as a gradient.
-        bar_top = 54
         bar_bottom = min(self.height - 28, bar_top + available_height)
         bar_left = left + padding
         bar_right = bar_left + 30
@@ -807,8 +835,8 @@ class Tkinter3DCanvas(tk.Frame):
             projected_points[key] = result
             return result
 
-        render_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
-        overlay_items: List[Tuple[float, int, Dict[str, Any], Tuple[float, ...]]] = []
+        render_items: List[Tuple[int, float, int, Dict[str, Any], Tuple[float, ...]]] = []
+        overlay_items: List[Tuple[int, float, int, Dict[str, Any], Tuple[float, ...]]] = []
         offscreen_margin = 20.0
         min_screen_x = -offscreen_margin
         max_screen_x = float(plot_width) + offscreen_margin
@@ -822,7 +850,11 @@ class Tkinter3DCanvas(tk.Frame):
                     position,
             ):
                 continue
-            if primitive.get("cull_backface", False):
+            needs_facing = (
+                primitive.get("kind") == "polygon"
+                and (primitive.get("cull_backface", False) or primitive.get("back_color"))
+            )
+            if needs_facing:
                 normal = primitive["normal"]
                 center = primitive["center"]
                 to_camera_x = position.x - center.x
@@ -833,6 +865,11 @@ class Tkinter3DCanvas(tk.Frame):
                     + normal.y * to_camera_y
                     + normal.z * to_camera_z
                 )
+                primitive["_front_facing"] = facing > 0.0
+            else:
+                facing = 1.0
+
+            if primitive.get("cull_backface", False):
                 if facing <= 0.0:
                     continue
 
@@ -850,6 +887,19 @@ class Tkinter3DCanvas(tk.Frame):
                     continue
                 depth = 0.5 * (start[2] + end[2])
                 coords = (start[0], start[1], end[0], end[1])
+            elif primitive["kind"] == "text":
+                point = project(primitive["point"])
+                if point is None:
+                    continue
+                if (
+                        point[0] < min_screen_x
+                        or point[0] > max_screen_x
+                        or point[1] < min_screen_y
+                        or point[1] > max_screen_y
+                ):
+                    continue
+                depth = point[2]
+                coords = (point[0], point[1])
             else:
                 projected: List[Tuple[float, float, float]] = []
                 clipped = False
@@ -885,7 +935,11 @@ class Tkinter3DCanvas(tk.Frame):
                 depth = depth_total / len(projected)
                 coords = tuple(flat)
 
+            render_phase = 1
+            if primitive.get("two_sided_shell", False):
+                render_phase = 2 if primitive.get("_front_facing", True) else 0
             item = (
+                render_phase,
                 depth,
                 int(primitive.get("layer", 0)),
                 primitive,
@@ -900,37 +954,73 @@ class Tkinter3DCanvas(tk.Frame):
         # bias was large enough to draw internal members through an opaque shell.
         scene_scale = max(float(self.camera.distance), 1.0)
         layer_epsilon = max(1.0e-9, scene_scale * 1.0e-7)
-        render_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
+        render_items.sort(key=lambda item: (
+            item[0],
+            -(item[1] - item[2] * layer_epsilon),
+            item[2],
+        ))
 
-        for _depth, _layer, primitive, coords in render_items:
+        for _phase, _depth, _layer, primitive, coords in render_items:
             if primitive["kind"] == "line":
                 self.canvas.create_line(
                     *coords,
                     fill=primitive["color"],
                     width=primitive["width"],
+                )
+            elif primitive["kind"] == "text":
+                self.canvas.create_text(
+                    *coords,
+                    text=primitive["text"],
+                    fill=primitive["color"],
+                    font=primitive["font"],
+                    anchor=primitive["anchor"],
                 )
             else:
                 outline = "" if interactive and primitive.get("fast_no_outline") else primitive["outline"]
-                kwargs = {
-                    "fill": primitive["color"],
-                    "outline": outline,
-                    "width": primitive["width"],
-                    "stipple": "" if interactive else primitive.get("stipple", ""),
-                }
+                fill_color = primitive["color"]
+                if not primitive.get("_front_facing", True):
+                    fill_color = primitive.get("back_color") or fill_color
+                stipple = "" if interactive else primitive.get("stipple", "")
                 if primitive.get("tags"):
-                    kwargs["tags"] = primitive.get("tags")
-                self.canvas.create_polygon(
-                    *coords,
-                    **kwargs
-                )
+                    kwargs = {
+                        "fill": fill_color,
+                        "outline": outline,
+                        "width": primitive["width"],
+                        "stipple": stipple,
+                        "tags": primitive.get("tags"),
+                    }
+                    self.canvas.create_polygon(
+                        *coords,
+                        **kwargs
+                    )
+                else:
+                    self.canvas.create_polygon(
+                        *coords,
+                        fill=fill_color,
+                        outline=outline,
+                        width=primitive["width"],
+                        stipple=stipple,
+                    )
 
-        overlay_items.sort(key=lambda item: (-(item[0] - item[1] * layer_epsilon), item[1]))
-        for _depth, _layer, primitive, coords in overlay_items:
+        overlay_items.sort(key=lambda item: (
+            item[0],
+            -(item[1] - item[2] * layer_epsilon),
+            item[2],
+        ))
+        for _phase, _depth, _layer, primitive, coords in overlay_items:
             if primitive["kind"] == "line":
                 self.canvas.create_line(
                     *coords,
                     fill=primitive["color"],
                     width=primitive["width"],
+                )
+            elif primitive["kind"] == "text":
+                self.canvas.create_text(
+                    *coords,
+                    text=primitive["text"],
+                    fill=primitive["color"],
+                    font=primitive["font"],
+                    anchor=primitive["anchor"],
                 )
 
         if not interactive:
@@ -987,6 +1077,7 @@ class Tkinter3DCanvas(tk.Frame):
         fast_no_outline: bool = True,
         stipple: str = "",
         tags: str = "",
+        back_color: str = "",
     ) -> Optional[Dict[str, Any]]:
         if len(vertices) < 3:
             return None
@@ -1001,6 +1092,7 @@ class Tkinter3DCanvas(tk.Frame):
             "kind": "polygon",
             "vertices": vertices_list,
             "color": color,
+            "back_color": back_color,
             "outline": outline,
             "width": width,
             "layer": layer,
@@ -1048,6 +1140,19 @@ class Tkinter3DCanvas(tk.Frame):
                     draw_overlay=bool(obj.get("draw_overlay", False)),
                 )
             ]
+        if object_type == "text":
+            return [
+                {
+                    "kind": "text",
+                    "point": obj["point"],
+                    "text": obj.get("text", ""),
+                    "color": obj.get("color", "black"),
+                    "font": obj.get("font", ("Segoe UI", 9, "bold")),
+                    "anchor": obj.get("anchor", tk.CENTER),
+                    "layer": int(obj.get("layer", 35)),
+                    "draw_overlay": bool(obj.get("draw_overlay", True)),
+                }
+            ]
         elif object_type == "polygon":
             primitive = self._polygon_primitive(
                 vertices=obj["vertices"],
@@ -1058,6 +1163,7 @@ class Tkinter3DCanvas(tk.Frame):
                 cull_backface=obj.get("cull_backface", False),
                 stipple=obj.get("stipple", ""),
                 tags=obj.get("tags", ""),
+                back_color=obj.get("back_color", ""),
             )
             return [primitive] if primitive else []
         if object_type == "cylinder":
@@ -1202,6 +1308,7 @@ class Tkinter3DCanvas(tk.Frame):
         height = max(0.0, float(obj.get("height", 1.0)))
         center = obj.get("center", Point3D(0.0, 0.0, 0.0))
         color = obj.get("color", "lightgray")
+        back_color = obj.get("back_color", "")
         outline = obj.get("outline", "black")
         plate_thickness = obj.get("plate_thickness")
         thickness_range = obj.get("thickness_range")
@@ -1227,7 +1334,7 @@ class Tkinter3DCanvas(tk.Frame):
         # show_backfaces option can override this automatic behaviour.
         show_backfaces = obj.get("show_backfaces")
         if show_backfaces is None:
-            show_backfaces = opacity < 0.90
+            show_backfaces = bool(back_color) or opacity < 0.90
         cull_shell_backfaces = not bool(show_backfaces)
 
         z_bottom = center.z - height / 2.0
@@ -1293,8 +1400,10 @@ class Tkinter3DCanvas(tk.Frame):
                     layer=0,
                     cull_backface=cull_shell_backfaces,
                     stipple=shell_stipple,
+                    back_color=back_color,
                 )
                 if primitive:
+                    primitive["two_sided_shell"] = bool(back_color)
                     primitives.append(primitive)
 
         if capped and rings:
@@ -1306,6 +1415,7 @@ class Tkinter3DCanvas(tk.Frame):
                 layer=1,
                 cull_backface=cull_shell_backfaces,
                 stipple=shell_stipple,
+                back_color=back_color,
             )
             bottom_cap = self._polygon_primitive(
                 list(reversed(rings[0])),
@@ -1315,6 +1425,7 @@ class Tkinter3DCanvas(tk.Frame):
                 layer=1,
                 cull_backface=cull_shell_backfaces,
                 stipple=shell_stipple,
+                back_color=back_color,
             )
             if top_cap:
                 primitives.append(top_cap)
@@ -1641,7 +1752,9 @@ class Tkinter3DCanvas(tk.Frame):
             show_backfaces = obj.get("show_backfaces")
             if show_backfaces is None:
                 show_backfaces = opacity < 0.90
-            if opacity < 0.94 or bool(show_backfaces):
+            if opacity < 0.94:
+                continue
+            if bool(show_backfaces):
                 continue
             occluders.append(
                 {
@@ -1761,6 +1874,31 @@ class Tkinter3DCanvas(tk.Frame):
         self._invalidate_geometry_cache()
         self._request_redraw()
 
+    def add_text(
+        self,
+        point: Point3D,
+        text: str,
+        color: str = "black",
+        font: Tuple[str, int, str] = ("Segoe UI", 9, "bold"),
+        anchor: str = tk.CENTER,
+        layer: int = 35,
+        draw_overlay: bool = True,
+    ) -> None:
+        self.objects.append(
+            {
+                "type": "text",
+                "point": point,
+                "text": text,
+                "color": color,
+                "font": font,
+                "anchor": anchor,
+                "layer": int(layer),
+                "draw_overlay": bool(draw_overlay),
+            }
+        )
+        self._invalidate_geometry_cache()
+        self._request_redraw()
+
     def add_polygon(
         self,
         vertices: Iterable[Point3D],
@@ -1771,12 +1909,14 @@ class Tkinter3DCanvas(tk.Frame):
         layer: int = 5,
         stipple: str = "",
         tags: str = "",
+        back_color: str = "",
     ) -> None:
         self.objects.append(
             {
                 "type": "polygon",
                 "vertices": list(vertices),
                 "color": color,
+                "back_color": back_color,
                 "outline": outline,
                 "width": width,
                 "cull_backface": cull_backface,
@@ -1794,6 +1934,7 @@ class Tkinter3DCanvas(tk.Frame):
         height: float,
         center: Optional[Point3D] = None,
         color: str = "lightgray",
+        back_color: str = "",
         outline: str = "black",
         segments: int = 32,
         height_segments: int = 24,
@@ -1813,6 +1954,7 @@ class Tkinter3DCanvas(tk.Frame):
                 "height": height,
                 "center": center if center is not None else Point3D(0.0, 0.0, 0.0),
                 "color": color,
+                "back_color": back_color,
                 "outline": outline,
                 "segments": segments,
                 "height_segments": height_segments,
@@ -1989,6 +2131,8 @@ class Tkinter3DCanvas(tk.Frame):
             object_type = obj.get("type")
             if object_type == "line":
                 points.extend((obj["start"], obj["end"]))
+            elif object_type == "text":
+                points.append(obj["point"])
             elif object_type == "polygon":
                 points.extend(obj.get("vertices", []))
             elif object_type == "cylinder":

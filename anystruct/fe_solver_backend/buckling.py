@@ -20,7 +20,7 @@ from scipy import linalg
 from scipy import sparse
 from scipy.sparse import linalg as sparse_linalg
 
-from .assembly import build_constraint_transformation
+from .assembly import build_constraint_transformation, build_reduced_rigid_body_modes
 from .cases import make_result_case
 from .linalg import FactorizationCache, MatrixClass, cached_inverse_operator
 from .matrix_assembly import assemble_geometric_stiffness_matrix, assemble_stiffness_matrix
@@ -41,6 +41,7 @@ class BucklingMode:
     modal_stiffness: float
     modal_geometric_stiffness: float
     residual_norm: float = 0.0
+    rigid_body_correlation: float = 0.0
     validity_status: str = "ok"
     repeated_group: Optional[int] = None
 
@@ -52,6 +53,7 @@ class BucklingMode:
             "modal_stiffness": self.modal_stiffness,
             "modal_geometric_stiffness": self.modal_geometric_stiffness,
             "residual_norm": self.residual_norm,
+            "rigid_body_correlation": self.rigid_body_correlation,
             "validity_status": self.validity_status,
             "repeated_group": self.repeated_group,
             "mode_shape": self.mode_shape.tolist(),
@@ -195,6 +197,7 @@ def solve_eigenvalue_buckling(
     search_factor: int = 4,
     repeated_tolerance: float = 1.0e-3,
     allow_dense_fallback: bool = False,
+    allow_free_mechanisms: bool = False,
     factorization_cache: Optional[FactorizationCache] = None,
 ) -> BucklingResult:
     """Solve ``K phi = lambda KG phi`` for positive buckling factors.
@@ -212,7 +215,7 @@ def solve_eigenvalue_buckling(
     KG, geometric_info = assemble_geometric_stiffness_matrix(model, element_states)
     zero_load = np.zeros(model.mesh.dof_manager.total_dofs, dtype=float)
 
-    K_red, _, T, _, _, constraint_info = build_constraint_transformation(K, zero_load, model)
+    K_red, _, T, _, independent_dofs, constraint_info = build_constraint_transformation(K, zero_load, model)
     KG_red = (T.T @ KG @ T).tocsr()
 
     assembly_info = {
@@ -231,6 +234,7 @@ def solve_eigenvalue_buckling(
         "search_factor": search_factor,
         "repeated_tolerance": repeated_tolerance,
         "allow_dense_fallback": allow_dense_fallback,
+        "allow_free_mechanisms": allow_free_mechanisms,
         "factorization_cache": None if factorization_cache is None else factorization_cache.name,
     }
 
@@ -258,6 +262,9 @@ def solve_eigenvalue_buckling(
             metadata={"prestress_state_source": "none" if element_states is None else type(element_states).__name__},
         ).to_dict()
         return BucklingResult([], num_modes, "zero_geometric_stiffness", constraint_info, assembly_info, result_case, diagnostics)
+
+    Q_rigid, nullspace_info = build_reduced_rigid_body_modes(model, independent_dofs, int(K.shape[0]))
+    assembly_info["nullspace"] = nullspace_info
 
     # Work with the inverted symmetric pencil KG phi = mu K phi where K is
     # positive definite after constraint elimination.  The largest mu
@@ -333,7 +340,7 @@ def solve_eigenvalue_buckling(
         ).to_dict()
         return BucklingResult([], num_modes, "failed", constraint_info, assembly_info, result_case, diagnostics)
 
-    candidates: List[tuple[float, np.ndarray, float, float, float]] = []
+    candidates: List[tuple[float, np.ndarray, float, float, float, float]] = []
     rejected: List[Dict[str, Any]] = []
     for i in range(eigenvectors.shape[1]):
         reduced_mode = np.asarray(np.real(eigenvectors[:, i]), dtype=float)
@@ -342,6 +349,16 @@ def solve_eigenvalue_buckling(
             rejected.append({"root_index": int(i), "reason": "invalid_or_zero_norm"})
             continue
         reduced_mode = reduced_mode / mode_norm
+        rigid_body_correlation = float(np.max(np.abs(Q_rigid.T @ reduced_mode))) if Q_rigid.shape[1] else 0.0
+        if rigid_body_correlation > 0.90 and not allow_free_mechanisms:
+            rejected.append(
+                {
+                    "root_index": int(i),
+                    "reason": "rigid_body_mode",
+                    "rigid_body_correlation": rigid_body_correlation,
+                }
+            )
+            continue
         modal_geometric = float(reduced_mode @ (KG_sym @ reduced_mode))
         modal_stiffness = float(reduced_mode @ (K_sym @ reduced_mode))
         if modal_geometric <= eigen_tolerance or modal_stiffness <= 0.0:
@@ -362,11 +379,11 @@ def solve_eigenvalue_buckling(
             rejected.append({"root_index": int(i), "reason": "outside_load_factor_range", "load_factor": float(rayleigh_value)})
             continue
         residual_norm = _mode_residual(K_sym, KG_sym, reduced_mode, rayleigh_value)
-        candidates.append((rayleigh_value, reduced_mode, modal_stiffness, modal_geometric, residual_norm))
+        candidates.append((rayleigh_value, reduced_mode, modal_stiffness, modal_geometric, residual_norm, rigid_body_correlation))
 
     candidates.sort(key=lambda item: _sort_key(item[0], shift_load_factor))
     modes: List[BucklingMode] = []
-    for mode_number, (value, reduced_mode, _modal_stiffness, _modal_geometric, _residual_norm) in enumerate(
+    for mode_number, (value, reduced_mode, _modal_stiffness, _modal_geometric, _residual_norm, rigid_body_correlation) in enumerate(
         candidates[:num_modes],
         start=1,
     ):
@@ -386,6 +403,7 @@ def solve_eigenvalue_buckling(
                 modal_stiffness=modal_stiffness,
                 modal_geometric_stiffness=modal_geometric,
                 residual_norm=residual_norm,
+                rigid_body_correlation=rigid_body_correlation,
                 validity_status=validity,
             )
         )
@@ -397,6 +415,9 @@ def solve_eigenvalue_buckling(
         "solver": solver_kind,
         **shift_invert_diagnostics,
         "sparse_error": sparse_error,
+        "nullspace_rank": int(Q_rigid.shape[1]),
+        "nullspace_info": nullspace_info,
+        "free_mechanism_handling": "retained" if allow_free_mechanisms else "rigid_body_roots_filtered",
         "num_roots_considered": int(eigenvectors.shape[1]),
         "num_rejected_roots": int(len(rejected)),
         "rejected_roots": rejected[:50],

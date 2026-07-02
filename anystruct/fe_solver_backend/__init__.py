@@ -1,19 +1,24 @@
-﻿"""Runtime-only FE backend exports for ANYstructure.
-
-This package mirrors the solver runtime from ANYintelligent, but deliberately
-excludes verification, QC, benchmark and development modules.
-"""
-
-from __future__ import annotations
+"""Runtime-only vendored FE solver backend for ANYstructure."""
 
 from .anystructure_fem_mode import (
     AnyStructureFEMConfig,
+    AnyStructureFEMResult,
     build_fe_model_from_generated_geometry,
     build_symmetric_load_case,
+    idealize_generated_geometry_members,
     recover_prestress_from_static_result,
+    run_anystructure_fem_mode,
 )
 from .arc_length import ArcLengthControl, ArcLengthResult, solve_static_arc_length
-from .boundary import BoundaryCondition, LoadCase
+from .assembly import (
+    build_constraint_transformation,
+    compute_constraint_force_diagnostics,
+    reconstruct_full_solution,
+    solve_linear,
+    solve_linear_many,
+    solve_nonlinear,
+)
+from .boundary import BoundaryCondition, FixedSupport, LoadCase, PinnedSupport, RollerSupport, SymmetryBC
 from .buckling import BucklingMode, BucklingResult, solve_eigenvalue_buckling
 from .capacity_workflow import (
     CapacityWorkflowConfig,
@@ -26,15 +31,40 @@ from .capacity_workflow import (
 )
 from .dynamics import PressurePatch, TransientConfig, TransientResult, solve_transient_newmark
 from .elements import BeamElement, CoupledBeamShellElement, QuadraticBeamElement, ShellElement, create_element
-from .fe_core import DOFManager, FEModel, FEMesh, Material, Node
+from .fe_core import DOFManager, FEMesh, FEModel, Material, Node
 from .imperfections import (
     CompositeImperfection,
     EigenmodeImperfection,
     ImperfectionField,
     StandardImperfection,
     apply_imperfection,
+    imperfection_from_buckling_mode,
+    standard_member_bow,
+    standard_plate_mode,
 )
-from .material_curves import DNVC208MaterialCurve, curve_from_properties, dnv_c208_steel_curve
+from .kernel_warmup import warm_fe_solver_kernels
+from .linalg import FactorizationCache
+from .material_curves import DNVC208MaterialCurve, FiberSectionPlasticityConfig, curve_from_properties, dnv_c208_steel_curve
+from .modal import solve_free_vibration
+from .matrix_assembly import (
+    AssemblyError,
+    assemble_damping_matrix,
+    assemble_geometric_stiffness_matrix,
+    assemble_load_matrix,
+    assemble_load_vector,
+    assemble_mass_matrix,
+    assemble_stiffness_matrix,
+    assemble_system,
+)
+from .mesh_gen import (
+    MeshConfig,
+    PanelGeometry,
+    StiffenerCrossSection,
+    generate_beam_mesh,
+    generate_simple_panel_mesh,
+    generate_stiffened_panel_mesh,
+    verify_mesh_quality,
+)
 from .nonlinear import NonlinearLimitPointResult, NonlinearLoadStep, solve_nonlinear_load_stepping
 from .nonlinear_static import (
     DisplacementControl,
@@ -45,15 +75,23 @@ from .nonlinear_static import (
     NonlinearStaticStep,
     solve_static_nonlinear,
 )
-from .recovery import RecoveryConfig, ResourceConfig
-from .validation import load_case_resultant, validate_production_model
-
-__version__ = "0.1.0-anystructure-runtime"
+from .recovery import (
+    MemoryEstimate,
+    RecoveryConfig,
+    RecoveryExecutionReport,
+    ResourceConfig,
+    ResourcePolicyError,
+    recover_element_stresses,
+    recover_element_stresses_with_report,
+)
+from .validation import load_case_resultant, load_vector_resultant, validate_production_model
 
 __all__ = [
+    "AnyStructureFEMConfig",
+    "AnyStructureFEMResult",
     "ArcLengthControl",
     "ArcLengthResult",
-    "AnyStructureFEMConfig",
+    "AssemblyError",
     "BeamElement",
     "BoundaryCondition",
     "BucklingMode",
@@ -68,9 +106,14 @@ __all__ = [
     "EigenmodeImperfection",
     "FEModel",
     "FEMesh",
+    "FactorizationCache",
+    "FiberSectionPlasticityConfig",
+    "FixedSupport",
     "ImperfectionField",
     "LoadCase",
     "Material",
+    "MemoryEstimate",
+    "MeshConfig",
     "MeshModeAdequacy",
     "Node",
     "NonlinearConvergenceSettings",
@@ -80,30 +123,64 @@ __all__ = [
     "NonlinearLoadStep",
     "NonlinearStaticResult",
     "NonlinearStaticStep",
+    "PanelGeometry",
+    "PinnedSupport",
     "PressurePatch",
     "QuadraticBeamElement",
     "RecoveryConfig",
+    "RecoveryExecutionReport",
     "ResourceConfig",
+    "ResourcePolicyError",
+    "RollerSupport",
     "ShellElement",
     "StandardImperfection",
+    "StiffenerCrossSection",
+    "SymmetryBC",
     "TransientConfig",
     "TransientResult",
     "apply_imperfection",
+    "assemble_damping_matrix",
+    "assemble_geometric_stiffness_matrix",
+    "assemble_load_matrix",
+    "assemble_load_vector",
+    "assemble_mass_matrix",
+    "assemble_stiffness_matrix",
+    "assemble_system",
+    "build_constraint_transformation",
     "build_fe_model_from_generated_geometry",
     "build_symmetric_load_case",
+    "compute_constraint_force_diagnostics",
     "create_element",
     "curve_from_properties",
     "default_eigenmode_imperfection",
     "dnv_c208_steel_curve",
     "evaluate_mode_mesh_adequacy",
+    "generate_beam_mesh",
+    "generate_simple_panel_mesh",
+    "generate_stiffened_panel_mesh",
+    "idealize_generated_geometry_members",
+    "imperfection_from_buckling_mode",
     "load_case_resultant",
+    "load_vector_resultant",
+    "recover_element_stresses",
+    "recover_element_stresses_with_report",
     "recover_prestress_from_static_result",
+    "reconstruct_full_solution",
+    "run_anystructure_fem_mode",
     "run_capacity_workflow_from_builder",
     "run_nonlinear_capacity_workflow",
     "solve_eigenvalue_buckling",
+    "solve_free_vibration",
+    "solve_linear",
+    "solve_linear_many",
+    "solve_nonlinear",
     "solve_nonlinear_load_stepping",
     "solve_static_arc_length",
     "solve_static_nonlinear",
     "solve_transient_newmark",
+    "standard_member_bow",
+    "standard_plate_mode",
     "validate_production_model",
+    "verify_mesh_quality",
+    "warm_fe_solver_kernels",
 ]

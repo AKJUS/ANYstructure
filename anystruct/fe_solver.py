@@ -32,6 +32,7 @@ try:
     from anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
     from anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
     from anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
+    from anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
     try:
@@ -45,6 +46,7 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
         from ANYstructure.anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
         from ANYstructure.anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
+        from ANYstructure.anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
         _full_backend = None
@@ -57,6 +59,7 @@ except ModuleNotFoundError:
         _backend_arc_length_control = None
         _backend_solve_static_arc_length = None
         _backend_solve_transient_newmark = None
+        _backend_warm_fe_solver_kernels = None
         _backend_load_case_resultant = None
 
 
@@ -80,7 +83,7 @@ class LightweightFEMConfig:
     member_model: str = "plates as shell, girders as beams"
     analysis_type: str = "linear eigenvalue"
     buckling_analysis_type: str = "linear eigenvalue"
-    pressure_direction: str = "external"
+    pressure_direction: str = "front"
     axial_force_n: float = 0.0
     enforced_displacement_m: float = 0.0
     stiffener_eccentricity_m: float = 0.0
@@ -126,6 +129,7 @@ class LightweightFEMConfig:
     custom_time_domain_duration_s: float = 0.01
     custom_time_domain_total_time_s: float = 0.05
     custom_time_domain_dt_s: float = 0.0005
+    custom_time_domain_result_interval_s: float = 0.0
     custom_time_domain_include_static_load: bool = False
     imperfection_enabled: bool = False
     imperfection_shape: str = "standard plate/cylinder"
@@ -2813,8 +2817,8 @@ def _resultant_dict(load_resultant) -> dict[str, tuple[float, float, float]]:
 
 
 def _pressure_sign(config: LightweightFEMConfig) -> float:
-    direction = _normalized_choice(config.pressure_direction, "external")
-    return 1.0 if direction in {"internal", "outward", "positive normal"} else -1.0
+    side = _normalized_choice(config.pressure_direction, "front")
+    return 1.0 if side in {"back", "internal", "inside", "inward side", "positive normal", "outward"} else -1.0
 
 
 def _solver_type(config: LightweightFEMConfig) -> str:
@@ -3438,6 +3442,98 @@ def _custom_pressure_patch_element_ids(
     )
 
 
+def _element_history_components(stress: object) -> dict[str, float]:
+    if not isinstance(stress, dict):
+        return {}
+    components: dict[str, float] = {}
+    if "von_mises" in stress:
+        values = np.asarray(stress.get("von_mises"), dtype=float).reshape(-1)
+        values = values[np.isfinite(values)]
+        components["von_mises_pa"] = float(np.max(np.abs(values))) if values.size else 0.0
+    mapping = {
+        "stress_x_membrane_pa": "membrane_xx",
+        "stress_y_membrane_pa": "membrane_yy",
+        "stress_xy_membrane_pa": "membrane_xy",
+        "strain_x_membrane": "membrane_strain_xx",
+        "strain_y_membrane": "membrane_strain_yy",
+        "strain_xy_membrane": "membrane_strain_xy",
+        "disp_mag": None,
+    }
+    for output_name, stress_key in mapping.items():
+        if stress_key is None or stress_key not in stress:
+            continue
+        components[output_name] = _mean_stress_value(stress.get(stress_key))
+    if "axial_stress" in stress:
+        components.setdefault("stress_x_membrane_pa", _mean_stress_value(stress.get("axial_stress")))
+    if "axial_strain" in stress:
+        components.setdefault("strain_x_membrane", _mean_stress_value(stress.get("axial_strain")))
+    return components
+
+
+def _transient_time_history_payload(
+        generated_geometry: dict,
+        model,
+        transient: object,
+) -> dict[str, object]:
+    times = tuple(float(value) for value in np.asarray(getattr(transient, "times", []), dtype=float).reshape(-1))
+    displacements = np.asarray(getattr(transient, "displacements", np.zeros((0, 0))), dtype=float)
+    if not times or displacements.ndim != 2 or displacements.shape[0] != len(times):
+        return {}
+    if str(getattr(transient, "history_storage_mode", "full")) != "full":
+        return {"times_s": times, "snapshots": (), "node_histories": {}, "element_histories": {}}
+
+    node_histories: dict[int, dict[str, tuple[float, ...]]] = {}
+    for node_id, node in model.mesh.nodes.items():
+        dofs = list(getattr(node, "dofs", []))[:3]
+        if len(dofs) < 3 or max(dofs) >= displacements.shape[1]:
+            continue
+        translations = displacements[:, dofs]
+        node_histories[int(node_id)] = {
+            "disp_x": tuple(float(value) for value in translations[:, 0]),
+            "disp_y": tuple(float(value) for value in translations[:, 1]),
+            "disp_z": tuple(float(value) for value in translations[:, 2]),
+            "disp_mag": tuple(float(np.linalg.norm(row)) for row in translations),
+        }
+
+    element_histories: dict[int, dict[str, list[float]]] = collections.defaultdict(lambda: collections.defaultdict(list))
+    snapshots: list[dict[str, object]] = []
+    for time_value, displacement in zip(times, displacements):
+        stresses = (
+            _backend_compute_stresses(model, displacement)
+            if _backend_compute_stresses is not None
+            else {}
+        )
+        visualization = _visualization_from_full_result(
+            generated_geometry,
+            model,
+            displacement,
+            stresses_by_element=stresses,
+        )
+        if visualization:
+            visualization["time_s"] = float(time_value)
+            snapshots.append(visualization)
+        for element_id, stress in (stresses or {}).items():
+            components = _element_history_components(stress)
+            for component_name, value in components.items():
+                element_histories[int(element_id)][component_name].append(float(value))
+
+    return {
+        "times_s": times,
+        "snapshots": tuple(snapshots),
+        "node_histories": {
+            int(node_id): values
+            for node_id, values in node_histories.items()
+        },
+        "element_histories": {
+            int(element_id): {
+                component_name: tuple(values)
+                for component_name, values in component_values.items()
+            }
+            for element_id, component_values in element_histories.items()
+        },
+    }
+
+
 def _run_custom_time_domain_response(
         model,
         load_case,
@@ -3452,6 +3548,7 @@ def _run_custom_time_domain_response(
     duration = max(float(config.custom_time_domain_duration_s or 0.0), 0.0)
     total_time = max(float(config.custom_time_domain_total_time_s or 0.0), duration)
     dt = max(float(config.custom_time_domain_dt_s or 0.0), 1.0e-9)
+    result_interval = max(float(config.custom_time_domain_result_interval_s or 0.0), 0.0)
     pressure_entries = _custom_pressure_load_entries(config)
     pressure_patches = []
     output_element_ids: set[int] = set()
@@ -3490,13 +3587,22 @@ def _run_custom_time_domain_response(
     patch_ids = tuple(sorted(output_element_ids))
     if not patch_ids:
         return {"status": "skipped", "reason": "no shell elements selected"}
+    if result_interval > 0.0:
+        save_every = max(int(round(result_interval / dt)), 1)
+    else:
+        save_every = max(int(math.ceil(max(total_time / dt, 1.0) / 120.0)), 1)
+    transient_recovery = (
+        _full_backend.RecoveryConfig(history_mode="full", store_full_histories=True)
+        if hasattr(_full_backend, "RecoveryConfig")
+        else _recovery_config(config)
+    )
     transient_config = _full_backend.TransientConfig(
         dt=dt,
         t_end=total_time,
-        save_every=max(int(math.ceil(max(total_time / dt, 1.0) / 120.0)), 1),
+        save_every=save_every,
         output_elements=patch_ids,
         include_stress_history=False,
-        recovery=_recovery_config(config),
+        recovery=transient_recovery,
         resource_config=_resource_config(config),
     )
     base_load_case = load_case if config.custom_time_domain_include_static_load else None
@@ -3512,11 +3618,14 @@ def _run_custom_time_domain_response(
         "duration_s": duration,
         "total_time_s": total_time,
         "dt_s": dt,
+        "result_interval_s": result_interval if result_interval > 0.0 else float(save_every) * dt,
+        "saved_steps": float(len(np.asarray(getattr(transient, "times", ()), dtype=float).reshape(-1))),
         "selected_shells": float(len(patch_ids)),
         "peak_displacement_m": float(transient.peak_displacement),
         "peak_von_mises_pa": float(transient.peak_von_mises_stress),
         "force_impulse_n_s": tuple(float(value) for value in np.asarray(transient.force_impulse, dtype=float).reshape(3)),
         "include_static_load": bool(config.custom_time_domain_include_static_load),
+        "history": _transient_time_history_payload(generated_geometry, model, transient),
     }
 
 
@@ -3941,8 +4050,14 @@ def _add_generated_end_moments(model, load_case, generated_geometry: dict, momen
 def _stress_statistics_from_model(model, displacements: np.ndarray, percentile: float = 95.0) -> dict[str, float]:
     if _backend_compute_stresses is None:
         return {"max": 0.0, "percentile": 0.0}
+    return _stress_statistics_from_stresses(_backend_compute_stresses(model, displacements), percentile)
+
+
+def _stress_statistics_from_stresses(stresses_by_element: dict[int, object], percentile: float = 95.0) -> dict[str, float]:
     values = []
-    for stress in _backend_compute_stresses(model, displacements).values():
+    for stress in (stresses_by_element or {}).values():
+        if not isinstance(stress, dict):
+            continue
         if "von_mises" in stress:
             values.extend(np.asarray(stress["von_mises"], dtype=float).reshape(-1).tolist())
     arr = np.asarray(values, dtype=float)
@@ -3950,6 +4065,98 @@ def _stress_statistics_from_model(model, displacements: np.ndarray, percentile: 
     if arr.size == 0:
         return {"max": 0.0, "percentile": 0.0}
     return {"max": float(np.max(arr)), "percentile": float(np.percentile(arr, percentile))}
+
+
+def _plane_stress_matrix(elastic_modulus: float, poisson_ratio: float) -> np.ndarray:
+    nu = float(poisson_ratio)
+    factor = float(elastic_modulus) / max(1.0 - nu**2, 1.0e-12)
+    return factor * np.array(
+        [[1.0, nu, 0.0], [nu, 1.0, 0.0], [0.0, 0.0, (1.0 - nu) / 2.0]],
+        dtype=float,
+    )
+
+
+def _nonlinear_shell_stresses_from_states(model, element_states: dict[int, object] | None) -> dict[int, dict[str, np.ndarray]]:
+    """Recover display stresses/strains from committed nonlinear shell states."""
+
+    recovered: dict[int, dict[str, np.ndarray]] = {}
+    if not element_states:
+        return recovered
+
+    for element_id, state in element_states.items():
+        if not isinstance(state, dict):
+            continue
+        element = model.mesh.get_element(int(element_id))
+        if element is None or element.__class__.__name__ != "ShellElement":
+            continue
+
+        layer_strain = np.asarray(state.get("layer_strain", []), dtype=float)
+        if layer_strain.size == 0:
+            continue
+        layer_strain = layer_strain.reshape((-1, 3))
+        if not np.all(np.isfinite(layer_strain)):
+            continue
+
+        layer_stress = np.asarray(state.get("layer_stress", []), dtype=float)
+        if layer_stress.size:
+            layer_stress = layer_stress.reshape((-1, 3))
+        else:
+            plastic_strain = np.asarray(state.get("plastic_strain", np.zeros_like(layer_strain)), dtype=float)
+            if plastic_strain.size == 0:
+                plastic_strain = np.zeros_like(layer_strain)
+            plastic_strain = plastic_strain.reshape(layer_strain.shape)
+            material = model.get_material(element.material_name)
+            layer_stress = (layer_strain - plastic_strain) @ _plane_stress_matrix(
+                material.elastic_modulus,
+                material.poisson_ratio,
+            ).T
+
+        if layer_stress.shape != layer_strain.shape:
+            continue
+
+        gauss_points = getattr(element, "gauss_points", ())
+        n_gp = max(1, len(gauss_points))
+        if layer_strain.shape[0] % n_gp != 0:
+            n_gp = 1
+        n_layers = max(1, layer_strain.shape[0] // n_gp)
+        strain_layers = layer_strain.reshape((n_gp, n_layers, 3))
+        stress_layers = layer_stress.reshape((n_gp, n_layers, 3))
+
+        membrane_strain = np.mean(strain_layers, axis=1)
+        membrane_stress = np.mean(stress_layers, axis=1)
+        sx = stress_layers[:, :, 0]
+        sy = stress_layers[:, :, 1]
+        txy = stress_layers[:, :, 2]
+        von_mises = np.sqrt(np.maximum(sx**2 - sx * sy + sy**2 + 3.0 * txy**2, 0.0))
+
+        recovered[int(element_id)] = {
+            "membrane_strain_xx": membrane_strain[:, 0],
+            "membrane_strain_yy": membrane_strain[:, 1],
+            "membrane_strain_xy": membrane_strain[:, 2],
+            "membrane_xx": membrane_stress[:, 0],
+            "membrane_yy": membrane_stress[:, 1],
+            "membrane_xy": membrane_stress[:, 2],
+            "von_mises": np.max(von_mises, axis=1),
+        }
+
+    return recovered
+
+
+def _runtime_display_stresses(model, displacements: np.ndarray, nonlinear_static_result: object | None) -> dict[int, object]:
+    elastic_stresses = (
+        _backend_compute_stresses(model, displacements)
+        if _backend_compute_stresses is not None
+        else {}
+    )
+    nonlinear_shell_stresses = _nonlinear_shell_stresses_from_states(
+        model,
+        getattr(nonlinear_static_result, "element_states", None),
+    )
+    if not nonlinear_shell_stresses:
+        return elastic_stresses
+    merged = dict(elastic_stresses)
+    merged.update(nonlinear_shell_stresses)
+    return merged
 
 
 def _max_translation(model, displacements: np.ndarray) -> float:
@@ -4223,6 +4430,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         prestress_summary["imperfection_max_offset_m"] = float(imperfection_info.get("max_offset_m", 0.0) or 0.0)
         prestress_summary["imperfection_waves_a"] = float(imperfection_info.get("waves_a", 0.0) or 0.0)
         prestress_summary["imperfection_waves_b"] = float(imperfection_info.get("waves_b", 0.0) or 0.0)
+    transient_summary: dict[str, object] = {}
     if config.custom_time_domain_enabled:
         if status_callback: status_callback("Solving custom time-domain pressure response...")
         try:
@@ -4233,6 +4441,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 prestress_summary["custom_time_domain_selected_shells"] = float(transient_summary.get("selected_shells", 0.0) or 0.0)
                 prestress_summary["custom_time_domain_peak_displacement_m"] = float(transient_summary.get("peak_displacement_m", 0.0) or 0.0)
                 prestress_summary["custom_time_domain_peak_von_mises_pa"] = float(transient_summary.get("peak_von_mises_pa", 0.0) or 0.0)
+                prestress_summary["custom_time_domain_result_interval_s"] = float(transient_summary.get("result_interval_s", 0.0) or 0.0)
+                prestress_summary["custom_time_domain_saved_steps"] = float(transient_summary.get("saved_steps", 0.0) or 0.0)
                 diagnostics.append(
                     "Custom time-domain response "
                     + str(transient_summary.get("status", "unknown"))
@@ -4407,9 +4617,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 if nonlinear_static_result.steps:
                     prestress_summary["nonlinear_static_max_plastic_strain"] = float(
                         max(step.max_equivalent_plastic_strain for step in nonlinear_static_result.steps)
-                    )
+                )
                 plastic_strain_by_node = _nodal_engineering_plastic_strain(model, nonlinear_static_result.element_states)
                 diagnostics.append("Ran " + nonlinear_control + " geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
+                diagnostics.append("Ran incremental geometric/material nonlinear static solve: " + str(nonlinear_static_result.status) + ".")
                 if nonlinear_static_result.converged:
                     displacements = np.asarray(nonlinear_static_result.displacements, dtype=float)
                     prestress_states, recovered = _full_backend.recover_prestress_from_static_result(model, displacements)
@@ -4512,12 +4723,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         prestress_summary["buckling_min_load_factor"] = 0.0 if load_factor_range[0] is None else float(load_factor_range[0])
         prestress_summary["buckling_max_load_factor"] = 0.0 if load_factor_range[1] is None else float(load_factor_range[1])
     prestress_summary["buckling_allow_dense_fallback"] = 1.0 if bool(config.buckling_allow_dense_fallback) else 0.0
-    stress_stats = _stress_statistics_from_model(analysis_model, displacements, min(max(float(config.stress_percentile), 0.0), 100.0))
-    runtime_stresses_by_element = (
-        _backend_compute_stresses(analysis_model, displacements)
-        if _backend_compute_stresses is not None
-        else {}
-    )
+    stress_percentile = min(max(float(config.stress_percentile), 0.0), 100.0)
+    runtime_stresses_by_element = _runtime_display_stresses(analysis_model, displacements, nonlinear_static_result)
+    stress_stats = _stress_statistics_from_stresses(runtime_stresses_by_element, stress_percentile)
     visualization = _visualization_from_full_result(
         generated_geometry,
         analysis_model,
@@ -4541,6 +4749,8 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         if plastic_visualization:
             visualization["plastic_strain"] = plastic_visualization.get("stress_pa", ())
             visualization["plastic_strain_label"] = "equiv. engineering plastic strain [-]"
+    if isinstance(transient_summary, dict) and transient_summary.get("history"):
+        visualization["time_domain"] = transient_summary.get("history")
     visualization["buckling_modes"] = _buckling_mode_visualizations(generated_geometry, model, buckling_result)
 
     if not prestress_states:
@@ -4675,3 +4885,15 @@ def full_backend_api():
     if _full_backend is None:
         raise RuntimeError("The vendored full FE solver backend is not available.")
     return _full_backend
+
+
+def warm_fe_solver_kernels(shell_orders=("S4", "Q8", "Q8R")) -> dict[str, object]:
+    """Warm optional compiled FE backend kernels for runtime use."""
+
+    if _backend_warm_fe_solver_kernels is None:
+        return {
+            "status": "backend_unavailable",
+            "shell_orders": {},
+            "message": "The vendored full FE solver backend warmup helper is not available.",
+        }
+    return _backend_warm_fe_solver_kernels(shell_orders)

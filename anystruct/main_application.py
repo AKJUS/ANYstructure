@@ -244,6 +244,7 @@ class Application():
         menu.add_cascade(label='Reporting', menu=sub_report)
         sub_report.add_command(label='Generate PDF report', command=self.report_generate)
         sub_report.add_command(label='Generate PDF result table', command=self.table_generate)
+
         sub_report.add_command(label='Stiffened flat plate - Weight development, plates and beams',
                                command=self.on_plot_cog_dev)
 
@@ -1875,17 +1876,31 @@ class Application():
         ttk.Button(self._main_fr, text='Load factors', command=self.on_open_load_factor_window, style="Bold.TButton") \
             .place(relx=0.8225, rely=0.7, relwidth=0.05)
 
-        # Wight developement plot
-        self._weight_button = ttk.Button(self._main_fr, text='Weights',
-                                         command=self.on_plot_cog_dev, style="Bold.TButton")
-        self._weight_button.place(relx=0.875, rely=0.7, relwidth=0.038)
+        # # Wight developement plot
+        # self._weight_button = ttk.Button(self._main_fr, text='Weights',
+        #                                  command=self.on_plot_cog_dev, style="Bold.TButton")
+        # self._weight_button.place(relx=0.875, rely=0.7, relwidth=0.038)
 
-        self._runtime_fem_button = ttk.Button(
-            self._main_fr,
-            text='FEM run',
-            command=self.on_open_runtime_fem_solver,
-            style="Bold.TButton",
-        )
+
+
+        try:
+            img_file_name = 'fesolver_image.png'
+            if os.path.isfile('images/' + img_file_name):
+                file_path = 'images/' + img_file_name
+            else:
+                file_path = self._root_dir + '/images/' + img_file_name
+            photo = tk.PhotoImage(file=file_path)
+            self._runtime_fem_button = tk.Button(self._main_fr, image=photo, command=self.on_open_runtime_fem_solver,
+                                           bg='white', fg='white')
+            self._runtime_fem_button .image = photo
+        except TclError:
+            self._runtime_fem_button = ttk.Button(
+                self._main_fr,
+                text='FEM run',
+                command=self.on_open_runtime_fem_solver,
+                style="Bold.TButton",
+            )
+
         self._place_runtime_fem_button()
 
         self._chk_show_prop_3d = ttk.Checkbutton(
@@ -2003,7 +2018,7 @@ class Application():
                     getattr(self, '_experimental_mode_enabled', False)
                     and not getattr(self, '_fea_buckling_mode', False)
             ):
-                self._runtime_fem_button.place(relx=0.915, rely=0.7, relwidth=0.055)
+                self._runtime_fem_button.place(relx=0.89, rely=0.69, relwidth=0.095)
                 self._runtime_fem_button.lift()
             else:
                 self._runtime_fem_button.place_forget()
@@ -4256,7 +4271,7 @@ class Application():
 
                 self._result_label_manual.config(text='Manual [Pa]: ' + str(results['manual']))
 
-                lc_y = self.results_gui_start + 0.018518519
+                lc_y = self.results_gui_start + 0.01
                 self._result_label_dnva.place(relx=lc_x + 0 * lc_x_delta, rely=lc_y + lc_y_delta * 1.5)
                 self._result_label_dnvb.place(relx=lc_x + 4 * lc_x_delta, rely=lc_y + lc_y_delta * 1.5)
                 self._result_label_tanktest.place(relx=lc_x + 0 * lc_x_delta, rely=lc_y + 2.4 * lc_y_delta)
