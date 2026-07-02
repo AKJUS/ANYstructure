@@ -552,6 +552,17 @@ def test_missing_shell_strain_component_does_not_reuse_von_mises_values():
     ) == pytest.approx(0.0)
 
 
+def test_stress_colorbar_label_converts_pa_to_mpa_without_duplicate_units():
+    grid, label = fe_runtime_solver._visualization_color_grid_and_label(
+        {"stress_pa": ((2.0e6,),), "scalar_label": "stress [Pa]"},
+        "von_mises_pa",
+        is_mode=False,
+    )
+
+    assert grid == [[2.0]]
+    assert label == "stress [MPa]"
+
+
 def test_display_modes_keep_equivalent_plastic_strain_for_dnv_material():
     class Var:
         def __init__(self, value):
@@ -2632,6 +2643,13 @@ def test_runtime_result_print_and_gui_source_include_custom_time_domain_and_impe
     assert "self.probe_node_id = tk.StringVar(value=\"\")" in source
     assert "self.color_min_vis = tk.StringVar(value=\"\")" in source
     assert "self.color_min_scale = ttk.Scale(" in source
+    assert "self._probe_click_origin: tuple[int, int] | None = None" in source
+    assert "self._selected_probe_node_id: int | None = None" in source
+    assert "ttk.Button(probe_bar, text=\"Show mesh\", command=self._show_probe_mesh)" in source
+    assert "self._select_probe_from_result_click(self.result_canvas" in source
+    assert "def _select_probe_from_result_click(" in source
+    assert "def _draw_selected_probe_overlay(" in source
+    assert "self._refresh_figure(preserve_view=True)" in source
 
 
 def test_runtime_fem_module_has_ready_to_run_main_example():

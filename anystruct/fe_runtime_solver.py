@@ -9,12 +9,13 @@ and can later be copied into that local module without changing this GUI layer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 import argparse
 import json
 import queue
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -1425,6 +1426,12 @@ def _visualization_color_grid_and_label(
         component: str,
         is_mode: bool,
 ) -> tuple[list[list[float]], str]:
+    def convert_label(raw_label: str, source_unit: str, target_unit: str) -> str:
+        label = raw_label.replace("_pa", "").strip()
+        label = re.sub(r"\s*\[" + re.escape(source_unit) + r"\]\s*$", "", label).strip()
+        label = re.sub(r"\s*\[[^\]]+\]\s*$", "", label).strip()
+        return (label or raw_label or "value") + " [" + target_unit + "]"
+
     scalar_values = _plot_grid_values(visualization.get("stress_pa"))
     if is_mode:
         return scalar_values, str(visualization.get("scalar_label") or "mode amplitude")
@@ -1433,12 +1440,12 @@ def _visualization_color_grid_and_label(
     if component.endswith("_pa"):
         return (
             [[value / 1.0e6 for value in row] for row in scalar_values],
-            str(visualization.get("scalar_label", "stress")).replace("_pa", "") + " [MPa]",
+            convert_label(str(visualization.get("scalar_label", "stress")), "Pa", "MPa"),
         )
     if "disp" in component:
         return (
             [[value * 1000.0 for value in row] for row in scalar_values],
-            str(visualization.get("scalar_label", "displacement")).replace(" [m]", " [mm]"),
+            convert_label(str(visualization.get("scalar_label", "displacement")), "m", "mm"),
         )
     return scalar_values, str(visualization.get("scalar_label", component))
 
@@ -3113,6 +3120,10 @@ class RuntimeFEMWindow:
         self._custom_load_selected_index: int = -1
         self._custom_load_selection_active = False
         self._custom_load_click_origin: tuple[int, int] | None = None
+        self._probe_click_origin: tuple[int, int] | None = None
+        self._selected_probe_node_id: int | None = None
+        self._selected_probe_element_id: int | None = None
+        self._last_mesh_result_case_label = "Static displacement/stress"
         self._custom_load_edge_click_origin: tuple[int, int] | None = None
         self._custom_load_selection_button = None
         self._generate_default_custom_load_patches()
@@ -3790,7 +3801,7 @@ class RuntimeFEMWindow:
         self._add_entry_row(vis_group, 5, "plate_back_color", "Plate back", self.plate_back_color_vis, width=10)
         self._add_entry_row(vis_group, 6, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
         self._add_option_row(vis_group, 7, "colormap", "Colormap", self.colormap_vis,
-                             ("jet", "viridis", "plasma", "inferno", "coolwarm"))
+                             ("jet", "viridis", "plasma", "inferno", "coolwarm", "greys"))
         vis_actions = ttk.Frame(vis_group)
         vis_actions.grid(row=8, column=0, columnspan=3, sticky=tk.W, padx=8, pady=4)
         ttk.Button(vis_actions, text="Redraw base 3D", command=self._redraw_base_3d).pack(side=tk.LEFT)
@@ -3861,6 +3872,7 @@ class RuntimeFEMWindow:
         element_entry.pack(side=tk.LEFT)
         element_entry.bind("<Return>", lambda _event: self._show_probe_history())
         ttk.Button(probe_bar, text="Show history", command=self._show_probe_history).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(probe_bar, text="Show mesh", command=self._show_probe_mesh).pack(side=tk.LEFT, padx=(6, 0))
 
         color_bar = ttk.Frame(plot_holder)
         color_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
@@ -4719,6 +4731,8 @@ class RuntimeFEMWindow:
                     stipple=member_stipple,
                 )
 
+        self._draw_selected_probe_overlay(canvas, visualization, component, is_mode, scale)
+
         canvas.set_thickness_legend(
             values=all_vals,
             unit="",
@@ -4859,6 +4873,8 @@ class RuntimeFEMWindow:
             self._color_limit_syncing = False
 
     def _on_visualization_choice_changed(self, _event: Any = None) -> None:
+        if self._selected_display_mode() != "time_history":
+            self._last_mesh_result_case_label = str(self.result_case_choice.get())
         self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
 
@@ -4886,12 +4902,201 @@ class RuntimeFEMWindow:
         if self.current_result is None:
             self._write_status("Run FEM before showing a node or element history.", keep_run_results=True)
             return
+        self._sync_selected_probe_from_entries()
+        if self._selected_display_mode() != "time_history":
+            self._last_mesh_result_case_label = str(self.result_case_choice.get())
         self.result_case_labels.setdefault("Time history graph", "time_history")
         if self.result_case_selector is not None:
             self.result_case_selector.configure(values=tuple(self.result_case_labels))
         self.result_case_choice.set("Time history graph")
         self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
+
+    def _show_probe_mesh(self) -> None:
+        if self.current_result is None:
+            self._write_status("Run FEM before returning to the mesh view.", keep_run_results=True)
+            return
+        self._sync_selected_probe_from_entries()
+        mesh_label = self._last_mesh_result_case_label
+        if mesh_label not in self.result_case_labels:
+            mesh_label = "Static displacement/stress"
+        if mesh_label not in self.result_case_labels:
+            mesh_label = next(iter(self.result_case_labels), "Static displacement/stress")
+        self.result_case_choice.set(mesh_label)
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+
+    def _sync_selected_probe_from_entries(self) -> None:
+        node_id = _safe_int(self.probe_node_id.get(), -1)
+        element_id = _safe_int(self.probe_element_id.get(), -1)
+        self._selected_probe_node_id = node_id if node_id >= 0 else None
+        self._selected_probe_element_id = element_id if element_id >= 0 else None
+
+    @staticmethod
+    def _probe_component_unit(component: str) -> str:
+        if component.endswith("_pa"):
+            return "MPa"
+        if component.startswith("disp") or component == "radial_displacement":
+            return "mm"
+        return ""
+
+    def _probe_component_label(self, component: str) -> str:
+        for label, key in getattr(self, "component_labels", {}).items():
+            if key == component:
+                return re.sub(r"\s*\[[^\]]+\]\s*$", "", str(label)).strip()
+        return component.replace("_pa", "").replace("_", " ").strip()
+
+    def _format_probe_value_label(self, target: str, component: str, value: float) -> str:
+        unit = self._probe_component_unit(component)
+        suffix = f" {unit}" if unit else ""
+        return f"{target} {self._probe_component_label(component)}: {value:.6g}{suffix}"
+
+    @staticmethod
+    def _probe_node_displacement_value(surface: dict[str, Any], node_id: int, component: str) -> float | None:
+        if not component.startswith("disp") and component != "radial_displacement":
+            return None
+        node_ids = tuple(int(candidate) for candidate in surface.get("node_ids", ()) or ())
+        points = list(surface.get("points") or ())
+        displaced_points = list(surface.get("displaced_points") or ())
+        for index, candidate in enumerate(node_ids):
+            if candidate != node_id or index >= len(points):
+                continue
+            try:
+                base = np.asarray(points[index], dtype=float)
+                moved = np.asarray(displaced_points[index], dtype=float) if index < len(displaced_points) else base
+            except Exception:
+                return None
+            delta = moved - base
+            if component == "disp_x":
+                return float(delta[0]) * 1000.0
+            if component == "disp_y":
+                return float(delta[1]) * 1000.0
+            if component == "disp_z":
+                return float(delta[2]) * 1000.0
+            return float(np.linalg.norm(delta)) * 1000.0
+        return None
+
+    @staticmethod
+    def _probe_overlay_span(points: Sequence[Point3D]) -> float:
+        if not points:
+            return 1.0
+        xs = [point.x for point in points]
+        ys = [point.y for point in points]
+        zs = [point.z for point in points]
+        return max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs), 1.0e-6)
+
+    def _draw_selected_probe_overlay(
+            self,
+            canvas: Tkinter3DCanvas,
+            visualization: dict[str, Any],
+            component: str,
+            is_mode: bool,
+            scale: float,
+    ) -> None:
+        element_id = self._selected_probe_element_id
+        node_id = self._selected_probe_node_id
+        if element_id is None and node_id is None:
+            return
+
+        surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(visualization.get("shell_surfaces") or ())
+        all_points: list[Point3D] = []
+        surface_points_by_id: dict[int, list[Point3D]] = {}
+        node_points: dict[int, Point3D] = {}
+        node_values: dict[int, float] = {}
+        node_adjacent_element_values: dict[int, tuple[int, float]] = {}
+        element_values: dict[int, float] = {}
+
+        for surface in surfaces:
+            polygon = [Point3D(x, y, z) for x, y, z in _shell_surface_points(surface, scale)]
+            if len(polygon) < 3:
+                continue
+            all_points.extend(polygon)
+            candidate_element_id = _safe_int(surface.get("id"), -1)
+            if candidate_element_id >= 0:
+                surface_points_by_id[candidate_element_id] = polygon
+                element_values[candidate_element_id] = _shell_surface_component_value(surface, component, is_mode=is_mode)
+            element_value = element_values.get(candidate_element_id)
+            node_ids = tuple(int(candidate) for candidate in surface.get("node_ids", ()) or ())
+            for index, candidate_node_id in enumerate(node_ids):
+                if index >= len(polygon):
+                    continue
+                node_points.setdefault(candidate_node_id, polygon[index])
+                if candidate_element_id >= 0 and element_value is not None:
+                    node_adjacent_element_values.setdefault(candidate_node_id, (candidate_element_id, element_value))
+                node_value = self._probe_node_displacement_value(surface, candidate_node_id, component)
+                if node_value is not None:
+                    node_values[candidate_node_id] = node_value
+
+        span = self._probe_overlay_span(all_points)
+        marker = max(span * 0.012, 1.0e-4)
+        label_offset = Point3D(marker * 1.8, marker * 1.8, marker * 1.2)
+        label_text: str | None = None
+        label_point: Point3D | None = None
+
+        if element_id is not None and element_id in surface_points_by_id:
+            polygon = surface_points_by_id[element_id]
+            for index, start in enumerate(polygon):
+                end = polygon[(index + 1) % len(polygon)]
+                canvas.add_line(start, end, color="#facc15", width=4, layer=90, draw_overlay=True)
+            centroid = Point3D(
+                sum(point.x for point in polygon) / len(polygon),
+                sum(point.y for point in polygon) / len(polygon),
+                sum(point.z for point in polygon) / len(polygon),
+            )
+            element_value = element_values.get(element_id)
+            if element_value is not None:
+                label_text = self._format_probe_value_label(f"E{element_id}", component, element_value)
+                label_point = centroid + label_offset
+
+        if node_id is not None and node_id in node_points:
+            point = node_points[node_id]
+            canvas.add_line(
+                Point3D(point.x - marker, point.y, point.z),
+                Point3D(point.x + marker, point.y, point.z),
+                color="#ef4444",
+                width=4,
+                layer=92,
+                draw_overlay=True,
+            )
+            canvas.add_line(
+                Point3D(point.x, point.y - marker, point.z),
+                Point3D(point.x, point.y + marker, point.z),
+                color="#ef4444",
+                width=4,
+                layer=92,
+                draw_overlay=True,
+            )
+            canvas.add_line(
+                Point3D(point.x, point.y, point.z - marker),
+                Point3D(point.x, point.y, point.z + marker),
+                color="#ef4444",
+                width=4,
+                layer=92,
+                draw_overlay=True,
+            )
+            node_value = node_values.get(node_id)
+            if node_value is not None or label_text is None:
+                if node_value is not None:
+                    label_text = self._format_probe_value_label(f"N{node_id}", component, node_value)
+                else:
+                    adjacent = node_adjacent_element_values.get(node_id)
+                    if adjacent is not None:
+                        adjacent_element_id, adjacent_value = adjacent
+                        label_text = self._format_probe_value_label(f"E{adjacent_element_id}", component, adjacent_value)
+                    else:
+                        label_text = f"N{node_id} selected"
+                label_point = point + label_offset
+
+        if label_text and label_point is not None:
+            canvas.add_text(
+                label_point,
+                label_text,
+                color="#111827",
+                font=("Segoe UI", 10, "bold"),
+                anchor=tk.W,
+                layer=95,
+                draw_overlay=True,
+            )
 
     def _refresh_figure(self, preserve_view: bool = False) -> None:
         self._update_result_text()
@@ -5437,11 +5642,20 @@ class RuntimeFEMWindow:
     def _on_custom_load_canvas_press(self, event: Any) -> None:
         if self._custom_load_selection_active:
             self._custom_load_click_origin = (int(event.x), int(event.y))
+        else:
+            self._probe_click_origin = (int(event.x), int(event.y))
 
     def _on_custom_load_canvas_release(self, event: Any) -> None:
         origin = self._custom_load_click_origin
         self._custom_load_click_origin = None
-        if not self._custom_load_selection_active or origin is None or self.result_canvas is None:
+        probe_origin = self._probe_click_origin
+        self._probe_click_origin = None
+        if not self._custom_load_selection_active:
+            if probe_origin is not None and self.result_canvas is not None:
+                if math.hypot(float(event.x) - probe_origin[0], float(event.y) - probe_origin[1]) <= 5.0:
+                    self._select_probe_from_result_click(self.result_canvas, float(event.x), float(event.y))
+            return
+        if origin is None or self.result_canvas is None:
             return
         if math.hypot(float(event.x) - origin[0], float(event.y) - origin[1]) > 5.0:
             return
@@ -5458,6 +5672,103 @@ class RuntimeFEMWindow:
         state = "selected" if patch["selected"] else "cleared"
         self._write_status(f"Custom load panel {patch_index + 1} {state}.", keep_run_results=True)
         self._refresh_figure(preserve_view=True)
+
+    def _select_probe_from_result_click(
+            self,
+            canvas: Tkinter3DCanvas,
+            screen_x: float,
+            screen_y: float,
+    ) -> None:
+        if self.current_result is None or self._display_base_geometry:
+            return
+        display_mode = self._selected_display_mode()
+        if display_mode == "time_history":
+            return
+        component = self._selected_component()
+        visualization, _title, is_mode = _selected_visualization(self.current_result, display_mode, component)
+        if is_mode:
+            return
+
+        scale = _displacement_plot_scale(
+            self.current_result.summary,
+            self.current_result,
+            visualization,
+            max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
+        )
+        surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(visualization.get("shell_surfaces") or ())
+        best_element_id: int | None = None
+        best_element_depth = float("inf")
+        best_node_id: int | None = None
+        best_node_distance = 18.0
+
+        for surface in surfaces:
+            polygon = _shell_surface_points(surface, scale)
+            if len(polygon) < 3:
+                continue
+            points = [Point3D(x, y, z) for x, y, z in polygon]
+            projected = self._project_custom_load_points(canvas, points)
+            if len(projected) < 3:
+                continue
+            projected_xy = [(x, y) for x, y, _depth in projected]
+            mean_depth = sum(depth for _x, _y, depth in projected) / len(projected)
+
+            if self._point_in_polygon_2d(screen_x, screen_y, projected_xy) and mean_depth < best_element_depth:
+                best_element_depth = mean_depth
+                best_element_id = _safe_int(surface.get("id"), -1)
+                if best_element_id < 0:
+                    best_element_id = None
+
+            node_ids = tuple(int(node_id) for node_id in surface.get("node_ids", ()) or ())
+            for index, (proj_x, proj_y, _depth) in enumerate(projected):
+                if index >= len(node_ids):
+                    continue
+                distance = math.hypot(screen_x - proj_x, screen_y - proj_y)
+                if distance < best_node_distance:
+                    best_node_distance = distance
+                    best_node_id = int(node_ids[index])
+
+        if best_element_id is None and surfaces:
+            best_distance = 36.0
+            best_depth = float("inf")
+            for surface in surfaces:
+                polygon = _shell_surface_points(surface, scale)
+                points = [Point3D(x, y, z) for x, y, z in polygon]
+                projected = self._project_custom_load_points(canvas, points)
+                if not projected:
+                    continue
+                cx = sum(x for x, _y, _depth in projected) / len(projected)
+                cy = sum(y for _x, y, _depth in projected) / len(projected)
+                depth = sum(depth for _x, _y, depth in projected) / len(projected)
+                distance = math.hypot(screen_x - cx, screen_y - cy)
+                if distance < best_distance and depth < best_depth:
+                    candidate_id = _safe_int(surface.get("id"), -1)
+                    if candidate_id >= 0:
+                        best_element_id = candidate_id
+                        best_distance = distance
+                        best_depth = depth
+
+        if best_node_id is None and best_element_id is None:
+            self._write_status("No result node or element was found at the clicked position.", keep_run_results=True)
+            return
+
+        self.probe_node_id.set(str(best_node_id) if best_node_id is not None else "")
+        self.probe_element_id.set(str(best_element_id) if best_element_id is not None else "")
+        self._selected_probe_node_id = best_node_id
+        self._selected_probe_element_id = best_element_id
+        self._last_mesh_result_case_label = str(self.result_case_choice.get())
+        self._refresh_figure(preserve_view=True)
+
+        time_domain = (self.current_result.visualization or {}).get("time_domain", {}) or {}
+        history_hint = " Use Show history to plot the time response." if time_domain else " Run a time-domain case to show history graphs."
+        self._write_status(
+            "Selected node "
+            + (str(best_node_id) if best_node_id is not None else "-")
+            + " / element "
+            + (str(best_element_id) if best_element_id is not None else "-")
+            + "."
+            + history_hint,
+            keep_run_results=True,
+        )
 
     def _on_custom_load_edge_canvas_press(self, event: Any) -> None:
         if self._custom_load_selection_active:
