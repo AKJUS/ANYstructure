@@ -1428,9 +1428,6 @@ class ShellElement(Element):
 
         num_ip = len(self.gauss_points)
         stresses: Dict[str, np.ndarray] = {
-            "membrane_strain_xx": np.zeros(num_ip),
-            "membrane_strain_yy": np.zeros(num_ip),
-            "membrane_strain_xy": np.zeros(num_ip),
             "membrane_xx": np.zeros(num_ip),
             "membrane_yy": np.zeros(num_ip),
             "membrane_xy": np.zeros(num_ip),
@@ -1504,9 +1501,6 @@ class ShellElement(Element):
             sigma_b = 6.0 * moments / max(h**2, _SMALL)
             tau_s = G * kappa * shear_strain
 
-            stresses["membrane_strain_xx"][idx] = membrane_strain[0]
-            stresses["membrane_strain_yy"][idx] = membrane_strain[1]
-            stresses["membrane_strain_xy"][idx] = membrane_strain[2]
             stresses["membrane_xx"][idx] = sigma_m[0]
             stresses["membrane_yy"][idx] = sigma_m[1]
             stresses["membrane_xy"][idx] = sigma_m[2]

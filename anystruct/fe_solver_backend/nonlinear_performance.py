@@ -222,10 +222,14 @@ class _ShellBatchPlan:
         displacements: np.ndarray,
         committed_states: Mapping[int, Any],
         tangent: bool,
+        deleted_element_ids: Sequence[int] = (),
+        residual_stiffness_fraction: float = 1.0,
     ) -> Tuple[np.ndarray, Optional[np.ndarray], Dict[int, Any], float]:
         from .vectorized_nonlinear import batch_shell_nonlinear_response
 
         start = time.perf_counter()
+        deleted = {int(element_id) for element_id in deleted_element_ids}
+        residual_fraction = float(residual_stiffness_fraction)
         self.u_work[:] = np.asarray(displacements, dtype=float)[self.dof_mappings]
 
         if self.has_plasticity:
@@ -266,6 +270,17 @@ class _ShellBatchPlan:
             for index, element_id in enumerate(self.element_ids):
                 start_layer = index * points_per_element
                 stop_layer = start_layer + points_per_element
+                if int(element_id) in deleted:
+                    existing = committed_states.get(int(element_id))
+                    if isinstance(existing, dict):
+                        states[int(element_id)] = existing
+                    else:
+                        states[int(element_id)] = {
+                            "plastic_strain": ep_new[index],
+                            "alpha": alpha_new[index],
+                            "layer_strain": layer_strain[start_layer:stop_layer].copy(),
+                        }
+                    continue
                 states[int(element_id)] = {
                     "plastic_strain": ep_new[index],
                     "alpha": alpha_new[index],
@@ -275,6 +290,14 @@ class _ShellBatchPlan:
             for index, element_id in enumerate(self.element_ids):
                 existing = committed_states.get(int(element_id))
                 states[int(element_id)] = existing if isinstance(existing, dict) else self.elastic_states[index]
+
+        if deleted:
+            for index, element_id in enumerate(self.element_ids):
+                if int(element_id) not in deleted:
+                    continue
+                F_batch[index] *= residual_fraction
+                if tangent and K_batch is not None:
+                    K_batch[index] *= residual_fraction
 
         return F_batch, K_batch if tangent else None, states, time.perf_counter() - start
 
@@ -428,6 +451,8 @@ class NonlinearAssemblyPlan:
         displacements: np.ndarray,
         committed_states: Mapping[int, Any],
         tangent: bool = True,
+        deleted_element_ids: Sequence[int] = (),
+        residual_stiffness_fraction: float = 1.0,
     ) -> Tuple[np.ndarray, Optional[sparse.csr_matrix], Dict[int, Any]]:
         """Assemble internal force and tangent using persistent batch/scatter data."""
         with self._lock:
@@ -442,6 +467,8 @@ class NonlinearAssemblyPlan:
             if tangent:
                 self.tangent_values.fill(0.0)
             trial_states: Dict[int, Any] = {}
+            deleted = {int(element_id) for element_id in deleted_element_ids}
+            residual_fraction = float(residual_stiffness_fraction)
 
             state_start = time.perf_counter()
             for batch in self.shell_batches:
@@ -449,6 +476,8 @@ class NonlinearAssemblyPlan:
                     displacements,
                     committed_states,
                     tangent,
+                    deleted_element_ids=tuple(deleted),
+                    residual_stiffness_fraction=residual_fraction,
                 )
                 self.timings.shell_kernel_seconds += kernel_seconds
                 self.force_values[batch.force_positions.reshape(-1)] = np.asarray(F_batch, dtype=float).reshape(-1)
@@ -471,6 +500,12 @@ class NonlinearAssemblyPlan:
                     self.num_layers,
                     tangent,
                 )
+                if record.element_id in deleted:
+                    f_element = residual_fraction * np.asarray(f_element, dtype=float)
+                    if tangent and k_element is not None:
+                        k_element = residual_fraction * np.asarray(k_element, dtype=float)
+                    if record.element_id in committed_states:
+                        trial_state = committed_states[record.element_id]
                 self.force_values[record.force_positions] = np.asarray(f_element, dtype=float).reshape(-1)
                 if tangent and k_element is not None:
                     self.tangent_values[record.tangent_positions] = np.asarray(k_element, dtype=float).reshape(-1)
@@ -561,9 +596,17 @@ def _optimized_assemble_nonlinear_system(
     committed_states: Dict[int, Any],
     num_layers: int,
     tangent: bool = True,
+    deleted_element_ids: Optional[Sequence[int]] = None,
+    residual_stiffness_fraction: float = 1.0,
 ):
     plan = get_nonlinear_assembly_plan(model, int(num_layers))
-    return plan.assemble(displacements, committed_states, tangent=tangent)
+    return plan.assemble(
+        displacements,
+        committed_states,
+        tangent=tangent,
+        deleted_element_ids=tuple(deleted_element_ids or ()),
+        residual_stiffness_fraction=float(residual_stiffness_fraction),
+    )
 
 
 def _revision_cached_sparsity_pattern(mesh: "FEMesh", matrix_type: str) -> Tuple[np.ndarray, np.ndarray]:

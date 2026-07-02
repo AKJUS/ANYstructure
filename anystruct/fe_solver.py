@@ -13,6 +13,7 @@ import collections
 import json
 import math
 import re
+import time
 
 import numpy as np
 
@@ -31,7 +32,13 @@ try:
     from anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
     from anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
     from anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
+    from anystruct.fe_solver_backend.contact import RigidSphereImpact as _backend_RigidSphereImpact
+    from anystruct.fe_solver_backend.contact import SphereContactConfig as _backend_SphereContactConfig
+    from anystruct.fe_solver_backend.contact import solve_transient_sphere_impact as _backend_solve_transient_sphere_impact
+    from anystruct.fe_solver_backend.dynamics import TransientConfig as _backend_TransientConfig
     from anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
+    from anystruct.fe_solver_backend.fracture import FractureConfig as _backend_FractureConfig
+    from anystruct.fe_solver_backend.fracture import ImpactDamageConfig as _backend_ImpactDamageConfig
     from anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
@@ -45,7 +52,13 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.nonlinear_static import solve_static_nonlinear as _backend_solve_static_nonlinear
         from ANYstructure.anystruct.fe_solver_backend.arc_length import ArcLengthControl as _backend_arc_length_control
         from ANYstructure.anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
+        from ANYstructure.anystruct.fe_solver_backend.contact import RigidSphereImpact as _backend_RigidSphereImpact
+        from ANYstructure.anystruct.fe_solver_backend.contact import SphereContactConfig as _backend_SphereContactConfig
+        from ANYstructure.anystruct.fe_solver_backend.contact import solve_transient_sphere_impact as _backend_solve_transient_sphere_impact
+        from ANYstructure.anystruct.fe_solver_backend.dynamics import TransientConfig as _backend_TransientConfig
         from ANYstructure.anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
+        from ANYstructure.anystruct.fe_solver_backend.fracture import FractureConfig as _backend_FractureConfig
+        from ANYstructure.anystruct.fe_solver_backend.fracture import ImpactDamageConfig as _backend_ImpactDamageConfig
         from ANYstructure.anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
@@ -58,7 +71,13 @@ except ModuleNotFoundError:
         _backend_solve_static_nonlinear = None
         _backend_arc_length_control = None
         _backend_solve_static_arc_length = None
+        _backend_RigidSphereImpact = None
+        _backend_SphereContactConfig = None
+        _backend_solve_transient_sphere_impact = None
+        _backend_TransientConfig = None
         _backend_solve_transient_newmark = None
+        _backend_FractureConfig = None
+        _backend_ImpactDamageConfig = None
         _backend_warm_fe_solver_kernels = None
         _backend_load_case_resultant = None
 
@@ -148,6 +167,45 @@ class LightweightFEMConfig:
     memory_limit_mb: float = 0.0
     capacity_buckling_mode_number: int = 1
     capacity_mesh_min_elements_per_half_wave: int = 4
+    fracture_enabled: bool = False
+    fracture_strain_threshold: float = 0.02
+    fracture_residual_stiffness_fraction: float = 1.0e-6
+    fracture_max_deleted_fraction: float = 0.25
+    fracture_min_load_factor: float = 0.0
+    collision_enabled: bool = False
+    collision_include_static_load: bool = False
+    collision_damage_enabled: bool = True
+    collision_mass_kg: float = 1000.0
+    collision_radius_m: float = 0.25
+    collision_start_x_m: float = 0.0
+    collision_start_y_m: float = 0.0
+    collision_start_z_m: float = 1.0
+    collision_vector_x: float = 0.0
+    collision_vector_y: float = 0.0
+    collision_vector_z: float = -1.0
+    collision_speed_mps: float = 5.0
+    collision_time_mode: str = "auto"
+    collision_auto_steps_per_radius: float = 20.0
+    collision_auto_post_contact_radii: float = 6.0
+    collision_total_time_s: float = 0.05
+    collision_dt_s: float = 0.0005
+    collision_result_interval_s: float = 0.0
+    collision_penalty_stiffness_n_per_m: float = 0.0
+    collision_contact_damping: float = 0.0
+    collision_max_iterations: int = 25
+    collision_penetration_tolerance_m: float = 1.0e-8
+    collision_force_tolerance_n: float = 1.0e-6
+    collision_target_penetration_fraction: float = 0.01
+    collision_max_event_substeps: int = 16
+    collision_contact_surface: str = "midsurface"
+    collision_damage_mode: str = "accumulated_damage"
+    collision_damage_capacity_basis: str = "yield"
+    collision_damage_user_capacity_pa: float = 0.0
+    collision_damage_softening_start: float = 0.6
+    collision_damage_delete_at: float = 1.0
+    collision_damage_min_contact_area_m2: float = 1.0e-6
+    collision_damage_max_deleted_fraction: float = 0.25
+    collision_damage_neighbor_smoothing: bool = False
 
 
 @dataclass(frozen=True)
@@ -2821,6 +2879,260 @@ def _pressure_sign(config: LightweightFEMConfig) -> float:
     return 1.0 if side in {"back", "internal", "inside", "inward side", "positive normal", "outward"} else -1.0
 
 
+def _runtime_collision_has_fixed_support(config: LightweightFEMConfig, geometry: dict) -> bool:
+    if _normalized_choice(config.boundary_condition, "auto") not in {"auto", "free", "none"}:
+        return True
+    if geometry.get("geometry") == "cylinder":
+        supports = (config.cylinder_lower_support, config.cylinder_upper_support)
+    else:
+        supports = (
+            config.plate_edge_x0_support,
+            config.plate_edge_x1_support,
+            config.plate_edge_y0_support,
+            config.plate_edge_y1_support,
+        )
+    return any(_normalized_choice(support, "free") not in {"free", "none"} for support in supports)
+
+
+def _runtime_fracture_config(config: LightweightFEMConfig):
+    if not config.fracture_enabled or _backend_FractureConfig is None:
+        return None
+    return _backend_FractureConfig(
+        threshold=max(float(config.fracture_strain_threshold), 1.0e-12),
+        residual_stiffness_fraction=min(max(float(config.fracture_residual_stiffness_fraction), 0.0), 1.0),
+        max_deleted_fraction=min(max(float(config.fracture_max_deleted_fraction), 1.0e-9), 1.0),
+        min_load_factor=max(float(config.fracture_min_load_factor), 0.0),
+    )
+
+
+def _collision_save_every(config: LightweightFEMConfig) -> int:
+    interval = max(float(config.collision_result_interval_s or 0.0), 0.0)
+    dt = max(float(config.collision_dt_s), 1.0e-12)
+    if interval <= 0.0:
+        return 1
+    return max(int(round(interval / dt)), 1)
+
+
+def _collision_damage_config(config: LightweightFEMConfig):
+    if not config.collision_damage_enabled or _backend_ImpactDamageConfig is None:
+        return None
+    user_capacity = None
+    if _normalized_choice(config.collision_damage_capacity_basis, "yield") == "user":
+        user_capacity = max(float(config.collision_damage_user_capacity_pa), 1.0e-9)
+    return _backend_ImpactDamageConfig(
+        mode=str(config.collision_damage_mode or "accumulated_damage"),
+        capacity_basis=str(config.collision_damage_capacity_basis or "yield"),
+        softening_start=min(max(float(config.collision_damage_softening_start), 0.0), 0.999999),
+        delete_at=max(float(config.collision_damage_delete_at), float(config.collision_damage_softening_start) + 1.0e-9),
+        min_contact_area=max(float(config.collision_damage_min_contact_area_m2), 1.0e-12),
+        neighbor_smoothing=bool(config.collision_damage_neighbor_smoothing),
+        residual_stiffness_fraction=min(max(float(config.fracture_residual_stiffness_fraction), 0.0), 1.0),
+        max_deleted_fraction=min(max(float(config.collision_damage_max_deleted_fraction), 1.0e-9), 1.0),
+        user_capacity=user_capacity,
+    )
+
+
+def _collision_representative_shell_edge(generated_geometry: dict) -> float:
+    node_lookup = _node_lookup(list(generated_geometry.get("nodes", ()) or ()))
+    lengths: list[float] = []
+    for shell in generated_geometry.get("shells", ()) or ():
+        node_ids = [int(node_id) for node_id in shell.get("node_ids", ()) or () if int(node_id) in node_lookup]
+        corner_count = 3 if len(node_ids) in (3, 6) else 4
+        corners = node_ids[:corner_count]
+        if len(corners) < 3:
+            continue
+        for index, node_id in enumerate(corners):
+            start = node_lookup[int(node_id)]
+            end = node_lookup[int(corners[(index + 1) % len(corners)])]
+            length = float(np.linalg.norm(end - start))
+            if math.isfinite(length) and length > 0.0:
+                lengths.append(length)
+    return float(np.median(lengths)) if lengths else 0.0
+
+
+def _collision_initial_penetration(generated_geometry: dict, config: LightweightFEMConfig) -> dict[str, float]:
+    node_lookup = _node_lookup(list(generated_geometry.get("nodes", ()) or ()))
+    if not node_lookup:
+        return {"penetration_m": 0.0, "clearance_m": 0.0, "closest_distance_m": 0.0}
+    center = np.asarray(
+        (
+            float(config.collision_start_x_m),
+            float(config.collision_start_y_m),
+            float(config.collision_start_z_m),
+        ),
+        dtype=float,
+    )
+    radius = max(float(config.collision_radius_m), 1.0e-9)
+    candidate_points: list[np.ndarray] = []
+    for shell in generated_geometry.get("shells", ()) or ():
+        node_ids = [int(node_id) for node_id in shell.get("node_ids", ()) or () if int(node_id) in node_lookup]
+        if not node_ids:
+            continue
+        points = [node_lookup[node_id] for node_id in node_ids]
+        corner_points = points[:4] if len(points) >= 4 else points
+        candidate_points.extend(corner_points)
+        candidate_points.append(np.mean(np.asarray(corner_points, dtype=float), axis=0))
+    if not candidate_points:
+        candidate_points = list(node_lookup.values())
+    distances = [float(np.linalg.norm(point - center)) for point in candidate_points]
+    closest = min(distances) if distances else radius
+    penetration = max(radius - closest, 0.0)
+    return {
+        "penetration_m": float(penetration),
+        "clearance_m": float(closest - radius),
+        "closest_distance_m": float(closest),
+    }
+
+
+def _collision_dynamic_penalty(config: LightweightFEMConfig, dt: float) -> dict[str, float | str]:
+    radius = max(float(config.collision_radius_m), 1.0e-9)
+    mass = max(float(config.collision_mass_kg), 1.0e-9)
+    speed = max(float(config.collision_speed_mps), 0.0)
+    target_fraction = max(float(config.collision_target_penetration_fraction), 1.0e-6)
+    target_penetration = max(radius * target_fraction, 1.0e-9)
+    desired = max(mass * speed * speed / max(target_penetration * target_penetration, 1.0e-18), 1.0)
+    stable = max(mass * (0.16 / max(float(dt), 1.0e-12)) ** 2, 1.0)
+    selected = min(desired, stable)
+    return {
+        "penalty_stiffness": float(selected),
+        "desired_penalty_stiffness": float(desired),
+        "dt_stable_penalty_stiffness": float(stable),
+        "target_penetration_m": float(target_penetration),
+        "basis": "dynamic_auto",
+    }
+
+
+def _collision_auto_time_settings(generated_geometry: dict, config: LightweightFEMConfig) -> dict[str, float | str]:
+    start = np.asarray(
+        (
+            float(config.collision_start_x_m),
+            float(config.collision_start_y_m),
+            float(config.collision_start_z_m),
+        ),
+        dtype=float,
+    )
+    direction = np.asarray(
+        (
+            float(config.collision_vector_x),
+            float(config.collision_vector_y),
+            float(config.collision_vector_z),
+        ),
+        dtype=float,
+    )
+    norm = float(np.linalg.norm(direction))
+    speed = max(float(config.collision_speed_mps), 0.0)
+    radius = max(float(config.collision_radius_m), 1.0e-9)
+    if norm <= 1.0e-14 or speed <= 0.0:
+        return {
+            "mode": "manual_fallback",
+            "dt_s": max(float(config.collision_dt_s), 1.0e-9),
+            "total_time_s": max(float(config.collision_total_time_s), 1.0e-9),
+            "arrival_time_s": 0.0,
+            "reason": "nonpositive speed or zero direction",
+        }
+    direction = direction / norm
+    coords = []
+    for node in generated_geometry.get("nodes", ()) or ():
+        try:
+            coords.append(np.asarray(node.get("coords", ()), dtype=float).reshape(3))
+        except Exception:
+            continue
+    if not coords:
+        return {
+            "mode": "manual_fallback",
+            "dt_s": max(float(config.collision_dt_s), 1.0e-9),
+            "total_time_s": max(float(config.collision_total_time_s), 1.0e-9),
+            "arrival_time_s": 0.0,
+            "reason": "no generated nodes",
+        }
+    projections = np.asarray([float(coord @ direction) for coord in coords], dtype=float)
+    lower = float(np.min(projections)) - radius
+    upper = float(np.max(projections)) + radius
+    start_projection = float(start @ direction)
+    if start_projection < lower:
+        arrival = (lower - start_projection) / speed
+    elif start_projection <= upper:
+        arrival = 0.0
+    else:
+        # The sphere is already past the model along its travel direction; keep a short run for diagnostics.
+        arrival = 0.0
+    span_time = max((upper - lower) / speed, 2.0 * radius / speed)
+    post_time = max(float(config.collision_auto_post_contact_radii), 0.0) * radius / speed
+    total_time = max(arrival + span_time + post_time, radius / speed)
+    steps_per_radius = max(float(config.collision_auto_steps_per_radius), 2.0)
+    representative_edge = _collision_representative_shell_edge(generated_geometry)
+    dt = radius / (speed * steps_per_radius)
+    if representative_edge > 0.0:
+        dt = min(dt, representative_edge / (speed * 4.0))
+    if float(config.collision_dt_s or 0.0) > 0.0:
+        dt = min(dt, float(config.collision_dt_s))
+    if float(config.collision_penalty_stiffness_n_per_m or 0.0) > 0.0:
+        period = 2.0 * math.pi * math.sqrt(
+            max(float(config.collision_mass_kg), 1.0e-9)
+            / max(float(config.collision_penalty_stiffness_n_per_m), 1.0e-9)
+        )
+        dt = min(dt, period / 30.0)
+        penalty_info = {
+            "penalty_stiffness": float(config.collision_penalty_stiffness_n_per_m),
+            "basis": "user",
+        }
+    else:
+        target_penetration = max(radius * max(float(config.collision_target_penetration_fraction), 1.0e-6), 1.0e-9)
+        desired_penalty = max(float(config.collision_mass_kg) * speed * speed / max(target_penetration * target_penetration, 1.0e-18), 1.0)
+        dt = min(dt, 0.16 * math.sqrt(max(float(config.collision_mass_kg), 1.0e-9) / desired_penalty))
+        penalty_info = _collision_dynamic_penalty(config, dt)
+    target_steps = max(int(math.ceil(total_time / max(dt, 1.0e-12))), 1)
+    if target_steps < 120:
+        dt = min(dt, total_time / 120.0)
+    elif target_steps > 5000:
+        total_time = max(dt, dt * 5000.0)
+        target_steps = 5000
+    return {
+        "mode": "auto",
+        "dt_s": max(float(dt), 1.0e-9),
+        "total_time_s": max(float(total_time), 1.0e-9),
+        "arrival_time_s": max(float(arrival), 0.0),
+        "span_time_s": float(span_time),
+        "post_time_s": float(post_time),
+        "model_projection_min": lower + radius,
+        "model_projection_max": upper - radius,
+        "representative_shell_edge_m": float(representative_edge),
+        "sphere_travel_per_step_m": float(speed * dt),
+        "estimated_steps": float(target_steps),
+        "recommended_penalty_stiffness": float(penalty_info.get("penalty_stiffness", 0.0)),
+        "desired_penalty_stiffness": float(penalty_info.get("desired_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0))),
+        "dt_stable_penalty_stiffness": float(penalty_info.get("dt_stable_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0))),
+        "target_penetration_m": float(penalty_info.get("target_penetration_m", 0.0)),
+        "penalty_basis": str(penalty_info.get("basis", "")),
+    }
+
+
+def _deleted_element_ids_for_time(records: object, time_value: float) -> tuple[int, ...]:
+    deleted: list[int] = []
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        try:
+            record_time = float(record.get("time", record.get("load_factor", 0.0)))
+            if record_time <= float(time_value) + 1.0e-12:
+                deleted.append(int(record.get("element_id")))
+        except Exception:
+            continue
+    return tuple(sorted(set(deleted)))
+
+
+def _filter_visualization_deleted_elements(visualization: dict[str, object], deleted_element_ids: tuple[int, ...]) -> None:
+    if not visualization or not deleted_element_ids:
+        return
+    deleted = {int(element_id) for element_id in deleted_element_ids}
+    for key in ("skin_shell_surfaces", "shell_surfaces"):
+        visualization[key] = tuple(
+            surface for surface in visualization.get(key, ()) or ()
+            if int((surface or {}).get("id", -1)) not in deleted
+        )
+    visualization["hidden_deleted_element_ids"] = tuple(sorted(deleted))
+
+
 def _solver_type(config: LightweightFEMConfig) -> str:
     solver = _normalized_choice(config.solver_type, "direct").replace(" ", "")
     return solver if solver in {"direct", "gmres", "minres", "bicgstab"} else "direct"
@@ -3629,6 +3941,354 @@ def _run_custom_time_domain_response(
     }
 
 
+def _ensure_runtime_density(model, density: float = 7850.0) -> None:
+    for material in getattr(model, "materials", {}).values():
+        if float(getattr(material, "density", 0.0) or 0.0) <= 0.0:
+            try:
+                material.density = float(density)
+            except Exception:
+                pass
+
+
+def _run_collision_response(
+        model,
+        load_case,
+        generated_geometry: dict,
+        geometry: dict,
+        config: LightweightFEMConfig,
+        diagnostics: list[str],
+        status_callback=None,
+) -> LightweightFEMResult:
+    if (
+        _backend_solve_transient_sphere_impact is None
+        or _backend_RigidSphereImpact is None
+        or _backend_SphereContactConfig is None
+        or _backend_TransientConfig is None
+    ):
+        return LightweightFEMResult(
+            status="backend_unavailable",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            diagnostics=tuple(diagnostics + ["Rigid-sphere collision backend is not available."]),
+            mesh_info={"nodes": int(model.mesh.num_nodes), "shells": len(generated_geometry.get("shells", [])), "beams": len(generated_geometry.get("beams", []))},
+            solver_name="ANYstructure production FE mesh",
+        )
+    if not _runtime_collision_has_fixed_support(config, geometry):
+        return LightweightFEMResult(
+            status="invalid_collision_support",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            diagnostics=tuple(diagnostics + ["Collision runs require at least one fixed, pinned, clamped, or otherwise constrained side/top/bottom. Nullspace projection is not used for collision."]),
+            mesh_info={"nodes": int(model.mesh.num_nodes), "shells": len(generated_geometry.get("shells", [])), "beams": len(generated_geometry.get("beams", []))},
+            solver_name="ANYstructure production FE mesh",
+        )
+    if status_callback:
+        status_callback("Solving rigid-sphere collision transient...")
+    _ensure_runtime_density(model)
+    auto_time = _collision_auto_time_settings(generated_geometry, config) if _normalized_choice(config.collision_time_mode, "auto") == "auto" else {}
+    dt = max(float(auto_time.get("dt_s", config.collision_dt_s) if auto_time else config.collision_dt_s), 1.0e-9)
+    t_end = max(float(auto_time.get("total_time_s", config.collision_total_time_s) if auto_time else config.collision_total_time_s), dt)
+    initial_contact = _collision_initial_penetration(generated_geometry, config)
+    representative_edge = float(auto_time.get("representative_shell_edge_m", _collision_representative_shell_edge(generated_geometry)) if auto_time else _collision_representative_shell_edge(generated_geometry))
+    radius = max(float(config.collision_radius_m), 1.0e-9)
+    allowed_initial_penetration = max(
+        5.0 * radius * max(float(config.collision_target_penetration_fraction), 1.0e-6),
+        0.25 * max(representative_edge, 0.0),
+        1.0e-6,
+    )
+    if float(initial_contact.get("penetration_m", 0.0)) > allowed_initial_penetration:
+        penetration = float(initial_contact.get("penetration_m", 0.0))
+        clearance = float(initial_contact.get("clearance_m", 0.0))
+        return LightweightFEMResult(
+            status="invalid_collision_start",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            diagnostics=tuple(
+                diagnostics
+                + [
+                    "Rigid-sphere collision start is invalid: the sphere initially penetrates the shell by "
+                    + str(round(1000.0 * penetration, 3))
+                    + " mm.",
+                    "Move the sphere centre outside the structure before impact, reduce the radius, or reverse the travel vector. "
+                    + "Allowed initial penetration for numerical contact settling is "
+                    + str(round(1000.0 * allowed_initial_penetration, 3))
+                    + " mm.",
+                ]
+            ),
+            mesh_info={
+                "nodes": int(model.mesh.num_nodes),
+                "shells": len(generated_geometry.get("shells", [])),
+                "beams": len(generated_geometry.get("beams", [])),
+            },
+            prestress_summary={
+                "collision_status": "invalid_collision_start",
+                "collision_time_mode": str(auto_time.get("mode", "manual") if auto_time else "manual"),
+                "collision_resolved_dt_s": float(dt),
+                "collision_resolved_total_time_s": float(t_end),
+                "collision_initial_penetration_m": penetration,
+                "collision_initial_clearance_m": clearance,
+                "collision_allowed_initial_penetration_m": float(allowed_initial_penetration),
+                "collision_representative_shell_edge_m": float(representative_edge),
+            },
+            solver_name="ANYstructure production FE mesh",
+        )
+    sphere = _backend_RigidSphereImpact(
+        name="ANYstructure sphere",
+        radius=radius,
+        mass=max(float(config.collision_mass_kg), 1.0e-9),
+        start_point=(
+            float(config.collision_start_x_m),
+            float(config.collision_start_y_m),
+            float(config.collision_start_z_m),
+        ),
+        travel_direction=(
+            float(config.collision_vector_x),
+            float(config.collision_vector_y),
+            float(config.collision_vector_z),
+        ),
+        speed=max(float(config.collision_speed_mps), 0.0),
+    )
+    if float(config.collision_penalty_stiffness_n_per_m or 0.0) > 0.0:
+        resolved_penalty = float(config.collision_penalty_stiffness_n_per_m)
+        penalty_basis = "user"
+        penalty_info = {
+            "penalty_stiffness": resolved_penalty,
+            "basis": penalty_basis,
+            "target_penetration_m": 0.0,
+            "desired_penalty_stiffness": resolved_penalty,
+            "dt_stable_penalty_stiffness": resolved_penalty,
+        }
+    else:
+        penalty_info = dict(auto_time) if auto_time else _collision_dynamic_penalty(config, dt)
+        resolved_penalty = max(float(penalty_info.get("recommended_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0)) or 0.0), 1.0)
+        penalty_basis = str(penalty_info.get("penalty_basis", penalty_info.get("basis", "dynamic_auto")) or "dynamic_auto")
+    contact_config = _backend_SphereContactConfig(
+        penalty_stiffness=resolved_penalty,
+        contact_damping=max(float(config.collision_contact_damping), 0.0),
+        max_contact_iterations=max(int(config.collision_max_iterations or 25), 1),
+        penetration_tolerance=max(float(config.collision_penetration_tolerance_m), 1.0e-12),
+        force_tolerance=max(float(config.collision_force_tolerance_n), 1.0e-12),
+        target_penetration_fraction=max(float(config.collision_target_penetration_fraction), 1.0e-9),
+        max_event_substeps=max(int(config.collision_max_event_substeps or 16), 1),
+        contact_surface=str(config.collision_contact_surface or "midsurface"),
+    )
+    transient_config = _backend_TransientConfig(
+        dt=dt,
+        t_end=t_end,
+        save_every=_collision_save_every(config),
+        recovery=(
+            _full_backend.RecoveryConfig(history_mode="full", store_full_histories=True)
+            if hasattr(_full_backend, "RecoveryConfig")
+            else _recovery_config(config)
+        ),
+        resource_config=_resource_config(config),
+    )
+    damage_config = _collision_damage_config(config)
+    base_load_case = load_case if config.collision_include_static_load else None
+    last_live_update = [0.0]
+
+    def live_progress(payload: dict[str, object]) -> None:
+        if not callable(status_callback):
+            return
+        now = time.perf_counter()
+        if now - last_live_update[0] < 0.25:
+            return
+        displacement = payload.get("displacement")
+        if displacement is None:
+            return
+        live_visualization = _visualization_from_full_result(
+            generated_geometry,
+            model,
+            np.asarray(displacement, dtype=float),
+            scalar_by_node={},
+            scalar_label="live dynamic displacement",
+            stresses_by_element={},
+        )
+        if not live_visualization:
+            return
+        sphere_position = np.asarray(payload.get("sphere_position", ()), dtype=float).reshape(-1)
+        if sphere_position.size >= 3:
+            live_visualization["rigid_sphere"] = {
+                "position": tuple(float(value) for value in sphere_position[:3]),
+                "radius": float(payload.get("sphere_radius", config.collision_radius_m)),
+                "visible": True,
+            }
+        live_visualization["time_s"] = float(payload.get("time_s", 0.0) or 0.0)
+        last_live_update[0] = now
+        status_callback(
+            {
+                "type": "live_visualization",
+                "analysis": "sphere_collision",
+                "time_s": float(payload.get("time_s", 0.0) or 0.0),
+                "step_index": int(payload.get("step_index", 0) or 0),
+                "visualization": live_visualization,
+                "displacement_max_m": _max_translation(model, np.asarray(displacement, dtype=float)),
+            }
+        )
+
+    impact = _backend_solve_transient_sphere_impact(
+        model,
+        transient_config,
+        sphere,
+        contact_config,
+        base_load_case=base_load_case,
+        damage_config=damage_config,
+        progress_callback=live_progress,
+    )
+    damage_summary = (impact.diagnostics or {}).get("impact_damage_summary", {}) or {}
+    erosion_summary = (impact.diagnostics or {}).get("erosion_summary", {}) or {}
+    records = tuple(damage_summary.get("records", ()) or ())
+    times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
+    displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
+    sphere_positions = np.asarray(getattr(impact, "sphere_positions", np.zeros((0, 3))), dtype=float)
+    snapshots: list[dict[str, object]] = []
+    for index, time_value in enumerate(times):
+        if index >= len(displacements):
+            continue
+        deleted_ids = _deleted_element_ids_for_time(records, float(time_value))
+        snapshot = _visualization_from_full_result(
+            generated_geometry,
+            model,
+            displacements[index],
+            scalar_by_node={},
+            scalar_label="dynamic displacement",
+            stresses_by_element={},
+        )
+        if not snapshot:
+            continue
+        _filter_visualization_deleted_elements(snapshot, deleted_ids)
+        position = sphere_positions[index].tolist() if index < len(sphere_positions) else list(sphere.initial_position)
+        snapshot["time_s"] = float(time_value)
+        snapshot["rigid_sphere"] = {
+            "position": tuple(float(value) for value in position),
+            "radius": float(sphere.radius),
+            "visible": True,
+        }
+        snapshots.append(snapshot)
+    visualization = snapshots[-1] if snapshots else _visualization_from_full_result(
+        generated_geometry,
+        model,
+        np.zeros(model.mesh.dof_manager.total_dofs, dtype=float),
+        scalar_by_node={},
+        scalar_label="dynamic displacement",
+        stresses_by_element={},
+    )
+    final_deleted = tuple(int(element_id) for element_id in erosion_summary.get("all_eroded_element_ids", ()) or ())
+    _filter_visualization_deleted_elements(visualization, final_deleted)
+    if len(sphere_positions):
+        visualization["rigid_sphere"] = {
+            "position": tuple(float(value) for value in sphere_positions[-1]),
+            "radius": float(sphere.radius),
+            "visible": True,
+        }
+    visualization["time_domain"] = {
+        "kind": "sphere_collision",
+        "times_s": tuple(float(value) for value in times),
+        "snapshots": tuple(snapshots),
+    }
+    visualization["impact_damage_summary"] = damage_summary
+    visualization["erosion_summary"] = erosion_summary
+    visualization["collision_summary"] = {
+        "status": str(impact.status),
+        "time_mode": str(auto_time.get("mode", "manual") if auto_time else "manual"),
+        "resolved_dt_s": float(dt),
+        "resolved_total_time_s": float(t_end),
+        "estimated_arrival_time_s": float(auto_time.get("arrival_time_s", 0.0) if auto_time else 0.0),
+        "peak_contact_force_n": float(impact.peak_contact_force),
+        "max_penetration_m": float(impact.max_penetration),
+        "max_penetration_ratio": float(impact.max_penetration_ratio),
+        "contact_duration_s": float(impact.contact_duration),
+        "sphere_momentum_balance_error": float(impact.sphere_momentum_balance_error),
+        "saved_steps": float(len(times)),
+        "damage_enabled": bool(config.collision_damage_enabled),
+        "deleted_shell_elements": float(len(final_deleted)),
+        "representative_shell_edge_m": float(auto_time.get("representative_shell_edge_m", 0.0) if auto_time else 0.0),
+        "sphere_travel_per_step_m": float(auto_time.get("sphere_travel_per_step_m", float(config.collision_speed_mps) * dt) if auto_time else float(config.collision_speed_mps) * dt),
+        "contact_penalty_stiffness_n_per_m": float(resolved_penalty),
+        "contact_penalty_basis": str(penalty_basis),
+    }
+    prestress_summary = {
+        "collision_status": str(impact.status),
+        "collision_time_mode": str(auto_time.get("mode", "manual") if auto_time else "manual"),
+        "collision_resolved_dt_s": float(dt),
+        "collision_resolved_total_time_s": float(t_end),
+        "collision_estimated_arrival_time_s": float(auto_time.get("arrival_time_s", 0.0) if auto_time else 0.0),
+        "collision_peak_contact_force_n": float(impact.peak_contact_force),
+        "collision_max_penetration_m": float(impact.max_penetration),
+        "collision_max_penetration_ratio": float(impact.max_penetration_ratio),
+        "collision_contact_duration_s": float(impact.contact_duration),
+        "collision_sphere_momentum_balance_error": float(impact.sphere_momentum_balance_error),
+        "collision_saved_steps": float(len(times)),
+        "collision_damage_enabled": 1.0 if config.collision_damage_enabled else 0.0,
+        "collision_deleted_shell_elements": float(len(final_deleted)),
+        "collision_representative_shell_edge_m": float(auto_time.get("representative_shell_edge_m", 0.0) if auto_time else 0.0),
+        "collision_sphere_travel_per_step_m": float(auto_time.get("sphere_travel_per_step_m", float(config.collision_speed_mps) * dt) if auto_time else float(config.collision_speed_mps) * dt),
+        "collision_estimated_steps": float(auto_time.get("estimated_steps", math.ceil(t_end / max(dt, 1.0e-12))) if auto_time else math.ceil(t_end / max(dt, 1.0e-12))),
+        "collision_contact_penalty_stiffness_n_per_m": float(resolved_penalty),
+        "collision_contact_penalty_basis": str(penalty_basis),
+        "collision_target_penetration_m": float(penalty_info.get("target_penetration_m", 0.0) or 0.0),
+        "runtime_solver": "sphere collision transient",
+        "allow_unbalanced_free_free": 0.0,
+        "recovery_history_mode": "full",
+    }
+    if damage_summary:
+        prestress_summary["impact_damage_max_utilization"] = float(damage_summary.get("max_utilization", 0.0) or 0.0)
+        prestress_summary["impact_damage_deleted_count"] = float(damage_summary.get("deleted_count", 0.0) or 0.0)
+    diagnostics.append("Ran rigid-sphere collision transient: " + str(impact.status) + ".")
+    if auto_time:
+        diagnostics.append(
+            "Automatic collision time setup: dt="
+            + str(round(dt, 9))
+            + " s, total="
+            + str(round(t_end, 6))
+            + " s, estimated arrival="
+            + str(round(float(auto_time.get("arrival_time_s", 0.0)), 6))
+            + " s."
+        )
+        if float(auto_time.get("representative_shell_edge_m", 0.0) or 0.0) > 0.0:
+            diagnostics.append(
+                "Automatic collision dt cap used representative shell edge "
+                + str(round(float(auto_time.get("representative_shell_edge_m", 0.0)), 6))
+                + " m and sphere travel per step "
+                + str(round(float(auto_time.get("sphere_travel_per_step_m", 0.0)), 6))
+                + " m."
+            )
+    diagnostics.append(
+        "Collision contact penalty: "
+        + str(round(float(resolved_penalty), 6))
+        + " N/m ("
+        + str(penalty_basis)
+        + ")."
+    )
+    diagnostics.append("Collision uses fixed/constrained supports only; rigid-body nullspace projection is disabled.")
+    if config.collision_damage_enabled:
+        diagnostics.append("Impact damage/erosion is enabled for shell elements; direct beam contact remains unsupported.")
+    for warning in (impact.diagnostics or {}).get("warnings", ()) or ():
+        diagnostics.append(str(warning))
+    return LightweightFEMResult(
+        status="ok" if str(impact.status) in {"completed", "no_contact", "max_deleted_fraction_reached"} else str(impact.status),
+        stress_max_pa=0.0,
+        stress_p95_pa=0.0,
+        displacement_max_m=float(impact.peak_displacement),
+        buckling_factors=(),
+        diagnostics=tuple(diagnostics),
+        mesh_info={
+            "nodes": int(model.mesh.num_nodes),
+            "shells": int(len(generated_geometry.get("shells", []))),
+            "beams": int(len(generated_geometry.get("beams", []))),
+            "rigid_lids": int(len(generated_geometry.get("rigid_lids", []))),
+            **_mesh_size_diagnostics(generated_geometry),
+        },
+        prestress_summary=prestress_summary,
+        load_resultant={},
+        visualization=visualization,
+        solver_name="ANYstructure production FE mesh",
+    )
+
+
 def _mesh_quality_diagnostics(
     generated_geometry: dict,
     nodes: dict[int, tuple[float, float, float]] | None = None,
@@ -4379,6 +5039,16 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             _add_generated_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         _add_custom_edge_loads(model, load_case, generated_geometry, config)
         load_resultant = _backend_load_case_resultant(model, load_case)
+        if config.collision_enabled:
+            return _run_collision_response(
+                model,
+                load_case,
+                generated_geometry,
+                geometry,
+                config,
+                diagnostics,
+                status_callback=status_callback,
+            )
         constraint_mode = _constraint_mode(config, geometry)
         if status_callback: 
             if _wants_static_nonlinear_analysis(config) or _wants_capacity_workflow(config):
@@ -4594,6 +5264,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         num_layers=_nonlinear_layer_count(config.nonlinear_layers),
                         convergence_settings=str(config.nonlinear_convergence_profile or "auto"),
                         resource_config=_resource_config(config),
+                        fracture_config=_runtime_fracture_config(config),
                     )
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
                 prestress_summary["nonlinear_static_control"] = nonlinear_control
@@ -4606,6 +5277,12 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 prestress_summary["nonlinear_static_convergence_profile"] = str(_nl_settings.get("profile", config.nonlinear_convergence_profile)) if isinstance(_nl_settings, dict) else str(config.nonlinear_convergence_profile)
                 prestress_summary["nonlinear_static_assembly_threads"] = float(int(config.nonlinear_assembly_threads or 0))
                 prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
+                fracture_summary_data = (nonlinear_static_result.info or {}).get("fracture_summary", {})
+                if isinstance(fracture_summary_data, dict):
+                    prestress_summary["fracture_enabled"] = 1.0 if config.fracture_enabled else 0.0
+                    prestress_summary["fracture_deleted_count"] = float(fracture_summary_data.get("deleted_count", 0.0) or 0.0)
+                    prestress_summary["fracture_max_utilization"] = float(fracture_summary_data.get("max_utilization", 0.0) or 0.0)
+                    prestress_summary["fracture_first_deletion_load_factor"] = float(fracture_summary_data.get("first_deletion_load_factor", 0.0) or 0.0)
                 if nonlinear_control == "arc length":
                     prestress_summary["nonlinear_static_peak_load_factor"] = float(getattr(nonlinear_static_result, "peak_load_factor", nonlinear_static_factor))
                     peak_step = getattr(nonlinear_static_result, "peak_step_index", None)
@@ -4640,6 +5317,10 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         "eps_p_y2",
                         "hardening_K_pa",
                         "hardening_n",
+                        "fracture_enabled",
+                        "fracture_deleted_count",
+                        "fracture_max_utilization",
+                        "fracture_first_deletion_load_factor",
                     ):
                         if key in prestress_summary:
                             recovered[key] = prestress_summary[key]
