@@ -193,6 +193,7 @@ class RuntimeFEMOptions:
     collision_time_mode: str = "auto"
     collision_auto_steps_per_radius: float = 20.0
     collision_auto_post_contact_radii: float = 6.0
+    collision_bounce_back_time_s: float = 0.01
     collision_total_time_s: float = 0.05
     collision_dt_s: float = 0.0005
     collision_result_interval_s: float = 0.0
@@ -925,6 +926,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         collision_time_mode=options.collision_time_mode,
         collision_auto_steps_per_radius=options.collision_auto_steps_per_radius,
         collision_auto_post_contact_radii=options.collision_auto_post_contact_radii,
+        collision_bounce_back_time_s=options.collision_bounce_back_time_s,
         collision_total_time_s=options.collision_total_time_s,
         collision_dt_s=options.collision_dt_s,
         collision_result_interval_s=options.collision_result_interval_s,
@@ -1084,6 +1086,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "collision_time_mode": str(options.collision_time_mode),
         "collision_auto_steps_per_radius": float(options.collision_auto_steps_per_radius),
         "collision_auto_post_contact_radii": float(options.collision_auto_post_contact_radii),
+        "collision_bounce_back_time_s": float(options.collision_bounce_back_time_s),
         "collision_total_time_s": float(options.collision_total_time_s),
         "collision_dt_s": float(options.collision_dt_s),
         "collision_result_interval_s": float(options.collision_result_interval_s),
@@ -1361,12 +1364,67 @@ def _plot_member_lines(
             )
 
 
-def _plot_rigid_sphere(axis: Any, visualization: dict[str, Any]) -> None:
+def _sphere_display_center(
+        sphere: dict[str, Any],
+        visualization: dict[str, Any],
+        deformation_scale: float,
+) -> np.ndarray:
+    """Return sphere center in the same displayed coordinates as deformed shell surfaces."""
+
+    center = np.asarray(sphere.get("position", (0.0, 0.0, 0.0)), dtype=float).reshape(3)
+    scale = float(deformation_scale)
+    if abs(scale - 1.0) <= 1.0e-12:
+        return center
+    contacts = tuple(sphere.get("active_contacts") or visualization.get("active_contacts") or ())
+    if not contacts:
+        return center
+    best_offset: np.ndarray | None = None
+    best_distance = float("inf")
+    surfaces = tuple(visualization.get("skin_shell_surfaces") or ()) + tuple(visualization.get("shell_surfaces") or ())
+    for contact in contacts:
+        if not isinstance(contact, dict):
+            continue
+        try:
+            element_id = int(contact.get("element_id"))
+            contact_point = np.asarray(contact.get("contact_point", ()), dtype=float).reshape(3)
+        except Exception:
+            continue
+        for surface in surfaces:
+            try:
+                if int(surface.get("id", -1)) != element_id:
+                    continue
+            except Exception:
+                continue
+            points = tuple(surface.get("points") or ())
+            displaced = tuple(surface.get("displaced_points") or ())
+            if len(points) < 1 or len(displaced) != len(points):
+                continue
+            local_offsets: list[np.ndarray] = []
+            for point, moved in zip(points, displaced):
+                try:
+                    base = np.asarray(point, dtype=float).reshape(3)
+                    deformed = np.asarray(moved, dtype=float).reshape(3)
+                except Exception:
+                    continue
+                offset = deformed - base
+                distance = float(np.linalg.norm(deformed - contact_point))
+                if distance < best_distance:
+                    best_distance = distance
+                    best_offset = offset
+                local_offsets.append(offset)
+            if best_offset is None and local_offsets:
+                best_offset = np.mean(np.vstack(local_offsets), axis=0)
+    if best_offset is None:
+        return center
+    return center + (scale - 1.0) * best_offset
+
+
+def _plot_rigid_sphere(axis: Any, visualization: dict[str, Any], deformation_scale: float = 1.0) -> None:
     sphere = visualization.get("rigid_sphere") or {}
     if not isinstance(sphere, dict) or not bool(sphere.get("visible", True)):
         return
     try:
-        center = np.asarray(sphere.get("position", (0.0, 0.0, 0.0)), dtype=float).reshape(3)
+        center = _sphere_display_center(sphere, visualization, deformation_scale)
         radius = max(_safe_float(sphere.get("radius"), 0.0), 0.0)
     except Exception:
         return
@@ -1377,8 +1435,8 @@ def _plot_rigid_sphere(axis: Any, visualization: dict[str, Any]) -> None:
     x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
     y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
     z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
-    axis.plot_surface(x, y, z, color="#f97316", alpha=0.35, linewidth=0.0, shade=True)
-    axis.scatter([center[0]], [center[1]], [center[2]], color="#9a3412", s=18)
+    axis.plot_surface(x, y, z, color="#9ca3af", alpha=0.32, linewidth=0.0, shade=True)
+    axis.scatter([center[0]], [center[1]], [center[2]], color="#4b5563", s=14, alpha=0.55)
 
 
 def _format_dimension(value: float) -> str:
@@ -1505,6 +1563,13 @@ _SHELL_FIELD_COMPONENTS = {
 }
 
 _COMPONENT_DISPLAY_LABELS = {
+    "von_mises_pa": "stress von Mises [Pa]",
+    "stress_x_membrane_pa": "stress X membrane [Pa]",
+    "stress_y_membrane_pa": "stress Y membrane [Pa]",
+    "stress_xy_membrane_pa": "stress XY membrane [Pa]",
+    "strain_x_membrane": "strain X membrane [-]",
+    "strain_y_membrane": "strain Y membrane [-]",
+    "strain_xy_membrane": "strain XY membrane [-]",
     "impact_damage": "impact damage [-]",
     "impact_damage_utilization": "impact damage utilization [-]",
     "impact_damage_scale": "impact damage stiffness scale [-]",
@@ -1622,8 +1687,6 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 vis["scalar_kind"] = "raw"
             else:
                 _set_unavailable_plastic(vis)
-        elif component == "von_mises_pa" and vis.get("stress_pa"):
-            vis["scalar_label"] = vis.get("scalar_label", "stress [Pa]")
         elif component in fields:
             vis["stress_pa"] = fields[component]
             vis["scalar_label"] = _COMPONENT_DISPLAY_LABELS.get(component, component.replace("_", " "))
@@ -1631,12 +1694,18 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 vis.pop("scalar_kind", None)
             else:
                 vis["scalar_kind"] = "raw"
+        elif component == "von_mises_pa" and vis.get("stress_pa"):
+            label = str(vis.get("scalar_label", "stress [Pa]") or "stress [Pa]")
+            if "displacement" in label.lower() or label.lower().startswith("disp"):
+                _set_unavailable_component(vis, "Stress von Mises")
+            else:
+                vis["scalar_label"] = label
         elif component in disps:
             vis["stress_pa"] = disps[component]
             vis["scalar_label"] = component.replace("_", " ") + " [m]"
             vis.pop("scalar_kind", None)
         elif component in _SHELL_FIELD_COMPONENTS:
-            _set_unavailable_component(vis, component.replace("_", " "))
+            _set_unavailable_component(vis, _COMPONENT_DISPLAY_LABELS.get(component, component.replace("_", " ")))
         return vis, title
 
     if display_mode.startswith("mode:"):
@@ -1865,7 +1934,7 @@ def _plot_visualization_surface(
         _plot_member_lines(axis, visualization, scale, show_stiffeners, show_girders, member_alpha)
         _set_3d_axes_limits(axis, x, y, z)
         if show_sphere:
-            _plot_rigid_sphere(axis, visualization)
+            _plot_rigid_sphere(axis, visualization, scale)
         try:
             axis.view_init(elev=18.0, azim=-45.0)
         except Exception:
@@ -1913,7 +1982,7 @@ def _plot_visualization_surface(
         _plot_member_lines(axis, visualization, scale, show_stiffeners, show_girders, member_alpha)
         _set_3d_axes_limits(axis, x, y, z)
         if show_sphere:
-            _plot_rigid_sphere(axis, visualization)
+            _plot_rigid_sphere(axis, visualization, scale)
 
     _plot_geometry_dimension_annotations(axis, geometry, visualization.get("type") == "cylinder")
     axis.set_title(title)
@@ -2498,6 +2567,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 + str(round(_safe_float(summary.get("collision_auto_steps_per_radius")), 3))
                 + " / "
                 + str(round(_safe_float(summary.get("collision_auto_post_contact_radii")), 3)),
+                " - bounce-back stop hold [s]: "
+                + str(round(_safe_float(summary.get("collision_bounce_back_time_s")), 8)),
                 " - contact surface: " + str(summary.get("collision_contact_surface", "")),
                 " - material nonlinear impact: " + str(bool(summary.get("collision_material_nonlinear_enabled"))),
                 " - damage active: " + str(bool(summary.get("collision_damage_enabled"))),
@@ -3578,6 +3649,13 @@ FEM_OPTION_INFO.update({
         "output": "Larger values save more rebound/free-vibration history.",
         "caution": "Longer histories increase runtime and result storage.",
     },
+    "collision_bounce_back_time": {
+        "title": "Bounce-Back Stop Hold",
+        "purpose": "Stops collision runs cleanly after the sphere has separated from contact for this duration.",
+        "use": "Use a small value to keep a visible rebound tail without simulating long free-flight. Set zero to disable this early stop.",
+        "output": "Successful early stops report completed_after_contact_separation instead of a contact failure.",
+        "caution": "This is a stop criterion only; it does not change contact force, damping or impact response before separation.",
+    },
     "collision_total_time_s": {
         "title": "Manual Total Time",
         "purpose": "Total transient duration used when time setup is manual.",
@@ -3921,6 +3999,7 @@ class RuntimeFEMWindow:
         self.collision_time_mode = tk.StringVar(value="auto")
         self.collision_auto_steps_per_radius = tk.DoubleVar(value=20.0)
         self.collision_auto_post_contact_radii = tk.DoubleVar(value=6.0)
+        self.collision_bounce_back_time_s = tk.DoubleVar(value=0.01)
         self.collision_total_time_s = tk.DoubleVar(value=0.05)
         self.collision_dt_s = tk.DoubleVar(value=0.0005)
         self.collision_result_interval_s = tk.DoubleVar(value=0.0)
@@ -3986,6 +4065,7 @@ class RuntimeFEMWindow:
         self._cancel_requested = False
         self.progress_bar = None
         self.result_canvas = None
+        self._live_collision_sphere_visualization: dict[str, Any] = {}
         self.use_interactive_3d = tk.BooleanVar(value=True)
         self.show_plate_vis = tk.BooleanVar(value=True)
         self.show_stiffener_vis = tk.BooleanVar(value=True)
@@ -3993,6 +4073,11 @@ class RuntimeFEMWindow:
         self.show_collision_sphere_vis = tk.BooleanVar(value=True)
         self.animation_fast_mode = tk.BooleanVar(value=True)
         self.animation_interval_ms = tk.IntVar(value=80)
+        self.animation_speed_multiplier = tk.DoubleVar(value=1.0)
+        self.time_step_slider_value = tk.DoubleVar(value=0.0)
+        self.time_step_slider = None
+        self.time_step_label = None
+        self._time_slider_syncing = False
         self.plate_alpha_vis = tk.StringVar(value="1.0")
         self.plate_front_color_vis = tk.StringVar(value="#d1d5db")
         self.plate_back_color_vis = tk.StringVar(value="#8b5e3c")
@@ -4790,6 +4875,8 @@ class RuntimeFEMWindow:
                                 self.collision_force_tolerance_n)
         self._add_compact_entry(collision_stop, 3, 0, "collision_target_penetration", "Target pen. frac.",
                                 self.collision_target_penetration_fraction)
+        self._add_compact_entry(collision_stop, 3, 1, "collision_bounce_back_time", "Bounce stop [s]",
+                                self.collision_bounce_back_time_s)
 
         collision_damage = ttk.LabelFrame(collision_body, text="Impact damage")
         collision_damage.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -4845,10 +4932,27 @@ class RuntimeFEMWindow:
         ttk.Button(vis_actions, text="Play", command=self._play_animation).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(vis_actions, text="Stop", command=self._stop_animation).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Checkbutton(vis_actions, text="Fast animation", variable=self.animation_fast_mode).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(vis_actions, text="x").pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Entry(vis_actions, textvariable=self.animation_speed_multiplier, width=5).pack(side=tk.RIGHT)
+        ttk.Label(vis_actions, text="speed").pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Label(vis_actions, text="ms").pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Entry(vis_actions, textvariable=self.animation_interval_ms, width=5).pack(side=tk.RIGHT)
+        replay_slider = ttk.Frame(vis_group)
+        replay_slider.grid(row=10, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(0, 4))
+        replay_slider.columnconfigure(1, weight=1)
+        self.time_step_label = ttk.Label(replay_slider, text="Time step")
+        self.time_step_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.time_step_slider = ttk.Scale(
+            replay_slider,
+            from_=0.0,
+            to=0.0,
+            orient=tk.HORIZONTAL,
+            variable=self.time_step_slider_value,
+            command=self._on_time_slider,
+        )
+        self.time_step_slider.grid(row=0, column=1, sticky=tk.EW)
         view_actions = ttk.Frame(vis_group)
-        view_actions.grid(row=10, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
+        view_actions.grid(row=11, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
         ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(view_actions, text="ISO", command=lambda: self._set_runtime_3d_view("iso")).pack(side=tk.LEFT, padx=(0, 4))
@@ -5180,20 +5284,67 @@ class RuntimeFEMWindow:
             self.component_choice.set("Stress von Mises")
         if self.component_selector is not None:
             self.component_selector.configure(values=tuple(component_labels.keys()))
+        self._sync_time_slider()
 
     def _time_result_labels(self) -> list[str]:
         return [label for label, mode in self.result_case_labels.items() if str(mode).startswith("time:")]
+
+    def _time_result_index(self) -> int:
+        labels = self._time_result_labels()
+        current = str(self.result_case_choice.get())
+        return labels.index(current) if current in labels else 0
+
+    def _set_time_result_index(self, index: int, *, stop_animation: bool = True) -> None:
+        labels = self._time_result_labels()
+        if not labels:
+            return
+        if stop_animation:
+            self._stop_animation()
+        index = int(index) % len(labels)
+        self.result_case_choice.set(labels[index])
+        self._sync_time_slider(index=index)
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+
+    def _sync_time_slider(self, index: int | None = None) -> None:
+        labels = self._time_result_labels()
+        count = len(labels)
+        if index is None:
+            index = self._time_result_index() if count else 0
+        index = min(max(int(index), 0), max(count - 1, 0))
+        self._time_slider_syncing = True
+        try:
+            if self.time_step_slider is not None:
+                self.time_step_slider.configure(from_=0.0, to=float(max(count - 1, 0)))
+                try:
+                    self.time_step_slider.configure(state=tk.NORMAL if count else tk.DISABLED)
+                except tk.TclError:
+                    pass
+            self.time_step_slider_value.set(float(index))
+            if self.time_step_label is not None:
+                if count:
+                    self.time_step_label.configure(text="Time step " + str(index + 1) + "/" + str(count))
+                else:
+                    self.time_step_label.configure(text="Time step")
+        finally:
+            self._time_slider_syncing = False
+
+    def _on_time_slider(self, value: Any) -> None:
+        if self._time_slider_syncing:
+            return
+        labels = self._time_result_labels()
+        if not labels:
+            return
+        index = int(round(_safe_float(value, 0.0)))
+        index = min(max(index, 0), len(labels) - 1)
+        self._set_time_result_index(index, stop_animation=True)
 
     def _step_time_result(self, direction: int) -> None:
         labels = self._time_result_labels()
         if not labels:
             self._write_status("No saved time-domain result steps are available.", keep_run_results=True)
             return
-        self._stop_animation()
-        current = str(self.result_case_choice.get())
-        index = labels.index(current) if current in labels else 0
-        self.result_case_choice.set(labels[(index + int(direction)) % len(labels)])
-        self._refresh_figure(preserve_view=True)
+        self._set_time_result_index(self._time_result_index() + int(direction), stop_animation=True)
 
     def _previous_time_step(self) -> None:
         self._step_time_result(-1)
@@ -5231,9 +5382,12 @@ class RuntimeFEMWindow:
             self._stop_animation()
             return
         self.result_case_choice.set(labels[self._animation_index % len(labels)])
+        self._sync_time_slider(index=self._animation_index % len(labels))
         self._animation_index = (self._animation_index + 1) % len(labels)
+        self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
-        interval = max(_safe_int(self.animation_interval_ms.get(), 80), 20)
+        speed = max(_safe_float(self.animation_speed_multiplier.get(), 1.0), 0.05)
+        interval = max(int(round(max(_safe_int(self.animation_interval_ms.get(), 80), 20) / speed)), 5)
         self._animation_after_id = self.window.after(interval, self._advance_animation_frame)
 
     def _get_shell_normal(self, p: np.ndarray, is_cylinder: bool) -> np.ndarray:
@@ -5878,7 +6032,7 @@ class RuntimeFEMWindow:
                 )
 
         self._draw_base_dimension_annotations(canvas, geometry)
-        self._draw_collision_sphere_overlay(canvas, visualization)
+        self._draw_collision_sphere_overlay(canvas, visualization, deformation_scale=scale)
         self._draw_selected_probe_overlay(canvas, visualization, component, is_mode, scale)
 
         canvas.set_thickness_legend(
@@ -5891,14 +6045,25 @@ class RuntimeFEMWindow:
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
 
-    def _draw_collision_sphere_overlay(self, canvas: Tkinter3DCanvas, visualization: dict[str, Any]) -> None:
+    def _draw_collision_sphere_overlay(
+            self,
+            canvas: Tkinter3DCanvas,
+            visualization: dict[str, Any],
+            deformation_scale: float = 1.0,
+    ) -> None:
         if not bool(self.show_collision_sphere_vis.get()):
             return
         sphere = visualization.get("rigid_sphere") or {}
+        if (
+                str(getattr(self.current_result, "status", "") or "") == "running"
+                and isinstance(getattr(self, "_live_collision_sphere_visualization", None), dict)
+                and self._live_collision_sphere_visualization
+        ):
+            sphere = self._live_collision_sphere_visualization.get("rigid_sphere") or sphere
         if not isinstance(sphere, dict) or not bool(sphere.get("visible", True)):
             return
         try:
-            center = np.asarray(sphere.get("position", (0.0, 0.0, 0.0)), dtype=float).reshape(3)
+            center = _sphere_display_center(sphere, visualization, deformation_scale)
             radius = max(_safe_float(sphere.get("radius"), 0.0), 0.0)
         except Exception:
             return
@@ -5906,9 +6071,10 @@ class RuntimeFEMWindow:
             return
         segments = 14
         rings = 8
-        base_color = "#f97316"
-        light_color = _blend_hex_color(base_color, 0.28)
-        outline_color = _blend_hex_color("#9a3412", 0.35)
+        base_color = "#9ca3af"
+        light_color = _blend_hex_color(base_color, 0.30)
+        outline_color = _blend_hex_color("#4b5563", 0.42)
+        sphere_stipple = _alpha_to_stipple(0.45)
         light = np.asarray((-0.35, -0.55, 0.76), dtype=float)
         light /= max(float(np.linalg.norm(light)), 1.0e-12)
 
@@ -5965,13 +6131,14 @@ class RuntimeFEMWindow:
                     cull_backface=False,
                     layer=39,
                     back_color=light_color,
+                    stipple=sphere_stipple,
                 )
 
         marker = max(radius * 0.025, 1.0e-3)
         canvas.add_line(
             Point3D(center[0] - marker, center[1], center[2]),
             Point3D(center[0] + marker, center[1], center[2]),
-            color="#9a3412",
+            color="#4b5563",
             width=2,
             layer=41,
             draw_overlay=False,
@@ -6034,8 +6201,27 @@ class RuntimeFEMWindow:
                 "Max penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)),
                 "Max penetration ratio: " + str(round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)),
                 "Contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)),
+                "Contact patch: factor "
+                + str(round(_safe_float(prestress.get("collision_contact_patch_radius_factor")), 3))
+                + ", nodes "
+                + str(_safe_int(prestress.get("collision_contact_patch_min_nodes"), 0))
+                + "-"
+                + str(_safe_int(prestress.get("collision_contact_patch_max_nodes"), 0)),
                 "Saved steps: " + str(_safe_int(prestress.get("collision_saved_steps"), 0)),
                 "Deleted shell elements: " + str(_safe_int(prestress.get("collision_deleted_shell_elements"), 0)),
+            ])
+            if result.status == "running":
+                sphere_position = tuple(prestress.get("collision_live_sphere_position_m") or ())
+                lines.extend([
+                    "Live time [s]: " + str(round(_safe_float(prestress.get("collision_live_time_s")), 8)),
+                    "Live max displacement [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_live_max_displacement_m")), 6)),
+                ])
+                if sphere_position:
+                    lines.append(
+                        "Live sphere [m]: "
+                        + ", ".join(str(round(_safe_float(value), 5)) for value in sphere_position[:3])
+                    )
+            lines.extend([
                 "",
                 "Time snapshots are available from the Result Case selector.",
             ])
@@ -6129,6 +6315,7 @@ class RuntimeFEMWindow:
     def _on_visualization_choice_changed(self, _event: Any = None) -> None:
         if self._selected_display_mode() != "time_history":
             self._last_mesh_result_case_label = str(self.result_case_choice.get())
+        self._sync_time_slider()
         self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
 
@@ -6404,13 +6591,23 @@ class RuntimeFEMWindow:
 
             fit_view = bool(canvas_created or self._force_fit_next_refresh or not preserve_view)
             self._force_fit_next_refresh = False
-            self.result_canvas.clear()
+            smooth_refresh = bool(
+                not canvas_created
+                and preserve_view
+                and (self._animation_running or str(getattr(self.current_result, "status", "") or "") == "running")
+            )
+            self.result_canvas.clear(keep_canvas=smooth_refresh)
             self.result_canvas.clear_thickness_legend()
 
             if show_base_geometry:
                 self._populate_canvas_with_geometry(self.result_canvas, fit_view=fit_view)
             else:
                 self._populate_canvas_with_results(self.result_canvas, fit_view=fit_view)
+            if smooth_refresh and self.result_canvas is not None:
+                cancel_redraw = getattr(self.result_canvas, "_cancel_scheduled_redraw", None)
+                if callable(cancel_redraw):
+                    cancel_redraw()
+                self.result_canvas.redraw()
         else:
             if self.result_canvas is not None:
                 try:
@@ -6599,6 +6796,7 @@ class RuntimeFEMWindow:
             collision_time_mode=str(self.collision_time_mode.get()),
             collision_auto_steps_per_radius=max(_safe_float(self.collision_auto_steps_per_radius.get(), 20.0), 2.0),
             collision_auto_post_contact_radii=max(_safe_float(self.collision_auto_post_contact_radii.get(), 6.0), 0.0),
+            collision_bounce_back_time_s=max(_safe_float(self.collision_bounce_back_time_s.get(), 0.01), 0.0),
             collision_total_time_s=max(_safe_float(self.collision_total_time_s.get(), 0.05), 1.0e-9),
             collision_dt_s=max(_safe_float(self.collision_dt_s.get(), 0.0005), 1.0e-9),
             collision_result_interval_s=max(_safe_float(self.collision_result_interval_s.get(), 0.0), 0.0),
@@ -6893,6 +7091,7 @@ class RuntimeFEMWindow:
         self._set_solver_running(True)
         self._cancel_requested = False
         self._last_run_result_status_text = ""
+        self._live_collision_sphere_visualization = {}
         self._run_status_history = ["The result plot will update when the solver finishes.", ""]
         self._write_status("Running FEM solver...\n\n" + "\n".join(self._run_status_history))
 
@@ -6940,6 +7139,7 @@ class RuntimeFEMWindow:
             return
 
         self.current_result = result
+        self._live_collision_sphere_visualization = {}
         self._display_base_geometry = False
         self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
@@ -6954,6 +7154,14 @@ class RuntimeFEMWindow:
         visualization = dict(payload.get("visualization") or {})
         if not visualization:
             return
+        live_sphere = visualization.get("rigid_sphere") if isinstance(visualization, dict) else None
+        self._live_collision_sphere_visualization = {"rigid_sphere": dict(live_sphere)} if isinstance(live_sphere, dict) else {}
+        live_sphere_position = ()
+        if isinstance(live_sphere, dict):
+            try:
+                live_sphere_position = tuple(float(value) for value in np.asarray(live_sphere.get("position", ()), dtype=float).reshape(-1)[:3])
+            except Exception:
+                live_sphere_position = ()
         geometry = runtime_geometry_summary(self.snapshot)
         time_value = _safe_float(payload.get("time_s"), 0.0)
         summary = {
@@ -6967,6 +7175,9 @@ class RuntimeFEMWindow:
                 "collision_status": "running",
                 "collision_time_mode": str(self.collision_time_mode.get()),
                 "collision_saved_steps": _safe_int(payload.get("step_index"), 0) + 1,
+                "collision_live_time_s": float(time_value),
+                "collision_live_max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
+                "collision_live_sphere_position_m": live_sphere_position,
             },
             "max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
         }
@@ -6997,6 +7208,7 @@ class RuntimeFEMWindow:
             self.component_selector.configure(values=tuple(live_component_labels.keys()))
         if bool(self.animation_fast_mode.get()):
             self.use_interactive_3d.set(True)
+        self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
         if hasattr(self, "_run_status_history"):
             self._write_status(

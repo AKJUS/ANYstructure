@@ -155,13 +155,13 @@ def _assemble_element_matrix(
     info = _base_info(model, matrix_type)
     start_time = time.time()
 
-    # Precompute shell stiffnesses in a JIT-compiled batch if doing stiffness matrix assembly
+    # Precompute shell matrices in a JIT-compiled batch for stiffness and mass assembly
     precomputed = {}
     vectorized_shell_groups = []
-    if matrix_type == "stiffness":
+    if matrix_type in {"stiffness", "mass"}:
         from .elements import ShellElement
         from .jit_compiler import JIT_ENABLED, JIT_DISABLED_REASON, jit_diagnostics
-        from .vectorized_stiffness import compute_shell_stiffness_matrices_jit
+        from .vectorized_stiffness import compute_shell_mass_matrices_jit, compute_shell_stiffness_matrices_jit
 
         groups = {}
         for elem_id, element in mesh.elements.items():
@@ -198,29 +198,41 @@ def _assemble_element_matrix(
             is_4node = first_element._is_4node
             gauss_points = first_element.gauss_points
             gauss_weights = first_element.gauss_weights
-            if is_4node:
-                shear_points = np.empty((0, 2))
-                shear_weights = np.empty(0)
-            else:
-                shear_points = first_element.shear_gauss_points
-                shear_weights = first_element.shear_gauss_weights
 
-            stiffnesses = compute_shell_stiffness_matrices_jit(
-                coords_all,
-                is_4node,
-                thickness,
-                drilling_stabilization,
-                E,
-                nu,
-                G,
-                gauss_points,
-                gauss_weights,
-                shear_points,
-                shear_weights,
-            )
+            if matrix_type == "mass":
+                kernel_name = "compute_shell_mass_matrices_jit"
+                batched = compute_shell_mass_matrices_jit(
+                    coords_all,
+                    is_4node,
+                    thickness,
+                    float(material.density),
+                    gauss_points,
+                    gauss_weights,
+                )
+            else:
+                kernel_name = "compute_shell_stiffness_matrices_jit"
+                if is_4node:
+                    shear_points = np.empty((0, 2))
+                    shear_weights = np.empty(0)
+                else:
+                    shear_points = first_element.shear_gauss_points
+                    shear_weights = first_element.shear_gauss_weights
+                batched = compute_shell_stiffness_matrices_jit(
+                    coords_all,
+                    is_4node,
+                    thickness,
+                    drilling_stabilization,
+                    E,
+                    nu,
+                    G,
+                    gauss_points,
+                    gauss_weights,
+                    shear_points,
+                    shear_weights,
+                )
 
             for idx, (elem_id, element) in enumerate(elem_list):
-                precomputed[elem_id] = stiffnesses[idx]
+                precomputed[elem_id] = batched[idx]
             jit_info = jit_diagnostics()
             vectorized_shell_groups.append(
                 {
@@ -231,7 +243,7 @@ def _assemble_element_matrix(
                     "thickness": float(thickness),
                     "jit_enabled": bool(JIT_ENABLED),
                     "jit_disabled_reason": JIT_DISABLED_REASON,
-                    "kernel": "compute_shell_stiffness_matrices_jit",
+                    "kernel": kernel_name,
                     "parallel_kernel": True,
                     "parallel_threads": jit_info.get("num_threads"),
                     "backend": jit_info.get("backend"),
@@ -288,7 +300,7 @@ def _assemble_element_matrix(
     )
     matrix = coo.tocsr()
     info["diagnostics"]["assembled_symmetry_error"] = _relative_symmetry_error(matrix)
-    if matrix_type == "stiffness":
+    if matrix_type in {"stiffness", "mass"}:
         info["diagnostics"]["vectorized_shell_groups"] = vectorized_shell_groups
         info["diagnostics"]["vectorized_shell_element_count"] = int(len(precomputed))
         info["diagnostics"]["scalar_shell_element_count"] = int(info["num_elements"] - len(precomputed))

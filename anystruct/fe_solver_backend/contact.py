@@ -114,6 +114,7 @@ class SphereContactConfig:
     min_load_patch_nodes: int = 4
     max_load_patch_nodes: int = 12
     save_contact_history: bool = True
+    post_separation_time: float = 0.0
 
     def __post_init__(self) -> None:
         if self.penalty_stiffness is not None and self.penalty_stiffness <= 0.0:
@@ -150,6 +151,8 @@ class SphereContactConfig:
             raise ValueError("min_load_patch_nodes must be positive")
         if self.max_load_patch_nodes < self.min_load_patch_nodes:
             raise ValueError("max_load_patch_nodes must be greater than or equal to min_load_patch_nodes")
+        if self.post_separation_time < 0.0:
+            raise ValueError("post_separation_time must be non-negative")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -171,6 +174,7 @@ class SphereContactConfig:
             "min_load_patch_nodes": int(self.min_load_patch_nodes),
             "max_load_patch_nodes": int(self.max_load_patch_nodes),
             "save_contact_history": bool(self.save_contact_history),
+            "post_separation_time": float(self.post_separation_time),
         }
 
 
@@ -355,79 +359,141 @@ def _shell_contact_candidates(model: "FEModel") -> List[ShellElement]:
     return [element for element in model.mesh.elements.values() if isinstance(element, ShellElement)]
 
 
-def _active_shell_contact_candidates(model: "FEModel", deleted_element_ids: Sequence[int] = ()) -> List[ShellElement]:
-    deleted = {int(element_id) for element_id in deleted_element_ids}
-    return [element for element in _shell_contact_candidates(model) if int(element.element_id) not in deleted]
+class _ContactGeometry:
+    """Mesh-constant shell contact geometry arrays, cached on the mesh revision.
+
+    The contact load assembly runs inside contact/Newton iterations, so anything
+    that only depends on the undeformed mesh (node coordinates, translation DOF
+    indices, element connectivity, representative edge length) is precomputed
+    once and reused until the mesh revision changes.
+    """
+
+    __slots__ = (
+        "elements",
+        "element_ids",
+        "node_ids",
+        "node_id_to_slot",
+        "node_base",
+        "node_dofs",
+        "element_node_slots",
+        "element_node_counts",
+        "node_mask",
+        "representative_edge_length",
+    )
+
+    def __init__(self, model: "FEModel"):
+        elements = _shell_contact_candidates(model)
+        self.elements = elements
+        self.element_ids = np.asarray([int(element.element_id) for element in elements], dtype=np.int64)
+        node_id_to_slot: Dict[int, int] = {}
+        for element in elements:
+            for node_id in element.node_ids:
+                node_id_to_slot.setdefault(int(node_id), len(node_id_to_slot))
+        self.node_id_to_slot = node_id_to_slot
+        self.node_ids = np.asarray(list(node_id_to_slot), dtype=np.int64)
+        n_nodes = len(node_id_to_slot)
+        self.node_base = np.zeros((max(n_nodes, 1), 3), dtype=float)
+        self.node_dofs = np.zeros((max(n_nodes, 1), 3), dtype=np.intp)
+        for node_id, slot in node_id_to_slot.items():
+            node = model.mesh.get_node(node_id)
+            self.node_base[slot] = (node.x, node.y, node.z)
+            self.node_dofs[slot] = np.asarray(node.dofs[:3], dtype=np.intp)
+        n_elem = len(elements)
+        max_nodes = max((element.num_nodes for element in elements), default=1)
+        self.element_node_slots = np.zeros((max(n_elem, 1), max_nodes), dtype=np.intp)
+        self.element_node_counts = np.zeros(max(n_elem, 1), dtype=np.intp)
+        lengths: List[float] = []
+        for index, element in enumerate(elements):
+            slots = [node_id_to_slot[int(node_id)] for node_id in element.node_ids]
+            self.element_node_counts[index] = len(slots)
+            self.element_node_slots[index, : len(slots)] = slots
+            self.element_node_slots[index, len(slots):] = slots[0]
+            corner_count = 3 if element.num_nodes in (3, 6) else 4
+            corners = self.node_base[slots[:corner_count]]
+            for corner in range(corner_count):
+                lengths.append(float(np.linalg.norm(corners[(corner + 1) % corner_count] - corners[corner])))
+        self.node_mask = np.arange(max_nodes)[None, :] < self.element_node_counts[:, None]
+        self.representative_edge_length = float(np.median(lengths)) if lengths else 0.0
+
+    def deformed_node_positions(self, displacement: Optional[np.ndarray]) -> np.ndarray:
+        if displacement is None:
+            return self.node_base
+        return self.node_base + np.asarray(displacement, dtype=float)[self.node_dofs]
+
+    def element_centroids_and_radii(self, node_positions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return per-element deformed node blocks, centroids and bounding radii."""
+        element_nodes = node_positions[self.element_node_slots]
+        counts = np.maximum(self.element_node_counts, 1)
+        sums = np.where(self.node_mask[..., None], element_nodes, 0.0).sum(axis=1)
+        centroids = sums / counts[:, None]
+        deltas = np.where(self.node_mask[..., None], element_nodes - centroids[:, None, :], 0.0)
+        radii = np.sqrt((deltas**2).sum(axis=2)).max(axis=1)
+        return element_nodes, centroids, radii
+
+    def active_element_mask(self, deleted_element_ids: Sequence[int]) -> np.ndarray:
+        if not deleted_element_ids:
+            return np.ones(self.element_ids.shape[0], dtype=bool)
+        deleted = np.asarray(sorted({int(element_id) for element_id in deleted_element_ids}), dtype=np.int64)
+        return ~np.isin(self.element_ids, deleted)
+
+
+def _contact_geometry(model: "FEModel") -> _ContactGeometry:
+    mesh = model.mesh
+    signature = mesh.revision_signature()
+    cached = getattr(mesh, "_contact_geometry_cache", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    geometry = _ContactGeometry(model)
+    mesh._contact_geometry_cache = (signature, geometry)
+    return geometry
 
 
 def _contact_patch_nodal_weights(
-    model: "FEModel",
-    candidates: Sequence[ShellElement],
+    geometry: _ContactGeometry,
+    node_positions: np.ndarray,
+    centroids: np.ndarray,
+    radii: np.ndarray,
+    active_mask: np.ndarray,
     contact_point: np.ndarray,
-    structural_displacement: np.ndarray,
     contact_config: SphereContactConfig,
-    representative_edge: float,
     sphere: RigidSphereImpact,
     penetration: float,
 ) -> Dict[int, float]:
-    """Return smooth local nodal weights for distributing one contact force."""
+    """Return smooth local nodal weights (keyed by node slot) for one contact force."""
     patch_radius = max(
         np.sqrt(max(float(sphere.radius) * float(penetration), 0.0)),
-        float(contact_config.load_patch_radius_factor) * max(float(representative_edge), 1.0e-12),
+        float(contact_config.load_patch_radius_factor) * max(float(geometry.representative_edge_length), 1.0e-12),
         1.0e-12,
     )
-    node_positions: Dict[int, np.ndarray] = {}
-    for element in candidates:
-        coords = _deformed_shell_coordinates(model, element, structural_displacement)
-        centroid = np.mean(coords, axis=0)
-        element_radius = max(float(np.linalg.norm(row - centroid)) for row in coords)
-        if float(np.linalg.norm(np.asarray(contact_point, dtype=float) - centroid)) > patch_radius + element_radius:
-            continue
-        for local_index, node_id in enumerate(element.node_ids):
-            node_positions.setdefault(int(node_id), coords[local_index])
-    if not node_positions:
+    point = np.asarray(contact_point, dtype=float).reshape(3)
+    near = active_mask & (np.linalg.norm(centroids - point[None, :], axis=1) <= patch_radius + radii)
+    if not near.any():
         return {}
-    distances = [
-        (int(node_id), float(np.linalg.norm(position - contact_point)))
-        for node_id, position in node_positions.items()
-    ]
-    distances.sort(key=lambda item: item[1])
-    selected = [(node_id, distance) for node_id, distance in distances if distance <= patch_radius]
-    min_nodes = min(int(contact_config.min_load_patch_nodes), len(distances))
-    if len(selected) < min_nodes:
-        selected = distances[:min_nodes]
+    slots = np.unique(geometry.element_node_slots[near][geometry.node_mask[near]])
+    distances = np.linalg.norm(node_positions[slots] - point[None, :], axis=1)
+    order = np.argsort(distances, kind="stable")
+    slots = slots[order]
+    distances = distances[order]
+    within = int(np.searchsorted(distances, patch_radius, side="right"))
+    min_nodes = min(int(contact_config.min_load_patch_nodes), slots.shape[0])
+    selected_count = max(within, min_nodes)
     max_nodes = max(int(contact_config.max_load_patch_nodes), min_nodes)
-    selected = selected[:max_nodes]
-    if not selected:
+    selected_count = min(selected_count, max_nodes)
+    if selected_count <= 0:
         return {}
-    raw: Dict[int, float] = {}
-    for node_id, distance in selected:
-        ratio = distance / max(patch_radius, 1.0e-12)
-        raw[int(node_id)] = float(np.exp(-(ratio * ratio)))
-    total = float(sum(raw.values()))
+    slots = slots[:selected_count]
+    ratios = distances[:selected_count] / max(patch_radius, 1.0e-12)
+    raw = np.exp(-(ratios * ratios))
+    total = float(raw.sum())
     if total <= 0.0:
-        equal = 1.0 / float(len(selected))
-        return {int(node_id): equal for node_id, _distance in selected}
-    return {int(node_id): float(value / total) for node_id, value in raw.items()}
-
-
-def _deformed_shell_coordinates(model: "FEModel", element: ShellElement, displacement: np.ndarray) -> np.ndarray:
-    coords = element.get_node_coordinates(model.mesh).astype(float, copy=True)
-    for local_index, node_id in enumerate(element.node_ids):
-        node = model.mesh.get_node(int(node_id))
-        coords[local_index] += displacement[np.asarray(node.dofs[:3], dtype=np.intp)]
-    return coords
+        raw = np.full(selected_count, 1.0 / selected_count)
+        total = 1.0
+    weights = raw / total
+    return {int(slot): float(weight) for slot, weight in zip(slots, weights)}
 
 
 def _representative_shell_edge_length(model: "FEModel") -> float:
-    lengths: List[float] = []
-    for element in _shell_contact_candidates(model):
-        coords = element.get_node_coordinates(model.mesh)
-        corner_count = 3 if element.num_nodes in (3, 6) else 4
-        corners = coords[:corner_count]
-        for index in range(corner_count):
-            lengths.append(float(np.linalg.norm(corners[(index + 1) % corner_count] - corners[index])))
-    return float(np.median(lengths)) if lengths else 0.0
+    return _contact_geometry(model).representative_edge_length
 
 
 def _representative_shell_stiffness(model: "FEModel") -> float:
@@ -485,6 +551,7 @@ def _resolved_contact_config(model: "FEModel", sphere: RigidSphereImpact, config
         min_load_patch_nodes=raw.min_load_patch_nodes,
         max_load_patch_nodes=raw.max_load_patch_nodes,
         save_contact_history=raw.save_contact_history,
+        post_separation_time=raw.post_separation_time,
     )
 
 
@@ -608,7 +675,7 @@ def assemble_sphere_contact_load_vector(
     """Assemble shell nodal loads from current rigid-sphere contact state."""
 
     total_dofs = model.mesh.dof_manager.total_dofs
-    u = np.zeros(total_dofs, dtype=float) if structural_displacement is None else np.asarray(structural_displacement, dtype=float)
+    u = None if structural_displacement is None else np.asarray(structural_displacement, dtype=float)
     v = np.zeros(total_dofs, dtype=float) if structural_velocity is None else np.asarray(structural_velocity, dtype=float)
     center = np.asarray(sphere_position, dtype=float).reshape(3)
     velocity = np.asarray(sphere_velocity, dtype=float).reshape(3)
@@ -616,18 +683,24 @@ def assemble_sphere_contact_load_vector(
     sphere_force_total = np.zeros(3, dtype=float)
     records: List[SphereContactRecord] = []
     contact_scales = {} if contact_scale_by_element is None else {int(k): float(v) for k, v in contact_scale_by_element.items()}
-    active_candidates = _active_shell_contact_candidates(model, deleted_element_ids)
-    representative_edge = _representative_shell_edge_length(model)
+    geometry = _contact_geometry(model)
+    if geometry.element_ids.shape[0] == 0:
+        return load, sphere_force_total, tuple(records)
+    node_positions = geometry.deformed_node_positions(u)
+    element_nodes, centroids, radii = geometry.element_centroids_and_radii(node_positions)
+    active_mask = geometry.active_element_mask(deleted_element_ids)
+    near_mask = active_mask & (
+        np.linalg.norm(centroids - center[None, :], axis=1) <= sphere.radius + radii + contact_config.search_margin
+    )
 
-    for element in active_candidates:
+    for element_index in np.flatnonzero(near_mask):
+        element = geometry.elements[element_index]
         contact_scale = float(contact_scales.get(int(element.element_id), 1.0))
         if contact_scale <= 0.0:
             continue
-        coords = _deformed_shell_coordinates(model, element, u)
-        centroid = np.mean(coords, axis=0)
-        element_radius = max(float(np.linalg.norm(row - centroid)) for row in coords)
-        if float(np.linalg.norm(center - centroid)) > sphere.radius + element_radius + contact_config.search_margin:
-            continue
+        node_count = int(geometry.element_node_counts[element_index])
+        element_slots = geometry.element_node_slots[element_index, :node_count]
+        coords = element_nodes[element_index, :node_count]
         local, N, dN_dxi, dN_deta, surface_point = _project_local_coordinates(element, coords, center)
         gap_vector = center - surface_point
         distance = float(np.linalg.norm(gap_vector))
@@ -656,10 +729,7 @@ def assemble_sphere_contact_load_vector(
         penetration = max(float(sphere.radius - distance), 0.0)
         if penetration <= 0.0:
             continue
-        surface_velocity = np.zeros(3, dtype=float)
-        for local_index, node_id in enumerate(element.node_ids):
-            node = model.mesh.get_node(int(node_id))
-            surface_velocity += float(N[local_index]) * v[np.asarray(node.dofs[:3], dtype=np.intp)]
+        surface_velocity = np.asarray(N, dtype=float) @ v[geometry.node_dofs[element_slots]]
         relative_normal_velocity = float(np.dot(velocity - surface_velocity, normal))
         normal_force = max(
             float(contact_config.penalty_stiffness) * penetration - float(contact_config.contact_damping) * relative_normal_velocity,
@@ -671,25 +741,23 @@ def assemble_sphere_contact_load_vector(
         sphere_force = normal_force * normal
         structure_force = -sphere_force
         patch_weights = _contact_patch_nodal_weights(
-            model,
-            active_candidates,
+            geometry,
+            node_positions,
+            centroids,
+            radii,
+            active_mask,
             surface_point,
-            u,
             contact_config,
-            representative_edge,
             sphere,
             penetration,
         )
         if not patch_weights:
-            patch_weights = {int(node_id): float(N[local_index]) for local_index, node_id in enumerate(element.node_ids)}
+            patch_weights = {int(slot): float(N[local_index]) for local_index, slot in enumerate(element_slots)}
         nodal_forces: Dict[int, np.ndarray] = {}
-        for node_id, weight in patch_weights.items():
-            node = model.mesh.get_node(int(node_id))
-            if node is None:
-                continue
+        for slot, weight in patch_weights.items():
             nodal = float(weight) * structure_force
-            load[np.asarray(node.dofs[:3], dtype=np.intp)] += nodal
-            nodal_forces[int(node_id)] = nodal
+            load[geometry.node_dofs[slot]] += nodal
+            nodal_forces[int(geometry.node_ids[slot])] = nodal
         sphere_force_total += sphere_force
         records.append(
             SphereContactRecord(
@@ -713,8 +781,7 @@ def assemble_sphere_contact_load_vector(
         for record in records:
             sphere_force_total += record.sphere_force
             for node_id, nodal in record.nodal_forces.items():
-                node = model.mesh.get_node(int(node_id))
-                load[np.asarray(node.dofs[:3], dtype=np.intp)] += nodal
+                load[geometry.node_dofs[geometry.node_id_to_slot[int(node_id)]]] += nodal
 
     return load, sphere_force_total, tuple(records)
 
@@ -1521,6 +1588,8 @@ def _solve_transient_sphere_impact_nonlinear(
     nonlinear_failure_summary: Dict[str, Any] = {}
     beta = float(transient_config.beta)
     gamma = float(transient_config.gamma)
+    separation_elapsed = 0.0
+    separation_stop_time = float(config.post_separation_time)
 
     segments: List[Tuple[int, float, float, bool]] = [
         (int(index), float(times[index - 1]), float(times[index]), True)
@@ -1587,6 +1656,7 @@ def _solve_transient_sphere_impact_nonlinear(
         sphere_v_next = sphere_velocity.copy()
         sphere_a_next = sphere_acceleration.copy()
         factor_diagnostics: Dict[str, Any] = {}
+        convergence_reason = "standard"
         for iteration in range(1, int(nl.max_iterations) + 1):
             full_u = reconstruct_full_solution(T, q_trial, u0)
             F_int, K_T, trial_states = assemble_nonlinear(
@@ -1646,12 +1716,23 @@ def _solve_transient_sphere_impact_nonlinear(
             contact_change = float(np.linalg.norm(new_sphere_force - sphere_force))
             contact_load, sphere_force, records = new_contact_load, new_sphere_force, new_records
             q_trial = q_next
-            if (
-                residual_norm <= float(nl.residual_tolerance) * reference
-                and displacement_increment <= float(nl.displacement_tolerance) * max(float(np.linalg.norm(q_next)), 1.0)
-                and contact_change <= max(float(nl.contact_force_tolerance) * contact_scale, float(config.force_tolerance))
-            ):
+            displacement_limit = float(nl.displacement_tolerance) * max(float(np.linalg.norm(q_next)), 1.0)
+            residual_limit = float(nl.residual_tolerance) * reference
+            force_limit = max(float(nl.contact_force_tolerance) * contact_scale, float(config.force_tolerance))
+            standard_converged = (
+                residual_norm <= residual_limit
+                and displacement_increment <= displacement_limit
+                and contact_change <= force_limit
+            )
+            contact_stall_converged = (
+                iteration >= max(3, int(nl.max_iterations) // 2)
+                and residual_norm <= 1.0e-2 * reference
+                and displacement_increment <= max(10.0 * displacement_limit, 1.0e-6)
+                and contact_change <= max(5.0e-3 * contact_scale, 10.0 * float(config.force_tolerance))
+            )
+            if standard_converged or contact_stall_converged:
                 converged = True
+                convergence_reason = "standard" if standard_converged else "contact_stall"
                 iteration_counts.append(iteration)
                 break
         if not converged:
@@ -1730,6 +1811,9 @@ def _solve_transient_sphere_impact_nonlinear(
         if contact_norm > 0.0:
             contact_step_count += 1
             active_contact_duration += dt
+            separation_elapsed = 0.0
+        elif contact_step_count > 0 and separation_stop_time > 0.0:
+            separation_elapsed += dt
         if records:
             max_penetration = max(max_penetration, max(float(record.penetration) for record in records))
             peak_contact_force = max(peak_contact_force, max(float(record.normal_force) for record in records))
@@ -1786,6 +1870,7 @@ def _solve_transient_sphere_impact_nonlinear(
                 "residual_norm": float(residual_norm),
                 "displacement_increment": float(displacement_increment),
                 "contact_force_change": float(contact_change),
+                "convergence_reason": str(convergence_reason),
                 "active_element_ids": [int(record.element_id) for record in records],
                 "max_penetration": float(max((record.penetration for record in records), default=0.0)),
                 "max_equivalent_plastic_strain": float(state_summary.get("max_equivalent_plastic_strain", 0.0) or 0.0),
@@ -1799,6 +1884,9 @@ def _solve_transient_sphere_impact_nonlinear(
         else:
             pending_save = (float(sub_time), sphere_force.copy(), records)
         if status == "max_deleted_fraction_reached":
+            break
+        if status == "completed" and contact_step_count > 0 and separation_stop_time > 0.0 and separation_elapsed >= separation_stop_time:
+            stop_reason = "completed_after_contact_separation"
             break
 
     if pending_save is not None:
@@ -1918,6 +2006,8 @@ def _solve_transient_sphere_impact_nonlinear(
         "num_reduced_dofs": int(M_red.shape[0]),
         "contact_step_count": int(contact_step_count),
         "active_contact_duration": float(contact_duration),
+        "separation_stop_time": float(separation_stop_time),
+        "post_contact_separation_time": float(separation_elapsed if contact_step_count > 0 else 0.0),
         "max_penetration_ratio": float(max_penetration_ratio),
         "sphere_momentum_balance_error": float(sphere_momentum_balance_error),
         "iteration_counts": iteration_counts,
@@ -2199,6 +2289,9 @@ def solve_transient_sphere_impact(
     damage_limit_warning_emitted = False
     eroded_matrix_rebuild_count = 0
     damage_state_update_count = 0
+    separation_elapsed = 0.0
+    separation_stop_time = float(config.post_separation_time)
+    stop_after_separation = False
     for step_index in range(1, len(times)):
         target_time = float(times[step_index])
         dt_total = float(times[step_index] - times[step_index - 1])
@@ -2293,6 +2386,9 @@ def solve_transient_sphere_impact(
             if contact_norm > 0.0:
                 contact_step_count += 1
                 active_contact_duration += dt
+                separation_elapsed = 0.0
+            elif contact_step_count > 0 and separation_stop_time > 0.0:
+                separation_elapsed += dt
             if records:
                 max_penetration = max(max_penetration, max(float(record.penetration) for record in records))
                 peak_contact_force = max(peak_contact_force, max(float(record.normal_force) for record in records))
@@ -2440,10 +2536,15 @@ def solve_transient_sphere_impact(
             step_diagnostics.append(last_step_diag)
             if status in {"contact_iteration_failed", "max_deleted_fraction_reached"}:
                 break
+            if status == "completed" and contact_step_count > 0 and separation_stop_time > 0.0 and separation_elapsed >= separation_stop_time:
+                stop_reason = "completed_after_contact_separation"
+                stop_after_separation = True
+                break
 
-        if step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1:
-            save_state(target_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, last_sphere_force, last_records)
-        if status in {"contact_iteration_failed", "max_deleted_fraction_reached"}:
+        save_time = float(last_step_diag.get("time", target_time)) if last_step_diag else target_time
+        if step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1 or stop_after_separation:
+            save_state(save_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, last_sphere_force, last_records)
+        if status in {"contact_iteration_failed", "max_deleted_fraction_reached"} or stop_after_separation:
             break
 
     if contact_step_count == 0 and status == "completed":
@@ -2586,6 +2687,8 @@ def solve_transient_sphere_impact(
         "num_reduced_dofs": int(K_red.shape[0]),
         "contact_step_count": int(contact_step_count),
         "active_contact_duration": float(contact_duration),
+        "separation_stop_time": float(separation_stop_time),
+        "post_contact_separation_time": float(separation_elapsed if contact_step_count > 0 else 0.0),
         "max_penetration_ratio": float(max_penetration_ratio),
         "sphere_momentum_balance_error": float(sphere_momentum_balance_error),
         "iteration_counts": iteration_counts,

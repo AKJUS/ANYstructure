@@ -198,6 +198,7 @@ class LightweightFEMConfig:
     collision_time_mode: str = "auto"
     collision_auto_steps_per_radius: float = 20.0
     collision_auto_post_contact_radii: float = 6.0
+    collision_bounce_back_time_s: float = 0.01
     collision_total_time_s: float = 0.05
     collision_dt_s: float = 0.0005
     collision_result_interval_s: float = 0.0
@@ -2740,7 +2741,7 @@ def _visualization_from_full_result(
         element_scalar_fields = {}
 
     fields = _nodal_scalar_fields(model, stresses_by_element)
-    if scalar_by_node is not None:
+    if scalar_by_node:
         fields["custom_scalar"] = scalar_by_node
     for field_name, by_element in element_scalar_fields.items():
         nodal_values: dict[int, list[float]] = {}
@@ -4205,6 +4206,9 @@ def _run_collision_response(
         penalty_info = dict(auto_time) if auto_time else _collision_dynamic_penalty(config, dt)
         resolved_penalty = max(float(penalty_info.get("recommended_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0)) or 0.0), 1.0)
         penalty_basis = str(penalty_info.get("penalty_basis", penalty_info.get("basis", "dynamic_auto")) or "dynamic_auto")
+    contact_patch_factor = 2.5 if bool(config.collision_material_nonlinear_enabled) else 2.0
+    contact_patch_min_nodes = 12 if bool(config.collision_material_nonlinear_enabled) else 8
+    contact_patch_max_nodes = 40 if bool(config.collision_material_nonlinear_enabled) else 24
     contact_config = _backend_SphereContactConfig(
         penalty_stiffness=resolved_penalty,
         contact_damping=max(float(config.collision_contact_damping), 0.0),
@@ -4214,6 +4218,10 @@ def _run_collision_response(
         target_penetration_fraction=max(float(config.collision_target_penetration_fraction), 1.0e-9),
         max_event_substeps=max(int(config.collision_max_event_substeps or 16), 1),
         contact_surface=str(config.collision_contact_surface or "midsurface"),
+        post_separation_time=max(float(config.collision_bounce_back_time_s), 0.0),
+        load_patch_radius_factor=contact_patch_factor,
+        min_load_patch_nodes=contact_patch_min_nodes,
+        max_load_patch_nodes=contact_patch_max_nodes,
     )
     transient_config = _backend_TransientConfig(
         dt=dt,
@@ -4236,7 +4244,7 @@ def _run_collision_response(
         if not callable(status_callback):
             return
         now = time.perf_counter()
-        if now - last_live_update[0] < 0.25:
+        if now - last_live_update[0] < 0.05:
             return
         displacement = payload.get("displacement")
         if displacement is None:
@@ -4254,11 +4262,14 @@ def _run_collision_response(
         live_visualization["scalar_kind"] = "raw"
         sphere_position = np.asarray(payload.get("sphere_position", ()), dtype=float).reshape(-1)
         if sphere_position.size >= 3:
+            active_contacts = tuple(payload.get("active_contacts", ()) or ())
             live_visualization["rigid_sphere"] = {
                 "position": tuple(float(value) for value in sphere_position[:3]),
                 "radius": float(payload.get("sphere_radius", config.collision_radius_m)),
                 "visible": True,
+                "active_contacts": active_contacts,
             }
+            live_visualization["active_contacts"] = active_contacts
         live_visualization["time_s"] = float(payload.get("time_s", 0.0) or 0.0)
         last_live_update[0] = now
         status_callback(
@@ -4293,6 +4304,7 @@ def _run_collision_response(
     times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
     displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
     sphere_positions = np.asarray(getattr(impact, "sphere_positions", np.zeros((0, 3))), dtype=float)
+    active_contact_history = tuple(getattr(impact, "active_contact_history", ()) or ())
     snapshots: list[dict[str, object]] = []
     for index, time_value in enumerate(times):
         if index >= len(displacements):
@@ -4321,11 +4333,14 @@ def _run_collision_response(
         _annotate_plastic_strain_visualization(snapshot)
         _filter_visualization_deleted_elements(snapshot, deleted_ids)
         position = sphere_positions[index].tolist() if index < len(sphere_positions) else list(sphere.initial_position)
+        active_contacts = tuple(active_contact_history[index]) if index < len(active_contact_history) else tuple()
         snapshot["time_s"] = float(time_value)
+        snapshot["active_contacts"] = active_contacts
         snapshot["rigid_sphere"] = {
             "position": tuple(float(value) for value in position),
             "radius": float(sphere.radius),
             "visible": True,
+            "active_contacts": active_contacts,
         }
         snapshots.append(snapshot)
     visualization = snapshots[-1] if snapshots else _visualization_from_full_result(
@@ -4345,10 +4360,14 @@ def _run_collision_response(
     final_deleted = tuple(int(element_id) for element_id in erosion_summary.get("all_eroded_element_ids", ()) or ())
     _filter_visualization_deleted_elements(visualization, final_deleted)
     if len(sphere_positions):
+        final_index = len(sphere_positions) - 1
+        final_contacts = tuple(active_contact_history[final_index]) if final_index < len(active_contact_history) else tuple()
+        visualization["active_contacts"] = final_contacts
         visualization["rigid_sphere"] = {
             "position": tuple(float(value) for value in sphere_positions[-1]),
             "radius": float(sphere.radius),
             "visible": True,
+            "active_contacts": final_contacts,
         }
     visualization["time_domain"] = {
         "kind": "sphere_collision",
@@ -4405,6 +4424,9 @@ def _run_collision_response(
         "collision_contact_penalty_stiffness_n_per_m": float(resolved_penalty),
         "collision_contact_penalty_basis": str(penalty_basis),
         "collision_target_penetration_m": float(penalty_info.get("target_penetration_m", 0.0) or 0.0),
+        "collision_contact_patch_radius_factor": float(contact_patch_factor),
+        "collision_contact_patch_min_nodes": float(contact_patch_min_nodes),
+        "collision_contact_patch_max_nodes": float(contact_patch_max_nodes),
         "collision_adaptive_cutback_retries": float((impact.diagnostics or {}).get("adaptive_cutback_retry_count", 0) or 0),
         "collision_solution_control": str((impact.diagnostics or {}).get("solution_control", "implicit_newmark_time_domain")),
         "collision_arc_length_applicability": str((impact.diagnostics or {}).get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
@@ -4412,6 +4434,7 @@ def _run_collision_response(
         "collision_separation_stop_time_s": float((impact.diagnostics or {}).get("separation_stop_time", 0.0) or 0.0),
         "collision_auto_requested_total_time_s": float(auto_time.get("requested_total_time_s", 0.0) if auto_time else 0.0),
         "collision_auto_impact_window_s": float(auto_time.get("impact_window_s", 0.0) if auto_time else 0.0),
+        "collision_bounce_back_time_s": float(config.collision_bounce_back_time_s),
         "runtime_solver": "sphere collision transient",
         "allow_unbalanced_free_free": 0.0,
         "recovery_history_mode": "full",
@@ -4466,6 +4489,15 @@ def _run_collision_response(
         + " N/m ("
         + str(penalty_basis)
         + ")."
+    )
+    diagnostics.append(
+        "Collision contact patch spread: radius factor "
+        + str(round(float(contact_patch_factor), 3))
+        + ", nodes "
+        + str(int(contact_patch_min_nodes))
+        + "-"
+        + str(int(contact_patch_max_nodes))
+        + "."
     )
     if str((impact.diagnostics or {}).get("stop_reason", "") or "") == "completed_after_contact_separation":
         diagnostics.append(

@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Tuple
 from scipy import sparse
 
 from .jit_compiler import JIT_DISABLED_REASON, JIT_ENABLED, jit_diagnostics
-from .matrix_assembly import assemble_stiffness_matrix
+from .matrix_assembly import assemble_mass_matrix, assemble_stiffness_matrix
 from .mesh_gen import generate_simple_panel_mesh
 
 
@@ -141,6 +141,12 @@ def warm_fe_solver_kernels(
         start = time.perf_counter()
         K_second, second_info = assemble_stiffness_matrix(model)
         second_seconds = time.perf_counter() - start
+        start = time.perf_counter()
+        M_first, _mass_first_info = assemble_mass_matrix(model)
+        mass_first_seconds = time.perf_counter() - start
+        start = time.perf_counter()
+        M_second, _mass_second_info = assemble_mass_matrix(model)
+        mass_second_seconds = time.perf_counter() - start
         results[order] = {
             "status": "completed",
             "shell_order": order,
@@ -153,6 +159,9 @@ def warm_fe_solver_kernels(
             "warm_assembly_seconds": float(second_seconds),
             "warm_speedup": float(first_seconds / second_seconds) if second_seconds > 0.0 else 0.0,
             "matrix_difference_norm": _matrix_difference_norm(K_first, K_second),
+            "mass_cold_assembly_seconds": float(mass_first_seconds),
+            "mass_warm_assembly_seconds": float(mass_second_seconds),
+            "mass_matrix_difference_norm": _matrix_difference_norm(M_first, M_second),
             "first_assembly": first_info.get("diagnostics", {}),
             "second_assembly": second_info.get("diagnostics", {}),
         }
