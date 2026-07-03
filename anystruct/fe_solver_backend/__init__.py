@@ -61,6 +61,7 @@ from .dynamics import (
     solve_transient_newmark,
 )
 from .contact import (
+    NonlinearTransientConfig,
     RigidSphereImpact,
     SphereContactConfig,
     SphereContactRecord,
@@ -76,6 +77,7 @@ from .fracture import (
     FractureConfig,
     ImpactDamageConfig,
     ImpactFractureConfig,
+    PlasticImpactDamageConfig,
 )
 from .imperfections import (
     CompositeImperfection,

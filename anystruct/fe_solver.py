@@ -34,11 +34,13 @@ try:
     from anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
     from anystruct.fe_solver_backend.contact import RigidSphereImpact as _backend_RigidSphereImpact
     from anystruct.fe_solver_backend.contact import SphereContactConfig as _backend_SphereContactConfig
+    from anystruct.fe_solver_backend.contact import NonlinearTransientConfig as _backend_NonlinearTransientConfig
     from anystruct.fe_solver_backend.contact import solve_transient_sphere_impact as _backend_solve_transient_sphere_impact
     from anystruct.fe_solver_backend.dynamics import TransientConfig as _backend_TransientConfig
     from anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
     from anystruct.fe_solver_backend.fracture import FractureConfig as _backend_FractureConfig
     from anystruct.fe_solver_backend.fracture import ImpactDamageConfig as _backend_ImpactDamageConfig
+    from anystruct.fe_solver_backend.fracture import PlasticImpactDamageConfig as _backend_PlasticImpactDamageConfig
     from anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
     from anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
 except ModuleNotFoundError:
@@ -54,11 +56,13 @@ except ModuleNotFoundError:
         from ANYstructure.anystruct.fe_solver_backend.arc_length import solve_static_arc_length as _backend_solve_static_arc_length
         from ANYstructure.anystruct.fe_solver_backend.contact import RigidSphereImpact as _backend_RigidSphereImpact
         from ANYstructure.anystruct.fe_solver_backend.contact import SphereContactConfig as _backend_SphereContactConfig
+        from ANYstructure.anystruct.fe_solver_backend.contact import NonlinearTransientConfig as _backend_NonlinearTransientConfig
         from ANYstructure.anystruct.fe_solver_backend.contact import solve_transient_sphere_impact as _backend_solve_transient_sphere_impact
         from ANYstructure.anystruct.fe_solver_backend.dynamics import TransientConfig as _backend_TransientConfig
         from ANYstructure.anystruct.fe_solver_backend.dynamics import solve_transient_newmark as _backend_solve_transient_newmark
         from ANYstructure.anystruct.fe_solver_backend.fracture import FractureConfig as _backend_FractureConfig
         from ANYstructure.anystruct.fe_solver_backend.fracture import ImpactDamageConfig as _backend_ImpactDamageConfig
+        from ANYstructure.anystruct.fe_solver_backend.fracture import PlasticImpactDamageConfig as _backend_PlasticImpactDamageConfig
         from ANYstructure.anystruct.fe_solver_backend.kernel_warmup import warm_fe_solver_kernels as _backend_warm_fe_solver_kernels
         from ANYstructure.anystruct.fe_solver_backend.validation import load_case_resultant as _backend_load_case_resultant
     except ModuleNotFoundError:
@@ -73,11 +77,13 @@ except ModuleNotFoundError:
         _backend_solve_static_arc_length = None
         _backend_RigidSphereImpact = None
         _backend_SphereContactConfig = None
+        _backend_NonlinearTransientConfig = None
         _backend_solve_transient_sphere_impact = None
         _backend_TransientConfig = None
         _backend_solve_transient_newmark = None
         _backend_FractureConfig = None
         _backend_ImpactDamageConfig = None
+        _backend_PlasticImpactDamageConfig = None
         _backend_warm_fe_solver_kernels = None
         _backend_load_case_resultant = None
 
@@ -175,6 +181,11 @@ class LightweightFEMConfig:
     collision_enabled: bool = False
     collision_include_static_load: bool = False
     collision_damage_enabled: bool = True
+    collision_material_nonlinear_enabled: bool = False
+    collision_nonlinear_max_iterations: int = 20
+    collision_nonlinear_tolerance: float = 1.0e-6
+    collision_nonlinear_cutbacks: int = 8
+    collision_plastic_damage_threshold: float = 0.01
     collision_mass_kg: float = 1000.0
     collision_radius_m: float = 0.25
     collision_start_x_m: float = 0.0
@@ -2638,6 +2649,7 @@ def _visualization_shell_surfaces(
     model,
     displacements: np.ndarray,
     fields: dict[str, dict[int, float]],
+    element_fields: dict[str, dict[int, float]] | None = None,
     *,
     include_skin: bool = False,
     include_members: bool = True,
@@ -2645,6 +2657,8 @@ def _visualization_shell_surfaces(
     surfaces: list[dict[str, object]] = []
     if displacements is None:
         return ()
+    if element_fields is None:
+        element_fields = {}
     shell_lookup = {
         int(shell.get("id", 0)): shell
         for shell in generated_geometry.get("shells", []) or []
@@ -2687,6 +2701,9 @@ def _visualization_shell_surfaces(
         for field_name, values in disp_values.items():
             if values:
                 field_values[field_name] = float(sum(values) / len(values))
+        for field_name, by_element in element_fields.items():
+            if shell_id in by_element:
+                field_values[field_name] = float(by_element[shell_id])
         surfaces.append(
             {
                 "id": shell_id,
@@ -2708,6 +2725,7 @@ def _visualization_from_full_result(
     scalar_by_node: dict[int, float] | None = None,
     scalar_label: str = "stress [Pa]",
     stresses_by_element: dict[int, object] | None = None,
+    element_scalar_fields: dict[str, dict[int, float]] | None = None,
 ) -> dict[str, object]:
     grid = generated_geometry.get("plot_grid") or []
     has_custom = bool(generated_geometry.get("shells") or generated_geometry.get("beams"))
@@ -2718,10 +2736,26 @@ def _visualization_from_full_result(
         stresses_by_element = {}
     if not stresses_by_element and _backend_compute_stresses is not None:
         stresses_by_element = _backend_compute_stresses(model, displacements)
+    if element_scalar_fields is None:
+        element_scalar_fields = {}
 
     fields = _nodal_scalar_fields(model, stresses_by_element)
     if scalar_by_node is not None:
         fields["custom_scalar"] = scalar_by_node
+    for field_name, by_element in element_scalar_fields.items():
+        nodal_values: dict[int, list[float]] = {}
+        for element_id, value in (by_element or {}).items():
+            element = model.mesh.elements.get(int(element_id))
+            if element is None:
+                continue
+            for node_id in getattr(element, "node_ids", ()) or ():
+                nodal_values.setdefault(int(node_id), []).append(float(value))
+        if nodal_values:
+            fields[field_name] = {
+                int(node_id): float(sum(values) / len(values))
+                for node_id, values in nodal_values.items()
+                if values
+            }
 
     is_cylinder = generated_geometry.get("plot_type") == "cylinder"
     radius = _positive(generated_geometry.get("radius_m", 1.0), 1.0) if is_cylinder else 0.0
@@ -2826,12 +2860,13 @@ def _visualization_from_full_result(
         "stress_pa": tuple(field_grids.get("custom_scalar", field_grids.get("von_mises_pa", w_grid))),
         "scalar_label": scalar_label,
         "member_lines": _visualization_member_lines(generated_geometry, model, displacements, stresses_by_element),
-        "shell_surfaces": _visualization_shell_surfaces(generated_geometry, model, displacements, fields),
+        "shell_surfaces": _visualization_shell_surfaces(generated_geometry, model, displacements, fields, element_scalar_fields),
         "skin_shell_surfaces": _visualization_shell_surfaces(
             generated_geometry,
             model,
             displacements,
             fields,
+            element_scalar_fields,
             include_skin=True,
             include_members=False,
         ),
@@ -2930,6 +2965,65 @@ def _collision_damage_config(config: LightweightFEMConfig):
         max_deleted_fraction=min(max(float(config.collision_damage_max_deleted_fraction), 1.0e-9), 1.0),
         user_capacity=user_capacity,
     )
+
+
+
+def _collision_nonlinear_config(config: LightweightFEMConfig):
+    if not bool(config.collision_material_nonlinear_enabled) or _backend_NonlinearTransientConfig is None:
+        return None
+    return _backend_NonlinearTransientConfig(
+        enabled=True,
+        num_layers=max(int(config.nonlinear_layers or 5), 1),
+        max_iterations=max(int(config.collision_nonlinear_max_iterations or 20), int(config.nonlinear_max_iterations or 25), 1),
+        residual_tolerance=max(float(config.collision_nonlinear_tolerance or 2.0e-3), 2.0e-3),
+        displacement_tolerance=max(float(config.nonlinear_tolerance or 1.0e-6), 1.0e-12),
+        contact_force_tolerance=max(float(config.collision_nonlinear_tolerance or 2.0e-3), 2.0e-3),
+        max_cutbacks=max(int(config.collision_nonlinear_cutbacks or 0), 12),
+        record_element_state_history=True,
+    )
+
+
+def _collision_plastic_damage_config(config: LightweightFEMConfig):
+    if (
+        not bool(config.collision_damage_enabled)
+        or not bool(config.collision_material_nonlinear_enabled)
+        or _backend_PlasticImpactDamageConfig is None
+    ):
+        return None
+    return _backend_PlasticImpactDamageConfig(
+        threshold=max(float(config.collision_plastic_damage_threshold or 0.01), 1.0e-12),
+        softening_start=min(max(float(config.collision_damage_softening_start), 0.0), 0.999999),
+        delete_at=max(float(config.collision_damage_delete_at), float(config.collision_damage_softening_start) + 1.0e-9),
+        residual_stiffness_fraction=min(max(float(config.fracture_residual_stiffness_fraction), 0.0), 1.0),
+        max_deleted_fraction=min(max(float(config.collision_damage_max_deleted_fraction), 1.0e-9), 1.0),
+        element_scope=("shell", "beam"),
+    )
+
+
+def _plastic_strain_element_fields_from_states(element_states: object) -> dict[str, dict[int, float]]:
+    field: dict[int, float] = {}
+    if not isinstance(element_states, dict):
+        return {"plastic_strain": field}
+    for raw_element_id, state in element_states.items():
+        if not isinstance(state, dict):
+            continue
+        try:
+            element_id = int(raw_element_id)
+        except Exception:
+            continue
+        alpha = np.asarray(state.get("alpha", ()), dtype=float).reshape(-1)
+        if alpha.size:
+            value = float(np.max(alpha))
+            if math.isfinite(value):
+                field[element_id] = max(value, 0.0)
+    return {"plastic_strain": field}
+
+
+def _annotate_plastic_strain_visualization(visualization: dict[str, object]) -> None:
+    fields = visualization.get("fields") if isinstance(visualization, dict) else None
+    if isinstance(fields, dict) and fields.get("plastic_strain"):
+        visualization["plastic_strain"] = fields.get("plastic_strain")
+        visualization["plastic_strain_label"] = "equiv. engineering plastic strain [-]"
 
 
 def _collision_representative_shell_edge(generated_geometry: dict) -> float:
@@ -3058,7 +3152,9 @@ def _collision_auto_time_settings(generated_geometry: dict, config: LightweightF
         arrival = 0.0
     span_time = max((upper - lower) / speed, 2.0 * radius / speed)
     post_time = max(float(config.collision_auto_post_contact_radii), 0.0) * radius / speed
-    total_time = max(arrival + span_time + post_time, radius / speed)
+    requested_total_time = max(arrival + span_time + post_time, radius / speed)
+    impact_window = max(0.01, min(0.02, 0.10 * radius / speed))
+    total_time = max(arrival + impact_window, impact_window)
     steps_per_radius = max(float(config.collision_auto_steps_per_radius), 2.0)
     representative_edge = _collision_representative_shell_edge(generated_geometry)
     dt = radius / (speed * steps_per_radius)
@@ -3077,9 +3173,6 @@ def _collision_auto_time_settings(generated_geometry: dict, config: LightweightF
             "basis": "user",
         }
     else:
-        target_penetration = max(radius * max(float(config.collision_target_penetration_fraction), 1.0e-6), 1.0e-9)
-        desired_penalty = max(float(config.collision_mass_kg) * speed * speed / max(target_penetration * target_penetration, 1.0e-18), 1.0)
-        dt = min(dt, 0.16 * math.sqrt(max(float(config.collision_mass_kg), 1.0e-9) / desired_penalty))
         penalty_info = _collision_dynamic_penalty(config, dt)
     target_steps = max(int(math.ceil(total_time / max(dt, 1.0e-12))), 1)
     if target_steps < 120:
@@ -3094,6 +3187,9 @@ def _collision_auto_time_settings(generated_geometry: dict, config: LightweightF
         "arrival_time_s": max(float(arrival), 0.0),
         "span_time_s": float(span_time),
         "post_time_s": float(post_time),
+        "requested_total_time_s": float(requested_total_time),
+        "impact_window_s": float(impact_window),
+        "auto_time_cap": "impact_window",
         "model_projection_min": lower + radius,
         "model_projection_max": upper - radius,
         "representative_shell_edge_m": float(representative_edge),
@@ -3119,6 +3215,50 @@ def _deleted_element_ids_for_time(records: object, time_value: float) -> tuple[i
         except Exception:
             continue
     return tuple(sorted(set(deleted)))
+
+
+def _impact_damage_element_fields_for_time(damage_summary: object, time_value: float) -> dict[str, dict[int, float]]:
+    fields = {
+        "impact_damage": {},
+        "impact_damage_utilization": {},
+        "impact_damage_scale": {},
+    }
+    if not isinstance(damage_summary, dict):
+        return fields
+    for record in damage_summary.get("records", ()) or ():
+        if not isinstance(record, dict):
+            continue
+        try:
+            element_id = int(record.get("element_id"))
+        except Exception:
+            continue
+        damage = float(record.get("damage", 0.0) or 0.0)
+        scale = float(record.get("scale", 1.0) or 1.0)
+        utilization = float(record.get("max_utilization", 0.0) or 0.0)
+        history = tuple(record.get("history", ()) or ())
+        if history:
+            eligible = []
+            for item in history:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    if float(item.get("time", 0.0) or 0.0) <= float(time_value) + 1.0e-12:
+                        eligible.append(item)
+                except Exception:
+                    continue
+            if eligible:
+                latest = eligible[-1]
+                damage = float(latest.get("damage", damage) or damage)
+                scale = float(latest.get("scale", scale) or scale)
+                utilization = float(latest.get("combined_utilization", latest.get("utilization", utilization)) or utilization)
+            else:
+                damage = 0.0
+                utilization = 0.0
+                scale = 1.0
+        fields["impact_damage"][element_id] = damage
+        fields["impact_damage_utilization"][element_id] = utilization
+        fields["impact_damage_scale"][element_id] = scale
+    return fields
 
 
 def _filter_visualization_deleted_elements(visualization: dict[str, object], deleted_element_ids: tuple[int, ...]) -> None:
@@ -4086,7 +4226,9 @@ def _run_collision_response(
         ),
         resource_config=_resource_config(config),
     )
-    damage_config = _collision_damage_config(config)
+    nonlinear_config = _collision_nonlinear_config(config)
+    plastic_damage_config = _collision_plastic_damage_config(config)
+    damage_config = None if nonlinear_config is not None else _collision_damage_config(config)
     base_load_case = load_case if config.collision_include_static_load else None
     last_live_update = [0.0]
 
@@ -4104,11 +4246,12 @@ def _run_collision_response(
             model,
             np.asarray(displacement, dtype=float),
             scalar_by_node={},
-            scalar_label="live dynamic displacement",
+            scalar_label="live dynamic displacement [m]",
             stresses_by_element={},
         )
         if not live_visualization:
             return
+        live_visualization["scalar_kind"] = "raw"
         sphere_position = np.asarray(payload.get("sphere_position", ()), dtype=float).reshape(-1)
         if sphere_position.size >= 3:
             live_visualization["rigid_sphere"] = {
@@ -4136,10 +4279,16 @@ def _run_collision_response(
         contact_config,
         base_load_case=base_load_case,
         damage_config=damage_config,
+        nonlinear_config=nonlinear_config,
+        plastic_damage_config=plastic_damage_config,
         progress_callback=live_progress,
     )
     damage_summary = (impact.diagnostics or {}).get("impact_damage_summary", {}) or {}
+    strain_summary = (impact.diagnostics or {}).get("strain_summary", {}) or {}
+    plastic_element_fields = _plastic_strain_element_fields_from_states((impact.diagnostics or {}).get("element_states", {}))
     erosion_summary = (impact.diagnostics or {}).get("erosion_summary", {}) or {}
+    contact_failure_summary = (impact.diagnostics or {}).get("contact_failure_summary", {}) or {}
+    nonlinear_failure_summary = (impact.diagnostics or {}).get("nonlinear_failure_summary", {}) or {}
     records = tuple(damage_summary.get("records", ()) or ())
     times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
     displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
@@ -4149,16 +4298,27 @@ def _run_collision_response(
         if index >= len(displacements):
             continue
         deleted_ids = _deleted_element_ids_for_time(records, float(time_value))
+        element_fields = dict(_impact_damage_element_fields_for_time(damage_summary, float(time_value)))
+        for field_name, by_element in plastic_element_fields.items():
+            if by_element:
+                element_fields[field_name] = by_element
         snapshot = _visualization_from_full_result(
             generated_geometry,
             model,
             displacements[index],
             scalar_by_node={},
-            scalar_label="dynamic displacement",
+            scalar_label="dynamic displacement [m]",
             stresses_by_element={},
+            element_scalar_fields=element_fields,
         )
         if not snapshot:
             continue
+        snapshot["scalar_kind"] = "raw"
+        if element_fields.get("impact_damage"):
+            snapshot["impact_damage_label"] = "impact damage [-]"
+            snapshot["impact_damage_utilization_label"] = "impact damage utilization [-]"
+            snapshot["impact_damage_scale_label"] = "impact damage stiffness scale [-]"
+        _annotate_plastic_strain_visualization(snapshot)
         _filter_visualization_deleted_elements(snapshot, deleted_ids)
         position = sphere_positions[index].tolist() if index < len(sphere_positions) else list(sphere.initial_position)
         snapshot["time_s"] = float(time_value)
@@ -4173,9 +4333,15 @@ def _run_collision_response(
         model,
         np.zeros(model.mesh.dof_manager.total_dofs, dtype=float),
         scalar_by_node={},
-        scalar_label="dynamic displacement",
+        scalar_label="dynamic displacement [m]",
         stresses_by_element={},
+        element_scalar_fields={
+            **_impact_damage_element_fields_for_time(damage_summary, float(times[-1]) if len(times) else 0.0),
+            **{name: values for name, values in plastic_element_fields.items() if values},
+        },
     )
+    _annotate_plastic_strain_visualization(visualization)
+    visualization["scalar_kind"] = "raw"
     final_deleted = tuple(int(element_id) for element_id in erosion_summary.get("all_eroded_element_ids", ()) or ())
     _filter_visualization_deleted_elements(visualization, final_deleted)
     if len(sphere_positions):
@@ -4209,6 +4375,9 @@ def _run_collision_response(
         "sphere_travel_per_step_m": float(auto_time.get("sphere_travel_per_step_m", float(config.collision_speed_mps) * dt) if auto_time else float(config.collision_speed_mps) * dt),
         "contact_penalty_stiffness_n_per_m": float(resolved_penalty),
         "contact_penalty_basis": str(penalty_basis),
+        "adaptive_cutback_retry_count": float((impact.diagnostics or {}).get("adaptive_cutback_retry_count", 0) or 0),
+        "solution_control": str((impact.diagnostics or {}).get("solution_control", "implicit_newmark_time_domain")),
+        "arc_length_applicability": str((impact.diagnostics or {}).get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
     }
     prestress_summary = {
         "collision_status": str(impact.status),
@@ -4223,6 +4392,12 @@ def _run_collision_response(
         "collision_sphere_momentum_balance_error": float(impact.sphere_momentum_balance_error),
         "collision_saved_steps": float(len(times)),
         "collision_damage_enabled": 1.0 if config.collision_damage_enabled else 0.0,
+        "collision_material_nonlinear_enabled": 1.0 if nonlinear_config is not None else 0.0,
+        "collision_nonlinear_status": str((impact.diagnostics or {}).get("status", impact.status)),
+        "collision_nonlinear_iterations": float(sum((impact.diagnostics or {}).get("iteration_counts", ()) or ())),
+        "collision_nonlinear_cutbacks": float((impact.diagnostics or {}).get("cutback_count", 0) or 0),
+        "collision_nonlinear_max_plastic_strain": float(strain_summary.get("max_equivalent_plastic_strain", 0.0) or 0.0),
+        "collision_plastic_damage_threshold": float(config.collision_plastic_damage_threshold),
         "collision_deleted_shell_elements": float(len(final_deleted)),
         "collision_representative_shell_edge_m": float(auto_time.get("representative_shell_edge_m", 0.0) if auto_time else 0.0),
         "collision_sphere_travel_per_step_m": float(auto_time.get("sphere_travel_per_step_m", float(config.collision_speed_mps) * dt) if auto_time else float(config.collision_speed_mps) * dt),
@@ -4230,10 +4405,31 @@ def _run_collision_response(
         "collision_contact_penalty_stiffness_n_per_m": float(resolved_penalty),
         "collision_contact_penalty_basis": str(penalty_basis),
         "collision_target_penetration_m": float(penalty_info.get("target_penetration_m", 0.0) or 0.0),
+        "collision_adaptive_cutback_retries": float((impact.diagnostics or {}).get("adaptive_cutback_retry_count", 0) or 0),
+        "collision_solution_control": str((impact.diagnostics or {}).get("solution_control", "implicit_newmark_time_domain")),
+        "collision_arc_length_applicability": str((impact.diagnostics or {}).get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
+        "collision_stop_reason": str((impact.diagnostics or {}).get("stop_reason", "") or ""),
+        "collision_separation_stop_time_s": float((impact.diagnostics or {}).get("separation_stop_time", 0.0) or 0.0),
+        "collision_auto_requested_total_time_s": float(auto_time.get("requested_total_time_s", 0.0) if auto_time else 0.0),
+        "collision_auto_impact_window_s": float(auto_time.get("impact_window_s", 0.0) if auto_time else 0.0),
         "runtime_solver": "sphere collision transient",
         "allow_unbalanced_free_free": 0.0,
         "recovery_history_mode": "full",
     }
+    failure_summary = contact_failure_summary or nonlinear_failure_summary
+    if failure_summary:
+        prestress_summary["collision_failure_time_s"] = float(failure_summary.get("time", 0.0) or 0.0)
+        prestress_summary["collision_failure_dt_s"] = float(failure_summary.get("dt", 0.0) or 0.0)
+        prestress_summary["collision_failure_iterations"] = float(failure_summary.get("contact_iterations", failure_summary.get("iterations", 0)) or 0)
+        prestress_summary["collision_failure_force_change_n"] = float(failure_summary.get("force_change_norm", failure_summary.get("contact_force_change", 0.0)) or 0.0)
+        prestress_summary["collision_failure_effective_force_tolerance_n"] = float(failure_summary.get("effective_force_tolerance", 0.0) or 0.0)
+        prestress_summary["collision_failure_effective_residual_tolerance_n"] = float(failure_summary.get("effective_residual_tolerance", 0.0) or 0.0)
+        prestress_summary["collision_failure_penetration_change_m"] = float(failure_summary.get("penetration_change", 0.0) or 0.0)
+        prestress_summary["collision_failure_max_penetration_m"] = float(failure_summary.get("max_penetration", 0.0) or 0.0)
+        prestress_summary["collision_failure_residual_norm"] = float(failure_summary.get("residual_norm", 0.0) or 0.0)
+        prestress_summary["collision_failure_displacement_increment_m"] = float(failure_summary.get("displacement_increment", 0.0) or 0.0)
+        active_ids = failure_summary.get("active_element_ids", ()) or ()
+        prestress_summary["collision_failure_active_element_ids"] = ",".join(str(int(element_id)) for element_id in active_ids[:8])
     if damage_summary:
         prestress_summary["impact_damage_max_utilization"] = float(damage_summary.get("max_utilization", 0.0) or 0.0)
         prestress_summary["impact_damage_deleted_count"] = float(damage_summary.get("deleted_count", 0.0) or 0.0)
@@ -4256,6 +4452,14 @@ def _run_collision_response(
                 + str(round(float(auto_time.get("sphere_travel_per_step_m", 0.0)), 6))
                 + " m."
             )
+        if str(auto_time.get("auto_time_cap", "") or ""):
+            diagnostics.append(
+                "Automatic collision total time capped to impact window "
+                + str(round(float(auto_time.get("impact_window_s", 0.0) or 0.0), 6))
+                + " s; uncapped estimate was "
+                + str(round(float(auto_time.get("requested_total_time_s", t_end) or t_end), 6))
+                + " s. Use manual time mode for longer post-impact free-flight."
+            )
     diagnostics.append(
         "Collision contact penalty: "
         + str(round(float(resolved_penalty), 6))
@@ -4263,9 +4467,46 @@ def _run_collision_response(
         + str(penalty_basis)
         + ")."
     )
+    if str((impact.diagnostics or {}).get("stop_reason", "") or "") == "completed_after_contact_separation":
+        diagnostics.append(
+            "Collision transient stopped automatically after contact separation; separation hold time="
+            + str(round(float((impact.diagnostics or {}).get("separation_stop_time", 0.0) or 0.0), 9))
+            + " s."
+        )
     diagnostics.append("Collision uses fixed/constrained supports only; rigid-body nullspace projection is disabled.")
+    diagnostics.append("Collision solution control is implicit Newmark time-domain integration; static arc-length continuation is not used for collision impact.")
+    if nonlinear_config is not None:
+        diagnostics.append("Material nonlinear impact is enabled: implicit Newmark/Newton with committed plastic state.")
+        diagnostics.append("Nonlinear impact max equivalent plastic strain: " + str(round(float(strain_summary.get("max_equivalent_plastic_strain", 0.0) or 0.0), 8)) + ".")
     if config.collision_damage_enabled:
         diagnostics.append("Impact damage/erosion is enabled for shell elements; direct beam contact remains unsupported.")
+    if failure_summary:
+        diagnostics.append(
+            "Contact failure detail: time="
+            + str(round(float(failure_summary.get("time", 0.0) or 0.0), 9))
+            + " s, dt="
+            + str(round(float(failure_summary.get("dt", 0.0) or 0.0), 9))
+            + " s, iterations="
+            + str(int(failure_summary.get("contact_iterations", failure_summary.get("iterations", 0)) or 0))
+            + ", residual="
+            + str(round(float(failure_summary.get("residual_norm", 0.0) or 0.0), 6))
+            + ", displacement increment="
+            + str(round(float(failure_summary.get("displacement_increment", 0.0) or 0.0), 9))
+            + " m, force change="
+            + str(round(float(failure_summary.get("force_change_norm", failure_summary.get("contact_force_change", 0.0)) or 0.0), 6))
+            + " N, effective force tolerance="
+            + str(round(float(failure_summary.get("effective_force_tolerance", 0.0) or 0.0), 6))
+            + " N, penetration change="
+            + str(round(1000.0 * float(failure_summary.get("penetration_change", 0.0) or 0.0), 6))
+            + " mm."
+        )
+        if failure_summary.get("active_element_ids"):
+            diagnostics.append(
+                "Contact failure active shell element(s): "
+                + ", ".join(str(int(element_id)) for element_id in (failure_summary.get("active_element_ids", ()) or ())[:8])
+                + "."
+            )
+        diagnostics.append("Contact failure suggestion: " + str(failure_summary.get("suggestion", "")))
     for warning in (impact.diagnostics or {}).get("warnings", ()) or ():
         diagnostics.append(str(warning))
     return LightweightFEMResult(
@@ -5568,7 +5809,7 @@ def full_backend_api():
     return _full_backend
 
 
-def warm_fe_solver_kernels(shell_orders=("S4", "Q8", "Q8R")) -> dict[str, object]:
+def warm_fe_solver_kernels(shell_orders=("S4", "Q8", "Q8R"), *, include_nonlinear_impact: bool = False) -> dict[str, object]:
     """Warm optional compiled FE backend kernels for runtime use."""
 
     if _backend_warm_fe_solver_kernels is None:
@@ -5577,4 +5818,10 @@ def warm_fe_solver_kernels(shell_orders=("S4", "Q8", "Q8R")) -> dict[str, object
             "shell_orders": {},
             "message": "The vendored full FE solver backend warmup helper is not available.",
         }
-    return _backend_warm_fe_solver_kernels(shell_orders)
+    return _backend_warm_fe_solver_kernels(shell_orders, include_nonlinear_impact=include_nonlinear_impact)
+
+
+
+
+
+

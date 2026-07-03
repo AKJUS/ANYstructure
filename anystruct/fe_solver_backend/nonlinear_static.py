@@ -361,6 +361,7 @@ def _assemble_nonlinear_system(
     tangent: bool = True,
     deleted_element_ids: Optional[Sequence[int]] = None,
     residual_stiffness_fraction: float = 1.0,
+    element_stiffness_scales: Optional[Mapping[int, float]] = None,
 ) -> Tuple[np.ndarray, Any, Dict[int, Any]]:
     """Assemble F_int (and the tangent K_T when requested) at a state."""
     mesh = model.mesh
@@ -370,6 +371,10 @@ def _assemble_nonlinear_system(
     trial_states: Dict[int, Any] = {}
     deleted_set = {int(element_id) for element_id in (deleted_element_ids or ())}
     residual_fraction = float(residual_stiffness_fraction)
+    element_scales = {
+        int(element_id): min(max(float(scale), 0.0), 1.0)
+        for element_id, scale in (element_stiffness_scales or {}).items()
+    }
 
     if tangent:
         from .matrix_assembly import _get_cached_sparsity_pattern
@@ -514,6 +519,11 @@ def _assemble_nonlinear_system(
                 k_elem = residual_fraction * np.asarray(k_elem, dtype=float)
             if elem_id in committed_states:
                 trial_states[elem_id] = committed_states[elem_id]
+        elif elem_id in element_scales:
+            scale = float(element_scales[elem_id])
+            f_elem = scale * np.asarray(f_elem, dtype=float)
+            if tangent and k_elem is not None:
+                k_elem = scale * np.asarray(k_elem, dtype=float)
 
         np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
         if tangent and k_elem is not None:
