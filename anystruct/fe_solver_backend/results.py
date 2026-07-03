@@ -342,3 +342,144 @@ def compare_with_analytical(result: FEResult, analytical_result: Dict[str, Any])
         comparison['stress']['error_percent'] = abs(fe_max_stress - analytical_max_stress) / analytical_max_stress * 100 if analytical_max_stress > 0 else float('inf')
     
     return comparison
+
+
+_QUAD4_NODE_NATURAL = np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], dtype=float)
+_QUAD8_NODE_NATURAL = np.array(
+    [
+        [-1.0, -1.0],
+        [1.0, -1.0],
+        [1.0, 1.0],
+        [-1.0, 1.0],
+        [0.0, -1.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [-1.0, 0.0],
+    ],
+    dtype=float,
+)
+
+_RECOVERED_STRESS_COMPONENTS = ("xx", "yy", "zz", "xy", "yz", "xz")
+
+
+def _polynomial_basis(points: np.ndarray, num_gauss: int) -> np.ndarray:
+    """Polynomial basis matched to the Gauss rule for stress extrapolation."""
+    xi = points[:, 0]
+    eta = points[:, 1]
+    if num_gauss >= 9:
+        return np.column_stack(
+            [np.ones_like(xi), xi, eta, xi * eta, xi**2, eta**2, xi**2 * eta, xi * eta**2, xi**2 * eta**2]
+        )
+    if num_gauss >= 4:
+        return np.column_stack([np.ones_like(xi), xi, eta, xi * eta])
+    return np.ones((points.shape[0], 1), dtype=float)
+
+
+def _gauss_to_node_extrapolation(element: Any) -> Optional[np.ndarray]:
+    """Return the (num_nodes, num_gauss) extrapolation operator for one shell."""
+    gauss_points = np.asarray(getattr(element, "gauss_points", ()), dtype=float).reshape(-1, 2)
+    num_gauss = gauss_points.shape[0]
+    if num_gauss == 0:
+        return None
+    if getattr(element, "num_nodes", 0) == 4:
+        node_natural = _QUAD4_NODE_NATURAL
+    elif getattr(element, "num_nodes", 0) == 8:
+        node_natural = _QUAD8_NODE_NATURAL
+    else:
+        return None
+    P_gauss = _polynomial_basis(gauss_points, num_gauss)
+    P_nodes = _polynomial_basis(node_natural, num_gauss)
+    coefficients, *_ = np.linalg.lstsq(P_gauss, np.eye(num_gauss), rcond=None)
+    return P_nodes @ coefficients
+
+
+def _von_mises_surface(components: Dict[str, float], suffix: str) -> float:
+    sxx = components[f"global_xx_{suffix}"]
+    syy = components[f"global_yy_{suffix}"]
+    szz = components[f"global_zz_{suffix}"]
+    sxy = components[f"global_xy_{suffix}"]
+    syz = components[f"global_yz_{suffix}"]
+    sxz = components[f"global_xz_{suffix}"]
+    return float(
+        np.sqrt(
+            0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2)
+            + 3.0 * (sxy**2 + syz**2 + sxz**2)
+        )
+    )
+
+
+def recover_nodal_stresses(
+    model: "FEModel",
+    displacements: np.ndarray,
+    element_ids: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Gauss-to-node extrapolated, patch-averaged shell surface stresses.
+
+    Shell integration-point stresses are second-order accurate inside the
+    element but underestimate surface peaks on coarse meshes, especially for
+    the 2x2-point S4.  This recovery evaluates the global-frame top/bottom
+    surface stresses at the integration points, extrapolates them to the
+    element nodes with the polynomial basis matched to the Gauss rule, and
+    averages contributions from all shell elements sharing each node.  Nodal
+    von Mises values are computed from the averaged global components, so the
+    result is frame-consistent on distorted meshes.
+
+    Supported for 4-node and 8-node quadrilateral shells; other element types
+    are skipped.  Returns per-node averaged components/von Mises, the
+    per-element nodal (unaveraged) values, and the peak recovered von Mises.
+    """
+    from .elements import ShellElement
+
+    keys = [f"global_{component}_{surface}" for surface in ("top", "bot") for component in _RECOVERED_STRESS_COMPONENTS]
+    selected = None if element_ids is None else {int(element_id) for element_id in element_ids}
+    node_sums: Dict[int, Dict[str, float]] = {}
+    node_counts: Dict[int, int] = {}
+    element_nodal: Dict[int, Dict[str, np.ndarray]] = {}
+    skipped: List[int] = []
+    for element_id, element in model.mesh.elements.items():
+        if selected is not None and int(element_id) not in selected:
+            continue
+        if not isinstance(element, ShellElement):
+            continue
+        operator = _gauss_to_node_extrapolation(element)
+        if operator is None:
+            skipped.append(int(element_id))
+            continue
+        material = model.get_material(element.material_name)
+        stresses = element.compute_stresses(model.mesh, displacements, material, return_global=True)
+        if any(key not in stresses for key in keys):
+            skipped.append(int(element_id))
+            continue
+        nodal_values = {key: operator @ np.asarray(stresses[key], dtype=float).reshape(-1) for key in keys}
+        element_nodal[int(element_id)] = nodal_values
+        for local_index, node_id in enumerate(element.node_ids):
+            entry = node_sums.setdefault(int(node_id), {key: 0.0 for key in keys})
+            for key in keys:
+                entry[key] += float(nodal_values[key][local_index])
+            node_counts[int(node_id)] = node_counts.get(int(node_id), 0) + 1
+
+    nodal: Dict[int, Dict[str, float]] = {}
+    max_von_mises = 0.0
+    max_von_mises_node: Optional[int] = None
+    for node_id, sums in node_sums.items():
+        count = max(node_counts.get(node_id, 1), 1)
+        averaged = {key: value / count for key, value in sums.items()}
+        vm_top = _von_mises_surface(averaged, "top")
+        vm_bot = _von_mises_surface(averaged, "bot")
+        averaged["von_mises_top"] = vm_top
+        averaged["von_mises_bot"] = vm_bot
+        averaged["von_mises"] = max(vm_top, vm_bot)
+        nodal[node_id] = averaged
+        if averaged["von_mises"] > max_von_mises:
+            max_von_mises = averaged["von_mises"]
+            max_von_mises_node = int(node_id)
+
+    return {
+        "method": "gauss_extrapolation_nodal_average",
+        "stress_frame": "global",
+        "nodal": nodal,
+        "element_nodal": element_nodal,
+        "max_von_mises": float(max_von_mises),
+        "max_von_mises_node": max_von_mises_node,
+        "skipped_element_ids": sorted(skipped),
+    }

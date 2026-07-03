@@ -115,6 +115,7 @@ class SphereContactConfig:
     max_load_patch_nodes: int = 12
     save_contact_history: bool = True
     post_separation_time: float = 0.0
+    contact_relaxation: str = "aitken"
 
     def __post_init__(self) -> None:
         if self.penalty_stiffness is not None and self.penalty_stiffness <= 0.0:
@@ -153,6 +154,8 @@ class SphereContactConfig:
             raise ValueError("max_load_patch_nodes must be greater than or equal to min_load_patch_nodes")
         if self.post_separation_time < 0.0:
             raise ValueError("post_separation_time must be non-negative")
+        if self.contact_relaxation not in {"aitken", "none"}:
+            raise ValueError("contact_relaxation must be 'aitken' or 'none'")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -175,6 +178,7 @@ class SphereContactConfig:
             "max_load_patch_nodes": int(self.max_load_patch_nodes),
             "save_contact_history": bool(self.save_contact_history),
             "post_separation_time": float(self.post_separation_time),
+            "contact_relaxation": self.contact_relaxation,
         }
 
 
@@ -482,12 +486,19 @@ def _contact_patch_nodal_weights(
     if selected_count <= 0:
         return {}
     slots = slots[:selected_count]
-    ratios = distances[:selected_count] / max(patch_radius, 1.0e-12)
-    raw = np.exp(-(ratios * ratios))
+    selected_distances = distances[:selected_count]
+    # Compactly supported kernel: the weight decays to zero at the selection
+    # boundary, so a node entering or leaving the patch as the deformed
+    # geometry changes does not discontinuously redistribute the contact load.
+    # A hard-cutoff kernel (e.g. a truncated Gaussian) makes the contact
+    # fixed-point map discontinuous and produces non-converging chatter cycles.
+    support_radius = max(patch_radius, float(selected_distances[-1]) * (1.0 + 1.0e-6), 1.0e-12)
+    ratios = np.minimum(selected_distances / support_radius, 1.0)
+    raw = (1.0 - ratios * ratios) ** 2
     total = float(raw.sum())
     if total <= 0.0:
         raw = np.full(selected_count, 1.0 / selected_count)
-        total = 1.0
+        total = float(selected_count) * (1.0 / selected_count)
     weights = raw / total
     return {int(slot): float(weight) for slot, weight in zip(slots, weights)}
 
@@ -497,11 +508,11 @@ def _representative_shell_edge_length(model: "FEModel") -> float:
 
 
 def _representative_shell_stiffness(model: "FEModel") -> float:
+    """Median shell membrane stiffness scale ``E * t`` in N/m."""
     values: List[float] = []
-    edge = max(_representative_shell_edge_length(model), 1.0e-12)
     for element in _shell_contact_candidates(model):
         material = model.get_material(element.material_name)
-        values.append(float(material.elastic_modulus) * float(element.thickness) / edge)
+        values.append(float(material.elastic_modulus) * float(element.thickness))
     return float(np.median(values)) if values else 0.0
 
 
@@ -511,14 +522,25 @@ def recommend_sphere_contact_penalty(
     target_penetration_fraction: float = 0.01,
     safety_factor: float = 1.0,
 ) -> float:
-    """Recommend a conservative normal penalty stiffness for v1 contact."""
+    """Recommend a conservative normal penalty stiffness [N/m] for v1 contact.
+
+    Two dimensionally consistent stiffness scales are combined:
+
+    - impact energy: ``k = m v^2 / delta^2`` stops the sphere's kinetic energy
+      within the target penetration ``delta = R * target_penetration_fraction``
+      (from ``1/2 k delta^2 = 1/2 m v^2``);
+    - structural: the representative shell membrane stiffness ``E t`` [N/m]
+      divided by the target penetration fraction, so the penalty spring is much
+      stiffer than the contacted structure and the penetration stays a small
+      fraction of the structural response.
+    """
 
     if target_penetration_fraction <= 0.0:
         raise ValueError("target_penetration_fraction must be positive")
     if safety_factor <= 0.0:
         raise ValueError("safety_factor must be positive")
     target_penetration = max(float(sphere.radius) * float(target_penetration_fraction), 1.0e-12)
-    impact_stiffness = float(sphere.mass) * max(float(sphere.speed), 1.0e-9) ** 2 / target_penetration
+    impact_stiffness = float(sphere.mass) * max(float(sphere.speed), 1.0e-9) ** 2 / target_penetration**2
     shell_stiffness = _representative_shell_stiffness(model) / max(float(target_penetration_fraction), 1.0e-12)
     return float(safety_factor) * max(impact_stiffness, shell_stiffness, 1.0)
 
@@ -552,6 +574,7 @@ def _resolved_contact_config(model: "FEModel", sphere: RigidSphereImpact, config
         max_load_patch_nodes=raw.max_load_patch_nodes,
         save_contact_history=raw.save_contact_history,
         post_separation_time=raw.post_separation_time,
+        contact_relaxation=raw.contact_relaxation,
     )
 
 
@@ -671,8 +694,18 @@ def assemble_sphere_contact_load_vector(
     structural_velocity: Optional[np.ndarray] = None,
     deleted_element_ids: Sequence[int] = (),
     contact_scale_by_element: Optional[Mapping[int, float]] = None,
+    preferred_element_ids: Sequence[int] = (),
 ) -> Tuple[np.ndarray, np.ndarray, Tuple[SphereContactRecord, ...]]:
-    """Assemble shell nodal loads from current rigid-sphere contact state."""
+    """Assemble shell nodal loads from current rigid-sphere contact state.
+
+    ``preferred_element_ids`` stabilizes the ``max_active_contacts`` reduction:
+    adjacent coplanar elements report near-identical penetrations for one
+    physical contact, and a bare deepest-penetration argmax then flips between
+    them from iteration to iteration, which makes the contact fixed-point map
+    discontinuous and can lock the iteration into a non-converging chatter
+    cycle.  Within a small penetration tie band the previously selected
+    elements are kept instead.
+    """
 
     total_dofs = model.mesh.dof_manager.total_dofs
     u = None if structural_displacement is None else np.asarray(structural_displacement, dtype=float)
@@ -775,7 +808,18 @@ def assemble_sphere_contact_load_vector(
         )
 
     if len(records) > int(contact_config.max_active_contacts):
-        records = sorted(records, key=lambda item: (item.penetration, item.normal_force), reverse=True)[: int(contact_config.max_active_contacts)]
+        deepest = max(record.penetration for record in records)
+        tie_band = 0.95 * deepest
+        preferred = {int(element_id) for element_id in preferred_element_ids}
+        records = sorted(
+            records,
+            key=lambda item: (
+                item.penetration >= tie_band and int(item.element_id) in preferred,
+                item.penetration,
+                item.normal_force,
+            ),
+            reverse=True,
+        )[: int(contact_config.max_active_contacts)]
         load = np.zeros(total_dofs, dtype=float)
         sphere_force_total = np.zeros(3, dtype=float)
         for record in records:
@@ -1456,6 +1500,7 @@ def _solve_transient_sphere_impact_nonlinear(
         tangent=False,
     )
     committed_states = trial0
+    F_int_prev = np.asarray(F_int0, dtype=float).copy()
     F0_red = np.asarray(T.T @ (base_load - F_int0), dtype=float).reshape(-1)
     mass_handle = factorize(M_red, MatrixClass.SYMMETRIC_SEMIDEFINITE, signature="sphere_impact.nl.initial_mass")
     a_red = np.asarray(mass_handle.solve(F0_red - C_red @ v_red), dtype=float).reshape(-1)
@@ -1567,6 +1612,7 @@ def _solve_transient_sphere_impact_nonlinear(
         contact_scale_by_element=damage_scale_by_element,
     )
     save_state(float(times[0]), q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, initial_sphere_force, initial_records)
+    sticky_contact_ids: Tuple[int, ...] = tuple(int(record.element_id) for record in initial_records)
 
     load_prev = base_load + initial_load
     sphere_force_prev = initial_sphere_force.copy()
@@ -1586,8 +1632,8 @@ def _solve_transient_sphere_impact_nonlinear(
     cutback_count = 0
     step_diagnostics: List[Dict[str, Any]] = []
     nonlinear_failure_summary: Dict[str, Any] = {}
-    beta = float(transient_config.beta)
-    gamma = float(transient_config.gamma)
+    alpha_h, beta, gamma = transient_config.integration_parameters()
+    one_plus_alpha = 1.0 + alpha_h
     separation_elapsed = 0.0
     separation_stop_time = float(config.post_separation_time)
 
@@ -1629,6 +1675,7 @@ def _solve_transient_sphere_impact_nonlinear(
             dict(damage_scale_by_element),
             load_prev.copy(),
             sphere_force_prev.copy(),
+            F_int_prev.copy(),
         )
         if sub_time - dt < sphere.t_start <= sub_time and np.linalg.norm(sphere_velocity) == 0.0:
             sphere_velocity = sphere.travel_velocity.copy()
@@ -1667,10 +1714,19 @@ def _solve_transient_sphere_impact_nonlinear(
             )
             a_trial = a0 * (q_trial - q_red) - a2 * v_red - a3 * a_red
             v_trial = v_red + dt * ((1.0 - gamma) * a_red + gamma * a_trial)
-            residual = np.asarray(T.T @ (base_load + contact_load - F_int), dtype=float).reshape(-1) - C_red @ v_trial - M_red @ a_trial
+            if alpha_h != 0.0:
+                weighted_force = one_plus_alpha * (base_load + contact_load - F_int) - alpha_h * (load_prev - F_int_prev)
+                residual = (
+                    np.asarray(T.T @ weighted_force, dtype=float).reshape(-1)
+                    - one_plus_alpha * (C_red @ v_trial)
+                    + alpha_h * (C_red @ v_red)
+                    - M_red @ a_trial
+                )
+            else:
+                residual = np.asarray(T.T @ (base_load + contact_load - F_int), dtype=float).reshape(-1) - C_red @ v_trial - M_red @ a_trial
             residual_norm = float(np.linalg.norm(residual))
             reference = max(float(np.linalg.norm(np.asarray(T.T @ (base_load + contact_load), dtype=float))), float(np.linalg.norm(np.asarray(T.T @ F_int, dtype=float))), 1.0)
-            K_eff = (T.T @ K_T @ T + a0 * M_red + a1 * C_red).tocsr()
+            K_eff = (one_plus_alpha * (T.T @ K_T @ T) + a0 * M_red + one_plus_alpha * a1 * C_red).tocsr()
             try:
                 handle = factorize(K_eff, MatrixClass.SYMMETRIC_INDEFINITE, signature=f"sphere_impact.nl.effective:{dt:.16g}:{iteration}")
                 factor_diagnostics = handle.diagnostics()
@@ -1711,7 +1767,10 @@ def _solve_transient_sphere_impact_nonlinear(
                 structural_velocity=full_v_next,
                 deleted_element_ids=tuple(deleted_element_ids),
                 contact_scale_by_element=damage_scale_by_element,
+                preferred_element_ids=sticky_contact_ids,
             )
+            if new_records:
+                sticky_contact_ids = tuple(int(record.element_id) for record in new_records)
             contact_scale = max(float(np.linalg.norm(new_sphere_force)), 1.0)
             contact_change = float(np.linalg.norm(new_sphere_force - sphere_force))
             contact_load, sphere_force, records = new_contact_load, new_sphere_force, new_records
@@ -1752,6 +1811,7 @@ def _solve_transient_sphere_impact_nonlinear(
                     damage_scale_by_element,
                     load_prev,
                     sphere_force_prev,
+                    F_int_prev,
                 ) = pre_state
                 midpoint = 0.5 * (float(segment_start) + float(sub_time))
                 segments.insert(0, (step_index, midpoint, float(sub_time), False))
@@ -1820,6 +1880,7 @@ def _solve_transient_sphere_impact_nonlinear(
         impulse += 0.5 * (load_prev + base_load + contact_load) * dt
         sphere_impulse += 0.5 * (sphere_force_prev + sphere_force) * dt
         load_prev = base_load + contact_load
+        F_int_prev = F_int
         sphere_force_prev = sphere_force.copy()
         q_red, v_red, a_red = q_next, v_next, a_next
         sphere_position, sphere_velocity, sphere_acceleration = sphere_x_next, sphere_v_next, sphere_a_next
@@ -1960,6 +2021,7 @@ def _solve_transient_sphere_impact_nonlinear(
             "t_end": transient_config.t_end,
             "beta": beta,
             "gamma": gamma,
+            "hht_alpha": alpha_h,
             "rayleigh_alpha": transient_config.rayleigh_alpha,
             "rayleigh_beta": transient_config.rayleigh_beta,
             "sphere": {
@@ -2252,6 +2314,7 @@ def solve_transient_sphere_impact(
         contact_scale_by_element=damage_scale_by_element,
     )
     save_state(float(times[0]), q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, initial_sphere_force, initial_records)
+    sticky_contact_ids: Tuple[int, ...] = tuple(int(record.element_id) for record in initial_records)
     load_prev = base_load + initial_load
     sphere_force_prev = initial_sphere_force.copy()
     impulse = np.zeros(total_dofs, dtype=float)
@@ -2279,8 +2342,9 @@ def solve_transient_sphere_impact(
             "it is not crack propagation, material nonlinear impact, or validated fracture mechanics."
         )
 
-    beta = float(transient_config.beta)
-    gamma = float(transient_config.gamma)
+    alpha_h, beta, gamma = transient_config.integration_parameters()
+    one_plus_alpha = 1.0 + alpha_h
+    F_red_prev = _reduced_load(T, K, u0, load_prev)
     total_substep_count = 0
     event_substep_count = 0
     step_diagnostics: List[Dict[str, Any]] = []
@@ -2318,7 +2382,7 @@ def solve_transient_sphere_impact(
             a4 = gamma / beta - 1.0
             a5 = dt * (gamma / (2.0 * beta) - 1.0)
             if cached_solver is None or cached_dt is None or not np.isclose(dt, cached_dt):
-                K_eff = (K_red + a0 * M_red + a1 * C_red).tocsr()
+                K_eff = (one_plus_alpha * K_red + a0 * M_red + one_plus_alpha * a1 * C_red).tocsr()
                 cached_solver = factorize(K_eff, MatrixClass.SYMMETRIC_INDEFINITE, signature=f"sphere_impact.effective:{dt:.16g}")
                 cached_solver_diagnostics = cached_solver.diagnostics()
                 cached_dt = dt
@@ -2338,14 +2402,20 @@ def solve_transient_sphere_impact(
             sphere_a_next = np.zeros(3, dtype=float)
             force_change = 0.0
             penetration_change = 0.0
+            use_aitken = str(config.contact_relaxation) == "aitken"
+            relaxation = 1.0
+            fixed_point_residual_prev: Optional[np.ndarray] = None
             for iteration in range(1, int(config.max_contact_iterations) + 1):
                 load_next = base_load + contact_load
                 F_red = _reduced_load(T, K, u0, load_next)
                 rhs = (
-                    F_red
+                    one_plus_alpha * F_red
+                    - alpha_h * F_red_prev
                     + M_red @ (a0 * q_red + a2 * v_red + a3 * a_red)
-                    + C_red @ (a1 * q_red + a4 * v_red + a5 * a_red)
+                    + one_plus_alpha * (C_red @ (a1 * q_red + a4 * v_red + a5 * a_red))
                 )
+                if alpha_h != 0.0:
+                    rhs += alpha_h * (K_red @ q_red) + alpha_h * (C_red @ v_red)
                 q_next = np.asarray(cached_solver.solve(rhs), dtype=float).reshape(-1)
                 solve_count += 1
                 a_next = a0 * (q_next - q_red) - a2 * v_red - a3 * a_red
@@ -2365,14 +2435,32 @@ def solve_transient_sphere_impact(
                     structural_velocity=full_v,
                     deleted_element_ids=tuple(deleted_element_ids),
                     contact_scale_by_element=damage_scale_by_element,
+                    preferred_element_ids=sticky_contact_ids,
                 )
+                if new_records:
+                    sticky_contact_ids = tuple(int(record.element_id) for record in new_records)
                 force_change = float(np.linalg.norm(new_sphere_force - sphere_force))
                 penetration_change = abs(
                     (max((record.penetration for record in new_records), default=0.0))
                     - (max((record.penetration for record in records), default=0.0))
                 )
                 scale = max(float(np.linalg.norm(new_sphere_force)), 1.0)
-                contact_load, sphere_force, records = new_contact_load, new_sphere_force, new_records
+                fixed_point_residual = new_sphere_force - sphere_force
+                if use_aitken and fixed_point_residual_prev is not None:
+                    residual_difference = fixed_point_residual - fixed_point_residual_prev
+                    denominator = float(residual_difference @ residual_difference)
+                    if denominator > 1.0e-30:
+                        relaxation = -relaxation * float(fixed_point_residual_prev @ residual_difference) / denominator
+                        relaxation = float(min(max(relaxation, 1.0e-4), 1.5))
+                    else:
+                        relaxation = 1.0
+                fixed_point_residual_prev = fixed_point_residual.copy()
+                if use_aitken and relaxation != 1.0:
+                    contact_load = contact_load + relaxation * (new_contact_load - contact_load)
+                    sphere_force = sphere_force + relaxation * (new_sphere_force - sphere_force)
+                    records = new_records
+                else:
+                    contact_load, sphere_force, records = new_contact_load, new_sphere_force, new_records
                 if force_change <= config.force_tolerance * scale and penetration_change <= config.penetration_tolerance:
                     converged = True
                     iteration_counts.append(iteration)
@@ -2396,6 +2484,7 @@ def solve_transient_sphere_impact(
             impulse += 0.5 * (load_prev + load_next) * dt
             sphere_impulse += 0.5 * (sphere_force_prev + sphere_force) * dt
             load_prev = load_next
+            F_red_prev = F_red
             sphere_force_prev = sphere_force.copy()
             q_red, v_red, a_red = q_next, v_next, a_next
             sphere_position, sphere_velocity, sphere_acceleration = sphere_x_next, sphere_v_next, sphere_a_next
@@ -2406,6 +2495,7 @@ def solve_transient_sphere_impact(
                 "substep_index": int(substep),
                 "time": float(sub_time),
                 "contact_iterations": int(iteration_counts[-1]),
+                "contact_relaxation_factor": float(relaxation),
                 "force_change_norm": float(force_change),
                 "penetration_change": float(penetration_change),
                 "active_element_ids": [int(record.element_id) for record in records],
@@ -2450,6 +2540,7 @@ def solve_transient_sphere_impact(
                         signature=f"sphere_impact.fracture_mass:{len(deleted_element_ids)}",
                     )
                     current_red_load = _reduced_load(T, K, u0, base_load + contact_load)
+                    F_red_prev = current_red_load
                     a_red = np.asarray(mass_handle.solve(current_red_load - C_red @ v_red - K_red @ q_red), dtype=float).reshape(-1)
                     scoped_total = sum(1 for element in model.mesh.elements.values() if element_fracture_category(element) == "shell")
                     deleted_fraction = len(deleted_element_ids) / max(scoped_total, 1)
@@ -2520,6 +2611,7 @@ def solve_transient_sphere_impact(
                         signature=f"sphere_impact.damage_mass:{len(damage_scale_by_element)}:{len(deleted_element_ids)}",
                     )
                     current_red_load = _reduced_load(T, K, u0, base_load + contact_load)
+                    F_red_prev = current_red_load
                     a_red = np.asarray(mass_handle.solve(current_red_load - C_red @ v_red - K_red @ q_red), dtype=float).reshape(-1)
                     scoped_total = sum(1 for element in model.mesh.elements.values() if element_fracture_category(element) == "shell")
                     deleted_fraction = len(deleted_element_ids) / max(scoped_total, 1)
@@ -2604,6 +2696,7 @@ def solve_transient_sphere_impact(
             "t_end": transient_config.t_end,
             "beta": beta,
             "gamma": gamma,
+            "hht_alpha": alpha_h,
             "rayleigh_alpha": transient_config.rayleigh_alpha,
             "rayleigh_beta": transient_config.rayleigh_beta,
             "sphere": {

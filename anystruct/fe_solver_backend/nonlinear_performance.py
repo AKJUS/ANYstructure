@@ -598,7 +598,28 @@ def _optimized_assemble_nonlinear_system(
     tangent: bool = True,
     deleted_element_ids: Optional[Sequence[int]] = None,
     residual_stiffness_fraction: float = 1.0,
+    **extra,
 ):
+    kinematics = str(extra.pop("kinematics", "von_karman"))
+    if extra or kinematics != "von_karman":
+        # The assembly plan encodes the von Karman element response; other
+        # kinematics or per-element scale options use the original assembler.
+        assembler = _ORIGINAL_ASSEMBLER
+        if assembler is None:
+            from . import nonlinear_static as _nonlinear_static
+
+            assembler = _nonlinear_static._assemble_nonlinear_system
+        return assembler(
+            model,
+            displacements,
+            committed_states,
+            num_layers,
+            tangent=tangent,
+            deleted_element_ids=tuple(deleted_element_ids or ()),
+            residual_stiffness_fraction=float(residual_stiffness_fraction),
+            kinematics=kinematics,
+            **extra,
+        )
     plan = get_nonlinear_assembly_plan(model, int(num_layers))
     return plan.assemble(
         displacements,
@@ -654,12 +675,39 @@ def _solve_static_displacement_control_block(
     info,
     start_time,
     resource_config=None,
+    kinematics="von_karman",
 ):
     """Displacement control using block elimination on the structural tangent."""
     from . import nonlinear_static as ns
     from .cases import make_result_case
     from .jit_compiler import numba_thread_scope
     from .linalg import MatrixClass, factorize
+
+    if str(kinematics) != "von_karman":
+        # The block-elimination fast path encodes the von Karman assembly plan;
+        # corotational displacement control uses the original solver.
+        solver = _ORIGINAL_DISPLACEMENT_SOLVER
+        if solver is None:
+            solver = ns._solve_static_displacement_control
+        return solver(
+            model=model,
+            T=T,
+            u0=u0,
+            F_const=F_const,
+            F_prop=F_prop,
+            stage_vectors=stage_vectors,
+            load_program=load_program,
+            displacement_control=displacement_control,
+            committed_states=committed_states,
+            num_layers=num_layers,
+            num_steps=num_steps,
+            max_iterations=max_iterations,
+            tolerance=tolerance,
+            info=info,
+            start_time=start_time,
+            resource_config=resource_config,
+            kinematics=kinematics,
+        )
 
     if load_program is not None:
         if len(load_program.stages) == 1:

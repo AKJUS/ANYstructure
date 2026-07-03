@@ -173,12 +173,21 @@ class PressurePatch:
 
 @dataclass(frozen=True)
 class TransientConfig:
-    """Configuration for linear Newmark transient analysis."""
+    """Configuration for linear Newmark/HHT-alpha transient analysis.
+
+    ``hht_alpha`` activates Hilber-Hughes-Taylor numerical dissipation.  The
+    valid range is ``-1/3 <= hht_alpha <= 0``; ``hht_alpha = 0`` reproduces the
+    plain Newmark method with the configured ``beta``/``gamma``.  For a
+    non-zero ``hht_alpha`` with ``beta``/``gamma`` left at their defaults, the
+    solvers use the second-order-accurate HHT-optimal parameters
+    ``gamma = 1/2 - alpha`` and ``beta = (1 - alpha)^2 / 4``.
+    """
 
     dt: float
     t_end: float
     beta: float = 0.25
     gamma: float = 0.5
+    hht_alpha: float = 0.0
     rayleigh_alpha: float = 0.0
     rayleigh_beta: float = 0.0
     save_every: int = 1
@@ -199,8 +208,24 @@ class TransientConfig:
             raise ValueError("beta must be positive")
         if self.gamma <= 0.0:
             raise ValueError("gamma must be positive")
+        if not (-1.0 / 3.0 - 1.0e-12 <= float(self.hht_alpha) <= 0.0):
+            raise ValueError("hht_alpha must be in [-1/3, 0]")
         if self.save_every <= 0:
             raise ValueError("save_every must be a positive integer")
+
+    def integration_parameters(self) -> Tuple[float, float, float]:
+        """Return the ``(hht_alpha, beta, gamma)`` used by the time integrators.
+
+        With a non-zero ``hht_alpha`` and default ``beta``/``gamma``, the
+        HHT-optimal Newmark parameters are derived from ``hht_alpha``;
+        explicitly configured non-default ``beta``/``gamma`` are respected.
+        """
+        alpha = float(self.hht_alpha)
+        if alpha == 0.0:
+            return 0.0, float(self.beta), float(self.gamma)
+        if float(self.beta) == 0.25 and float(self.gamma) == 0.5:
+            return alpha, 0.25 * (1.0 - alpha) ** 2, 0.5 - alpha
+        return alpha, float(self.beta), float(self.gamma)
 
 
 @dataclass(frozen=True)
@@ -503,8 +528,9 @@ def solve_transient_newmark(
     cached_solver = None
     cached_solver_diagnostics: Dict[str, Any] = {}
 
-    beta = float(config.beta)
-    gamma = float(config.gamma)
+    alpha_h, beta, gamma = config.integration_parameters()
+    one_plus_alpha = 1.0 + alpha_h
+    F_red_prev = F0_red
     for step_index in range(1, len(times)):
         dt = float(times[step_index] - times[step_index - 1])
         if dt <= 0.0:
@@ -516,7 +542,7 @@ def solve_transient_newmark(
         a4 = gamma / beta - 1.0
         a5 = dt * (gamma / (2.0 * beta) - 1.0)
         if cached_solver is None or cached_dt is None or not np.isclose(dt, cached_dt):
-            K_eff = (K_red + a0 * M_red + a1 * C_red).tocsr()
+            K_eff = (one_plus_alpha * K_red + a0 * M_red + one_plus_alpha * a1 * C_red).tocsr()
             try:
                 cached_solver = factorize(
                     K_eff,
@@ -535,16 +561,19 @@ def solve_transient_newmark(
         load_prev = load_next
         F_red = _reduced_load(T, K, u0, load_next)
         rhs = (
-            F_red
+            one_plus_alpha * F_red
+            - alpha_h * F_red_prev
             + M_red @ (a0 * q_red + a2 * v_red + a3 * a_red)
-            + C_red @ (a1 * q_red + a4 * v_red + a5 * a_red)
+            + one_plus_alpha * (C_red @ (a1 * q_red + a4 * v_red + a5 * a_red))
         )
+        if alpha_h != 0.0:
+            rhs += alpha_h * (K_red @ q_red) + alpha_h * (C_red @ v_red)
         if cached_solver is not None:
             q_next = np.asarray(cached_solver.solve(rhs), dtype=float).reshape(-1)
             factorization_reused = True
         else:
             fallback_handle = factorize(
-                (K_red + a0 * M_red + a1 * C_red).tocsr(),
+                (one_plus_alpha * K_red + a0 * M_red + one_plus_alpha * a1 * C_red).tocsr(),
                 MatrixClass.GENERAL,
                 signature=f"transient.effective.fallback:{dt:.16g}:{step_index}",
             )
@@ -554,6 +583,7 @@ def solve_transient_newmark(
         a_next = a0 * (q_next - q_red) - a2 * v_red - a3 * a_red
         v_next = v_red + dt * ((1.0 - gamma) * a_red + gamma * a_next)
         q_red, v_red, a_red = q_next, v_next, a_next
+        F_red_prev = F_red
 
         if step_index % int(config.save_every) == 0 or step_index == len(times) - 1:
             save_state(float(times[step_index]), q_red, v_red, a_red)
@@ -590,7 +620,8 @@ def solve_transient_newmark(
     policy_metadata = recovery_metadata(recovery, config.resource_config, recovery_memory)
 
     diagnostics: Dict[str, Any] = {
-        "method": "newmark",
+        "method": "newmark" if alpha_h == 0.0 else "hht_alpha",
+        "hht_alpha": alpha_h,
         "beta": beta,
         "gamma": gamma,
         "rayleigh_alpha": float(config.rayleigh_alpha),
@@ -644,6 +675,7 @@ def solve_transient_newmark(
             "t_end": config.t_end,
             "beta": beta,
             "gamma": gamma,
+            "hht_alpha": alpha_h,
             "rayleigh_alpha": config.rayleigh_alpha,
             "rayleigh_beta": config.rayleigh_beta,
             "save_every": config.save_every,

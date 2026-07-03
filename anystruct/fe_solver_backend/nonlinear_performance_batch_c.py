@@ -309,9 +309,14 @@ def _batch_c_assemble_nonlinear_system(
     tangent: bool = True,
     deleted_element_ids=None,
     residual_stiffness_fraction: float = 1.0,
+    **extra,
 ):
     deleted_tuple = tuple(deleted_element_ids or ())
-    if deleted_tuple:
+    kinematics = str(extra.pop("kinematics", "von_karman"))
+    if deleted_tuple or extra or kinematics != "von_karman":
+        # The reduced-assembly plan encodes the default von Karman element
+        # response; erosion, per-element stiffness scales and corotational
+        # kinematics take the full base assembler.
         return _BASE_ASSEMBLER(
             model,
             displacements,
@@ -320,6 +325,8 @@ def _batch_c_assemble_nonlinear_system(
             tangent=tangent,
             deleted_element_ids=deleted_tuple,
             residual_stiffness_fraction=float(residual_stiffness_fraction),
+            kinematics=kinematics,
+            **extra,
         )
     context = _active_context(model)
     if (

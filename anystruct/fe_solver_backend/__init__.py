@@ -148,7 +148,7 @@ from .recovery import (
     recovery_metadata,
     select_node_displacements,
 )
-from .results import FEResult, StressResult, DisplacementResult, compare_with_analytical, create_fe_result, post_process_results
+from .results import FEResult, StressResult, DisplacementResult, compare_with_analytical, create_fe_result, post_process_results, recover_nodal_stresses
 from .validation import (
     LoadResultant,
     ProductionValidationIssue,
