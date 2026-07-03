@@ -8,16 +8,23 @@ behind the same API later without changing analysis modules.
 
 from __future__ import annotations
 
+import ctypes
+import glob
+import site
+import sys
 import time
+import warnings
+import weakref
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
 import os
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from scipy import sparse
+from scipy.sparse import SparseEfficiencyWarning
 from scipy.sparse.linalg import LinearOperator, splu
 
 try:
@@ -142,10 +149,213 @@ class SparseSolverBackend:
         )
 
 
+_MKL_RT_ENV_READY = False
+
+
+def _ensure_mkl_rt_env() -> None:
+    """Locate mkl_rt once per process so PyPardisoSolver() skips its DLL search.
+
+    pypardiso's ``PyPardisoSolver.__init__`` falls back to a recursive glob over
+    the Python installation on every construction when ``find_library`` cannot
+    resolve mkl_rt (typical on Windows).  That search costs on the order of a
+    second per factorization.  pypardiso checks the ``PYPARDISO_MKL_RT``
+    environment variable first, so resolving the path once and publishing it
+    there makes every subsequent solver construction cheap.
+    """
+
+    global _MKL_RT_ENV_READY
+    if _MKL_RT_ENV_READY or not _HAS_PYPARDISO:
+        return
+    if os.environ.get("PYPARDISO_MKL_RT"):
+        _MKL_RT_ENV_READY = True
+        return
+    from ctypes.util import find_library
+
+    path = find_library("mkl_rt") or find_library("mkl_rt.1")
+    if path is None:
+        candidates = glob.glob(f"{sys.prefix}/[Ll]ib*/**/*mkl_rt*", recursive=True) or glob.glob(
+            f"{site.USER_BASE}/[Ll]ib*/**/*mkl_rt*", recursive=True
+        )
+        for candidate in sorted(candidates, key=len):
+            try:
+                ctypes.CDLL(candidate)
+            except OSError:
+                continue
+            path = candidate
+            break
+    if path:
+        os.environ["PYPARDISO_MKL_RT"] = path
+    _MKL_RT_ENV_READY = True
+
+
+def _pardiso_mtype_candidates(matrix_class: MatrixClass) -> Tuple[int, ...]:
+    """PARDISO mtypes to try for a declared matrix class, best first.
+
+    Symmetric classes factorize the upper triangle (mtype 2 Cholesky for SPD,
+    mtype -2 Bunch-Kaufman otherwise) with the general real path (mtype 11) as
+    the final fallback.
+    """
+
+    if matrix_class == MatrixClass.SPD:
+        return (2, -2, 11)
+    if matrix_class in (MatrixClass.SYMMETRIC_SEMIDEFINITE, MatrixClass.SYMMETRIC_INDEFINITE):
+        return (-2, 11)
+    return (11,)
+
+
+def _pardiso_prepared_matrix(csr: sparse.csr_matrix, mtype: int) -> sparse.csr_matrix:
+    """Return the CSR matrix PARDISO should factorize for the given mtype.
+
+    Symmetric mtypes take the upper triangle only; MKL additionally requires
+    every diagonal entry to be structurally present, so missing diagonals are
+    inserted as explicit zeros.
+    """
+
+    if mtype == 11:
+        return csr
+    upper = sparse.triu(csr, format="csr")
+    diagonal = upper.diagonal()
+    if np.any(diagonal == 0.0):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SparseEfficiencyWarning)
+            upper.setdiag(diagonal)
+        upper = sparse.csr_matrix(upper)
+    upper.sort_indices()
+    return upper
+
+
+def _release_mkl_solver(solver: Any) -> None:
+    """Release MKL's internal factorization memory (PARDISO phase -1)."""
+    try:
+        solver.free_memory(everything=True)
+    except Exception:
+        pass
+
+
+def _pardiso_full_factorize(solver: Any, prepared: sparse.csr_matrix) -> None:
+    solver._check_A(prepared)
+    solver.set_phase(12)
+    solver._call_pardiso(prepared, np.zeros((prepared.shape[0], 1)))
+
+
+class _PardisoPatternSlot:
+    """One retained PARDISO instance per sparsity pattern for analysis reuse."""
+
+    __slots__ = ("solver", "mtype", "shape", "indptr", "indices", "generation")
+
+    def __init__(self, solver: Any, mtype: int, prepared: sparse.csr_matrix):
+        self.solver = solver
+        self.mtype = int(mtype)
+        self.shape = tuple(int(v) for v in prepared.shape)
+        self.indptr = prepared.indptr.copy()
+        self.indices = prepared.indices.copy()
+        self.generation = 0
+
+    def matches(self, prepared: sparse.csr_matrix, mtype: int) -> bool:
+        return (
+            self.solver is not None
+            and self.mtype == int(mtype)
+            and self.shape == tuple(int(v) for v in prepared.shape)
+            and self.indptr.size == prepared.indptr.size
+            and self.indices.size == prepared.indices.size
+            and np.array_equal(self.indptr, prepared.indptr)
+            and np.array_equal(self.indices, prepared.indices)
+        )
+
+    def release(self) -> None:
+        self.generation += 1
+        solver, self.solver = self.solver, None
+        if solver is not None:
+            _release_mkl_solver(solver)
+
+
+class _PardisoFactorization:
+    """Solve interface bound to a pattern slot.
+
+    The slot's PARDISO instance holds the factorization of the *most recent*
+    matrix with that sparsity pattern.  A handle created earlier therefore
+    checks a generation token before solving; if the slot has moved on (or was
+    evicted), the handle transparently refactorizes its own matrix into a
+    private solver whose MKL memory is released by a finalizer when the handle
+    is garbage collected.
+    """
+
+    def __init__(self, slot: _PardisoPatternSlot, prepared: sparse.csr_matrix, mtype: int):
+        self._slot: Optional[_PardisoPatternSlot] = slot
+        self._generation = slot.generation
+        self._matrix = prepared
+        self._mtype = int(mtype)
+        self._private_solver: Any = None
+        self.stale_rebuild_count = 0
+
+    def _active_solver(self) -> Any:
+        if self._private_solver is not None:
+            return self._private_solver
+        slot = self._slot
+        if slot is not None and slot.solver is not None and slot.generation == self._generation:
+            return slot.solver
+        solver = PyPardisoSolver(mtype=self._mtype)
+        _pardiso_full_factorize(solver, self._matrix)
+        self._private_solver = solver
+        weakref.finalize(self, _release_mkl_solver, solver)
+        self._slot = None
+        self.stale_rebuild_count += 1
+        return solver
+
+    def solve(self, rhs: np.ndarray) -> np.ndarray:
+        solver = self._active_solver()
+        b = solver._check_b(self._matrix, np.asarray(rhs, dtype=np.float64))
+        solver.set_phase(33)
+        return solver._call_pardiso(self._matrix, b)
+
+
 class PyPardisoSolverBackend:
-    """Intel MKL PARDISO backend using pypardiso."""
+    """Intel MKL PARDISO backend using pypardiso.
+
+    Optimizations over naive pypardiso usage:
+
+    - mkl_rt is resolved once per process (``PYPARDISO_MKL_RT``) instead of
+      re-searching the filesystem on every ``PyPardisoSolver`` construction;
+    - symmetric matrix classes factorize the upper triangle with symmetric
+      mtypes (2 / -2), falling back to the general path on numerical failure;
+    - refactorizations with an unchanged sparsity pattern reuse the symbolic
+      analysis (PARDISO phase 22) through a small LRU of pattern slots;
+    - MKL internal memory is bounded and released: evicted slots and privately
+      rebuilt factorizations free their memory (phase -1) via finalizers.
+
+    Not thread-safe; matches the existing single-threaded solver usage.
+    """
 
     name = "pypardiso"
+
+    def __init__(self, *, max_pattern_slots: int = 4):
+        self.max_pattern_slots = _env_int("FE_SOLVER_PYPARDISO_MAX_PATTERN_SLOTS", int(max_pattern_slots))
+        self._slots: List[_PardisoPatternSlot] = []
+
+    def release_pattern_slots(self) -> None:
+        """Release all retained MKL factorization memory."""
+        while self._slots:
+            self._slots.pop().release()
+
+    def _factorize_prepared(self, prepared: sparse.csr_matrix, mtype: int) -> Tuple[_PardisoFactorization, bool]:
+        for slot in self._slots:
+            if slot.matches(prepared, mtype):
+                slot.generation += 1
+                try:
+                    slot.solver.set_phase(22)
+                    slot.solver._call_pardiso(prepared, np.zeros((prepared.shape[0], 1)))
+                except Exception:
+                    _pardiso_full_factorize(slot.solver, prepared)
+                self._slots.remove(slot)
+                self._slots.insert(0, slot)
+                return _PardisoFactorization(slot, prepared, mtype), True
+        solver = PyPardisoSolver(mtype=int(mtype))
+        _pardiso_full_factorize(solver, prepared)
+        slot = _PardisoPatternSlot(solver, mtype, prepared)
+        self._slots.insert(0, slot)
+        while len(self._slots) > max(int(self.max_pattern_slots), 1):
+            self._slots.pop().release()
+        return _PardisoFactorization(slot, prepared, mtype), False
 
     def factorize(
         self,
@@ -156,20 +366,29 @@ class PyPardisoSolverBackend:
         options: Optional[Mapping[str, Any]] = None,
     ) -> FactorizationHandle:
         start = time.time()
+        _ensure_mkl_rt_env()
+        failure_reasons: List[str] = []
         try:
-            csc = sparse.csc_matrix(matrix)
-            
-            class PyPardisoWrapper:
-                def __init__(self, mat):
-                    self.ps = PyPardisoSolver()
-                    self.mat = mat
-                    self.ps.factorize(self.mat)
-                def solve(self, rhs):
-                    return self.ps.solve(self.mat, rhs)
-
-            wrapper = PyPardisoWrapper(csc)
-            
+            csr = sparse.csr_matrix(matrix)
+            if csr is matrix:
+                csr = csr.copy()
+            csr.sort_indices()
         except Exception as exc:
+            failure_reasons.append(str(exc))
+            csr = None
+        wrapper: Optional[_PardisoFactorization] = None
+        used_mtype: Optional[int] = None
+        symbolic_reused = False
+        if csr is not None:
+            for mtype in _pardiso_mtype_candidates(matrix_class):
+                try:
+                    prepared = _pardiso_prepared_matrix(csr, mtype)
+                    wrapper, symbolic_reused = self._factorize_prepared(prepared, mtype)
+                    used_mtype = int(mtype)
+                    break
+                except Exception as exc:
+                    failure_reasons.append(f"mtype={mtype}: {exc}")
+        if wrapper is None:
             return FactorizationHandle(
                 matrix_shape=tuple(int(v) for v in matrix.shape),
                 matrix_class=matrix_class,
@@ -178,9 +397,9 @@ class PyPardisoSolverBackend:
                 signature=signature,
                 factorization_time=time.time() - start,
                 status="failed",
-                failure_reason=str(exc),
+                failure_reason="; ".join(failure_reasons) or "unknown pypardiso failure",
             )
-        return FactorizationHandle(
+        handle = FactorizationHandle(
             matrix_shape=tuple(int(v) for v in matrix.shape),
             matrix_class=matrix_class,
             backend_name=self.name,
@@ -189,6 +408,12 @@ class PyPardisoSolverBackend:
             factorization_time=time.time() - start,
             _solver=wrapper,
         )
+        handle.metadata["pardiso_mtype"] = used_mtype
+        handle.metadata["pardiso_symbolic_reused"] = bool(symbolic_reused)
+        handle.metadata["pardiso_pattern_slots"] = len(self._slots)
+        if failure_reasons:
+            handle.metadata["pardiso_fallback_attempts"] = list(failure_reasons)
+        return handle
 
 
 class AutoSparseSolverBackend:
@@ -215,6 +440,11 @@ class AutoSparseSolverBackend:
         self.pardiso_backend = (pardiso_backend or PyPardisoSolverBackend()) if _HAS_PYPARDISO else None
         self.pypardiso_min_dimension = _env_int("FE_SOLVER_PYPARDISO_MIN_DIMENSION", int(pypardiso_min_dimension))
         self.pypardiso_min_nnz = _env_int("FE_SOLVER_PYPARDISO_MIN_NNZ", int(pypardiso_min_nnz))
+
+    def release_pattern_slots(self) -> None:
+        """Release MKL factorization memory retained for pattern reuse."""
+        if self.pardiso_backend is not None:
+            self.pardiso_backend.release_pattern_slots()
 
     def _use_pypardiso(self, matrix: sparse.spmatrix, options: Mapping[str, Any]) -> bool:
         requested = str(options.get("backend", options.get("solver", "auto"))).lower()

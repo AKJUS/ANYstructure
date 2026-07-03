@@ -17,23 +17,38 @@ from .boundary import (
     RollerSupport,
     SymmetryBC,
 )
-from .assembly import compute_stresses, solve_linear
+from .assembly import (
+    build_constraint_transformation,
+    compute_constraint_force_diagnostics,
+    compute_stresses,
+    reconstruct_full_solution,
+    solve_linear,
+    solve_linear_many,
+    solve_nonlinear,
+)
 from .buckling import BucklingMode, BucklingResult, solve_eigenvalue_buckling
 from .nonlinear import NonlinearLimitPointResult, NonlinearLoadStep, solve_nonlinear_load_stepping
 from .nonlinear_static import (
     DisplacementControl,
+    NonlinearConvergenceSettings,
     NonlinearLoadProgram,
     NonlinearLoadStage,
+    NonlinearStaticResult,
+    NonlinearStaticStep,
     solve_static_nonlinear,
 )
 from .arc_length import ArcLengthControl, ArcLengthResult, solve_static_arc_length
 from .anystructure_fem_mode import (
     AnyStructureFEMConfig,
+    AnyStructureFEMResult,
     build_fe_model_from_generated_geometry,
     build_symmetric_load_case,
+    idealize_generated_geometry_members,
     recover_prestress_from_static_result,
+    run_anystructure_fem_mode,
 )
 from .capacity_workflow import (
+    DEFAULT_CAPACITY_WORKFLOW_PATH,
     CapacityWorkflowConfig,
     CapacityWorkflowResult,
     MeshModeAdequacy,
@@ -41,6 +56,7 @@ from .capacity_workflow import (
     evaluate_mode_mesh_adequacy,
     run_capacity_workflow_from_builder,
     run_nonlinear_capacity_workflow,
+    write_capacity_workflow_report,
 )
 from .cases import (
     AnalysisCase,
@@ -93,9 +109,29 @@ from .imperfections import (
     standard_plate_mode,
 )
 from .kernel_warmup import warm_fe_solver_kernels
-from .linalg import FactorizationHandle, MatrixClass, SparseSolverBackend, factorize, solve_many
+from .linalg import (
+    AutoSparseSolverBackend,
+    FactorizationCache,
+    FactorizationHandle,
+    MatrixClass,
+    SparseSolverBackend,
+    cached_inverse_operator,
+    factorize,
+    factorize_cached,
+    solve_many,
+    sparse_matrix_signature,
+)
 from .material_curves import DNVC208MaterialCurve, FiberSectionPlasticityConfig, curve_from_properties, dnv_c208_steel_curve
-from .matrix_assembly import assemble_damping_matrix, assemble_geometric_stiffness_matrix, assemble_load_matrix, assemble_load_vector, assemble_mass_matrix, assemble_stiffness_matrix
+from .matrix_assembly import (
+    AssemblyError,
+    assemble_damping_matrix,
+    assemble_geometric_stiffness_matrix,
+    assemble_load_matrix,
+    assemble_load_vector,
+    assemble_mass_matrix,
+    assemble_stiffness_matrix,
+    assemble_system,
+)
 from .modal import ModalMode, ModalResult, solve_free_vibration
 from .recovery import (
     MemoryEstimate,
@@ -112,7 +148,20 @@ from .recovery import (
     recovery_metadata,
     select_node_displacements,
 )
-from .results import FEResult, StressResult, DisplacementResult, create_fe_result, post_process_results
-from .validation import ProductionValidationIssue, ProductionValidationReport, load_case_resultant, load_vector_resultant
+from .results import FEResult, StressResult, DisplacementResult, compare_with_analytical, create_fe_result, post_process_results
+from .validation import (
+    LoadResultant,
+    ProductionValidationIssue,
+    ProductionValidationReport,
+    ShellPatchSummary,
+    dof_order_signature,
+    load_case_resultant,
+    load_vector_resultant,
+    max_abs,
+    mpc_constraint_residuals,
+    nullspace_diagnostics,
+    shell_element_patch_summary,
+    validate_production_model,
+)
 
 __all__ = [name for name in globals() if not name.startswith('_')]

@@ -110,6 +110,9 @@ class SphereContactConfig:
     max_sphere_travel_fraction: float = 0.25
     max_event_substeps: int = 16
     max_active_contacts: int = 1
+    load_patch_radius_factor: float = 1.25
+    min_load_patch_nodes: int = 4
+    max_load_patch_nodes: int = 12
     save_contact_history: bool = True
 
     def __post_init__(self) -> None:
@@ -141,6 +144,12 @@ class SphereContactConfig:
             raise ValueError("max_event_substeps must be positive")
         if self.max_active_contacts <= 0:
             raise ValueError("max_active_contacts must be positive")
+        if self.load_patch_radius_factor <= 0.0:
+            raise ValueError("load_patch_radius_factor must be positive")
+        if self.min_load_patch_nodes <= 0:
+            raise ValueError("min_load_patch_nodes must be positive")
+        if self.max_load_patch_nodes < self.min_load_patch_nodes:
+            raise ValueError("max_load_patch_nodes must be greater than or equal to min_load_patch_nodes")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -158,6 +167,9 @@ class SphereContactConfig:
             "max_sphere_travel_fraction": float(self.max_sphere_travel_fraction),
             "max_event_substeps": int(self.max_event_substeps),
             "max_active_contacts": int(self.max_active_contacts),
+            "load_patch_radius_factor": float(self.load_patch_radius_factor),
+            "min_load_patch_nodes": int(self.min_load_patch_nodes),
+            "max_load_patch_nodes": int(self.max_load_patch_nodes),
             "save_contact_history": bool(self.save_contact_history),
         }
 
@@ -348,6 +360,57 @@ def _active_shell_contact_candidates(model: "FEModel", deleted_element_ids: Sequ
     return [element for element in _shell_contact_candidates(model) if int(element.element_id) not in deleted]
 
 
+def _contact_patch_nodal_weights(
+    model: "FEModel",
+    candidates: Sequence[ShellElement],
+    contact_point: np.ndarray,
+    structural_displacement: np.ndarray,
+    contact_config: SphereContactConfig,
+    representative_edge: float,
+    sphere: RigidSphereImpact,
+    penetration: float,
+) -> Dict[int, float]:
+    """Return smooth local nodal weights for distributing one contact force."""
+    patch_radius = max(
+        np.sqrt(max(float(sphere.radius) * float(penetration), 0.0)),
+        float(contact_config.load_patch_radius_factor) * max(float(representative_edge), 1.0e-12),
+        1.0e-12,
+    )
+    node_positions: Dict[int, np.ndarray] = {}
+    for element in candidates:
+        coords = _deformed_shell_coordinates(model, element, structural_displacement)
+        centroid = np.mean(coords, axis=0)
+        element_radius = max(float(np.linalg.norm(row - centroid)) for row in coords)
+        if float(np.linalg.norm(np.asarray(contact_point, dtype=float) - centroid)) > patch_radius + element_radius:
+            continue
+        for local_index, node_id in enumerate(element.node_ids):
+            node_positions.setdefault(int(node_id), coords[local_index])
+    if not node_positions:
+        return {}
+    distances = [
+        (int(node_id), float(np.linalg.norm(position - contact_point)))
+        for node_id, position in node_positions.items()
+    ]
+    distances.sort(key=lambda item: item[1])
+    selected = [(node_id, distance) for node_id, distance in distances if distance <= patch_radius]
+    min_nodes = min(int(contact_config.min_load_patch_nodes), len(distances))
+    if len(selected) < min_nodes:
+        selected = distances[:min_nodes]
+    max_nodes = max(int(contact_config.max_load_patch_nodes), min_nodes)
+    selected = selected[:max_nodes]
+    if not selected:
+        return {}
+    raw: Dict[int, float] = {}
+    for node_id, distance in selected:
+        ratio = distance / max(patch_radius, 1.0e-12)
+        raw[int(node_id)] = float(np.exp(-(ratio * ratio)))
+    total = float(sum(raw.values()))
+    if total <= 0.0:
+        equal = 1.0 / float(len(selected))
+        return {int(node_id): equal for node_id, _distance in selected}
+    return {int(node_id): float(value / total) for node_id, value in raw.items()}
+
+
 def _deformed_shell_coordinates(model: "FEModel", element: ShellElement, displacement: np.ndarray) -> np.ndarray:
     coords = element.get_node_coordinates(model.mesh).astype(float, copy=True)
     for local_index, node_id in enumerate(element.node_ids):
@@ -418,6 +481,9 @@ def _resolved_contact_config(model: "FEModel", sphere: RigidSphereImpact, config
         max_sphere_travel_fraction=raw.max_sphere_travel_fraction,
         max_event_substeps=raw.max_event_substeps,
         max_active_contacts=raw.max_active_contacts,
+        load_patch_radius_factor=raw.load_patch_radius_factor,
+        min_load_patch_nodes=raw.min_load_patch_nodes,
+        max_load_patch_nodes=raw.max_load_patch_nodes,
         save_contact_history=raw.save_contact_history,
     )
 
@@ -550,8 +616,10 @@ def assemble_sphere_contact_load_vector(
     sphere_force_total = np.zeros(3, dtype=float)
     records: List[SphereContactRecord] = []
     contact_scales = {} if contact_scale_by_element is None else {int(k): float(v) for k, v in contact_scale_by_element.items()}
+    active_candidates = _active_shell_contact_candidates(model, deleted_element_ids)
+    representative_edge = _representative_shell_edge_length(model)
 
-    for element in _active_shell_contact_candidates(model, deleted_element_ids):
+    for element in active_candidates:
         contact_scale = float(contact_scales.get(int(element.element_id), 1.0))
         if contact_scale <= 0.0:
             continue
@@ -602,10 +670,24 @@ def assemble_sphere_contact_load_vector(
             continue
         sphere_force = normal_force * normal
         structure_force = -sphere_force
+        patch_weights = _contact_patch_nodal_weights(
+            model,
+            active_candidates,
+            surface_point,
+            u,
+            contact_config,
+            representative_edge,
+            sphere,
+            penetration,
+        )
+        if not patch_weights:
+            patch_weights = {int(node_id): float(N[local_index]) for local_index, node_id in enumerate(element.node_ids)}
         nodal_forces: Dict[int, np.ndarray] = {}
-        for local_index, node_id in enumerate(element.node_ids):
+        for node_id, weight in patch_weights.items():
             node = model.mesh.get_node(int(node_id))
-            nodal = float(N[local_index]) * structure_force
+            if node is None:
+                continue
+            nodal = float(weight) * structure_force
             load[np.asarray(node.dofs[:3], dtype=np.intp)] += nodal
             nodal_forces[int(node_id)] = nodal
         sphere_force_total += sphere_force
@@ -1132,7 +1214,7 @@ def _plastic_impact_damage_update(
                 trigger_value=float(trigger_value),
                 threshold=float(config.threshold),
                 location=str(location),
-                measure=element_measure(model, int(element_id)),
+                measure=element_measure(model.mesh, element),
             )
             new_records.append(record)
             deleted_element_ids.add(int(element_id))
@@ -1440,16 +1522,30 @@ def _solve_transient_sphere_impact_nonlinear(
     beta = float(transient_config.beta)
     gamma = float(transient_config.gamma)
 
-    segments: List[Tuple[int, float, float]] = [
-        (int(index), float(times[index - 1]), float(times[index]))
+    segments: List[Tuple[int, float, float, bool]] = [
+        (int(index), float(times[index - 1]), float(times[index]), True)
         for index in range(1, len(times))
     ]
-    last_save_step = 0
+    travel_scale = max(float(sphere.radius) * float(config.max_sphere_travel_fraction), 1.0e-12)
+    pending_save: Optional[Tuple[float, np.ndarray, Tuple[SphereContactRecord, ...]]] = None
     while segments:
-        step_index, segment_start, sub_time = segments.pop(0)
+        step_index, segment_start, sub_time, needs_travel_check = segments.pop(0)
         dt = float(sub_time - segment_start)
         if dt <= 0.0:
             continue
+        if needs_travel_check:
+            predicted_travel = max(float(np.linalg.norm(sphere_velocity)) * dt, float(sphere.speed) * dt)
+            n_travel = min(max(int(np.ceil(predicted_travel / travel_scale)), 1), int(config.max_event_substeps))
+            if n_travel > 1:
+                pieces: List[Tuple[int, float, float, bool]] = []
+                piece_start = float(segment_start)
+                for piece in range(1, n_travel + 1):
+                    piece_end = float(sub_time) if piece == n_travel else float(segment_start) + piece * dt / n_travel
+                    pieces.append((step_index, piece_start, piece_end, False))
+                    piece_start = piece_end
+                segments[:0] = pieces
+                event_substep_count += n_travel - 1
+                continue
         total_substep_count += 1
         pre_state = (
             q_red.copy(),
@@ -1577,8 +1673,8 @@ def _solve_transient_sphere_impact_nonlinear(
                     sphere_force_prev,
                 ) = pre_state
                 midpoint = 0.5 * (float(segment_start) + float(sub_time))
-                segments.insert(0, (step_index, midpoint, float(sub_time)))
-                segments.insert(0, (step_index, float(segment_start), midpoint))
+                segments.insert(0, (step_index, midpoint, float(sub_time), False))
+                segments.insert(0, (step_index, float(segment_start), midpoint, False))
                 cutback_count += 1
                 event_substep_count += 1
                 step_diagnostics.append(
@@ -1696,11 +1792,19 @@ def _solve_transient_sphere_impact_nonlinear(
                 "max_damage_utilization": float(max_damage_util),
             }
         )
-        if step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1 or step_index != last_save_step:
+        step_complete = float(sub_time) >= float(times[step_index]) - 1.0e-12 * max(abs(float(times[step_index])), 1.0)
+        if step_complete and (step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1):
             save_state(sub_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, sphere_force, records)
-            last_save_step = step_index
+            pending_save = None
+        else:
+            pending_save = (float(sub_time), sphere_force.copy(), records)
         if status == "max_deleted_fraction_reached":
             break
+
+    if pending_save is not None:
+        save_state(
+            pending_save[0], q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, pending_save[1], pending_save[2]
+        )
 
     if contact_step_count == 0 and status == "completed":
         status = "no_contact"
@@ -2231,7 +2335,12 @@ def solve_transient_sphere_impact(
                     base_load, base_load_info = assemble_load_vector(model, filtered_base)
                     if linear_matrix_terms is None:
                         linear_matrix_terms = _linear_element_matrix_terms(model)
-                    fracture_scales = {int(element_id): float(fracture_config.residual_stiffness_fraction) for element_id in deleted_element_ids}
+                    fracture_scales = {int(element_id): float(scale) for element_id, scale in damage_scale_by_element.items()}
+                    for element_id in deleted_element_ids:
+                        fracture_scales[int(element_id)] = min(
+                            fracture_scales.get(int(element_id), 1.0),
+                            float(fracture_config.residual_stiffness_fraction),
+                        )
                     K, M = _assemble_damaged_linear_matrices(model, fracture_scales, cached_terms=linear_matrix_terms)
                     eroded_matrix_rebuild_count += 1
                     K_red = (T.T @ K @ T).tocsr()
