@@ -67,6 +67,21 @@ def _pressure_surface_sign(value: Any) -> float:
     return -1.0 if _normalise_pressure_side(value) == "back" else 1.0
 
 
+_KINEMATICS_LABELS = ("Von Karman", "Corotational")
+
+
+def _normalise_kinematics(value: Any) -> str:
+    choice = str(value or "von karman").strip().lower().replace("_", " ").replace("-", " ")
+    choice = " ".join(choice.split())
+    if choice in {"corotational", "co rotational", "large rotation", "large rotations"}:
+        return "corotational"
+    return "von_karman"
+
+
+def _kinematics_label(value: Any) -> str:
+    return "Corotational" if _normalise_kinematics(value) == "corotational" else "Von Karman"
+
+
 @dataclass(frozen=True)
 class RuntimeFEMLineSnapshot:
     """Minimal active-line payload passed from ANYstructure to the runtime FEM UI."""
@@ -124,6 +139,8 @@ class RuntimeFEMOptions:
     nonlinear_solution_control: str = "newton force control"
     nonlinear_convergence_profile: str = "auto"
     nonlinear_assembly_threads: int = 0
+    nonlinear_static_kinematics: str = "von_karman"
+    beam_consistent_mass_enabled: bool = False
     deformation_scale: float = 0.0
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
@@ -177,6 +194,8 @@ class RuntimeFEMOptions:
     collision_include_static_load: bool = False
     collision_damage_enabled: bool = True
     collision_material_nonlinear_enabled: bool = False
+    collision_nonlinear_kinematics: str = "von_karman"
+    collision_beam_contact_enabled: bool = False
     collision_nonlinear_max_iterations: int = 20
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
@@ -858,6 +877,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         nonlinear_solution_control=options.nonlinear_solution_control,
         nonlinear_convergence_profile=options.nonlinear_convergence_profile,
         nonlinear_assembly_threads=options.nonlinear_assembly_threads,
+        nonlinear_static_kinematics=_normalise_kinematics(options.nonlinear_static_kinematics),
+        beam_consistent_mass_enabled=bool(options.beam_consistent_mass_enabled),
         custom_loads_add_to_imported=options.custom_loads_add_to_imported,
         custom_use_nullspace_projection=options.custom_use_nullspace_projection,
         custom_pressure_pa=options.custom_pressure_pa,
@@ -910,6 +931,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         collision_include_static_load=options.collision_include_static_load,
         collision_damage_enabled=options.collision_damage_enabled,
         collision_material_nonlinear_enabled=options.collision_material_nonlinear_enabled,
+        collision_nonlinear_kinematics=_normalise_kinematics(options.collision_nonlinear_kinematics),
+        collision_beam_contact_enabled=bool(options.collision_beam_contact_enabled),
         collision_nonlinear_max_iterations=options.collision_nonlinear_max_iterations,
         collision_nonlinear_tolerance=options.collision_nonlinear_tolerance,
         collision_nonlinear_cutbacks=options.collision_nonlinear_cutbacks,
@@ -1005,6 +1028,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "nonlinear_solution_control": str(options.nonlinear_solution_control),
         "nonlinear_convergence_profile": str(options.nonlinear_convergence_profile),
         "nonlinear_assembly_threads": int(options.nonlinear_assembly_threads),
+        "nonlinear_static_kinematics": _normalise_kinematics(options.nonlinear_static_kinematics),
+        "beam_consistent_mass_enabled": bool(options.beam_consistent_mass_enabled),
         "deformation_scale": float(options.deformation_scale),
         "custom_load_bc_enabled": bool(options.custom_load_bc_enabled),
         "custom_loads_add_to_imported": bool(options.custom_loads_add_to_imported),
@@ -1066,6 +1091,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "collision_include_static_load": bool(options.collision_include_static_load),
         "collision_damage_enabled": bool(options.collision_damage_enabled),
         "collision_material_nonlinear_enabled": bool(options.collision_material_nonlinear_enabled),
+        "collision_nonlinear_kinematics": _normalise_kinematics(options.collision_nonlinear_kinematics),
+        "collision_beam_contact_enabled": bool(options.collision_beam_contact_enabled),
         "collision_nonlinear_max_iterations": int(options.collision_nonlinear_max_iterations),
         "collision_nonlinear_tolerance": float(options.collision_nonlinear_tolerance),
         "collision_nonlinear_cutbacks": int(options.collision_nonlinear_cutbacks),
@@ -2446,8 +2473,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         + " / "
         + str(_safe_int(summary.get("nonlinear_max_iterations"), 0)),
         "Nonlinear solution control: " + str(summary.get("nonlinear_solution_control", "newton force control")),
+        "Nonlinear static kinematics: " + str(summary.get("nonlinear_static_kinematics", "von_karman")),
         "Nonlinear convergence profile: " + str(summary.get("nonlinear_convergence_profile", "auto")),
         "Nonlinear assembly threads: " + ("auto" if _safe_int(summary.get("nonlinear_assembly_threads"), 0) <= 0 else str(_safe_int(summary.get("nonlinear_assembly_threads"), 0))),
+        "Consistent beam mass: " + str(bool(summary.get("beam_consistent_mass_enabled"))),
         "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(
             round(_safe_float(summary.get("deformation_scale")), 3))),
         "Recovery history: " + str(summary.get("recovery_history_mode", "full")),
@@ -2570,7 +2599,9 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 " - bounce-back stop hold [s]: "
                 + str(round(_safe_float(summary.get("collision_bounce_back_time_s")), 8)),
                 " - contact surface: " + str(summary.get("collision_contact_surface", "")),
+                " - direct beam/stiffener contact: " + str(bool(summary.get("collision_beam_contact_enabled"))),
                 " - material nonlinear impact: " + str(bool(summary.get("collision_material_nonlinear_enabled"))),
+                " - nonlinear impact kinematics: " + str(summary.get("collision_nonlinear_kinematics", "von_karman")),
                 " - damage active: " + str(bool(summary.get("collision_damage_enabled"))),
             ]
         )
@@ -2688,6 +2719,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "nonlinear_static_initial_arc_increment",
             "nonlinear_static_steps",
             "nonlinear_static_total_iterations",
+            "nonlinear_static_kinematics",
             "nonlinear_static_layers",
             "nonlinear_static_max_plastic_strain",
         }
@@ -2735,12 +2767,21 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "collision_saved_steps",
             "collision_damage_enabled",
             "collision_material_nonlinear_enabled",
+            "collision_nonlinear_kinematics",
+            "collision_nonlinear_assembly_threads",
+            "collision_beam_contact_enabled",
             "collision_nonlinear_status",
             "collision_nonlinear_iterations",
             "collision_nonlinear_cutbacks",
             "collision_nonlinear_max_plastic_strain",
             "collision_plastic_damage_threshold",
             "collision_deleted_shell_elements",
+            "collision_deleted_eroded_elements",
+            "collision_energy_initial_j",
+            "collision_energy_final_j",
+            "collision_sphere_kinetic_initial_j",
+            "collision_sphere_kinetic_final_j",
+            "collision_energy_max_relative_drift",
             "collision_adaptive_cutback_retries",
             "collision_solution_control",
             "collision_arc_length_applicability",
@@ -2850,6 +2891,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             lines.extend(["", "Incremental nonlinear static solve:"])
             control_mode = str(prestress.get("nonlinear_static_control", summary.get("nonlinear_solution_control", "newton force control")))
             lines.append(" - control: " + control_mode)
+            lines.append(" - kinematics: " + str(prestress.get("nonlinear_static_kinematics", summary.get("nonlinear_static_kinematics", "von_karman"))))
             lines.append(" - status: " + nonlinear_static_status.replace("_", " "))
             lines.append(" - last converged load factor: " + str(
                 round(_safe_float(prestress.get("nonlinear_static_load_factor")), 4)))
@@ -2860,6 +2902,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             lines.append(" - completed steps: " + str(_safe_int(prestress.get("nonlinear_static_steps"), 0)))
             lines.append(
                 " - Newton iterations: " + str(_safe_int(prestress.get("nonlinear_static_total_iterations"), 0)))
+            if _safe_float(prestress.get("nonlinear_static_assembly_threads"), 0.0) > 0.0:
+                lines.append(" - resolved assembly threads: " + str(_safe_int(prestress.get("nonlinear_static_assembly_threads"), 0)))
             lines.append(" - through-thickness layers: " + str(_safe_int(prestress.get("nonlinear_static_layers"), 0)))
             lines.append(" - max equivalent plastic strain: " + str(
                 round(_safe_float(prestress.get("nonlinear_static_max_plastic_strain")), 6)))
@@ -2942,8 +2986,13 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(" - solution control: " + str(prestress.get("collision_solution_control", "")).replace("_", " "))
             if str(prestress.get("collision_arc_length_applicability", "") or ""):
                 lines.append(" - arc length: static continuation only; not used for collision impact")
+            if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0:
+                lines.append(" - direct beam/stiffener contact: enabled")
             if _safe_float(prestress.get("collision_material_nonlinear_enabled"), 0.0) > 0.0:
                 lines.append(" - material nonlinear impact: enabled")
+                lines.append(" - impact kinematics: " + str(prestress.get("collision_nonlinear_kinematics", summary.get("collision_nonlinear_kinematics", "von_karman"))))
+                if _safe_float(prestress.get("collision_nonlinear_assembly_threads"), 0.0) > 0.0:
+                    lines.append(" - resolved assembly threads: " + str(_safe_int(prestress.get("collision_nonlinear_assembly_threads"), 0)))
                 if str(prestress.get("collision_nonlinear_status", "") or ""):
                     lines.append(" - nonlinear impact status: " + str(prestress.get("collision_nonlinear_status", "")).replace("_", " "))
                 lines.append(" - nonlinear Newton iterations: " + str(_safe_int(prestress.get("collision_nonlinear_iterations"), 0)))
@@ -2951,6 +3000,21 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(" - max equivalent plastic strain: " + str(round(_safe_float(prestress.get("collision_nonlinear_max_plastic_strain")), 8)))
                 lines.append(" - plastic damage strain limit: " + str(round(_safe_float(prestress.get("collision_plastic_damage_threshold")), 8)))
             lines.append(" - sphere momentum balance error: " + str(round(_safe_float(prestress.get("collision_sphere_momentum_balance_error")), 6)))
+            if "collision_energy_initial_j" in prestress or "collision_energy_final_j" in prestress:
+                lines.extend(["", "Impact energy balance:"])
+                lines.append(
+                    " - total initial/final [J]: "
+                    + str(round(_safe_float(prestress.get("collision_energy_initial_j")), 6))
+                    + " / "
+                    + str(round(_safe_float(prestress.get("collision_energy_final_j")), 6))
+                )
+                lines.append(
+                    " - sphere kinetic initial/final [J]: "
+                    + str(round(_safe_float(prestress.get("collision_sphere_kinetic_initial_j")), 6))
+                    + " / "
+                    + str(round(_safe_float(prestress.get("collision_sphere_kinetic_final_j")), 6))
+                )
+                lines.append(" - max relative drift: " + str(round(_safe_float(prestress.get("collision_energy_max_relative_drift")), 8)))
             if collision_status in {"contact_iteration_failed", "nonlinear_iteration_failed"}:
                 lines.extend(["", "Collision solver failure detail:"])
                 if _safe_float(prestress.get("collision_failure_time_s"), 0.0) > 0.0:
@@ -2974,20 +3038,26 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(" - failure penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_failure_max_penetration_m")), 6)))
                 active_ids = str(prestress.get("collision_failure_active_element_ids", "") or "")
                 if active_ids:
-                    lines.append(" - active shell element(s): " + active_ids)
+                    lines.append(" - active element(s): " + active_ids)
                 if collision_status == "nonlinear_iteration_failed":
                     lines.append(" - suggestion: reduce manual dt, increase NL cutbacks, or reduce contact penalty/target stiffness.")
                 else:
                     lines.append(" - suggestion: reduce dt/penalty or increase event substeps/contact iterations.")
             if _safe_float(prestress.get("collision_damage_enabled"), 0.0) > 0.0:
                 lines.append(" - impact damage max utilization: " + str(round(_safe_float(prestress.get("impact_damage_max_utilization")), 6)))
-                lines.append(" - deleted shell elements: " + str(_safe_int(prestress.get("collision_deleted_shell_elements"), 0)))
+                deleted_count = _safe_int(
+                    prestress.get("collision_deleted_eroded_elements", prestress.get("collision_deleted_shell_elements")),
+                    0,
+                )
+                lines.append(" - deleted/eroded elements: " + str(deleted_count))
             if _safe_float(prestress.get("collision_material_nonlinear_enabled"), 0.0) > 0.0:
                 lines.append(
-                    " - meaning: this is a material-nonlinear implicit transient with frictionless sphere-shell contact; beams respond through shell coupling and beam plasticity only where configured.")
+                    " - meaning: this is a material-nonlinear implicit transient with frictionless sphere-shell contact"
+                    + (" and direct beam/stiffener contact." if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "."))
             else:
                 lines.append(
-                    " - meaning: this is a linear structural transient with nonlinear frictionless sphere-shell contact; beams respond only through shell coupling.")
+                    " - meaning: this is a linear structural transient with nonlinear frictionless sphere-shell contact"
+                    + (" and direct beam/stiffener contact." if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "."))
         for key, value in prestress.items():
             if key in special_keys:
                 continue
@@ -3277,7 +3347,7 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "analysis_type": {
         "title": "Analysis Type",
         "purpose": "Controls how the reference stress/prestress state is established before buckling capacity is interpreted.",
-        "use": "Linear eigenvalue runs one linear static solve, recovers membrane prestress, and sends that state to the eigenvalue buckling solver. Nonlinear stability is the older tangent-stability check: it scales the linear prestress and monitors K - lambda KG. Geometric nonlinear static uses incremental Newton-Raphson with von Karman shell kinematics and beam-column axial coupling. Geometric + material nonlinear static also attaches the DNV-RP-C208 layered J2 plasticity curve to shell elements.",
+        "use": "Linear eigenvalue runs one linear static solve, recovers membrane prestress, and sends that state to the eigenvalue buckling solver. Nonlinear stability is the older tangent-stability check: it scales the linear prestress and monitors K - lambda KG. Direct geometric/material nonlinear static uses incremental Newton-Raphson with the selected nonlinear kinematics.",
         "output": "Linear analysis produces static displacement/stress and eigenvalue buckling factors. Tangent stability prints a tangent limit estimate when one is found. Incremental nonlinear static prints status, completed load factor, Newton iterations, through-thickness layers and maximum equivalent plastic strain.",
         "caution": "Incremental nonlinear static is more expensive than linear eigenvalue analysis. A completed nonlinear static run at the requested max load factor means the target load was reached; it is not automatically a collapse load unless the run stops at a limit.",
     },
@@ -3368,9 +3438,9 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "material_model": {
         "title": "Material Model",
         "purpose": "Selects whether the FE material remains linear elastic or uses the DNV-RP-C208 low-fractile steel curve in nonlinear static analysis.",
-        "use": "Linear elastic keeps shell and beam stiffness elastic. DNV-RP-C208 steel attaches a true-stress versus true-plastic-strain curve to shell elements. The curve combines a proportional/yield transition, a yield plateau and a power-law hardening branch.",
+        "use": "Linear elastic keeps generated sections elastic. DNV-RP-C208 steel attaches the low-fractile true-stress versus true-plastic-strain curve for nonlinear static and nonlinear impact paths supported by the backend.",
         "output": "Affects incremental nonlinear static response, plastic strain output and the nonlinear load-factor estimate. Linear static and eigenvalue buckling stay elastic.",
-        "caution": "The current material nonlinearity is for shell plane-stress layers. Beam plasticity is not included in this local runtime formulation.",
+        "caution": "Use mesh and member-model convergence for capacity studies; nonlinear shell and beam-framed paths now use the backend nonlinear element support, but material modelling is still a simplified single-steel runtime setup.",
     },
     "steel_grade": {
         "title": "Steel Grade",
@@ -3437,10 +3507,24 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     },
     "nonlinear_assembly_threads": {
         "title": "Nonlinear Assembly Threads",
-        "purpose": "Caps the backend assembly worker thread count used during nonlinear tangent/internal-force assembly.",
-        "use": "Use 0 for backend/default behavior, or a positive integer to cap the parallel assembly work.",
-        "output": "Can reduce nonlinear runtime on larger models when measured threading is beneficial.",
-        "caution": "Too many threads can slow small models or compete with sparse factorization threads.",
+        "purpose": "Controls backend worker threads used during nonlinear tangent/internal-force assembly.",
+        "use": "Use 0 for the runtime auto policy. Auto keeps small models serial, uses a small count for medium models, and caps larger models to avoid oversubscription. Enter a positive integer to force a manual count.",
+        "output": "The resolved assembly thread count is printed in nonlinear static and nonlinear impact summaries.",
+        "caution": "More threads can be slower when assembly work is small or when sparse factorization is already using CPU resources. Treat manual high counts as something to benchmark.",
+    },
+    "nonlinear_static_kinematics": {
+        "title": "Nonlinear Static Kinematics",
+        "purpose": "Selects the geometric kinematics for direct nonlinear static solves.",
+        "use": "Von Karman is the default and preserves previous behavior. Corotational is available for direct Newton nonlinear static runs with large rotations such as panel folding or tripping.",
+        "output": "Reported in the nonlinear static result summary and passed to the backend only for the direct solve_static_nonlinear path.",
+        "caution": "Arc length, tangent-stability, capacity workflow and linear paths keep Von Karman. Corotational static does not support fracture/erosion.",
+    },
+    "beam_consistent_mass": {
+        "title": "Consistent Beam Mass",
+        "purpose": "Uses consistent beam mass matrices for generated stiffener and girder sections.",
+        "use": "Enable for modal or transient studies where beam rotational inertia affects natural frequencies. Leave off to preserve previous lumped-mass results.",
+        "output": "Beam section dictionaries carry consistent_mass=True into the backend model.",
+        "caution": "This affects mass/inertia, not static stiffness. Compare against previous lumped-mass baselines when reproducing old runs.",
     },
     "display_choice": {
         "title": "Display",
@@ -3546,10 +3630,10 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
 FEM_OPTION_INFO.update({
     "collision_enabled": {
         "title": "Collision Transient",
-        "purpose": "Runs the limited rigid-sphere-to-shell impact solver instead of the usual static/eigenvalue workflow.",
+        "purpose": "Runs the rigid-sphere impact solver instead of the usual static/eigenvalue workflow.",
         "use": "Enable this for one rigid sphere travelling along the specified vector. At least one real side/end support is required; nullspace/free-body collision is not used.",
-        "output": "Produces saved time snapshots, sphere motion, contact force, penetration and optional shell damage/erosion summaries.",
-        "caution": "This is frictionless rigid-sphere contact against shell midsurfaces/surfaces. Direct beam contact, fracture mechanics, contact friction and FSI are not included.",
+        "output": "Produces saved time snapshots, sphere motion, contact force, penetration, energy balance and optional deleted/eroded element summaries.",
+        "caution": "This is frictionless rigid-sphere contact against shell surfaces and, when enabled, direct beam/stiffener targets. Contact friction, fluid-structure interaction and calibrated fracture mechanics are not included.",
     },
     "collision_include_static_load": {
         "title": "Collision Base Load",
@@ -3570,7 +3654,14 @@ FEM_OPTION_INFO.update({
         "purpose": "Rigid sphere radius used for contact geometry and preview display.",
         "use": "The preview sphere updates immediately from this value. The solver uses this radius for closest-point contact and automatic time-step estimates.",
         "output": "Affects first contact time, contact area estimate, penetration ratio and damage demand.",
-        "caution": "The current contact target is the shell surface representation, not detailed beam/flange geometry.",
+        "caution": "Beam contact uses each beam section's contact radius when provided, otherwise the backend equivalent-area radius is used automatically.",
+    },
+    "collision_beam_contact": {
+        "title": "Direct Beam Contact",
+        "purpose": "Allows the rigid sphere to contact generated stiffener/girder beam targets directly.",
+        "use": "Enable for edge-on hits or cases where the striker may hit a stiffener or girder rather than only shell plating. Leave off to preserve previous shell-only contact behavior.",
+        "output": "The collision result reports beam contact enabled and backend diagnostics include beam/contact warnings when applicable.",
+        "caution": "Capacity-based impact damage remains shell-contact based; use material nonlinear plastic damage for beam erosion.",
     },
     "collision_speed_mps": {
         "title": "Sphere Speed",
@@ -3729,10 +3820,17 @@ FEM_OPTION_INFO.update({
 
     "collision_material_nonlinear": {
         "title": "Material Nonlinear Impact",
-        "purpose": "Uses the nonlinear transient impact path so shell plastic strain can be committed during collision.",
+        "purpose": "Uses the nonlinear transient impact path so plastic strain can be committed during collision.",
         "use": "Enable for damage driven by equivalent plastic strain. Leave off for the faster linear elastic contact proxy.",
         "output": "Makes Equivalent Plastic Strain available when plasticity develops and reports Newton iterations/cutbacks.",
         "caution": "This is much slower than the linear collision path and still uses simplified frictionless rigid-sphere contact.",
+    },
+    "collision_nonlinear_kinematics": {
+        "title": "Impact Kinematics",
+        "purpose": "Selects Von Karman or corotational kinematics for material nonlinear collision runs.",
+        "use": "Von Karman preserves previous behavior. Corotational is useful when the struck panel can fold or rotate through large angles during impact.",
+        "output": "Passed into NonlinearTransientConfig and reported in the collision result summary.",
+        "caution": "This selector is active only when collision and material nonlinear impact are both enabled; linear impact keeps Von Karman.",
     },
     "collision_nonlinear_iterations": {
         "title": "Impact Newton Iterations",
@@ -3764,10 +3862,10 @@ FEM_OPTION_INFO.update({
     },
     "collision_damage_enabled": {
         "title": "Impact Damage",
-        "purpose": "Activates engineering shell damage/erosion during collision.",
-        "use": "Damage accumulates from contact-derived demand and can soften or delete shell elements.",
-        "output": "Deleted/fully damaged shell elements are removed from the visualization and reported in the result text.",
-        "caution": "This is not crack propagation or validated fracture mechanics.",
+        "purpose": "Activates engineering damage/erosion during collision.",
+        "use": "Capacity-based damage accumulates from shell contact demand. With material nonlinear impact enabled, plastic-damage erosion also applies to backend-supported shell and beam element states.",
+        "output": "Deleted/fully damaged elements are removed from the visualization and reported in the result text.",
+        "caution": "Capacity-based impact damage is shell-only; with direct beam contact use material nonlinear plastic damage for beam erosion. This is not crack propagation or validated fracture mechanics.",
     },
     "collision_damage_mode": {
         "title": "Damage Mode",
@@ -3801,8 +3899,8 @@ FEM_OPTION_INFO.update({
         "title": "Damage Deletion Level",
         "purpose": "Damage level at which a shell element is treated as fully eroded/deleted.",
         "use": "Default 1.0 deletes at full damage.",
-        "output": "Deleted shell elements are hidden in visualization and removed from later contact/load participation.",
-        "caution": "No nodes, MPCs, beams, or topology are physically separated in this v1 model.",
+        "output": "Deleted/eroded elements are hidden in visualization and removed from later contact/load participation where the backend erosion scope applies.",
+        "caution": "Topology is still simplified for screening; do not treat deletion as calibrated fracture separation.",
     },
     "collision_damage_min_area": {
         "title": "Minimum Contact Area",
@@ -3913,6 +4011,8 @@ class RuntimeFEMWindow:
         self.nonlinear_solution_control = tk.StringVar(value="newton force control")
         self.nonlinear_convergence_profile = tk.StringVar(value="auto")
         self.nonlinear_assembly_threads = tk.IntVar(value=0)
+        self.nonlinear_static_kinematics = tk.StringVar(value="Von Karman")
+        self.beam_consistent_mass_enabled = tk.BooleanVar(value=False)
         self.deformation_scale = tk.StringVar(value="0.0")
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
@@ -3983,6 +4083,8 @@ class RuntimeFEMWindow:
         self.collision_include_static_load = tk.BooleanVar(value=False)
         self.collision_damage_enabled = tk.BooleanVar(value=True)
         self.collision_material_nonlinear_enabled = tk.BooleanVar(value=False)
+        self.collision_nonlinear_kinematics = tk.StringVar(value="Von Karman")
+        self.collision_beam_contact_enabled = tk.BooleanVar(value=False)
         self.collision_nonlinear_max_iterations = tk.IntVar(value=20)
         self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.collision_nonlinear_cutbacks = tk.IntVar(value=8)
@@ -4094,8 +4196,13 @@ class RuntimeFEMWindow:
         self._animation_after_id: str | None = None
         self._animation_running = False
         self._animation_index = 0
+        self._nonlinear_static_kinematics_control = None
+        self._collision_nonlinear_kinematics_control = None
+        self._collision_damage_beam_hint = None
+        self._option_state_trace_ids: list[tuple[tk.Variable, str]] = []
 
         self._build()
+        self._bind_option_state_traces()
         self._bind_plot_configuration_traces()
         self._show_as_normal_maximizable_window()
         self._start_kernel_warmup()
@@ -4130,6 +4237,91 @@ class RuntimeFEMWindow:
                 self._plot_trace_ids.append((variable, trace_id))
             except Exception:
                 pass
+
+    @staticmethod
+    def _choice_key(value: Any) -> str:
+        text = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+        return " ".join(text.split())
+
+    @staticmethod
+    def _set_control_state(control: Any, enabled: bool) -> None:
+        if control is None:
+            return
+        try:
+            control.configure(state=(tk.NORMAL if enabled else tk.DISABLED))
+        except Exception:
+            pass
+
+    def _static_kinematics_selector_enabled(self) -> bool:
+        if bool(self.collision_enabled.get()):
+            return False
+        if self._choice_key(self.runtime_solver.get()) in {
+            "anyintelligent capacity workflow",
+            "capacity workflow",
+            "nonlinear capacity workflow",
+        }:
+            return False
+        if self._choice_key(self.nonlinear_solution_control.get()) == "arc length":
+            return False
+        analysis = self._choice_key(self.analysis_type.get())
+        runtime = self._choice_key(self.runtime_solver.get())
+        return runtime == "nonlinear static" or analysis in {
+            "geometric nonlinear static",
+            "material nonlinear static",
+            "geom. + material nonlinear static",
+            "geom + material nonlinear static",
+            "geometric and material nonlinear static",
+        }
+
+    def _collision_kinematics_selector_enabled(self) -> bool:
+        return bool(self.collision_enabled.get()) and bool(self.collision_material_nonlinear_enabled.get())
+
+    def _refresh_option_states(self, *_args: Any) -> None:
+        static_enabled = self._static_kinematics_selector_enabled()
+        if not static_enabled and _normalise_kinematics(self.nonlinear_static_kinematics.get()) != "von_karman":
+            self.nonlinear_static_kinematics.set("Von Karman")
+        elif static_enabled:
+            self.nonlinear_static_kinematics.set(_kinematics_label(self.nonlinear_static_kinematics.get()))
+        self._set_control_state(self._nonlinear_static_kinematics_control, static_enabled)
+
+        collision_enabled = self._collision_kinematics_selector_enabled()
+        if not collision_enabled and _normalise_kinematics(self.collision_nonlinear_kinematics.get()) != "von_karman":
+            self.collision_nonlinear_kinematics.set("Von Karman")
+        elif collision_enabled:
+            self.collision_nonlinear_kinematics.set(_kinematics_label(self.collision_nonlinear_kinematics.get()))
+        self._set_control_state(self._collision_nonlinear_kinematics_control, collision_enabled)
+
+        if self._collision_damage_beam_hint is not None:
+            hint = ""
+            if (
+                bool(self.collision_enabled.get())
+                and bool(self.collision_beam_contact_enabled.get())
+                and bool(self.collision_damage_enabled.get())
+                and not bool(self.collision_material_nonlinear_enabled.get())
+            ):
+                hint = "Capacity damage is shell-contact based; use material nonlinear plastic damage for beam erosion."
+            try:
+                self._collision_damage_beam_hint.configure(text=hint)
+            except Exception:
+                pass
+
+    def _bind_option_state_traces(self) -> None:
+        variables: tuple[tk.Variable, ...] = (
+            self.analysis_type,
+            self.runtime_solver,
+            self.nonlinear_solution_control,
+            self.collision_enabled,
+            self.collision_material_nonlinear_enabled,
+            self.collision_beam_contact_enabled,
+            self.collision_damage_enabled,
+        )
+        for variable in variables:
+            try:
+                trace_id = variable.trace_add("write", self._refresh_option_states)
+                self._option_state_trace_ids.append((variable, trace_id))
+            except Exception:
+                pass
+        self._refresh_option_states()
 
     def _start_kernel_warmup(self) -> None:
         state = start_fe_solver_kernel_warmup(background=True)
@@ -4551,6 +4743,14 @@ class RuntimeFEMWindow:
                              self.nonlinear_convergence_profile, ("auto", "fast", "robust", "balanced", "legacy"))
         self._add_entry_row(solver_options, 12, "nonlinear_assembly_threads", "NL threads",
                             self.nonlinear_assembly_threads, width=8)
+        self._nonlinear_static_kinematics_control = self._add_option_row(
+            solver_options,
+            13,
+            "nonlinear_static_kinematics",
+            "Kinematics",
+            self.nonlinear_static_kinematics,
+            _KINEMATICS_LABELS,
+        )
 
         buckling_validity = ttk.LabelFrame(tab_general, text="Buckling validity and resources")
         buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -4596,6 +4796,8 @@ class RuntimeFEMWindow:
         self._add_entry_row(members, 2, "girder_eccentricity_m", "Girder ecc. [m]", self.girder_eccentricity_m)
         self._add_option_row(members, 3, "member_orientation", "Member orient.", self.member_orientation,
                              ("auto", "global Y", "global Z", "radial"))
+        self._add_check_row(members, 4, "beam_consistent_mass", "Consistent beam mass",
+                            self.beam_consistent_mass_enabled)
 
         material = ttk.LabelFrame(tab_properties, text="Material and recovery")
         material.pack(fill=tk.X, padx=8, pady=(0, 8))
@@ -4829,6 +5031,8 @@ class RuntimeFEMWindow:
                                 self.collision_speed_mps)
         self._add_compact_option(collision_main, 2, 1, "collision_contact_surface", "Surface",
                                  self.collision_contact_surface, ("midsurface", "top", "bottom"))
+        self._add_compact_check(collision_main, 3, 0, "collision_beam_contact",
+                                "Direct beam/stiffener contact", self.collision_beam_contact_enabled)
 
         collision_path = ttk.LabelFrame(collision_body, text="Path and time")
         collision_path.pack(fill=tk.X, padx=8, pady=(0, 4))
@@ -4909,6 +5113,17 @@ class RuntimeFEMWindow:
                                 self.collision_nonlinear_tolerance)
         self._add_compact_entry(collision_damage, 6, 1, "collision_nonlinear_cutbacks", "NL cutbacks",
                                 self.collision_nonlinear_cutbacks, width=8)
+        self._collision_nonlinear_kinematics_control = self._add_compact_option(
+            collision_damage,
+            7,
+            0,
+            "collision_nonlinear_kinematics",
+            "Kinematics",
+            self.collision_nonlinear_kinematics,
+            _KINEMATICS_LABELS,
+        )
+        self._collision_damage_beam_hint = ttk.Label(collision_damage, text="", foreground="#7f1d1d")
+        self._collision_damage_beam_hint.grid(row=8, column=0, columnspan=6, sticky=tk.W, padx=6, pady=(0, 4))
 
         vis_group = ttk.LabelFrame(tab_visualization, text="Plot configuration")
         vis_group.pack(fill=tk.X, padx=8, pady=(8, 8))
@@ -5284,7 +5499,9 @@ class RuntimeFEMWindow:
             self.component_choice.set("Stress von Mises")
         if self.component_selector is not None:
             self.component_selector.configure(values=tuple(component_labels.keys()))
-        self._sync_time_slider()
+        sync_time_slider = getattr(self, "_sync_time_slider", None)
+        if callable(sync_time_slider):
+            sync_time_slider()
 
     def _time_result_labels(self) -> list[str]:
         return [label for label, mode in self.result_case_labels.items() if str(mode).startswith("time:")]
@@ -6201,6 +6418,8 @@ class RuntimeFEMWindow:
                 "Max penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)),
                 "Max penetration ratio: " + str(round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)),
                 "Contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)),
+                "Beam contact: " + ("enabled" if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "off"),
+                "Impact kinematics: " + str(prestress.get("collision_nonlinear_kinematics", geometry.get("collision_nonlinear_kinematics", "von_karman"))),
                 "Contact patch: factor "
                 + str(round(_safe_float(prestress.get("collision_contact_patch_radius_factor")), 3))
                 + ", nodes "
@@ -6208,8 +6427,18 @@ class RuntimeFEMWindow:
                 + "-"
                 + str(_safe_int(prestress.get("collision_contact_patch_max_nodes"), 0)),
                 "Saved steps: " + str(_safe_int(prestress.get("collision_saved_steps"), 0)),
-                "Deleted shell elements: " + str(_safe_int(prestress.get("collision_deleted_shell_elements"), 0)),
+                "Deleted/eroded elements: "
+                + str(_safe_int(prestress.get("collision_deleted_eroded_elements", prestress.get("collision_deleted_shell_elements")), 0)),
             ])
+            if "collision_energy_initial_j" in prestress or "collision_energy_final_j" in prestress:
+                lines.extend([
+                    "Energy initial/final [J]: "
+                    + str(round(_safe_float(prestress.get("collision_energy_initial_j")), 6))
+                    + " / "
+                    + str(round(_safe_float(prestress.get("collision_energy_final_j")), 6)),
+                    "Energy max relative drift: "
+                    + str(round(_safe_float(prestress.get("collision_energy_max_relative_drift")), 8)),
+                ])
             if result.status == "running":
                 sphere_position = tuple(prestress.get("collision_live_sphere_position_m") or ())
                 lines.extend([
@@ -6726,6 +6955,8 @@ class RuntimeFEMWindow:
             nonlinear_solution_control=str(self.nonlinear_solution_control.get()),
             nonlinear_convergence_profile=str(self.nonlinear_convergence_profile.get()),
             nonlinear_assembly_threads=max(_safe_int(self.nonlinear_assembly_threads.get(), 0), 0),
+            nonlinear_static_kinematics=_normalise_kinematics(self.nonlinear_static_kinematics.get()),
+            beam_consistent_mass_enabled=bool(self.beam_consistent_mass_enabled.get()),
             deformation_scale=max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
             custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
@@ -6780,6 +7011,8 @@ class RuntimeFEMWindow:
             collision_include_static_load=bool(self.collision_include_static_load.get()),
             collision_damage_enabled=bool(self.collision_damage_enabled.get()),
             collision_material_nonlinear_enabled=bool(self.collision_material_nonlinear_enabled.get()),
+            collision_nonlinear_kinematics=_normalise_kinematics(self.collision_nonlinear_kinematics.get()),
+            collision_beam_contact_enabled=bool(self.collision_beam_contact_enabled.get()),
             collision_nonlinear_max_iterations=max(_safe_int(self.collision_nonlinear_max_iterations.get(), 20), 1),
             collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             collision_nonlinear_cutbacks=max(_safe_int(self.collision_nonlinear_cutbacks.get(), 8), 0),
@@ -7076,14 +7309,31 @@ class RuntimeFEMWindow:
             return False
         return True
 
+    def _static_inputs_are_valid(self) -> bool:
+        if (
+            self._static_kinematics_selector_enabled()
+            and _normalise_kinematics(self.nonlinear_static_kinematics.get()) == "corotational"
+            and bool(self.fracture_enabled.get())
+        ):
+            messagebox.showerror(
+                "FEM solver",
+                "Corotational nonlinear static does not support fracture/erosion. "
+                "Use Von Karman kinematics or disable strain-triggered erosion.",
+            )
+            return False
+        return True
+
     def run(self) -> None:
         """Prepare/run the runtime FEM request and render Matplotlib results."""
 
         if self.solver_thread is not None and self.solver_thread.is_alive():
             return
         self._stop_animation()
+        self._refresh_option_states()
         if not self.include_stiffeners.get() and not self.include_girders.get():
             messagebox.showwarning("FEM solver", "At least one member beam family should normally be included.")
+        if not self._static_inputs_are_valid():
+            return
         if not self._collision_inputs_are_valid():
             return
 

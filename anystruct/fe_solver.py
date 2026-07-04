@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import collections
 import json
 import math
+import os
 import re
 import time
 
@@ -130,6 +131,8 @@ class LightweightFEMConfig:
     nonlinear_solution_control: str = "newton force control"
     nonlinear_convergence_profile: str = "auto"
     nonlinear_assembly_threads: int = 0
+    nonlinear_static_kinematics: str = "von_karman"
+    beam_consistent_mass_enabled: bool = False
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
     custom_use_nullspace_projection: bool = False
@@ -182,6 +185,8 @@ class LightweightFEMConfig:
     collision_include_static_load: bool = False
     collision_damage_enabled: bool = True
     collision_material_nonlinear_enabled: bool = False
+    collision_nonlinear_kinematics: str = "von_karman"
+    collision_beam_contact_enabled: bool = False
     collision_nonlinear_max_iterations: int = 20
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
@@ -627,6 +632,13 @@ def _normalized_choice(value: object, default: str = "auto") -> str:
     return " ".join(text.split()) or default
 
 
+def _normalized_kinematics(value: object) -> str:
+    choice = _normalized_choice(value, "von karman")
+    if choice in {"corotational", "co rotational", "large rotation", "large rotations"}:
+        return "corotational"
+    return "von_karman"
+
+
 def _wants_s8(config: LightweightFEMConfig) -> bool:
     return _normalized_choice(config.shell_element_order, "s4") in {"s8", "s8r", "8 node", "8 node shell", "quadratic"}
 
@@ -973,6 +985,7 @@ def _section_with_runtime_options(
     depth_factor: float,
     eccentricity: float,
     orientation: str,
+    consistent_mass: bool = False,
 ) -> dict[str, float]:
     result = dict(_section_or_default(section, thickness, reference, depth_factor))
     try:
@@ -986,6 +999,8 @@ def _section_with_runtime_options(
         result["orientation"] = (0.0, 0.0, 1.0)
     elif orientation_key == "global y":
         result["orientation"] = (0.0, 1.0, 0.0)
+    if bool(consistent_mass):
+        result["consistent_mass"] = True
     return result
 
 
@@ -1107,7 +1122,7 @@ def _flange_beam_section(section: dict[str, float], fallback_thickness: float) -
     if width <= 0.0 or thickness <= 0.0:
         return {}
     area = width * thickness
-    return {
+    result = {
         "area": area,
         "Iy": width * thickness ** 3 / 12.0,
         "Iz": thickness * width ** 3 / 12.0,
@@ -1118,6 +1133,9 @@ def _flange_beam_section(section: dict[str, float], fallback_thickness: float) -
         "flange_thickness": 0.0,
         "label": "flange " + str(section.get("label", "")).strip(),
     }
+    if bool(section.get("consistent_mass", False)):
+        result["consistent_mass"] = True
+    return result
 
 
 def _append_member_shell(
@@ -1784,6 +1802,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             0.08,
             config.stiffener_eccentricity_m,
             orientation,
+            config.beam_consistent_mass_enabled,
         )
     for girder_x in girder_positions:
         girder_sections[float(girder_x)] = _section_with_runtime_options(
@@ -1793,6 +1812,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             0.10,
             config.girder_eccentricity_m,
             orientation,
+            config.beam_consistent_mass_enabled,
         )
     stiffener_web_intersections = {
         round(float(girder_x), 12): _member_web_section_depth_levels(section, config)
@@ -2044,6 +2064,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             0.08,
             config.stiffener_eccentricity_m,
             orientation,
+            config.beam_consistent_mass_enabled,
         )
         count = stiffener_count if stiffener_count > 0 else min(8, cols)
         for offset in range(count):
@@ -2064,6 +2085,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             0.12,
             config.girder_eccentricity_m,
             orientation,
+            config.beam_consistent_mass_enabled,
         )
         ring_rows = [_index_of_break(z_breaks, pos) for pos in girder_positions] or [rows // 2]
     stiffener_web_intersections = {
@@ -2981,6 +3003,7 @@ def _collision_nonlinear_config(config: LightweightFEMConfig):
         contact_force_tolerance=max(float(config.collision_nonlinear_tolerance or 2.0e-3), 2.0e-3),
         max_cutbacks=max(int(config.collision_nonlinear_cutbacks or 0), 12),
         record_element_state_history=True,
+        kinematics=_normalized_kinematics(config.collision_nonlinear_kinematics),
     )
 
 
@@ -2999,6 +3022,27 @@ def _collision_plastic_damage_config(config: LightweightFEMConfig):
         max_deleted_fraction=min(max(float(config.collision_damage_max_deleted_fraction), 1.0e-9), 1.0),
         element_scope=("shell", "beam"),
     )
+
+
+def _collision_energy_summary(diagnostics: dict[str, object]) -> dict[str, float]:
+    if not isinstance(diagnostics, dict):
+        return {}
+    kinetic = np.asarray(diagnostics.get("kinetic_energy", ()), dtype=float).reshape(-1)
+    strain = np.asarray(diagnostics.get("strain_energy", ()), dtype=float).reshape(-1)
+    sphere = np.asarray(diagnostics.get("sphere_kinetic_energy", ()), dtype=float).reshape(-1)
+    count = min(int(kinetic.size), int(strain.size), int(sphere.size))
+    if count <= 0:
+        return {}
+    total = kinetic[:count] + strain[:count] + sphere[:count]
+    if total.size <= 0:
+        return {}
+    return {
+        "collision_energy_initial_j": float(total[0]),
+        "collision_energy_final_j": float(total[-1]),
+        "collision_sphere_kinetic_initial_j": float(sphere[0]),
+        "collision_sphere_kinetic_final_j": float(sphere[count - 1]),
+        "collision_energy_max_relative_drift": float(diagnostics.get("max_relative_energy_drift", 0.0) or 0.0),
+    }
 
 
 def _plastic_strain_element_fields_from_states(element_states: object) -> dict[str, dict[int, float]]:
@@ -3418,20 +3462,78 @@ def _recovery_config(config: LightweightFEMConfig):
     return _full_backend.RecoveryConfig(history_mode=mode, store_full_histories=(mode == "full"))
 
 
-def _resource_config(config: LightweightFEMConfig):
+def _auto_thread_cap() -> int:
+    cpu_count = max(int(os.cpu_count() or 1), 1)
+    if cpu_count <= 2:
+        return 1
+    if cpu_count <= 6:
+        return max(1, cpu_count // 2)
+    return min(8, max(2, cpu_count // 2))
+
+
+def _auto_assembly_thread_count(config: LightweightFEMConfig, generated_geometry: dict | None = None) -> int | None:
+    requested = int(config.nonlinear_assembly_threads or 0)
+    if requested > 0:
+        return requested
+    if generated_geometry is None:
+        return None
+    element_count = int(len(generated_geometry.get("shells", []) or ())) + int(len(generated_geometry.get("beams", []) or ()))
+    node_count = int(len(generated_geometry.get("nodes", []) or ()))
+    if element_count <= 0 and node_count <= 0:
+        return None
+    layers = _nonlinear_layer_count(config.nonlinear_layers)
+    work_units = max(float(element_count), 0.5 * float(node_count)) * float(layers)
+    cap = _auto_thread_cap()
+    if work_units < 2500.0:
+        return 1
+    if work_units < 10000.0:
+        return min(2, cap)
+    if work_units < 40000.0:
+        return min(4, cap)
+    return cap
+
+
+def _resource_config(
+        config: LightweightFEMConfig,
+        generated_geometry: dict | None = None,
+        *,
+        auto_assembly: bool = False,
+):
     if _full_backend is None or not hasattr(_full_backend, "ResourceConfig"):
         return None
     recovery_threads = int(config.recovery_threads or 0)
-    assembly_threads = int(config.nonlinear_assembly_threads or 0)
+    assembly_threads = (
+        _auto_assembly_thread_count(config, generated_geometry)
+        if auto_assembly
+        else int(config.nonlinear_assembly_threads or 0)
+    )
     memory_limit_mb = float(config.memory_limit_mb or 0.0)
-    if recovery_threads <= 0 and assembly_threads <= 0 and memory_limit_mb <= 0.0:
+    if recovery_threads <= 0 and (assembly_threads is None or assembly_threads <= 0) and memory_limit_mb <= 0.0:
         return None
     return _full_backend.ResourceConfig(
-        assembly_threads=assembly_threads if assembly_threads > 0 else None,
+        assembly_threads=assembly_threads if assembly_threads is not None and assembly_threads > 0 else None,
         recovery_threads=recovery_threads if recovery_threads > 0 else None,
         memory_limit_bytes=int(memory_limit_mb * 1024.0 * 1024.0) if memory_limit_mb > 0.0 else None,
         deterministic=True,
+        metadata={
+            "assembly_threads_policy": (
+                "manual"
+                if int(config.nonlinear_assembly_threads or 0) > 0
+                else ("auto" if auto_assembly and assembly_threads is not None else "backend")
+            ),
+            "assembly_thread_cap": float(_auto_thread_cap()),
+        },
     )
+
+
+def _resource_assembly_threads(resource_config: object | None, fallback: int = 0) -> int:
+    value = getattr(resource_config, "assembly_threads", None)
+    if value is None:
+        return int(fallback)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
 
 
 def _wants_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
@@ -3467,6 +3569,26 @@ def _wants_static_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
         "geom + material nonlinear static",
         "geometric and material nonlinear static",
     }
+
+
+def _effective_nonlinear_static_kinematics(config: LightweightFEMConfig) -> str:
+    if not _wants_static_nonlinear_analysis(config):
+        return "von_karman"
+    if _wants_capacity_workflow(config):
+        return "von_karman"
+    if _wants_tangent_stability_analysis(config):
+        return "von_karman"
+    if _nonlinear_solution_control(config) == "arc length":
+        return "von_karman"
+    return _normalized_kinematics(config.nonlinear_static_kinematics)
+
+
+def _invalid_corotational_static_fracture(config: LightweightFEMConfig) -> bool:
+    return (
+        not bool(config.collision_enabled)
+        and _effective_nonlinear_static_kinematics(config) == "corotational"
+        and bool(config.fracture_enabled)
+    )
 
 
 def _nonlinear_solution_control(config: LightweightFEMConfig) -> str:
@@ -4222,6 +4344,12 @@ def _run_collision_response(
         load_patch_radius_factor=contact_patch_factor,
         min_load_patch_nodes=contact_patch_min_nodes,
         max_load_patch_nodes=contact_patch_max_nodes,
+        beam_contact=bool(config.collision_beam_contact_enabled),
+    )
+    collision_resource_config = _resource_config(
+        config,
+        generated_geometry,
+        auto_assembly=bool(config.collision_material_nonlinear_enabled),
     )
     transient_config = _backend_TransientConfig(
         dt=dt,
@@ -4232,9 +4360,14 @@ def _run_collision_response(
             if hasattr(_full_backend, "RecoveryConfig")
             else _recovery_config(config)
         ),
-        resource_config=_resource_config(config),
+        resource_config=collision_resource_config,
     )
     nonlinear_config = _collision_nonlinear_config(config)
+    collision_kinematics = (
+        _normalized_kinematics(config.collision_nonlinear_kinematics)
+        if nonlinear_config is not None
+        else "von_karman"
+    )
     plastic_damage_config = _collision_plastic_damage_config(config)
     damage_config = None if nonlinear_config is not None else _collision_damage_config(config)
     base_load_case = load_case if config.collision_include_static_load else None
@@ -4294,12 +4427,14 @@ def _run_collision_response(
         plastic_damage_config=plastic_damage_config,
         progress_callback=live_progress,
     )
-    damage_summary = (impact.diagnostics or {}).get("impact_damage_summary", {}) or {}
-    strain_summary = (impact.diagnostics or {}).get("strain_summary", {}) or {}
-    plastic_element_fields = _plastic_strain_element_fields_from_states((impact.diagnostics or {}).get("element_states", {}))
-    erosion_summary = (impact.diagnostics or {}).get("erosion_summary", {}) or {}
-    contact_failure_summary = (impact.diagnostics or {}).get("contact_failure_summary", {}) or {}
-    nonlinear_failure_summary = (impact.diagnostics or {}).get("nonlinear_failure_summary", {}) or {}
+    impact_diagnostics = impact.diagnostics or {}
+    energy_summary = _collision_energy_summary(impact_diagnostics)
+    damage_summary = impact_diagnostics.get("impact_damage_summary", {}) or {}
+    strain_summary = impact_diagnostics.get("strain_summary", {}) or {}
+    plastic_element_fields = _plastic_strain_element_fields_from_states(impact_diagnostics.get("element_states", {}))
+    erosion_summary = impact_diagnostics.get("erosion_summary", {}) or {}
+    contact_failure_summary = impact_diagnostics.get("contact_failure_summary", {}) or {}
+    nonlinear_failure_summary = impact_diagnostics.get("nonlinear_failure_summary", {}) or {}
     records = tuple(damage_summary.get("records", ()) or ())
     times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
     displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
@@ -4389,15 +4524,20 @@ def _run_collision_response(
         "sphere_momentum_balance_error": float(impact.sphere_momentum_balance_error),
         "saved_steps": float(len(times)),
         "damage_enabled": bool(config.collision_damage_enabled),
+        "material_nonlinear_enabled": nonlinear_config is not None,
+        "nonlinear_kinematics": collision_kinematics,
+        "beam_contact_enabled": bool(config.collision_beam_contact_enabled),
         "deleted_shell_elements": float(len(final_deleted)),
+        "deleted_eroded_elements": float(len(final_deleted)),
         "representative_shell_edge_m": float(auto_time.get("representative_shell_edge_m", 0.0) if auto_time else 0.0),
         "sphere_travel_per_step_m": float(auto_time.get("sphere_travel_per_step_m", float(config.collision_speed_mps) * dt) if auto_time else float(config.collision_speed_mps) * dt),
         "contact_penalty_stiffness_n_per_m": float(resolved_penalty),
         "contact_penalty_basis": str(penalty_basis),
-        "adaptive_cutback_retry_count": float((impact.diagnostics or {}).get("adaptive_cutback_retry_count", 0) or 0),
-        "solution_control": str((impact.diagnostics or {}).get("solution_control", "implicit_newmark_time_domain")),
-        "arc_length_applicability": str((impact.diagnostics or {}).get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
+        "adaptive_cutback_retry_count": float(impact_diagnostics.get("adaptive_cutback_retry_count", 0) or 0),
+        "solution_control": str(impact_diagnostics.get("solution_control", "implicit_newmark_time_domain")),
+        "arc_length_applicability": str(impact_diagnostics.get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
     }
+    visualization["collision_summary"].update(energy_summary)
     prestress_summary = {
         "collision_status": str(impact.status),
         "collision_time_mode": str(auto_time.get("mode", "manual") if auto_time else "manual"),
@@ -4412,12 +4552,16 @@ def _run_collision_response(
         "collision_saved_steps": float(len(times)),
         "collision_damage_enabled": 1.0 if config.collision_damage_enabled else 0.0,
         "collision_material_nonlinear_enabled": 1.0 if nonlinear_config is not None else 0.0,
-        "collision_nonlinear_status": str((impact.diagnostics or {}).get("status", impact.status)),
-        "collision_nonlinear_iterations": float(sum((impact.diagnostics or {}).get("iteration_counts", ()) or ())),
-        "collision_nonlinear_cutbacks": float((impact.diagnostics or {}).get("cutback_count", 0) or 0),
+        "collision_nonlinear_kinematics": collision_kinematics,
+        "collision_nonlinear_assembly_threads": float(_resource_assembly_threads(collision_resource_config)),
+        "collision_beam_contact_enabled": 1.0 if bool(config.collision_beam_contact_enabled) else 0.0,
+        "collision_nonlinear_status": str(impact_diagnostics.get("status", impact.status)),
+        "collision_nonlinear_iterations": float(sum(impact_diagnostics.get("iteration_counts", ()) or ())),
+        "collision_nonlinear_cutbacks": float(impact_diagnostics.get("cutback_count", 0) or 0),
         "collision_nonlinear_max_plastic_strain": float(strain_summary.get("max_equivalent_plastic_strain", 0.0) or 0.0),
         "collision_plastic_damage_threshold": float(config.collision_plastic_damage_threshold),
         "collision_deleted_shell_elements": float(len(final_deleted)),
+        "collision_deleted_eroded_elements": float(len(final_deleted)),
         "collision_representative_shell_edge_m": float(auto_time.get("representative_shell_edge_m", 0.0) if auto_time else 0.0),
         "collision_sphere_travel_per_step_m": float(auto_time.get("sphere_travel_per_step_m", float(config.collision_speed_mps) * dt) if auto_time else float(config.collision_speed_mps) * dt),
         "collision_estimated_steps": float(auto_time.get("estimated_steps", math.ceil(t_end / max(dt, 1.0e-12))) if auto_time else math.ceil(t_end / max(dt, 1.0e-12))),
@@ -4427,11 +4571,11 @@ def _run_collision_response(
         "collision_contact_patch_radius_factor": float(contact_patch_factor),
         "collision_contact_patch_min_nodes": float(contact_patch_min_nodes),
         "collision_contact_patch_max_nodes": float(contact_patch_max_nodes),
-        "collision_adaptive_cutback_retries": float((impact.diagnostics or {}).get("adaptive_cutback_retry_count", 0) or 0),
-        "collision_solution_control": str((impact.diagnostics or {}).get("solution_control", "implicit_newmark_time_domain")),
-        "collision_arc_length_applicability": str((impact.diagnostics or {}).get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
-        "collision_stop_reason": str((impact.diagnostics or {}).get("stop_reason", "") or ""),
-        "collision_separation_stop_time_s": float((impact.diagnostics or {}).get("separation_stop_time", 0.0) or 0.0),
+        "collision_adaptive_cutback_retries": float(impact_diagnostics.get("adaptive_cutback_retry_count", 0) or 0),
+        "collision_solution_control": str(impact_diagnostics.get("solution_control", "implicit_newmark_time_domain")),
+        "collision_arc_length_applicability": str(impact_diagnostics.get("arc_length_applicability", "not_applicable_to_dynamic_impact")),
+        "collision_stop_reason": str(impact_diagnostics.get("stop_reason", "") or ""),
+        "collision_separation_stop_time_s": float(impact_diagnostics.get("separation_stop_time", 0.0) or 0.0),
         "collision_auto_requested_total_time_s": float(auto_time.get("requested_total_time_s", 0.0) if auto_time else 0.0),
         "collision_auto_impact_window_s": float(auto_time.get("impact_window_s", 0.0) if auto_time else 0.0),
         "collision_bounce_back_time_s": float(config.collision_bounce_back_time_s),
@@ -4439,6 +4583,7 @@ def _run_collision_response(
         "allow_unbalanced_free_free": 0.0,
         "recovery_history_mode": "full",
     }
+    prestress_summary.update(energy_summary)
     failure_summary = contact_failure_summary or nonlinear_failure_summary
     if failure_summary:
         prestress_summary["collision_failure_time_s"] = float(failure_summary.get("time", 0.0) or 0.0)
@@ -4507,11 +4652,22 @@ def _run_collision_response(
         )
     diagnostics.append("Collision uses fixed/constrained supports only; rigid-body nullspace projection is disabled.")
     diagnostics.append("Collision solution control is implicit Newmark time-domain integration; static arc-length continuation is not used for collision impact.")
+    if bool(config.collision_beam_contact_enabled):
+        diagnostics.append("Direct beam/stiffener contact is enabled for the rigid sphere.")
     if nonlinear_config is not None:
-        diagnostics.append("Material nonlinear impact is enabled: implicit Newmark/Newton with committed plastic state.")
+        diagnostics.append(
+            "Material nonlinear impact is enabled with "
+            + collision_kinematics.replace("_", " ")
+            + " kinematics: implicit Newmark/Newton with committed plastic state."
+        )
         diagnostics.append("Nonlinear impact max equivalent plastic strain: " + str(round(float(strain_summary.get("max_equivalent_plastic_strain", 0.0) or 0.0), 8)) + ".")
     if config.collision_damage_enabled:
-        diagnostics.append("Impact damage/erosion is enabled for shell elements; direct beam contact remains unsupported.")
+        if nonlinear_config is not None:
+            diagnostics.append("Impact plastic-damage erosion is enabled for shell and beam elements where the backend damage scope applies.")
+        elif bool(config.collision_beam_contact_enabled):
+            diagnostics.append("Capacity-based impact damage/erosion is shell-contact based; use material nonlinear plastic damage for beam erosion.")
+        else:
+            diagnostics.append("Capacity-based impact damage/erosion is enabled for shell contact elements.")
     if failure_summary:
         diagnostics.append(
             "Contact failure detail: time="
@@ -4534,12 +4690,12 @@ def _run_collision_response(
         )
         if failure_summary.get("active_element_ids"):
             diagnostics.append(
-                "Contact failure active shell element(s): "
+                "Contact failure active element(s): "
                 + ", ".join(str(int(element_id)) for element_id in (failure_summary.get("active_element_ids", ()) or ())[:8])
                 + "."
             )
         diagnostics.append("Contact failure suggestion: " + str(failure_summary.get("suggestion", "")))
-    for warning in (impact.diagnostics or {}).get("warnings", ()) or ():
+    for warning in impact_diagnostics.get("warnings", ()) or ():
         diagnostics.append(str(warning))
     return LightweightFEMResult(
         status="ok" if str(impact.status) in {"completed", "no_contact", "max_deleted_fraction_reached"} else str(impact.status),
@@ -5266,6 +5422,30 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         diagnostics.append("Custom selected edge segments receive an additional line load.")
     if config.custom_time_domain_enabled:
         diagnostics.append("Custom time-domain pressure response is enabled and solved with the linear Newmark pressure-patch solver.")
+    if _invalid_corotational_static_fracture(config):
+        message = (
+            "Corotational nonlinear static does not support fracture/erosion; "
+            + "use Von Karman kinematics or disable strain-triggered erosion."
+        )
+        return LightweightFEMResult(
+            status="invalid_static_kinematics",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            diagnostics=tuple(diagnostics + [message]),
+            mesh_info={
+                "nodes": int(len(generated_geometry.get("nodes", []))),
+                "shells": int(len(generated_geometry.get("shells", []))),
+                "beams": int(len(generated_geometry.get("beams", []))),
+                "rigid_lids": int(len(generated_geometry.get("rigid_lids", []))),
+                **_mesh_size_diagnostics(generated_geometry),
+            },
+            prestress_summary={
+                "nonlinear_static_kinematics": "corotational",
+                "fracture_enabled": 1.0,
+            },
+            solver_name="ANYstructure production FE mesh",
+        )
 
     try:
         if status_callback: status_callback("Building FE model...")
@@ -5440,6 +5620,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 selected_imperfection = None
                 if config.imperfection_enabled:
                     selected_imperfection, _imperfection_metadata = _build_runtime_imperfection(model, generated_geometry, geometry, config)
+                nonlinear_resource_config = _resource_config(config, generated_geometry, auto_assembly=True)
                 workflow_config = _full_backend.CapacityWorkflowConfig(
                     num_buckling_modes=int(config.num_buckling_modes),
                     buckling_mode_number=_positive_int(config.capacity_buckling_mode_number, 1),
@@ -5450,7 +5631,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                     nonlinear_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                     nonlinear_num_layers=_nonlinear_layer_count(config.nonlinear_layers),
                     nonlinear_convergence_settings=str(config.nonlinear_convergence_profile or "auto"),
-                    nonlinear_resource_config=_resource_config(config),
+                    nonlinear_resource_config=nonlinear_resource_config,
                     mesh_min_elements_per_half_wave=_positive_int(config.capacity_mesh_min_elements_per_half_wave, 4),
                     copy_model=True,
                 )
@@ -5479,11 +5660,12 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                 prestress_summary["nonlinear_static_status"] = str(nonlinear_static_result.status)
                 prestress_summary["nonlinear_static_load_factor"] = nonlinear_static_factor
                 prestress_summary["nonlinear_static_steps"] = float(len(nonlinear_static_result.steps))
+                prestress_summary["nonlinear_static_kinematics"] = "von_karman"
                 prestress_summary["nonlinear_static_total_iterations"] = float((nonlinear_static_result.info or {}).get("total_newton_iterations", 0.0))
                 _nl_info = nonlinear_static_result.info or {}
                 _nl_settings = _nl_info.get("convergence_settings", {}) if isinstance(_nl_info, dict) else {}
                 prestress_summary["nonlinear_static_convergence_profile"] = str(_nl_settings.get("profile", config.nonlinear_convergence_profile)) if isinstance(_nl_settings, dict) else str(config.nonlinear_convergence_profile)
-                prestress_summary["nonlinear_static_assembly_threads"] = float(int(config.nonlinear_assembly_threads or 0))
+                prestress_summary["nonlinear_static_assembly_threads"] = float(_resource_assembly_threads(nonlinear_resource_config))
                 prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
                 if nonlinear_static_result.steps:
                     prestress_summary["nonlinear_static_max_plastic_strain"] = float(
@@ -5505,6 +5687,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
 
     if _wants_static_nonlinear_analysis(config) and capacity_workflow_result is None:
         nonlinear_control = _nonlinear_solution_control(config)
+        static_kinematics = _effective_nonlinear_static_kinematics(config)
         if status_callback: status_callback("Solving nonlinear static system (" + nonlinear_control + ")...")
         if nonlinear_control == "arc length":
             solver_available = _backend_solve_static_arc_length is not None
@@ -5516,6 +5699,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             diagnostics.append(unavailable_message)
         else:
             try:
+                nonlinear_resource_config = None
                 if nonlinear_control == "arc length":
                     nonlinear_static_result = _backend_solve_static_arc_length(
                         model,
@@ -5527,6 +5711,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         num_layers=_nonlinear_layer_count(config.nonlinear_layers),
                     )
                 else:
+                    nonlinear_resource_config = _resource_config(config, generated_geometry, auto_assembly=True)
                     nonlinear_static_result = _backend_solve_static_nonlinear(
                         model,
                         load_case,
@@ -5536,19 +5721,21 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         num_layers=_nonlinear_layer_count(config.nonlinear_layers),
                         convergence_settings=str(config.nonlinear_convergence_profile or "auto"),
-                        resource_config=_resource_config(config),
+                        resource_config=nonlinear_resource_config,
                         fracture_config=_runtime_fracture_config(config),
+                        kinematics=static_kinematics,
                     )
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
+                _nl_info = nonlinear_static_result.info or {}
                 prestress_summary["nonlinear_static_control"] = nonlinear_control
                 prestress_summary["nonlinear_static_status"] = str(nonlinear_static_result.status)
                 prestress_summary["nonlinear_static_load_factor"] = nonlinear_static_factor
                 prestress_summary["nonlinear_static_steps"] = float(len(nonlinear_static_result.steps))
-                prestress_summary["nonlinear_static_total_iterations"] = float((nonlinear_static_result.info or {}).get("total_newton_iterations", 0.0))
-                _nl_info = nonlinear_static_result.info or {}
+                prestress_summary["nonlinear_static_kinematics"] = str(_nl_info.get("kinematics", static_kinematics)) if isinstance(_nl_info, dict) else static_kinematics
+                prestress_summary["nonlinear_static_total_iterations"] = float(_nl_info.get("total_newton_iterations", 0.0)) if isinstance(_nl_info, dict) else 0.0
                 _nl_settings = _nl_info.get("convergence_settings", {}) if isinstance(_nl_info, dict) else {}
                 prestress_summary["nonlinear_static_convergence_profile"] = str(_nl_settings.get("profile", config.nonlinear_convergence_profile)) if isinstance(_nl_settings, dict) else str(config.nonlinear_convergence_profile)
-                prestress_summary["nonlinear_static_assembly_threads"] = float(int(config.nonlinear_assembly_threads or 0))
+                prestress_summary["nonlinear_static_assembly_threads"] = float(_resource_assembly_threads(nonlinear_resource_config))
                 prestress_summary["nonlinear_static_layers"] = float((nonlinear_static_result.info or {}).get("num_layers", _nonlinear_layer_count(config.nonlinear_layers)))
                 fracture_summary_data = (nonlinear_static_result.info or {}).get("fracture_summary", {})
                 if isinstance(fracture_summary_data, dict):
