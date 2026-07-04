@@ -775,11 +775,12 @@ class Tkinter3DCanvas(tk.Frame):
     def _clear_canvas_only(self) -> None:
         self.canvas.delete("all")
 
-    def clear(self) -> None:
+    def clear(self, keep_canvas: bool = False) -> None:
         self.objects.clear()
         self._explicit_opaque_cylinder_occluders.clear()
         self._invalidate_geometry_cache()
-        self._clear_canvas_only()
+        if not keep_canvas:
+            self._clear_canvas_only()
 
     def redraw(self) -> None:
         """Render the scene; static world geometry is reused from cache."""

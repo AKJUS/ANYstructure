@@ -236,7 +236,7 @@ def test_fe_solver_kernel_warmup_manager_reports_runtime_state(monkeypatch):
             {"status": "not_started", "shell_orders": (), "total_seconds": 0.0, "message": ""}
         )
 
-    def fake_warmup(shell_orders):
+    def fake_warmup(shell_orders, *, include_nonlinear_impact=False):
         return {
             "status": "completed",
             "total_seconds": 0.25,

@@ -511,3 +511,61 @@ def compute_shell_stiffness_matrices_jit(
         K_all[e] = K
         
     return K_all
+
+
+@njit(cache=True, parallel=True)
+def compute_shell_mass_matrices_jit(
+    coords_all: np.ndarray,      # (N, num_nodes, 3)
+    is_4node: bool,
+    thickness: float,
+    rho: float,
+    gauss_points: np.ndarray,    # (num_gp, 2)
+    gauss_weights: np.ndarray,   # (num_gp,)
+) -> np.ndarray:                 # (N, total_dofs, total_dofs)
+    """Batched consistent shell mass matrices.
+
+    The per-integration-point mass blocks are isotropic per node pair
+    (``m_ij * I3`` for translations and rotations separately), so the local
+    shell frame rotation cancels exactly (``R.T (m I3) R == m I3``) and the
+    local-to-global DOF transform used by the scalar element path can be
+    skipped without changing the result.
+    """
+    N_elem = coords_all.shape[0]
+    num_nodes = 4 if is_4node else 8
+    total_dofs = num_nodes * 6
+
+    trans_factor = rho * thickness
+    rot_factor = rho * thickness**3 / 12.0
+
+    M_all = np.zeros((N_elem, total_dofs, total_dofs))
+
+    for e in prange(N_elem):
+        coords = coords_all[e]
+        M = np.zeros((total_dofs, total_dofs))
+
+        num_gp = gauss_points.shape[0]
+        for gp_idx in range(num_gp):
+            xi = gauss_points[gp_idx, 0]
+            eta = gauss_points[gp_idx, 1]
+            weight = gauss_weights[gp_idx]
+
+            if is_4node:
+                N, dN_dxi, dN_deta = _compute_4node_shape_functions(xi, eta)
+            else:
+                N, dN_dxi, dN_deta = _compute_8node_shape_functions(xi, eta)
+
+            _R, _dN_dx, _dN_dy, det_j = _local_frame_and_derivatives_jit(coords, dN_dxi, dN_deta)
+            scale = det_j * weight
+
+            for i in range(num_nodes):
+                for j in range(num_nodes):
+                    outer_n = N[i] * N[j] * scale
+                    trans = trans_factor * outer_n
+                    rot = rot_factor * outer_n
+                    for d in range(3):
+                        M[6 * i + d, 6 * j + d] += trans
+                        M[6 * i + 3 + d, 6 * j + 3 + d] += rot
+
+        M_all[e] = M
+
+    return M_all

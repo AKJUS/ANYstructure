@@ -23,7 +23,7 @@ required.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy import sparse
@@ -396,8 +396,19 @@ def _batch_b_plan_assemble(
     displacements: np.ndarray,
     committed_states: Mapping[int, Any],
     tangent: bool = True,
+    deleted_element_ids: Sequence[int] = (),
+    residual_stiffness_fraction: float = 1.0,
 ) -> Tuple[np.ndarray, Optional[sparse.csr_matrix], Dict[int, Any]]:
     """Assemble with direct-buffer elastic batches and legacy plastic batches."""
+    if tuple(deleted_element_ids or ()):
+        return _ORIGINAL_PLAN_ASSEMBLE(
+            self,
+            displacements,
+            committed_states,
+            tangent=tangent,
+            deleted_element_ids=tuple(deleted_element_ids),
+            residual_stiffness_fraction=float(residual_stiffness_fraction),
+        )
     with self._lock:
         start_total = time.perf_counter()
         self.timings.calls += 1

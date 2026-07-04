@@ -168,6 +168,51 @@ class RuntimeFEMOptions:
     memory_limit_mb: float = 0.0
     capacity_buckling_mode_number: int = 1
     capacity_mesh_min_elements_per_half_wave: int = 4
+    fracture_enabled: bool = False
+    fracture_strain_threshold: float = 0.02
+    fracture_residual_stiffness_fraction: float = 1.0e-6
+    fracture_max_deleted_fraction: float = 0.25
+    fracture_min_load_factor: float = 0.0
+    collision_enabled: bool = False
+    collision_include_static_load: bool = False
+    collision_damage_enabled: bool = True
+    collision_material_nonlinear_enabled: bool = False
+    collision_nonlinear_max_iterations: int = 20
+    collision_nonlinear_tolerance: float = 1.0e-6
+    collision_nonlinear_cutbacks: int = 8
+    collision_plastic_damage_threshold: float = 0.01
+    collision_mass_kg: float = 1000.0
+    collision_radius_m: float = 0.25
+    collision_start_x_m: float = 0.0
+    collision_start_y_m: float = 0.0
+    collision_start_z_m: float = 1.0
+    collision_vector_x: float = 0.0
+    collision_vector_y: float = 0.0
+    collision_vector_z: float = -1.0
+    collision_speed_mps: float = 5.0
+    collision_time_mode: str = "auto"
+    collision_auto_steps_per_radius: float = 20.0
+    collision_auto_post_contact_radii: float = 6.0
+    collision_bounce_back_time_s: float = 0.01
+    collision_total_time_s: float = 0.05
+    collision_dt_s: float = 0.0005
+    collision_result_interval_s: float = 0.0
+    collision_penalty_stiffness_n_per_m: float = 0.0
+    collision_contact_damping: float = 0.0
+    collision_max_iterations: int = 25
+    collision_penetration_tolerance_m: float = 1.0e-8
+    collision_force_tolerance_n: float = 1.0e-6
+    collision_target_penetration_fraction: float = 0.01
+    collision_max_event_substeps: int = 16
+    collision_contact_surface: str = "midsurface"
+    collision_damage_mode: str = "accumulated_damage"
+    collision_damage_capacity_basis: str = "yield"
+    collision_damage_user_capacity_pa: float = 0.0
+    collision_damage_softening_start: float = 0.6
+    collision_damage_delete_at: float = 1.0
+    collision_damage_min_contact_area_m2: float = 1.0e-6
+    collision_damage_max_deleted_fraction: float = 0.25
+    collision_damage_neighbor_smoothing: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,6 +250,7 @@ _FE_KERNEL_WARMUP_STATE: dict[str, Any] = {
     "shell_orders": (),
     "total_seconds": 0.0,
     "message": "",
+    "nonlinear_impact": False,
 }
 
 
@@ -213,13 +259,20 @@ def _warmup_disabled() -> bool:
     return str(raw).strip().lower() in {"0", "false", "no", "off", "disable", "disabled"}
 
 
-def _summarize_kernel_warmup_report(report: dict[str, Any], shell_orders: tuple[str, ...]) -> dict[str, Any]:
+def _summarize_kernel_warmup_report(
+    report: dict[str, Any],
+    shell_orders: tuple[str, ...],
+    *,
+    include_nonlinear_impact: bool = False,
+) -> dict[str, Any]:
     warmed = report.get("shell_orders") if isinstance(report, dict) else {}
     warmed = warmed if isinstance(warmed, dict) else {}
     max_difference = 0.0
     for item in warmed.values():
         if isinstance(item, dict):
             max_difference = max(max_difference, _safe_float(item.get("matrix_difference_norm"), 0.0))
+    nonlinear = report.get("nonlinear_impact") if isinstance(report, dict) else None
+    nonlinear = nonlinear if isinstance(nonlinear, dict) else None
     return {
         "status": str(report.get("status", "completed") if isinstance(report, dict) else "completed"),
         "shell_orders": tuple(str(key) for key in warmed.keys()) or shell_orders,
@@ -228,6 +281,9 @@ def _summarize_kernel_warmup_report(report: dict[str, Any], shell_orders: tuple[
         "parallel_threads": (report.get("jit") or {}).get("num_threads") if isinstance(report, dict) else None,
         "max_matrix_difference_norm": float(max_difference),
         "message": "",
+        "nonlinear_impact": bool(nonlinear is not None or include_nonlinear_impact),
+        "nonlinear_impact_status": str((nonlinear or {}).get("status", "")),
+        "nonlinear_impact_seconds": _safe_float((nonlinear or {}).get("seconds"), 0.0),
     }
 
 
@@ -243,6 +299,7 @@ def start_fe_solver_kernel_warmup(
     *,
     background: bool = True,
     status_callback=None,
+    include_nonlinear_impact: bool = False,
 ) -> dict[str, Any]:
     """Start optional FE backend kernel warmup once per process."""
 
@@ -261,7 +318,13 @@ def start_fe_solver_kernel_warmup(
 
     with _FE_KERNEL_WARMUP_LOCK:
         status = str(_FE_KERNEL_WARMUP_STATE.get("status", "not_started"))
-        if status in {"running", "completed", "failed", "backend_unavailable", "disabled"}:
+        requested_set = set(requested)
+        warmed_set = set(str(order) for order in _FE_KERNEL_WARMUP_STATE.get("shell_orders", ()) or ())
+        nonlinear_done = bool(_FE_KERNEL_WARMUP_STATE.get("nonlinear_impact", False))
+        request_satisfied = requested_set.issubset(warmed_set) and (not include_nonlinear_impact or nonlinear_done)
+        if status == "running":
+            return dict(_FE_KERNEL_WARMUP_STATE)
+        if status in {"completed", "failed", "backend_unavailable", "disabled"} and request_satisfied:
             return dict(_FE_KERNEL_WARMUP_STATE)
         _FE_KERNEL_WARMUP_STATE.update(
             {
@@ -269,6 +332,7 @@ def start_fe_solver_kernel_warmup(
                 "shell_orders": requested,
                 "total_seconds": 0.0,
                 "message": "FE solver kernel warmup is running.",
+                "nonlinear_impact": bool(include_nonlinear_impact),
                 "started_at": time.time(),
             }
         )
@@ -277,9 +341,9 @@ def start_fe_solver_kernel_warmup(
         start = time.perf_counter()
         try:
             if status_callback is not None:
-                status_callback("Warming FE solver shell kernels...")
-            report = fe_solver.warm_fe_solver_kernels(requested)
-            summary = _summarize_kernel_warmup_report(report, requested)
+                status_callback("Warming FE solver shell kernels" + (" and nonlinear impact kernels" if include_nonlinear_impact else "") + "...")
+            report = fe_solver.warm_fe_solver_kernels(requested, include_nonlinear_impact=include_nonlinear_impact)
+            summary = _summarize_kernel_warmup_report(report, requested, include_nonlinear_impact=include_nonlinear_impact)
             summary["total_seconds"] = summary["total_seconds"] or float(time.perf_counter() - start)
             with _FE_KERNEL_WARMUP_LOCK:
                 _FE_KERNEL_WARMUP_STATE.update(summary)
@@ -319,6 +383,11 @@ def _warmup_diagnostics() -> list[str]:
         text += " for " + orders
     if seconds > 0.0:
         text += " in " + str(round(seconds, 3)) + " s"
+    if state.get("nonlinear_impact"):
+        nl_seconds = _safe_float(state.get("nonlinear_impact_seconds"), 0.0)
+        text += "; nonlinear impact warmed"
+        if nl_seconds > 0.0:
+            text += " in " + str(round(nl_seconds, 3)) + " s"
     if status == "completed":
         text += "; max matrix difference " + str(round(_safe_float(state.get("max_matrix_difference_norm")), 12))
         if state.get("jit_enabled") is not None:
@@ -747,6 +816,9 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
     if options.custom_load_bc_enabled:
         effective_pressure += float(listed_pressure if custom_load_entries else options.custom_pressure_pa)
+    if bool(options.collision_enabled) and bool(options.collision_material_nonlinear_enabled):
+        start_fe_solver_kernel_warmup((), background=False, status_callback=status_callback, include_nonlinear_impact=True)
+
     solver_config = fe_solver.LightweightFEMConfig(
         mesh_fidelity=options.mesh_fidelity,
         pressure_pa=options.pressure_pa,
@@ -829,6 +901,51 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         memory_limit_mb=options.memory_limit_mb,
         capacity_buckling_mode_number=options.capacity_buckling_mode_number,
         capacity_mesh_min_elements_per_half_wave=options.capacity_mesh_min_elements_per_half_wave,
+        fracture_enabled=options.fracture_enabled,
+        fracture_strain_threshold=options.fracture_strain_threshold,
+        fracture_residual_stiffness_fraction=options.fracture_residual_stiffness_fraction,
+        fracture_max_deleted_fraction=options.fracture_max_deleted_fraction,
+        fracture_min_load_factor=options.fracture_min_load_factor,
+        collision_enabled=options.collision_enabled,
+        collision_include_static_load=options.collision_include_static_load,
+        collision_damage_enabled=options.collision_damage_enabled,
+        collision_material_nonlinear_enabled=options.collision_material_nonlinear_enabled,
+        collision_nonlinear_max_iterations=options.collision_nonlinear_max_iterations,
+        collision_nonlinear_tolerance=options.collision_nonlinear_tolerance,
+        collision_nonlinear_cutbacks=options.collision_nonlinear_cutbacks,
+        collision_plastic_damage_threshold=options.collision_plastic_damage_threshold,
+        collision_mass_kg=options.collision_mass_kg,
+        collision_radius_m=options.collision_radius_m,
+        collision_start_x_m=options.collision_start_x_m,
+        collision_start_y_m=options.collision_start_y_m,
+        collision_start_z_m=options.collision_start_z_m,
+        collision_vector_x=options.collision_vector_x,
+        collision_vector_y=options.collision_vector_y,
+        collision_vector_z=options.collision_vector_z,
+        collision_speed_mps=options.collision_speed_mps,
+        collision_time_mode=options.collision_time_mode,
+        collision_auto_steps_per_radius=options.collision_auto_steps_per_radius,
+        collision_auto_post_contact_radii=options.collision_auto_post_contact_radii,
+        collision_bounce_back_time_s=options.collision_bounce_back_time_s,
+        collision_total_time_s=options.collision_total_time_s,
+        collision_dt_s=options.collision_dt_s,
+        collision_result_interval_s=options.collision_result_interval_s,
+        collision_penalty_stiffness_n_per_m=options.collision_penalty_stiffness_n_per_m,
+        collision_contact_damping=options.collision_contact_damping,
+        collision_max_iterations=options.collision_max_iterations,
+        collision_penetration_tolerance_m=options.collision_penetration_tolerance_m,
+        collision_force_tolerance_n=options.collision_force_tolerance_n,
+        collision_target_penetration_fraction=options.collision_target_penetration_fraction,
+        collision_max_event_substeps=options.collision_max_event_substeps,
+        collision_contact_surface=options.collision_contact_surface,
+        collision_damage_mode=options.collision_damage_mode,
+        collision_damage_capacity_basis=options.collision_damage_capacity_basis,
+        collision_damage_user_capacity_pa=options.collision_damage_user_capacity_pa,
+        collision_damage_softening_start=options.collision_damage_softening_start,
+        collision_damage_delete_at=options.collision_damage_delete_at,
+        collision_damage_min_contact_area_m2=options.collision_damage_min_contact_area_m2,
+        collision_damage_max_deleted_fraction=options.collision_damage_max_deleted_fraction,
+        collision_damage_neighbor_smoothing=options.collision_damage_neighbor_smoothing,
     )
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback, imported_fem_model=imported_fem_model)
@@ -940,6 +1057,55 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "memory_limit_mb": float(options.memory_limit_mb),
         "capacity_buckling_mode_number": int(options.capacity_buckling_mode_number),
         "capacity_mesh_min_elements_per_half_wave": int(options.capacity_mesh_min_elements_per_half_wave),
+        "fracture_enabled": bool(options.fracture_enabled),
+        "fracture_strain_threshold": float(options.fracture_strain_threshold),
+        "fracture_residual_stiffness_fraction": float(options.fracture_residual_stiffness_fraction),
+        "fracture_max_deleted_fraction": float(options.fracture_max_deleted_fraction),
+        "fracture_min_load_factor": float(options.fracture_min_load_factor),
+        "collision_enabled": bool(options.collision_enabled),
+        "collision_include_static_load": bool(options.collision_include_static_load),
+        "collision_damage_enabled": bool(options.collision_damage_enabled),
+        "collision_material_nonlinear_enabled": bool(options.collision_material_nonlinear_enabled),
+        "collision_nonlinear_max_iterations": int(options.collision_nonlinear_max_iterations),
+        "collision_nonlinear_tolerance": float(options.collision_nonlinear_tolerance),
+        "collision_nonlinear_cutbacks": int(options.collision_nonlinear_cutbacks),
+        "collision_plastic_damage_threshold": float(options.collision_plastic_damage_threshold),
+        "collision_mass_kg": float(options.collision_mass_kg),
+        "collision_radius_m": float(options.collision_radius_m),
+        "collision_start_m": (
+            float(options.collision_start_x_m),
+            float(options.collision_start_y_m),
+            float(options.collision_start_z_m),
+        ),
+        "collision_vector": (
+            float(options.collision_vector_x),
+            float(options.collision_vector_y),
+            float(options.collision_vector_z),
+        ),
+        "collision_speed_mps": float(options.collision_speed_mps),
+        "collision_time_mode": str(options.collision_time_mode),
+        "collision_auto_steps_per_radius": float(options.collision_auto_steps_per_radius),
+        "collision_auto_post_contact_radii": float(options.collision_auto_post_contact_radii),
+        "collision_bounce_back_time_s": float(options.collision_bounce_back_time_s),
+        "collision_total_time_s": float(options.collision_total_time_s),
+        "collision_dt_s": float(options.collision_dt_s),
+        "collision_result_interval_s": float(options.collision_result_interval_s),
+        "collision_penalty_stiffness_n_per_m": float(options.collision_penalty_stiffness_n_per_m),
+        "collision_contact_damping": float(options.collision_contact_damping),
+        "collision_max_iterations": int(options.collision_max_iterations),
+        "collision_penetration_tolerance_m": float(options.collision_penetration_tolerance_m),
+        "collision_force_tolerance_n": float(options.collision_force_tolerance_n),
+        "collision_target_penetration_fraction": float(options.collision_target_penetration_fraction),
+        "collision_max_event_substeps": int(options.collision_max_event_substeps),
+        "collision_contact_surface": str(options.collision_contact_surface),
+        "collision_damage_mode": str(options.collision_damage_mode),
+        "collision_damage_capacity_basis": str(options.collision_damage_capacity_basis),
+        "collision_damage_user_capacity_pa": float(options.collision_damage_user_capacity_pa),
+        "collision_damage_softening_start": float(options.collision_damage_softening_start),
+        "collision_damage_delete_at": float(options.collision_damage_delete_at),
+        "collision_damage_min_contact_area_m2": float(options.collision_damage_min_contact_area_m2),
+        "collision_damage_max_deleted_fraction": float(options.collision_damage_max_deleted_fraction),
+        "collision_damage_neighbor_smoothing": bool(options.collision_damage_neighbor_smoothing),
         "kernel_warmup_status": str(warmup_state.get("status", "not_started")),
         "kernel_warmup_shell_orders": tuple(str(order) for order in warmup_state.get("shell_orders", ()) or ()),
         "kernel_warmup_total_seconds": _safe_float(warmup_state.get("total_seconds"), 0.0),
@@ -1198,6 +1364,128 @@ def _plot_member_lines(
             )
 
 
+def _sphere_display_center(
+        sphere: dict[str, Any],
+        visualization: dict[str, Any],
+        deformation_scale: float,
+) -> np.ndarray:
+    """Return sphere center in the same displayed coordinates as deformed shell surfaces."""
+
+    center = np.asarray(sphere.get("position", (0.0, 0.0, 0.0)), dtype=float).reshape(3)
+    scale = float(deformation_scale)
+    if abs(scale - 1.0) <= 1.0e-12:
+        return center
+    contacts = tuple(sphere.get("active_contacts") or visualization.get("active_contacts") or ())
+    if not contacts:
+        return center
+    best_offset: np.ndarray | None = None
+    best_distance = float("inf")
+    surfaces = tuple(visualization.get("skin_shell_surfaces") or ()) + tuple(visualization.get("shell_surfaces") or ())
+    for contact in contacts:
+        if not isinstance(contact, dict):
+            continue
+        try:
+            element_id = int(contact.get("element_id"))
+            contact_point = np.asarray(contact.get("contact_point", ()), dtype=float).reshape(3)
+        except Exception:
+            continue
+        for surface in surfaces:
+            try:
+                if int(surface.get("id", -1)) != element_id:
+                    continue
+            except Exception:
+                continue
+            points = tuple(surface.get("points") or ())
+            displaced = tuple(surface.get("displaced_points") or ())
+            if len(points) < 1 or len(displaced) != len(points):
+                continue
+            local_offsets: list[np.ndarray] = []
+            for point, moved in zip(points, displaced):
+                try:
+                    base = np.asarray(point, dtype=float).reshape(3)
+                    deformed = np.asarray(moved, dtype=float).reshape(3)
+                except Exception:
+                    continue
+                offset = deformed - base
+                distance = float(np.linalg.norm(deformed - contact_point))
+                if distance < best_distance:
+                    best_distance = distance
+                    best_offset = offset
+                local_offsets.append(offset)
+            if best_offset is None and local_offsets:
+                best_offset = np.mean(np.vstack(local_offsets), axis=0)
+    if best_offset is None:
+        return center
+    return center + (scale - 1.0) * best_offset
+
+
+def _plot_rigid_sphere(axis: Any, visualization: dict[str, Any], deformation_scale: float = 1.0) -> None:
+    sphere = visualization.get("rigid_sphere") or {}
+    if not isinstance(sphere, dict) or not bool(sphere.get("visible", True)):
+        return
+    try:
+        center = _sphere_display_center(sphere, visualization, deformation_scale)
+        radius = max(_safe_float(sphere.get("radius"), 0.0), 0.0)
+    except Exception:
+        return
+    if radius <= 0.0:
+        return
+    u = np.linspace(0.0, 2.0 * math.pi, 18)
+    v = np.linspace(0.0, math.pi, 10)
+    x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
+    y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
+    z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
+    axis.plot_surface(x, y, z, color="#9ca3af", alpha=0.32, linewidth=0.0, shade=True)
+    axis.scatter([center[0]], [center[1]], [center[2]], color="#4b5563", s=14, alpha=0.55)
+
+
+def _format_dimension(value: float) -> str:
+    value = float(value)
+    if abs(value) >= 100.0:
+        return f"{value:.0f} m"
+    if abs(value) >= 10.0:
+        return f"{value:.1f} m"
+    if abs(value) >= 1.0:
+        return f"{value:.2f} m"
+    return f"{value:.3f} m"
+
+
+def _base_geometry_height_extent(geometry: dict[str, Any]) -> float:
+    heights = [0.0]
+    for key in ("stiffener_section", "girder_section"):
+        section = geometry.get(key) or {}
+        heights.append(_safe_float(section.get("web_height") or section.get("web_h"), 0.0))
+        heights.append(_safe_float(section.get("flange_thickness") or section.get("flange_t"), 0.0))
+    return max(heights)
+
+
+def _plot_geometry_dimension_annotations(axis: Any, geometry: dict[str, Any], is_cylinder: bool) -> None:
+    color = "#6b7280"
+    if is_cylinder:
+        radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        y = -1.18 * radius
+        z = -0.18 * radius
+        axis.plot([-radius, radius], [y, y], [z, z], color=color, linewidth=0.8, alpha=0.6)
+        axis.text(0.0, y, z, "D " + _format_dimension(2.0 * radius), color=color, fontsize=8, ha="center", va="top")
+        x = 1.18 * radius
+        y2 = 1.18 * radius
+        axis.plot([x, x], [y2, y2], [0.0, length], color=color, linewidth=0.8, alpha=0.6)
+        axis.text(x, y2, 0.5 * length, "L " + _format_dimension(length), color=color, fontsize=8, ha="left", va="center")
+        return
+    length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+    width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
+    offset = 0.06 * max(length, width, 1.0)
+    axis.plot([0.0, length], [-offset, -offset], [0.0, 0.0], color=color, linewidth=0.8, alpha=0.6)
+    axis.text(0.5 * length, -offset, 0.0, _format_dimension(length), color=color, fontsize=8, ha="center", va="top")
+    axis.plot([-offset, -offset], [0.0, width], [0.0, 0.0], color=color, linewidth=0.8, alpha=0.6)
+    axis.text(-offset, 0.5 * width, 0.0, _format_dimension(width), color=color, fontsize=8, ha="right", va="center")
+    height = _base_geometry_height_extent(geometry)
+    if height > 0.0:
+        axis.plot([length + offset, length + offset], [width + offset, width + offset], [0.0, height], color=color, linewidth=0.8, alpha=0.6)
+        axis.text(length + offset, width + offset, 0.5 * height, _format_dimension(height), color=color, fontsize=8, ha="left", va="center")
+
+
 def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, Any]]:
     if result is None:
         return []
@@ -1233,6 +1521,8 @@ def _member_component_value(line: dict[str, Any], component: str, *, is_mode: bo
         return 500.0 * float(disp_a[2] + disp_b[2])
     if component == "plastic_strain":
         return 0.0
+    if component.startswith("impact_damage"):
+        return 0.0
 
     sig_axial = _safe_float(line.get("axial_stress"), 0.0)
     sig_bend_y = _safe_float(line.get("bending_stress_y"), 0.0)
@@ -1267,6 +1557,23 @@ _SHELL_FIELD_COMPONENTS = {
     "strain_y_membrane",
     "strain_xy_membrane",
     "plastic_strain",
+    "impact_damage",
+    "impact_damage_utilization",
+    "impact_damage_scale",
+}
+
+_COMPONENT_DISPLAY_LABELS = {
+    "von_mises_pa": "stress von Mises [Pa]",
+    "stress_x_membrane_pa": "stress X membrane [Pa]",
+    "stress_y_membrane_pa": "stress Y membrane [Pa]",
+    "stress_xy_membrane_pa": "stress XY membrane [Pa]",
+    "strain_x_membrane": "strain X membrane [-]",
+    "strain_y_membrane": "strain Y membrane [-]",
+    "strain_xy_membrane": "strain XY membrane [-]",
+    "impact_damage": "impact damage [-]",
+    "impact_damage_utilization": "impact damage utilization [-]",
+    "impact_damage_scale": "impact damage stiffness scale [-]",
+    "plastic_strain": "equiv. engineering plastic strain [-]",
 }
 
 
@@ -1284,7 +1591,7 @@ def _include_member_component_in_color_range(
 ) -> bool:
     if is_mode or component.startswith("disp"):
         return True
-    if component in {"plastic_strain", "strain_x_membrane", "strain_y_membrane", "strain_xy_membrane"}:
+    if component in {"plastic_strain", "impact_damage", "impact_damage_utilization", "impact_damage_scale", "strain_x_membrane", "strain_y_membrane", "strain_xy_membrane"}:
         return False
     if component in {"stress_x_membrane_pa", "stress_y_membrane_pa", "stress_xy_membrane_pa"}:
         return False
@@ -1380,16 +1687,25 @@ def _selected_visualization(result: RuntimeFEMRunResult, display_mode: str, comp
                 vis["scalar_kind"] = "raw"
             else:
                 _set_unavailable_plastic(vis)
-        elif component == "von_mises_pa" and vis.get("stress_pa"):
-            vis["scalar_label"] = vis.get("scalar_label", "stress [Pa]")
         elif component in fields:
             vis["stress_pa"] = fields[component]
-            vis["scalar_label"] = component.replace("_", " ")
+            vis["scalar_label"] = _COMPONENT_DISPLAY_LABELS.get(component, component.replace("_", " "))
+            if component.endswith("_pa"):
+                vis.pop("scalar_kind", None)
+            else:
+                vis["scalar_kind"] = "raw"
+        elif component == "von_mises_pa" and vis.get("stress_pa"):
+            label = str(vis.get("scalar_label", "stress [Pa]") or "stress [Pa]")
+            if "displacement" in label.lower() or label.lower().startswith("disp"):
+                _set_unavailable_component(vis, "Stress von Mises")
+            else:
+                vis["scalar_label"] = label
         elif component in disps:
             vis["stress_pa"] = disps[component]
             vis["scalar_label"] = component.replace("_", " ") + " [m]"
+            vis.pop("scalar_kind", None)
         elif component in _SHELL_FIELD_COMPONENTS:
-            _set_unavailable_component(vis, component.replace("_", " "))
+            _set_unavailable_component(vis, _COMPONENT_DISPLAY_LABELS.get(component, component.replace("_", " ")))
         return vis, title
 
     if display_mode.startswith("mode:"):
@@ -1497,6 +1813,7 @@ def _plot_visualization_surface(
         colormap: str = "jet",
         component: str = "von_mises_pa",
         color_limits: tuple[float | None, float | None] | None = None,
+        show_sphere: bool = True,
 ) -> None:
     plate_alpha = _clamped_alpha(plate_alpha, 1.0)
     member_alpha = _clamped_alpha(member_alpha, 0.95)
@@ -1616,6 +1933,8 @@ def _plot_visualization_surface(
         axis.set_zlabel("height [m]")
         _plot_member_lines(axis, visualization, scale, show_stiffeners, show_girders, member_alpha)
         _set_3d_axes_limits(axis, x, y, z)
+        if show_sphere:
+            _plot_rigid_sphere(axis, visualization, scale)
         try:
             axis.view_init(elev=18.0, azim=-45.0)
         except Exception:
@@ -1662,7 +1981,10 @@ def _plot_visualization_surface(
         axis.set_zlabel("w x" + str(round(scale, 1)))
         _plot_member_lines(axis, visualization, scale, show_stiffeners, show_girders, member_alpha)
         _set_3d_axes_limits(axis, x, y, z)
+        if show_sphere:
+            _plot_rigid_sphere(axis, visualization, scale)
 
+    _plot_geometry_dimension_annotations(axis, geometry, visualization.get("type") == "cylinder")
     axis.set_title(title)
     mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
     mappable.set_array(_all_grid_values(color_grid) + surface_values)
@@ -1689,7 +2011,7 @@ def _plot_base_geometry_surface(
         radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
         length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
         theta = np.linspace(0.0, 2.0 * math.pi, 49)
-        axial = np.linspace(-0.5 * length, 0.5 * length, 13)
+        axial = np.linspace(0.0, length, 13)
         theta_grid, axial_grid = np.meshgrid(theta, axial)
         x_grid = radius * np.cos(theta_grid)
         y_grid = radius * np.sin(theta_grid)
@@ -1720,7 +2042,7 @@ def _plot_base_geometry_surface(
                     axis.plot(
                         [member_radius * math.cos(angle)] * 2,
                         [member_radius * math.sin(angle)] * 2,
-                        [-0.5 * length, 0.5 * length],
+                        [0.0, length],
                         color="#334155",
                         linewidth=1.3,
                         alpha=member_alpha,
@@ -1739,7 +2061,7 @@ def _plot_base_geometry_surface(
                         spacing,
                         fallback_midpoint=True,
                 ):
-                    z_position = station - 0.5 * length
+                    z_position = station
                     axis.plot(
                         member_radius * np.cos(ring_theta),
                         member_radius * np.sin(ring_theta),
@@ -1826,6 +2148,7 @@ def _plot_base_geometry_surface(
             pass
 
     axis.set_title("Base model geometry")
+    _plot_geometry_dimension_annotations(axis, geometry, is_cylinder)
     if not drew_anything:
         axis.text2D(0.08, 0.56, "All model display items are hidden.", transform=axis.transAxes)
 
@@ -1887,6 +2210,34 @@ def _plot_time_history(
         )
         target = "element"
 
+    if not series and (probe_element_id is not None or not component.startswith("disp")):
+        snapshots = tuple(time_domain.get("snapshots", ()) or ())
+        selected_element = probe_element_id
+        if selected_element is None:
+            for snapshot in snapshots:
+                surfaces = tuple((snapshot or {}).get("skin_shell_surfaces", ()) or ()) + tuple((snapshot or {}).get("shell_surfaces", ()) or ())
+                if surfaces:
+                    try:
+                        selected_element = int((surfaces[0] or {}).get("id"))
+                    except Exception:
+                        selected_element = None
+                    break
+        if selected_element is not None:
+            values = []
+            for snapshot in snapshots:
+                found = None
+                for surface in tuple((snapshot or {}).get("skin_shell_surfaces", ()) or ()) + tuple((snapshot or {}).get("shell_surfaces", ()) or ()):
+                    try:
+                        if int((surface or {}).get("id")) == int(selected_element):
+                            found = _safe_float(((surface or {}).get("field_values", {}) or {}).get(component), 0.0)
+                            break
+                    except Exception:
+                        continue
+                values.append(0.0 if found is None else float(found))
+            selected_id = int(selected_element)
+            series = tuple(values)
+            target = "element"
+
     if not series:
         axis.text(
             0.05,
@@ -1922,6 +2273,8 @@ def create_runtime_fem_result_figure(
         color_limits: tuple[float | None, float | None] | None = None,
         probe_node_id: int | None = None,
         probe_element_id: int | None = None,
+        show_sphere: bool = True,
+        base_sphere: dict[str, Any] | None = None,
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
@@ -1946,12 +2299,14 @@ def create_runtime_fem_result_figure(
             plate_alpha=plate_alpha,
             member_alpha=member_alpha,
         )
+        if show_sphere and base_sphere:
+            _plot_rigid_sphere(geometry_ax, base_sphere)
     else:
         _plot_visualization_surface(
             figure, geometry_ax, geometry, result, display_mode, deformation_scale,
             show_plate=show_plate, show_stiffeners=show_stiffeners, show_girders=show_girders,
             plate_alpha=plate_alpha, member_alpha=member_alpha, colormap=colormap,
-            component=component, color_limits=color_limits,
+            component=component, color_limits=color_limits, show_sphere=show_sphere,
         )
 
     figure.tight_layout()
@@ -2159,6 +2514,17 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     _safe_int(summary.get("imperfection_wave_b"), 1)),
             ]
         )
+    if summary.get("fracture_enabled"):
+        lines.extend(
+            [
+                "",
+                "Nonlinear static fracture input:",
+                " - plastic strain threshold: " + str(round(_safe_float(summary.get("fracture_strain_threshold")), 6)),
+                " - residual stiffness fraction: " + str(round(_safe_float(summary.get("fracture_residual_stiffness_fraction")), 10)),
+                " - max deleted fraction: " + str(round(_safe_float(summary.get("fracture_max_deleted_fraction")), 6)),
+                " - min load factor: " + str(round(_safe_float(summary.get("fracture_min_load_factor")), 6)),
+            ]
+        )
     if summary.get("custom_time_domain_enabled"):
         lines.extend(
             [
@@ -2177,6 +2543,35 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 " - selected patches: " + str(_safe_int(summary.get("custom_pressure_patch_count"), 0)),
                 " - selected patch area [m2]: " + str(round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)),
                 " - include static load in time domain: " + str(bool(summary.get("custom_time_domain_include_static_load"))),
+            ]
+        )
+    if summary.get("collision_enabled"):
+        lines.extend(
+            [
+                "",
+                "Rigid-sphere collision input:",
+                " - mass/radius: "
+                + str(round(_safe_float(summary.get("collision_mass_kg")), 6))
+                + " kg / "
+                + str(round(_safe_float(summary.get("collision_radius_m")), 6))
+                + " m",
+                " - start [m]: " + ", ".join(str(round(_safe_float(v), 6)) for v in summary.get("collision_start_m", ()) or ()),
+                " - vector: " + ", ".join(str(round(_safe_float(v), 6)) for v in summary.get("collision_vector", ()) or ()),
+                " - speed [m/s]: " + str(round(_safe_float(summary.get("collision_speed_mps")), 6)),
+                " - time setup: " + str(summary.get("collision_time_mode", "auto")),
+                " - total time / dt [s]: "
+                + str(round(_safe_float(summary.get("collision_total_time_s")), 8))
+                + " / "
+                + str(round(_safe_float(summary.get("collision_dt_s")), 8)),
+                " - auto steps/radius, post radii: "
+                + str(round(_safe_float(summary.get("collision_auto_steps_per_radius")), 3))
+                + " / "
+                + str(round(_safe_float(summary.get("collision_auto_post_contact_radii")), 3)),
+                " - bounce-back stop hold [s]: "
+                + str(round(_safe_float(summary.get("collision_bounce_back_time_s")), 8)),
+                " - contact surface: " + str(summary.get("collision_contact_surface", "")),
+                " - material nonlinear impact: " + str(bool(summary.get("collision_material_nonlinear_enabled"))),
+                " - damage active: " + str(bool(summary.get("collision_damage_enabled"))),
             ]
         )
     if (
@@ -2296,6 +2691,12 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "nonlinear_static_layers",
             "nonlinear_static_max_plastic_strain",
         }
+        fracture_keys = {
+            "fracture_enabled",
+            "fracture_deleted_count",
+            "fracture_max_utilization",
+            "fracture_first_deletion_load_factor",
+        }
         imperfection_keys = {
             "imperfection_status",
             "imperfection_kind",
@@ -2312,6 +2713,50 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "custom_time_domain_peak_von_mises_pa",
             "custom_time_domain_result_interval_s",
             "custom_time_domain_saved_steps",
+        }
+        collision_keys = {
+            "collision_status",
+            "collision_time_mode",
+            "collision_resolved_dt_s",
+            "collision_resolved_total_time_s",
+            "collision_estimated_arrival_time_s",
+            "collision_contact_penalty_stiffness_n_per_m",
+            "collision_contact_penalty_basis",
+            "collision_target_penetration_m",
+            "collision_stop_reason",
+            "collision_separation_stop_time_s",
+            "collision_auto_requested_total_time_s",
+            "collision_auto_impact_window_s",
+            "collision_peak_contact_force_n",
+            "collision_max_penetration_m",
+            "collision_max_penetration_ratio",
+            "collision_contact_duration_s",
+            "collision_sphere_momentum_balance_error",
+            "collision_saved_steps",
+            "collision_damage_enabled",
+            "collision_material_nonlinear_enabled",
+            "collision_nonlinear_status",
+            "collision_nonlinear_iterations",
+            "collision_nonlinear_cutbacks",
+            "collision_nonlinear_max_plastic_strain",
+            "collision_plastic_damage_threshold",
+            "collision_deleted_shell_elements",
+            "collision_adaptive_cutback_retries",
+            "collision_solution_control",
+            "collision_arc_length_applicability",
+            "collision_failure_time_s",
+            "collision_failure_dt_s",
+            "collision_failure_iterations",
+            "collision_failure_force_change_n",
+            "collision_failure_effective_force_tolerance_n",
+            "collision_failure_penetration_change_m",
+            "collision_failure_max_penetration_m",
+            "collision_failure_active_element_ids",
+            "collision_failure_residual_norm",
+            "collision_failure_effective_residual_tolerance_n",
+            "collision_failure_displacement_increment_m",
+            "impact_damage_max_utilization",
+            "impact_damage_deleted_count",
         }
         runtime_keys = {
             "runtime_solver",
@@ -2349,8 +2794,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             "rigid_body_load_imbalance_norm",
             *material_keys,
             *nonlinear_static_keys,
+            *fracture_keys,
             *imperfection_keys,
             *custom_time_domain_keys,
+            *collision_keys,
             *runtime_keys,
         }
         if prestress.get("material_model"):
@@ -2422,6 +2869,12 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             elif nonlinear_static_status == "stopped_at_limit":
                 lines.append(
                     " - interpretation: the adaptive Newton solve stopped at the last stable converged load increment.")
+            if _safe_float(prestress.get("fracture_enabled"), 0.0) > 0.0:
+                lines.append(" - fracture deleted elements: " + str(_safe_int(prestress.get("fracture_deleted_count"), 0)))
+                lines.append(" - fracture max utilization: " + str(round(_safe_float(prestress.get("fracture_max_utilization")), 6)))
+                first_lf = _safe_float(prestress.get("fracture_first_deletion_load_factor"), 0.0)
+                if first_lf > 0.0:
+                    lines.append(" - first deletion load factor: " + str(round(first_lf, 4)))
         imperfection_status = str(prestress.get("imperfection_status", "") or "")
         if imperfection_status:
             lines.extend(["", "Applied geometric imperfection:"])
@@ -2451,6 +2904,90 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     round(_safe_float(prestress.get("custom_time_domain_result_interval_s")), 8)))
             lines.append(
                 " - meaning: this is a linear Newmark response to the prescribed pressure pulse; it is reported separately from the static buckling prestress.")
+        collision_status = str(prestress.get("collision_status", "") or "")
+        if collision_status:
+            lines.extend(["", "Rigid-sphere collision response:"])
+            lines.append(" - status: " + collision_status.replace("_", " "))
+            lines.append(" - time mode: " + str(prestress.get("collision_time_mode", summary.get("collision_time_mode", ""))))
+            if _safe_float(prestress.get("collision_resolved_dt_s"), 0.0) > 0.0:
+                lines.append(" - resolved dt [s]: " + str(round(_safe_float(prestress.get("collision_resolved_dt_s")), 9)))
+            if _safe_float(prestress.get("collision_resolved_total_time_s"), 0.0) > 0.0:
+                lines.append(" - resolved total time [s]: " + str(round(_safe_float(prestress.get("collision_resolved_total_time_s")), 6)))
+            if _safe_float(prestress.get("collision_estimated_arrival_time_s"), 0.0) > 0.0:
+                lines.append(" - estimated arrival [s]: " + str(round(_safe_float(prestress.get("collision_estimated_arrival_time_s")), 6)))
+            if _safe_float(prestress.get("collision_contact_penalty_stiffness_n_per_m"), 0.0) > 0.0:
+                lines.append(
+                    " - contact penalty [N/m]: "
+                    + str(round(_safe_float(prestress.get("collision_contact_penalty_stiffness_n_per_m")), 3))
+                    + " ("
+                    + str(prestress.get("collision_contact_penalty_basis", ""))
+                    + ")"
+                )
+            if _safe_float(prestress.get("collision_target_penetration_m"), 0.0) > 0.0:
+                lines.append(" - target penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_target_penetration_m")), 4)))
+            if str(prestress.get("collision_stop_reason", "") or ""):
+                lines.append(" - stop reason: " + str(prestress.get("collision_stop_reason", "")).replace("_", " "))
+            if _safe_float(prestress.get("collision_separation_stop_time_s"), 0.0) > 0.0:
+                lines.append(" - separation stop hold [s]: " + str(round(_safe_float(prestress.get("collision_separation_stop_time_s")), 9)))
+            if _safe_float(prestress.get("collision_auto_impact_window_s"), 0.0) > 0.0:
+                lines.append(" - auto impact window [s]: " + str(round(_safe_float(prestress.get("collision_auto_impact_window_s")), 6)))
+            lines.append(" - peak contact force [kN]: " + str(round(_safe_float(prestress.get("collision_peak_contact_force_n")) / 1000.0, 4)))
+            lines.append(" - max penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)))
+            lines.append(" - max penetration ratio: " + str(round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)))
+            lines.append(" - contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)))
+            lines.append(" - saved result steps: " + str(_safe_int(prestress.get("collision_saved_steps"), 0)))
+            if _safe_float(prestress.get("collision_adaptive_cutback_retries"), 0.0) > 0.0:
+                lines.append(" - adaptive contact cutbacks: " + str(_safe_int(prestress.get("collision_adaptive_cutback_retries"), 0)))
+            if str(prestress.get("collision_solution_control", "") or ""):
+                lines.append(" - solution control: " + str(prestress.get("collision_solution_control", "")).replace("_", " "))
+            if str(prestress.get("collision_arc_length_applicability", "") or ""):
+                lines.append(" - arc length: static continuation only; not used for collision impact")
+            if _safe_float(prestress.get("collision_material_nonlinear_enabled"), 0.0) > 0.0:
+                lines.append(" - material nonlinear impact: enabled")
+                if str(prestress.get("collision_nonlinear_status", "") or ""):
+                    lines.append(" - nonlinear impact status: " + str(prestress.get("collision_nonlinear_status", "")).replace("_", " "))
+                lines.append(" - nonlinear Newton iterations: " + str(_safe_int(prestress.get("collision_nonlinear_iterations"), 0)))
+                lines.append(" - nonlinear cutbacks: " + str(_safe_int(prestress.get("collision_nonlinear_cutbacks"), 0)))
+                lines.append(" - max equivalent plastic strain: " + str(round(_safe_float(prestress.get("collision_nonlinear_max_plastic_strain")), 8)))
+                lines.append(" - plastic damage strain limit: " + str(round(_safe_float(prestress.get("collision_plastic_damage_threshold")), 8)))
+            lines.append(" - sphere momentum balance error: " + str(round(_safe_float(prestress.get("collision_sphere_momentum_balance_error")), 6)))
+            if collision_status in {"contact_iteration_failed", "nonlinear_iteration_failed"}:
+                lines.extend(["", "Collision solver failure detail:"])
+                if _safe_float(prestress.get("collision_failure_time_s"), 0.0) > 0.0:
+                    lines.append(" - failure time [s]: " + str(round(_safe_float(prestress.get("collision_failure_time_s")), 9)))
+                if _safe_float(prestress.get("collision_failure_dt_s"), 0.0) > 0.0:
+                    lines.append(" - failed local dt [s]: " + str(round(_safe_float(prestress.get("collision_failure_dt_s")), 9)))
+                lines.append(" - iterations used: " + str(_safe_int(prestress.get("collision_failure_iterations"), 0)))
+                if _safe_float(prestress.get("collision_failure_residual_norm"), 0.0) > 0.0:
+                    lines.append(" - residual norm: " + str(round(_safe_float(prestress.get("collision_failure_residual_norm")), 6)))
+                if _safe_float(prestress.get("collision_failure_effective_residual_tolerance_n"), 0.0) > 0.0:
+                    lines.append(" - effective residual tolerance [N]: " + str(round(_safe_float(prestress.get("collision_failure_effective_residual_tolerance_n")), 6)))
+                if _safe_float(prestress.get("collision_failure_displacement_increment_m"), 0.0) > 0.0:
+                    lines.append(" - displacement increment [m]: " + str(round(_safe_float(prestress.get("collision_failure_displacement_increment_m")), 9)))
+                lines.append(" - force change [N]: " + str(round(_safe_float(prestress.get("collision_failure_force_change_n")), 6)))
+                if _safe_float(prestress.get("collision_failure_effective_force_tolerance_n"), 0.0) > 0.0:
+                    lines.append(
+                        " - effective force tolerance [N]: "
+                        + str(round(_safe_float(prestress.get("collision_failure_effective_force_tolerance_n")), 6))
+                    )
+                lines.append(" - penetration change [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_failure_penetration_change_m")), 6)))
+                lines.append(" - failure penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_failure_max_penetration_m")), 6)))
+                active_ids = str(prestress.get("collision_failure_active_element_ids", "") or "")
+                if active_ids:
+                    lines.append(" - active shell element(s): " + active_ids)
+                if collision_status == "nonlinear_iteration_failed":
+                    lines.append(" - suggestion: reduce manual dt, increase NL cutbacks, or reduce contact penalty/target stiffness.")
+                else:
+                    lines.append(" - suggestion: reduce dt/penalty or increase event substeps/contact iterations.")
+            if _safe_float(prestress.get("collision_damage_enabled"), 0.0) > 0.0:
+                lines.append(" - impact damage max utilization: " + str(round(_safe_float(prestress.get("impact_damage_max_utilization")), 6)))
+                lines.append(" - deleted shell elements: " + str(_safe_int(prestress.get("collision_deleted_shell_elements"), 0)))
+            if _safe_float(prestress.get("collision_material_nonlinear_enabled"), 0.0) > 0.0:
+                lines.append(
+                    " - meaning: this is a material-nonlinear implicit transient with frictionless sphere-shell contact; beams respond through shell coupling and beam plasticity only where configured.")
+            else:
+                lines.append(
+                    " - meaning: this is a linear structural transient with nonlinear frictionless sphere-shell contact; beams respond only through shell coupling.")
         for key, value in prestress.items():
             if key in special_keys:
                 continue
@@ -3006,6 +3543,298 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
 }
 
 
+FEM_OPTION_INFO.update({
+    "collision_enabled": {
+        "title": "Collision Transient",
+        "purpose": "Runs the limited rigid-sphere-to-shell impact solver instead of the usual static/eigenvalue workflow.",
+        "use": "Enable this for one rigid sphere travelling along the specified vector. At least one real side/end support is required; nullspace/free-body collision is not used.",
+        "output": "Produces saved time snapshots, sphere motion, contact force, penetration and optional shell damage/erosion summaries.",
+        "caution": "This is frictionless rigid-sphere contact against shell midsurfaces/surfaces. Direct beam contact, fracture mechanics, contact friction and FSI are not included.",
+    },
+    "collision_include_static_load": {
+        "title": "Collision Base Load",
+        "purpose": "Adds the current generated/static FE load vector as a constant base load during the collision transient.",
+        "use": "Leave off for an isolated impact event. Enable only when the sphere impact is intentionally superposed on pressure, axial force, moment or custom static loads.",
+        "output": "Changes the transient displacement and stress state used during contact.",
+        "caution": "This can double count loading if the static load represents the same physical event as the impact.",
+    },
+    "collision_mass_kg": {
+        "title": "Sphere Mass",
+        "purpose": "Rigid sphere mass used for translational inertia.",
+        "use": "Enter the impacting body's mass directly in kg. Radius affects geometry/contact only; it does not imply density.",
+        "output": "Controls sphere deceleration, impulse and contact duration.",
+        "caution": "Very large mass or speed can require smaller time steps and stronger supports.",
+    },
+    "collision_radius_m": {
+        "title": "Sphere Radius",
+        "purpose": "Rigid sphere radius used for contact geometry and preview display.",
+        "use": "The preview sphere updates immediately from this value. The solver uses this radius for closest-point contact and automatic time-step estimates.",
+        "output": "Affects first contact time, contact area estimate, penetration ratio and damage demand.",
+        "caution": "The current contact target is the shell surface representation, not detailed beam/flange geometry.",
+    },
+    "collision_speed_mps": {
+        "title": "Sphere Speed",
+        "purpose": "Initial speed along the travel vector.",
+        "use": "The travel vector sets direction; this value sets magnitude in m/s.",
+        "output": "Controls kinetic energy, impulse and automatic total time/dt estimates.",
+        "caution": "Higher speeds need smaller dt. Auto time setup limits step count, but inspect resolved dt in the result text.",
+    },
+    "collision_contact_surface": {
+        "title": "Contact Surface",
+        "purpose": "Chooses the shell contact surface used by the sphere.",
+        "use": "Midsurface is the default. Top or bottom offsets contact by shell half-thickness according to shell normal convention.",
+        "output": "Changes first contact time, penetration and load distribution.",
+        "caution": "Use top/bottom only when the shell normal convention is clear for the model.",
+    },
+    "collision_start_x_m": {
+        "title": "Sphere Start X",
+        "purpose": "Initial global X coordinate of the sphere centre.",
+        "use": "Changing this value moves the preview sphere immediately when collision preview is visible.",
+        "output": "Affects trajectory, first-contact location and automatic timing.",
+        "caution": "The start point is the sphere centre, not the nearest surface point.",
+    },
+    "collision_start_y_m": {
+        "title": "Sphere Start Y",
+        "purpose": "Initial global Y coordinate of the sphere centre.",
+        "use": "Changing this value moves the preview sphere immediately when collision preview is visible.",
+        "output": "Affects trajectory, first-contact location and automatic timing.",
+        "caution": "The start point is the sphere centre, not the nearest surface point.",
+    },
+    "collision_start_z_m": {
+        "title": "Sphere Start Z",
+        "purpose": "Initial global Z coordinate of the sphere centre.",
+        "use": "Changing this value moves the preview sphere immediately when collision preview is visible.",
+        "output": "Affects trajectory, first-contact location and automatic timing.",
+        "caution": "For cylinders, generated axial height is along global Z in the runtime view.",
+    },
+    "collision_vector_x": {
+        "title": "Travel Vector X",
+        "purpose": "X component of the sphere travel direction.",
+        "use": "The vector is normalized internally; combine X/Y/Z entries to aim the sphere.",
+        "output": "Affects contact location and automatic timing.",
+        "caution": "The vector must not be zero.",
+    },
+    "collision_vector_y": {
+        "title": "Travel Vector Y",
+        "purpose": "Y component of the sphere travel direction.",
+        "use": "The vector is normalized internally; combine X/Y/Z entries to aim the sphere.",
+        "output": "Affects contact location and automatic timing.",
+        "caution": "The vector must not be zero.",
+    },
+    "collision_vector_z": {
+        "title": "Travel Vector Z",
+        "purpose": "Z component of the sphere travel direction.",
+        "use": "The vector is normalized internally; combine X/Y/Z entries to aim the sphere.",
+        "output": "Affects contact location and automatic timing.",
+        "caution": "The vector must not be zero.",
+    },
+    "collision_time_mode": {
+        "title": "Collision Time Setup",
+        "purpose": "Chooses automatic or manual collision time stepping.",
+        "use": "Auto estimates first arrival from the sphere path and model bounds, then chooses dt from sphere travel per step and optional contact penalty period. Manual uses the entered total time and dt.",
+        "output": "Resolved dt, total time and estimated arrival are printed after a run.",
+        "caution": "Auto is a practical starting point, not a substitute for time-step convergence checks on final impact cases.",
+    },
+    "collision_auto_steps_per_radius": {
+        "title": "Auto Steps Per Radius",
+        "purpose": "Controls automatic time-step fineness by limiting sphere travel per step.",
+        "use": "A value of 20 means the sphere travels about radius/20 per step before step-count guards are applied.",
+        "output": "Higher values reduce dt and increase runtime.",
+        "caution": "Use higher values for sharp contact events or high penalty stiffness.",
+    },
+    "collision_auto_post_contact": {
+        "title": "Auto Post-Contact Time",
+        "purpose": "Adds extra automatic simulation time after the sphere has crossed the model bounds.",
+        "use": "The value is measured in sphere radii of travel after contact traversal.",
+        "output": "Larger values save more rebound/free-vibration history.",
+        "caution": "Longer histories increase runtime and result storage.",
+    },
+    "collision_bounce_back_time": {
+        "title": "Bounce-Back Stop Hold",
+        "purpose": "Stops collision runs cleanly after the sphere has separated from contact for this duration.",
+        "use": "Use a small value to keep a visible rebound tail without simulating long free-flight. Set zero to disable this early stop.",
+        "output": "Successful early stops report completed_after_contact_separation instead of a contact failure.",
+        "caution": "This is a stop criterion only; it does not change contact force, damping or impact response before separation.",
+    },
+    "collision_total_time_s": {
+        "title": "Manual Total Time",
+        "purpose": "Total transient duration used when time setup is manual.",
+        "use": "Choose a duration long enough to include approach, contact and rebound/free vibration.",
+        "output": "Controls saved time range and peak search duration.",
+        "caution": "Ignored in auto mode except as a fallback if automatic setup cannot estimate geometry.",
+    },
+    "collision_dt_s": {
+        "title": "Manual Time Step",
+        "purpose": "Fixed transient time step used when time setup is manual.",
+        "use": "Choose dt small enough to resolve contact. A common starting point is sphere radius divided by speed and by 20 or more.",
+        "output": "Controls accuracy and runtime.",
+        "caution": "Ignored in auto mode except as a fallback if automatic setup cannot estimate geometry.",
+    },
+    "collision_result_interval_s": {
+        "title": "Collision Result Interval",
+        "purpose": "Controls spacing of saved animation/result snapshots.",
+        "use": "Set zero to save every solver step. Enter a positive interval to decimate saved frames.",
+        "output": "Controls available animation frames and result-case time snapshots.",
+        "caution": "Saving every step can be heavy for long fine-step runs.",
+    },
+    "collision_penalty_stiffness": {
+        "title": "Contact Penalty",
+        "purpose": "Normal penalty stiffness for sphere-shell contact.",
+        "use": "Leave zero for automatic recommendation. Enter a positive N/m value to force a penalty.",
+        "output": "Higher values reduce penetration but can require smaller dt and more iterations.",
+        "caution": "Too high can make contact numerically stiff; too low permits excessive penetration.",
+    },
+    "collision_contact_damping": {
+        "title": "Contact Damping",
+        "purpose": "Optional normal damping in the penalty contact law.",
+        "use": "Use small nonnegative values to reduce contact oscillation.",
+        "output": "Changes rebound, energy balance and peak force.",
+        "caution": "Damping is numerical/engineering damping, not friction or material loss modelling.",
+    },
+    "collision_max_iterations": {
+        "title": "Max Contact Iterations",
+        "purpose": "Maximum contact-force iterations per time step/substep.",
+        "use": "Increase if contact_iteration_failed appears in diagnostics.",
+        "output": "Affects convergence robustness and runtime.",
+        "caution": "Repeated failures usually indicate dt/penalty/support issues, not just too few iterations.",
+    },
+    "collision_penetration_tolerance": {
+        "title": "Penetration Tolerance",
+        "purpose": "Convergence tolerance for penetration change during contact iteration.",
+        "use": "Smaller values require more stable contact iteration before accepting a step.",
+        "output": "Affects contact convergence status.",
+        "caution": "Very small values can increase iterations without meaningful accuracy gain.",
+    },
+    "collision_force_tolerance": {
+        "title": "Force Tolerance",
+        "purpose": "Relative contact-force convergence tolerance.",
+        "use": "The contact iteration stops when force change is small relative to current contact force scale.",
+        "output": "Affects contact convergence status and step acceptance.",
+        "caution": "Very tight tolerances increase runtime.",
+    },
+    "collision_target_penetration": {
+        "title": "Target Penetration Fraction",
+        "purpose": "Target penetration fraction used by automatic penalty recommendation.",
+        "use": "A value of 0.01 targets penetration around one percent of sphere radius in the recommendation model.",
+        "output": "Affects automatically selected contact penalty.",
+        "caution": "This is a recommendation target, not a hard bound.",
+    },
+    "collision_max_event_substeps": {
+        "title": "Max Event Substeps",
+        "purpose": "Maximum substeps used when the sphere may cross the shell surface within one time step.",
+        "use": "Increase for high-speed impacts where contact can be missed between coarse steps.",
+        "output": "Improves event capture at the cost of more contact work.",
+        "caution": "If many event substeps are used, consider reducing dt or increasing auto steps/radius.",
+    },
+
+    "collision_material_nonlinear": {
+        "title": "Material Nonlinear Impact",
+        "purpose": "Uses the nonlinear transient impact path so shell plastic strain can be committed during collision.",
+        "use": "Enable for damage driven by equivalent plastic strain. Leave off for the faster linear elastic contact proxy.",
+        "output": "Makes Equivalent Plastic Strain available when plasticity develops and reports Newton iterations/cutbacks.",
+        "caution": "This is much slower than the linear collision path and still uses simplified frictionless rigid-sphere contact.",
+    },
+    "collision_nonlinear_iterations": {
+        "title": "Impact Newton Iterations",
+        "purpose": "Maximum Newton iterations for each nonlinear impact substep.",
+        "use": "Increase if a nonlinear impact step fails after contact or plasticity starts.",
+        "output": "Affects robustness and runtime.",
+        "caution": "Convergence failures usually also need smaller dt or more cutbacks.",
+    },
+    "collision_nonlinear_tolerance": {
+        "title": "Impact Residual Tolerance",
+        "purpose": "Residual tolerance for the material-nonlinear transient equilibrium iterations.",
+        "use": "Use the default for screening; tighten for convergence studies.",
+        "output": "Affects accepted nonlinear impact steps.",
+        "caution": "Overly tight tolerance can make impact runs slow or fail without improving engineering decisions.",
+    },
+    "collision_nonlinear_cutbacks": {
+        "title": "Impact Cutbacks",
+        "purpose": "Maximum automatic time-step halvings when a nonlinear impact step fails.",
+        "use": "Higher values allow the solver to recover from abrupt contact/plasticity events.",
+        "output": "Increases robustness at the cost of more substeps.",
+        "caution": "Many cutbacks indicate the requested dt/penalty/contact setup should be reviewed.",
+    },
+    "collision_plastic_damage_threshold": {
+        "title": "Plastic Damage Strain",
+        "purpose": "Equivalent plastic strain threshold for plasticity-based impact damage/erosion.",
+        "use": "Used only when material nonlinear impact and damage are enabled.",
+        "output": "Controls when damaged shell/beam elements soften or delete after converged substeps.",
+        "caution": "This is engineering erosion, not calibrated crack propagation.",
+    },
+    "collision_damage_enabled": {
+        "title": "Impact Damage",
+        "purpose": "Activates engineering shell damage/erosion during collision.",
+        "use": "Damage accumulates from contact-derived demand and can soften or delete shell elements.",
+        "output": "Deleted/fully damaged shell elements are removed from the visualization and reported in the result text.",
+        "caution": "This is not crack propagation or validated fracture mechanics.",
+    },
+    "collision_damage_mode": {
+        "title": "Damage Mode",
+        "purpose": "Chooses accumulated or instant threshold damage behavior.",
+        "use": "Accumulated damage allows repeated/subthreshold contact to build damage. Instant threshold reacts to a single exceeded demand.",
+        "output": "Changes when softening/deletion occurs.",
+        "caution": "Accumulated damage is usually the more stable screening mode.",
+    },
+    "collision_damage_capacity": {
+        "title": "Damage Capacity Basis",
+        "purpose": "Material capacity reference for impact damage utilization.",
+        "use": "Yield uses yield stress, ultimate proxy uses a higher proxy, and user uses the entered capacity value.",
+        "output": "Higher capacity delays damage and deletion.",
+        "caution": "User capacity must be positive when selected.",
+    },
+    "collision_damage_user_capacity": {
+        "title": "User Damage Capacity",
+        "purpose": "User-defined capacity in MPa for impact damage calculations.",
+        "use": "Only used when capacity basis is user.",
+        "output": "Controls damage utilization scaling.",
+        "caution": "This is an engineering screening input; choose defensible values.",
+    },
+    "collision_damage_softening": {
+        "title": "Damage Softening Start",
+        "purpose": "Damage level where stiffness/contact participation starts reducing.",
+        "use": "Values below delete-at create gradual softening before deletion.",
+        "output": "Affects impact force redistribution and later contact response.",
+        "caution": "Too low can over-soften from small numerical damage.",
+    },
+    "collision_damage_delete_at": {
+        "title": "Damage Deletion Level",
+        "purpose": "Damage level at which a shell element is treated as fully eroded/deleted.",
+        "use": "Default 1.0 deletes at full damage.",
+        "output": "Deleted shell elements are hidden in visualization and removed from later contact/load participation.",
+        "caution": "No nodes, MPCs, beams, or topology are physically separated in this v1 model.",
+    },
+    "collision_damage_min_area": {
+        "title": "Minimum Contact Area",
+        "purpose": "Lower bound on estimated contact patch area used for damage demand.",
+        "use": "Prevents unrealistically high pressure from vanishingly small numerical contact areas.",
+        "output": "Affects contact pressure utilization and damage accumulation.",
+        "caution": "Choose an area consistent with mesh size and shell thickness for final screening.",
+    },
+    "collision_damage_max_deleted": {
+        "title": "Max Deleted Fraction",
+        "purpose": "Stops the collision damage run after too much shell area has been eroded.",
+        "use": "Keeps the v1 erosion model inside a controlled range.",
+        "output": "Can stop the transient with a max-deleted-fraction status.",
+        "caution": "Large deletion fractions are outside this simplified model's intended reliability.",
+    },
+    "collision_damage_smoothing": {
+        "title": "Neighbor Smoothing",
+        "purpose": "Reduces isolated single-element damage spikes.",
+        "use": "Enable when a coarse contact mesh produces isolated erosion not supported by neighbouring/contact history.",
+        "output": "Can delay or prevent isolated deletion.",
+        "caution": "This is a numerical guardrail, not a crack-path model.",
+    },
+    "show_collision_sphere": {
+        "title": "Show Rigid Sphere",
+        "purpose": "Displays the rigid sphere in preview and result snapshots.",
+        "use": "When collision is enabled, the pre-result sphere updates from start/radius inputs. Result snapshots show saved sphere positions.",
+        "output": "Changes visualization only.",
+        "caution": "The displayed sphere represents the rigid body centre/radius, not deformation or spin.",
+    },
+})
+
+
 class RuntimeFEMWindow:
     """Popup window for the experimental full-geometry FEM runtime solver."""
 
@@ -3145,6 +3974,51 @@ class RuntimeFEMWindow:
         self.memory_limit_mb = tk.DoubleVar(value=0.0)
         self.capacity_buckling_mode_number = tk.IntVar(value=1)
         self.capacity_mesh_min_elements_per_half_wave = tk.IntVar(value=4)
+        self.fracture_enabled = tk.BooleanVar(value=False)
+        self.fracture_strain_threshold = tk.DoubleVar(value=0.02)
+        self.fracture_residual_stiffness_fraction = tk.DoubleVar(value=1.0e-6)
+        self.fracture_max_deleted_fraction = tk.DoubleVar(value=0.25)
+        self.fracture_min_load_factor = tk.DoubleVar(value=0.0)
+        self.collision_enabled = tk.BooleanVar(value=False)
+        self.collision_include_static_load = tk.BooleanVar(value=False)
+        self.collision_damage_enabled = tk.BooleanVar(value=True)
+        self.collision_material_nonlinear_enabled = tk.BooleanVar(value=False)
+        self.collision_nonlinear_max_iterations = tk.IntVar(value=20)
+        self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
+        self.collision_nonlinear_cutbacks = tk.IntVar(value=8)
+        self.collision_plastic_damage_threshold = tk.DoubleVar(value=0.01)
+        self.collision_mass_kg = tk.DoubleVar(value=1000.0)
+        self.collision_radius_m = tk.DoubleVar(value=0.25)
+        self.collision_start_x_m = tk.DoubleVar(value=0.0)
+        self.collision_start_y_m = tk.DoubleVar(value=0.0)
+        self.collision_start_z_m = tk.DoubleVar(value=1.0)
+        self.collision_vector_x = tk.DoubleVar(value=0.0)
+        self.collision_vector_y = tk.DoubleVar(value=0.0)
+        self.collision_vector_z = tk.DoubleVar(value=-1.0)
+        self.collision_speed_mps = tk.DoubleVar(value=5.0)
+        self.collision_time_mode = tk.StringVar(value="auto")
+        self.collision_auto_steps_per_radius = tk.DoubleVar(value=20.0)
+        self.collision_auto_post_contact_radii = tk.DoubleVar(value=6.0)
+        self.collision_bounce_back_time_s = tk.DoubleVar(value=0.01)
+        self.collision_total_time_s = tk.DoubleVar(value=0.05)
+        self.collision_dt_s = tk.DoubleVar(value=0.0005)
+        self.collision_result_interval_s = tk.DoubleVar(value=0.0)
+        self.collision_penalty_stiffness_n_per_m = tk.DoubleVar(value=0.0)
+        self.collision_contact_damping = tk.DoubleVar(value=0.0)
+        self.collision_max_iterations = tk.IntVar(value=25)
+        self.collision_penetration_tolerance_m = tk.DoubleVar(value=1.0e-8)
+        self.collision_force_tolerance_n = tk.DoubleVar(value=1.0e-6)
+        self.collision_target_penetration_fraction = tk.DoubleVar(value=0.01)
+        self.collision_max_event_substeps = tk.IntVar(value=16)
+        self.collision_contact_surface = tk.StringVar(value="midsurface")
+        self.collision_damage_mode = tk.StringVar(value="accumulated_damage")
+        self.collision_damage_capacity_basis = tk.StringVar(value="yield")
+        self.collision_damage_user_capacity_mpa = tk.DoubleVar(value=0.0)
+        self.collision_damage_softening_start = tk.DoubleVar(value=0.6)
+        self.collision_damage_delete_at = tk.DoubleVar(value=1.0)
+        self.collision_damage_min_contact_area_m2 = tk.DoubleVar(value=1.0e-6)
+        self.collision_damage_max_deleted_fraction = tk.DoubleVar(value=0.25)
+        self.collision_damage_neighbor_smoothing = tk.BooleanVar(value=False)
         self.result_case_choice = tk.StringVar(value="Static displacement/stress")
         self.result_case_labels: dict[str, str] = {"Static displacement/stress": "static"}
         self.component_choice = tk.StringVar(value="von_mises_pa")
@@ -3161,6 +4035,8 @@ class RuntimeFEMWindow:
             "Strain Y (membrane)": "strain_y_membrane",
             "Strain XY (membrane)": "strain_xy_membrane",
             "Equivalent Plastic Strain": "plastic_strain",
+            "Impact Damage": "impact_damage",
+            "Impact Damage Utilization": "impact_damage_utilization",
         }
         self.current_result: RuntimeFEMRunResult | None = None
         self.result_text = None
@@ -3189,10 +4065,19 @@ class RuntimeFEMWindow:
         self._cancel_requested = False
         self.progress_bar = None
         self.result_canvas = None
+        self._live_collision_sphere_visualization: dict[str, Any] = {}
         self.use_interactive_3d = tk.BooleanVar(value=True)
         self.show_plate_vis = tk.BooleanVar(value=True)
         self.show_stiffener_vis = tk.BooleanVar(value=True)
         self.show_girder_vis = tk.BooleanVar(value=True)
+        self.show_collision_sphere_vis = tk.BooleanVar(value=True)
+        self.animation_fast_mode = tk.BooleanVar(value=True)
+        self.animation_interval_ms = tk.IntVar(value=80)
+        self.animation_speed_multiplier = tk.DoubleVar(value=1.0)
+        self.time_step_slider_value = tk.DoubleVar(value=0.0)
+        self.time_step_slider = None
+        self.time_step_label = None
+        self._time_slider_syncing = False
         self.plate_alpha_vis = tk.StringVar(value="1.0")
         self.plate_front_color_vis = tk.StringVar(value="#d1d5db")
         self.plate_back_color_vis = tk.StringVar(value="#8b5e3c")
@@ -3206,6 +4091,9 @@ class RuntimeFEMWindow:
         self._plot_trace_ids: list[tuple[tk.Variable, str]] = []
         self._force_fit_next_refresh = True
         self._display_base_geometry = True
+        self._animation_after_id: str | None = None
+        self._animation_running = False
+        self._animation_index = 0
 
         self._build()
         self._bind_plot_configuration_traces()
@@ -3220,11 +4108,21 @@ class RuntimeFEMWindow:
             self.show_plate_vis,
             self.show_stiffener_vis,
             self.show_girder_vis,
+            self.show_collision_sphere_vis,
             self.plate_alpha_vis,
             self.plate_front_color_vis,
             self.plate_back_color_vis,
             self.member_alpha_vis,
             self.colormap_vis,
+            self.collision_enabled,
+            self.collision_radius_m,
+            self.collision_start_x_m,
+            self.collision_start_y_m,
+            self.collision_start_z_m,
+            self.collision_vector_x,
+            self.collision_vector_y,
+            self.collision_vector_z,
+            self.collision_speed_mps,
         )
         for variable in variables:
             try:
@@ -3359,6 +4257,70 @@ class RuntimeFEMWindow:
         parent.columnconfigure(0, weight=0)
         parent.columnconfigure(1, weight=0)
         parent.columnconfigure(2, weight=1)
+
+    @staticmethod
+    def _configure_compact_option_grid(parent: Any) -> None:
+        for column in (0, 3):
+            parent.columnconfigure(column, weight=0)
+        for column in (1, 4):
+            parent.columnconfigure(column, weight=0)
+        for column in (2, 5):
+            parent.columnconfigure(column, weight=1)
+
+    def _add_compact_entry(
+            self,
+            parent: Any,
+            row: int,
+            side: int,
+            key: str,
+            label: str,
+            variable: tk.Variable,
+            width: int = 10,
+    ) -> ttk.Entry:
+        offset = 0 if side == 0 else 3
+        self._info_button(parent, key).grid(row=row, column=offset, sticky=tk.W, padx=(6, 3), pady=2)
+        ttk.Label(parent, text=label).grid(row=row, column=offset + 1, sticky=tk.W, padx=(0, 6), pady=2)
+        control = ttk.Entry(parent, textvariable=variable, width=width)
+        control.grid(row=row, column=offset + 2, sticky=tk.EW, padx=(0, 8), pady=2)
+        return control
+
+    def _add_compact_option(
+            self,
+            parent: Any,
+            row: int,
+            side: int,
+            key: str,
+            label: str,
+            variable: tk.Variable,
+            values: tuple[str, ...],
+            width: int | None = None,
+    ) -> ttk.OptionMenu:
+        offset = 0 if side == 0 else 3
+        self._info_button(parent, key).grid(row=row, column=offset, sticky=tk.W, padx=(6, 3), pady=2)
+        ttk.Label(parent, text=label).grid(row=row, column=offset + 1, sticky=tk.W, padx=(0, 6), pady=2)
+        control = ttk.OptionMenu(parent, variable, variable.get(), *values)
+        if width is not None:
+            try:
+                control.configure(width=width)
+            except Exception:
+                pass
+        control.grid(row=row, column=offset + 2, sticky=tk.EW, padx=(0, 8), pady=2)
+        return control
+
+    def _add_compact_check(
+            self,
+            parent: Any,
+            row: int,
+            side: int,
+            key: str,
+            text: str,
+            variable: tk.BooleanVar,
+    ) -> ttk.Checkbutton:
+        offset = 0 if side == 0 else 3
+        self._info_button(parent, key).grid(row=row, column=offset, sticky=tk.W, padx=(6, 3), pady=2)
+        control = ttk.Checkbutton(parent, text=text, variable=variable)
+        control.grid(row=row, column=offset + 1, columnspan=2, sticky=tk.W, padx=(0, 8), pady=2)
+        return control
 
     def _show_solver_info(self, key: str) -> None:
         info = FEM_OPTION_INFO.get(key)
@@ -3534,6 +4496,9 @@ class RuntimeFEMWindow:
         tab_advanced = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_advanced, text="Advanced")
 
+        tab_collision = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_collision, text="Collision")
+
         constraints = ttk.LabelFrame(tab_general, text="Supports and load path")
         constraints.pack(fill=tk.X, padx=8, pady=(8, 6))
         self._configure_option_grid(constraints)
@@ -3673,6 +4638,20 @@ class RuntimeFEMWindow:
                                                                                       padx=(0, 8), pady=4)
         imperfections.columnconfigure(3, weight=1)
 
+        fracture = ttk.LabelFrame(tab_properties, text="Nonlinear static fracture / erosion")
+        fracture.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(fracture)
+        self._add_check_row(fracture, 0, "fracture_enabled", "Use strain-triggered erosion",
+                            self.fracture_enabled)
+        self._add_entry_row(fracture, 1, "fracture_strain_threshold", "Plastic strain threshold",
+                            self.fracture_strain_threshold)
+        self._add_entry_row(fracture, 2, "fracture_residual_stiffness", "Residual stiffness frac.",
+                            self.fracture_residual_stiffness_fraction)
+        self._add_entry_row(fracture, 3, "fracture_max_deleted", "Max deleted fraction",
+                            self.fracture_max_deleted_fraction)
+        self._add_entry_row(fracture, 4, "fracture_min_load_factor", "Min LF before erosion",
+                            self.fracture_min_load_factor)
+
         time_domain = ttk.LabelFrame(tab_advanced, text="Custom time-domain load")
         time_domain.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(time_domain)
@@ -3790,24 +4769,190 @@ class RuntimeFEMWindow:
         self._bind_custom_load_list_traces()
         self._refresh_custom_load_list()
 
+        collision_scroll_frame = ttk.Frame(tab_collision)
+        collision_scroll_frame.pack(fill=tk.BOTH, expand=True)
+        collision_canvas = tk.Canvas(collision_scroll_frame, highlightthickness=0)
+        collision_scrollbar = ttk.Scrollbar(collision_scroll_frame, orient=tk.VERTICAL, command=collision_canvas.yview)
+        collision_canvas.configure(yscrollcommand=collision_scrollbar.set)
+        collision_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        collision_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        collision_body = ttk.Frame(collision_canvas)
+        collision_window_id = collision_canvas.create_window((0, 0), window=collision_body, anchor=tk.NW)
+        collision_body.bind(
+            "<Configure>",
+            lambda _event, canvas=collision_canvas: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        collision_canvas.bind(
+            "<Configure>",
+            lambda event, canvas=collision_canvas, window_id=collision_window_id: canvas.itemconfigure(
+                window_id,
+                width=event.width,
+            ),
+        )
+        def _scroll_collision_tab(event: Any, canvas: tk.Canvas = collision_canvas) -> str:
+            if getattr(event, "num", None) == 4:
+                canvas.yview_scroll(-3, "units")
+            elif getattr(event, "num", None) == 5:
+                canvas.yview_scroll(3, "units")
+            else:
+                delta = getattr(event, "delta", 0)
+                if delta:
+                    canvas.yview_scroll(-max(-3, min(3, int(delta / 120))), "units")
+            return "break"
+
+        def _bind_collision_wheel(_event: Any, canvas: tk.Canvas = collision_canvas) -> None:
+            canvas.bind_all("<MouseWheel>", _scroll_collision_tab)
+            canvas.bind_all("<Button-4>", _scroll_collision_tab)
+            canvas.bind_all("<Button-5>", _scroll_collision_tab)
+
+        def _unbind_collision_wheel(_event: Any, canvas: tk.Canvas = collision_canvas) -> None:
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
+        collision_canvas.bind("<Enter>", _bind_collision_wheel)
+        collision_canvas.bind("<Leave>", _unbind_collision_wheel)
+        self._collision_scroll_canvas = collision_canvas
+
+        collision_main = ttk.LabelFrame(collision_body, text="Rigid-sphere collision")
+        collision_main.pack(fill=tk.X, padx=8, pady=(6, 4))
+        self._configure_compact_option_grid(collision_main)
+        self._add_compact_check(collision_main, 0, 0, "collision_enabled", "Run collision transient",
+                                self.collision_enabled)
+        self._add_compact_check(collision_main, 0, 1, "collision_include_static_load", "Include static FE loads",
+                                self.collision_include_static_load)
+        self._add_compact_entry(collision_main, 1, 0, "collision_mass_kg", "Mass [kg]",
+                                self.collision_mass_kg)
+        self._add_compact_entry(collision_main, 1, 1, "collision_radius_m", "Radius [m]",
+                                self.collision_radius_m)
+        self._add_compact_entry(collision_main, 2, 0, "collision_speed_mps", "Speed [m/s]",
+                                self.collision_speed_mps)
+        self._add_compact_option(collision_main, 2, 1, "collision_contact_surface", "Surface",
+                                 self.collision_contact_surface, ("midsurface", "top", "bottom"))
+
+        collision_path = ttk.LabelFrame(collision_body, text="Path and time")
+        collision_path.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self._configure_compact_option_grid(collision_path)
+        self._add_compact_entry(collision_path, 0, 0, "collision_start_x_m", "Start X [m]",
+                                self.collision_start_x_m)
+        self._add_compact_entry(collision_path, 0, 1, "collision_vector_x", "Vector X",
+                                self.collision_vector_x)
+        self._add_compact_entry(collision_path, 1, 0, "collision_start_y_m", "Start Y [m]",
+                                self.collision_start_y_m)
+        self._add_compact_entry(collision_path, 1, 1, "collision_vector_y", "Vector Y",
+                                self.collision_vector_y)
+        self._add_compact_entry(collision_path, 2, 0, "collision_start_z_m", "Start Z [m]",
+                                self.collision_start_z_m)
+        self._add_compact_entry(collision_path, 2, 1, "collision_vector_z", "Vector Z",
+                                self.collision_vector_z)
+        self._add_compact_option(collision_path, 3, 0, "collision_time_mode", "Time setup",
+                                 self.collision_time_mode, ("auto", "manual"))
+        self._add_compact_entry(collision_path, 3, 1, "collision_result_interval_s", "Result int. [s]",
+                                self.collision_result_interval_s)
+        self._add_compact_entry(collision_path, 4, 0, "collision_auto_steps_per_radius", "Auto steps/r",
+                                self.collision_auto_steps_per_radius)
+        self._add_compact_entry(collision_path, 4, 1, "collision_auto_post_contact", "Auto post r",
+                                self.collision_auto_post_contact_radii)
+        self._add_compact_entry(collision_path, 5, 0, "collision_total_time_s", "Manual time [s]",
+                                self.collision_total_time_s)
+        self._add_compact_entry(collision_path, 5, 1, "collision_dt_s", "Manual dt [s]",
+                                self.collision_dt_s)
+
+        collision_stop = ttk.LabelFrame(collision_body, text="Contact and stop controls")
+        collision_stop.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self._configure_compact_option_grid(collision_stop)
+        self._add_compact_entry(collision_stop, 0, 0, "collision_penalty_stiffness", "Penalty [N/m]",
+                                self.collision_penalty_stiffness_n_per_m)
+        self._add_compact_entry(collision_stop, 0, 1, "collision_contact_damping", "Damping",
+                                self.collision_contact_damping)
+        self._add_compact_entry(collision_stop, 1, 0, "collision_max_iterations", "Max iters",
+                                self.collision_max_iterations, width=8)
+        self._add_compact_entry(collision_stop, 1, 1, "collision_max_event_substeps", "Event substeps",
+                                self.collision_max_event_substeps, width=8)
+        self._add_compact_entry(collision_stop, 2, 0, "collision_penetration_tolerance", "Pen. tol. [m]",
+                                self.collision_penetration_tolerance_m)
+        self._add_compact_entry(collision_stop, 2, 1, "collision_force_tolerance", "Force tol. [N]",
+                                self.collision_force_tolerance_n)
+        self._add_compact_entry(collision_stop, 3, 0, "collision_target_penetration", "Target pen. frac.",
+                                self.collision_target_penetration_fraction)
+        self._add_compact_entry(collision_stop, 3, 1, "collision_bounce_back_time", "Bounce stop [s]",
+                                self.collision_bounce_back_time_s)
+
+        collision_damage = ttk.LabelFrame(collision_body, text="Impact damage")
+        collision_damage.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_compact_option_grid(collision_damage)
+        self._add_compact_check(collision_damage, 0, 0, "collision_damage_enabled", "Activate damage",
+                                self.collision_damage_enabled)
+        self._add_compact_check(collision_damage, 0, 1, "collision_material_nonlinear", "Material nonlinear",
+                                self.collision_material_nonlinear_enabled)
+        self._add_compact_check(collision_damage, 1, 0, "collision_damage_smoothing", "Neighbor smoothing",
+                                self.collision_damage_neighbor_smoothing)
+        self._add_compact_entry(collision_damage, 1, 1, "collision_plastic_damage_threshold", "Plastic strain lim.",
+                                self.collision_plastic_damage_threshold)
+        self._add_compact_option(collision_damage, 2, 0, "collision_damage_mode", "Mode",
+                                 self.collision_damage_mode, ("accumulated_damage", "instant_threshold"))
+        self._add_compact_option(collision_damage, 2, 1, "collision_damage_capacity", "Capacity",
+                                 self.collision_damage_capacity_basis, ("yield", "ultimate_proxy", "user"))
+        self._add_compact_entry(collision_damage, 3, 0, "collision_damage_user_capacity", "User cap. [MPa]",
+                                self.collision_damage_user_capacity_mpa)
+        self._add_compact_entry(collision_damage, 3, 1, "collision_damage_min_area", "Min area [m2]",
+                                self.collision_damage_min_contact_area_m2)
+        self._add_compact_entry(collision_damage, 4, 0, "collision_damage_softening", "Softening start",
+                                self.collision_damage_softening_start)
+        self._add_compact_entry(collision_damage, 4, 1, "collision_damage_delete_at", "Delete damage",
+                                self.collision_damage_delete_at)
+        self._add_compact_entry(collision_damage, 5, 0, "collision_damage_max_deleted", "Max deleted frac.",
+                                self.collision_damage_max_deleted_fraction)
+        self._add_compact_entry(collision_damage, 5, 1, "collision_nonlinear_iterations", "NL iters",
+                                self.collision_nonlinear_max_iterations, width=8)
+        self._add_compact_entry(collision_damage, 6, 0, "collision_nonlinear_tolerance", "NL tol.",
+                                self.collision_nonlinear_tolerance)
+        self._add_compact_entry(collision_damage, 6, 1, "collision_nonlinear_cutbacks", "NL cutbacks",
+                                self.collision_nonlinear_cutbacks, width=8)
+
         vis_group = ttk.LabelFrame(tab_visualization, text="Plot configuration")
         vis_group.pack(fill=tk.X, padx=8, pady=(8, 8))
         self._configure_option_grid(vis_group)
         self._add_check_row(vis_group, 0, "show_plate", "Show plate surface", self.show_plate_vis)
         self._add_check_row(vis_group, 1, "show_stiffeners", "Show stiffeners", self.show_stiffener_vis)
         self._add_check_row(vis_group, 2, "show_girders", "Show girders/frames", self.show_girder_vis)
-        self._add_entry_row(vis_group, 3, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
-        self._add_entry_row(vis_group, 4, "plate_front_color", "Plate front", self.plate_front_color_vis, width=10)
-        self._add_entry_row(vis_group, 5, "plate_back_color", "Plate back", self.plate_back_color_vis, width=10)
-        self._add_entry_row(vis_group, 6, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
-        self._add_option_row(vis_group, 7, "colormap", "Colormap", self.colormap_vis,
+        self._add_check_row(vis_group, 3, "show_collision_sphere", "Show rigid sphere", self.show_collision_sphere_vis)
+        self._add_entry_row(vis_group, 4, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
+        self._add_entry_row(vis_group, 5, "plate_front_color", "Plate front", self.plate_front_color_vis, width=10)
+        self._add_entry_row(vis_group, 6, "plate_back_color", "Plate back", self.plate_back_color_vis, width=10)
+        self._add_entry_row(vis_group, 7, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
+        self._add_option_row(vis_group, 8, "colormap", "Colormap", self.colormap_vis,
                              ("jet", "viridis", "plasma", "inferno", "coolwarm", "greys"))
         vis_actions = ttk.Frame(vis_group)
-        vis_actions.grid(row=8, column=0, columnspan=3, sticky=tk.W, padx=8, pady=4)
+        vis_actions.grid(row=9, column=0, columnspan=4, sticky=tk.W, padx=8, pady=4)
         ttk.Button(vis_actions, text="Redraw base 3D", command=self._redraw_base_3d).pack(side=tk.LEFT)
         ttk.Button(vis_actions, text="Show results", command=self._show_results).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(vis_actions, text="Previous step", command=self._previous_time_step).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(vis_actions, text="Next step", command=self._next_time_step).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(vis_actions, text="Play", command=self._play_animation).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(vis_actions, text="Stop", command=self._stop_animation).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Checkbutton(vis_actions, text="Fast animation", variable=self.animation_fast_mode).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(vis_actions, text="x").pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Entry(vis_actions, textvariable=self.animation_speed_multiplier, width=5).pack(side=tk.RIGHT)
+        ttk.Label(vis_actions, text="speed").pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Label(vis_actions, text="ms").pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Entry(vis_actions, textvariable=self.animation_interval_ms, width=5).pack(side=tk.RIGHT)
+        replay_slider = ttk.Frame(vis_group)
+        replay_slider.grid(row=10, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(0, 4))
+        replay_slider.columnconfigure(1, weight=1)
+        self.time_step_label = ttk.Label(replay_slider, text="Time step")
+        self.time_step_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.time_step_slider = ttk.Scale(
+            replay_slider,
+            from_=0.0,
+            to=0.0,
+            orient=tk.HORIZONTAL,
+            variable=self.time_step_slider_value,
+            command=self._on_time_slider,
+        )
+        self.time_step_slider.grid(row=0, column=1, sticky=tk.EW)
         view_actions = ttk.Frame(vis_group)
-        view_actions.grid(row=9, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
+        view_actions.grid(row=11, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
         ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(view_actions, text="ISO", command=lambda: self._set_runtime_3d_view("iso")).pack(side=tk.LEFT, padx=(0, 4))
@@ -4094,6 +5239,8 @@ class RuntimeFEMWindow:
     def _set_display_modes(self, result: RuntimeFEMRunResult) -> None:
         has_plastic = bool((result.visualization or {}).get("plastic_strain"))
         uses_nonlinear_material = _summary_uses_nonlinear_material(result.summary)
+        prestress_summary = (result.summary or {}).get("prestress_summary", {}) or {}
+        is_collision_result = str(prestress_summary.get("runtime_solver", "") or "") == "sphere collision transient"
         labels = {"Static displacement/stress": "static"}
         for mode in _buckling_mode_shapes(result):
             mode_number = int(mode.get("mode_number", 0))
@@ -4125,13 +5272,123 @@ class RuntimeFEMWindow:
             "Strain Y (membrane)": "strain_y_membrane",
             "Strain XY (membrane)": "strain_xy_membrane",
         }
-        if has_plastic or uses_nonlinear_material:
+        if has_plastic or (uses_nonlinear_material and not is_collision_result):
             component_labels["Equivalent Plastic Strain"] = "plastic_strain"
+        damage_summary = (result.visualization or {}).get("impact_damage_summary", {}) or {}
+        if bool(damage_summary.get("enabled", False)) or is_collision_result:
+            component_labels["Impact Damage"] = "impact_damage"
+            component_labels["Impact Damage Utilization"] = "impact_damage_utilization"
+            component_labels["Impact Damage Stiffness Scale"] = "impact_damage_scale"
         self.component_labels = component_labels
         if self.component_choice.get() not in component_labels:
             self.component_choice.set("Stress von Mises")
         if self.component_selector is not None:
             self.component_selector.configure(values=tuple(component_labels.keys()))
+        self._sync_time_slider()
+
+    def _time_result_labels(self) -> list[str]:
+        return [label for label, mode in self.result_case_labels.items() if str(mode).startswith("time:")]
+
+    def _time_result_index(self) -> int:
+        labels = self._time_result_labels()
+        current = str(self.result_case_choice.get())
+        return labels.index(current) if current in labels else 0
+
+    def _set_time_result_index(self, index: int, *, stop_animation: bool = True) -> None:
+        labels = self._time_result_labels()
+        if not labels:
+            return
+        if stop_animation:
+            self._stop_animation()
+        index = int(index) % len(labels)
+        self.result_case_choice.set(labels[index])
+        self._sync_time_slider(index=index)
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+
+    def _sync_time_slider(self, index: int | None = None) -> None:
+        labels = self._time_result_labels()
+        count = len(labels)
+        if index is None:
+            index = self._time_result_index() if count else 0
+        index = min(max(int(index), 0), max(count - 1, 0))
+        self._time_slider_syncing = True
+        try:
+            if self.time_step_slider is not None:
+                self.time_step_slider.configure(from_=0.0, to=float(max(count - 1, 0)))
+                try:
+                    self.time_step_slider.configure(state=tk.NORMAL if count else tk.DISABLED)
+                except tk.TclError:
+                    pass
+            self.time_step_slider_value.set(float(index))
+            if self.time_step_label is not None:
+                if count:
+                    self.time_step_label.configure(text="Time step " + str(index + 1) + "/" + str(count))
+                else:
+                    self.time_step_label.configure(text="Time step")
+        finally:
+            self._time_slider_syncing = False
+
+    def _on_time_slider(self, value: Any) -> None:
+        if self._time_slider_syncing:
+            return
+        labels = self._time_result_labels()
+        if not labels:
+            return
+        index = int(round(_safe_float(value, 0.0)))
+        index = min(max(index, 0), len(labels) - 1)
+        self._set_time_result_index(index, stop_animation=True)
+
+    def _step_time_result(self, direction: int) -> None:
+        labels = self._time_result_labels()
+        if not labels:
+            self._write_status("No saved time-domain result steps are available.", keep_run_results=True)
+            return
+        self._set_time_result_index(self._time_result_index() + int(direction), stop_animation=True)
+
+    def _previous_time_step(self) -> None:
+        self._step_time_result(-1)
+
+    def _next_time_step(self) -> None:
+        self._step_time_result(1)
+
+    def _play_animation(self) -> None:
+        labels = self._time_result_labels()
+        if not labels:
+            self._write_status("No saved time-domain result steps are available for animation.", keep_run_results=True)
+            return
+        self._stop_animation()
+        if bool(self.animation_fast_mode.get()):
+            self.use_interactive_3d.set(True)
+        current = str(self.result_case_choice.get())
+        self._animation_index = labels.index(current) if current in labels else 0
+        self._animation_running = True
+        self._advance_animation_frame()
+
+    def _stop_animation(self) -> None:
+        self._animation_running = False
+        if self._animation_after_id is not None:
+            try:
+                self.window.after_cancel(self._animation_after_id)
+            except Exception:
+                pass
+            self._animation_after_id = None
+
+    def _advance_animation_frame(self) -> None:
+        if not self._animation_running:
+            return
+        labels = self._time_result_labels()
+        if not labels:
+            self._stop_animation()
+            return
+        self.result_case_choice.set(labels[self._animation_index % len(labels)])
+        self._sync_time_slider(index=self._animation_index % len(labels))
+        self._animation_index = (self._animation_index + 1) % len(labels)
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+        speed = max(_safe_float(self.animation_speed_multiplier.get(), 1.0), 0.05)
+        interval = max(int(round(max(_safe_int(self.animation_interval_ms.get(), 80), 20) / speed)), 5)
+        self._animation_after_id = self.window.after(interval, self._advance_animation_frame)
 
     def _get_shell_normal(self, p: np.ndarray, is_cylinder: bool) -> np.ndarray:
         if is_cylinder:
@@ -4182,7 +5439,7 @@ class RuntimeFEMWindow:
             radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             arrow_length = max(radius * 0.22, length * 0.025, 0.02)
-            z_mid = 0.0
+            z_mid = 0.5 * length
             for angle in (math.radians(25.0), math.radians(145.0), math.radians(265.0)):
                 radial = Point3D(math.cos(angle), math.sin(angle), 0.0)
                 surface = radial * (radius + surface_sign * arrow_length * 0.08) + Point3D(0.0, 0.0, z_mid)
@@ -4192,13 +5449,13 @@ class RuntimeFEMWindow:
             label_angle = math.radians(55.0)
             radial = Point3D(math.cos(label_angle), math.sin(label_angle), 0.0)
             canvas.add_text(
-                radial * (radius + arrow_length * 1.35) + Point3D(0.0, 0.0, 0.25 * length),
+                radial * (radius + arrow_length * 1.35) + Point3D(0.0, 0.0, 0.75 * length),
                 "Front",
                 color=front_color,
                 draw_overlay=True,
             )
             canvas.add_text(
-                radial * max(radius - arrow_length * 1.35, radius * 0.35) + Point3D(0.0, 0.0, -0.25 * length),
+                radial * max(radius - arrow_length * 1.35, radius * 0.35) + Point3D(0.0, 0.0, 0.25 * length),
                 "Back",
                 color=back_color,
                 draw_overlay=True,
@@ -4302,7 +5559,7 @@ class RuntimeFEMWindow:
                 canvas.add_cylinder(
                     radius=radius,
                     height=length,
-                    center=Point3D(0.0, 0.0, 0.0),
+                    center=Point3D(0.0, 0.0, 0.5 * length),
                     color=plate_front_color,
                     back_color=plate_back_color,
                     outline="",
@@ -4340,7 +5597,7 @@ class RuntimeFEMWindow:
                             segments=4,
                             height_segments=8,
                             inside=True,
-                            z_offset=0.0,
+                            z_offset=0.5 * length,
                         )
             if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
                 gir_spacing = _safe_float(geometry.get("girder_spacing_m"))
@@ -4354,8 +5611,8 @@ class RuntimeFEMWindow:
                             length,
                             gir_spacing,
                             fallback_midpoint=True,
-                    ):
-                        z_pos = station - 0.5 * length
+                ):
+                        z_pos = station
                         canvas.add_ring_stiffener(
                             radius=radius,
                             z_position=z_pos,
@@ -4463,11 +5720,54 @@ class RuntimeFEMWindow:
                             stipple=member_stipple
                         )
         if callable(getattr(canvas, "add_line", None)) and callable(getattr(canvas, "add_text", None)):
+            self._draw_base_dimension_annotations(canvas, geometry)
             RuntimeFEMWindow._draw_pressure_side_indicators(self, canvas, geometry)
+            self._draw_collision_sphere_overlay(canvas, self._collision_sphere_preview_visualization())
         if hasattr(self, "_custom_load_patches"):
             self._draw_custom_load_patch_outlines(canvas)
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
+
+    def _draw_base_dimension_annotations(self, canvas: Tkinter3DCanvas, geometry: dict[str, Any]) -> None:
+        color = "#6b7280"
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+            y = -1.18 * radius
+            z = -0.18 * radius
+            canvas.add_line(Point3D(-radius, y, z), Point3D(radius, y, z), color=color, width=1, layer=2, draw_overlay=False)
+            canvas.add_text(Point3D(0.0, y, z), "D " + _format_dimension(2.0 * radius), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+            x = 1.18 * radius
+            y2 = 1.18 * radius
+            canvas.add_line(Point3D(x, y2, 0.0), Point3D(x, y2, length), color=color, width=1, layer=2, draw_overlay=False)
+            canvas.add_text(Point3D(x, y2, 0.5 * length), "L " + _format_dimension(length), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+            return
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
+        width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
+        offset = 0.06 * max(length, width, 1.0)
+        canvas.add_line(Point3D(0.0, -offset, 0.0), Point3D(length, -offset, 0.0), color=color, width=1, layer=2, draw_overlay=False)
+        canvas.add_text(Point3D(0.5 * length, -offset, 0.0), _format_dimension(length), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+        canvas.add_line(Point3D(-offset, 0.0, 0.0), Point3D(-offset, width, 0.0), color=color, width=1, layer=2, draw_overlay=False)
+        canvas.add_text(Point3D(-offset, 0.5 * width, 0.0), _format_dimension(width), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+        height = _base_geometry_height_extent(geometry)
+        if height > 0.0:
+            canvas.add_line(Point3D(length + offset, width + offset, 0.0), Point3D(length + offset, width + offset, height), color=color, width=1, layer=2, draw_overlay=False)
+            canvas.add_text(Point3D(length + offset, width + offset, 0.5 * height), _format_dimension(height), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+
+    def _collision_sphere_preview_visualization(self) -> dict[str, Any]:
+        if not bool(self.collision_enabled.get()):
+            return {}
+        return {
+            "rigid_sphere": {
+                "position": (
+                    _safe_float(self.collision_start_x_m.get(), 0.0),
+                    _safe_float(self.collision_start_y_m.get(), 0.0),
+                    _safe_float(self.collision_start_z_m.get(), 1.0),
+                ),
+                "radius": max(_safe_float(self.collision_radius_m.get(), 0.25), 1.0e-9),
+                "visible": True,
+            }
+        }
 
     def _populate_canvas_with_results(self, canvas: Tkinter3DCanvas, fit_view: bool = True) -> None:
         result = self.current_result
@@ -4493,7 +5793,7 @@ class RuntimeFEMWindow:
                         1.0e-9,
                     ),
                     height=max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9),
-                    center=Point3D(0.0, 0.0, 0.0),
+                    center=Point3D(0.0, 0.0, 0.5 * max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)),
                 )
 
 
@@ -4731,6 +6031,8 @@ class RuntimeFEMWindow:
                     stipple=member_stipple,
                 )
 
+        self._draw_base_dimension_annotations(canvas, geometry)
+        self._draw_collision_sphere_overlay(canvas, visualization, deformation_scale=scale)
         self._draw_selected_probe_overlay(canvas, visualization, component, is_mode, scale)
 
         canvas.set_thickness_legend(
@@ -4742,6 +6044,105 @@ class RuntimeFEMWindow:
         )
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
+
+    def _draw_collision_sphere_overlay(
+            self,
+            canvas: Tkinter3DCanvas,
+            visualization: dict[str, Any],
+            deformation_scale: float = 1.0,
+    ) -> None:
+        if not bool(self.show_collision_sphere_vis.get()):
+            return
+        sphere = visualization.get("rigid_sphere") or {}
+        if (
+                str(getattr(self.current_result, "status", "") or "") == "running"
+                and isinstance(getattr(self, "_live_collision_sphere_visualization", None), dict)
+                and self._live_collision_sphere_visualization
+        ):
+            sphere = self._live_collision_sphere_visualization.get("rigid_sphere") or sphere
+        if not isinstance(sphere, dict) or not bool(sphere.get("visible", True)):
+            return
+        try:
+            center = _sphere_display_center(sphere, visualization, deformation_scale)
+            radius = max(_safe_float(sphere.get("radius"), 0.0), 0.0)
+        except Exception:
+            return
+        if radius <= 0.0:
+            return
+        segments = 14
+        rings = 8
+        base_color = "#9ca3af"
+        light_color = _blend_hex_color(base_color, 0.30)
+        outline_color = _blend_hex_color("#4b5563", 0.42)
+        sphere_stipple = _alpha_to_stipple(0.45)
+        light = np.asarray((-0.35, -0.55, 0.76), dtype=float)
+        light /= max(float(np.linalg.norm(light)), 1.0e-12)
+
+        def sphere_point(latitude: float, longitude: float) -> Point3D:
+            cos_lat = math.cos(latitude)
+            return Point3D(
+                center[0] + radius * cos_lat * math.cos(longitude),
+                center[1] + radius * cos_lat * math.sin(longitude),
+                center[2] + radius * math.sin(latitude),
+            )
+
+        for ring in range(rings):
+            lat0 = -0.5 * math.pi + math.pi * ring / rings
+            lat1 = -0.5 * math.pi + math.pi * (ring + 1) / rings
+            for segment in range(segments):
+                lon0 = 2.0 * math.pi * segment / segments
+                lon1 = 2.0 * math.pi * (segment + 1) / segments
+                if ring == 0:
+                    vertices = (
+                        sphere_point(lat0, lon0),
+                        sphere_point(lat1, lon0),
+                        sphere_point(lat1, lon1),
+                    )
+                elif ring == rings - 1:
+                    vertices = (
+                        sphere_point(lat0, lon0),
+                        sphere_point(lat0, lon1),
+                        sphere_point(lat1, lon1),
+                    )
+                else:
+                    vertices = (
+                        sphere_point(lat0, lon0),
+                        sphere_point(lat0, lon1),
+                        sphere_point(lat1, lon1),
+                        sphere_point(lat1, lon0),
+                    )
+                centroid = np.asarray(
+                    (
+                        sum(point.x for point in vertices) / len(vertices),
+                        sum(point.y for point in vertices) / len(vertices),
+                        sum(point.z for point in vertices) / len(vertices),
+                    ),
+                    dtype=float,
+                )
+                normal = centroid - center
+                normal /= max(float(np.linalg.norm(normal)), 1.0e-12)
+                shade = 0.44 + 0.38 * max(float(np.dot(normal, light)), 0.0)
+                color = _blend_hex_color(base_color, shade)
+                canvas.add_polygon(
+                    vertices,
+                    color=color,
+                    outline=outline_color,
+                    width=1,
+                    cull_backface=False,
+                    layer=39,
+                    back_color=light_color,
+                    stipple=sphere_stipple,
+                )
+
+        marker = max(radius * 0.025, 1.0e-3)
+        canvas.add_line(
+            Point3D(center[0] - marker, center[1], center[2]),
+            Point3D(center[0] + marker, center[1], center[2]),
+            color="#4b5563",
+            width=2,
+            layer=41,
+            draw_overlay=False,
+        )
 
     def _update_result_text(self) -> None:
         if self.upper_result_text is None:
@@ -4785,6 +6186,45 @@ class RuntimeFEMWindow:
                     lines.append(f"{prefix}{idx}\t{round(factor, 4)}")
             else:
                 lines.append("No positive buckling modes found.")
+        elif bool(geometry.get("collision_enabled")) or str((geometry.get("prestress_summary") or {}).get("collision_status", "") or ""):
+            prestress = geometry.get("prestress_summary") or {}
+            lines.extend([
+                "--- RIGID-SPHERE COLLISION TRANSIENT ---",
+                "Status: " + result.status.replace("_", " "),
+                "Solver: " + str(geometry.get("solver", "")),
+                "Time mode: " + str(prestress.get("collision_time_mode", geometry.get("collision_time_mode", ""))),
+                "Resolved dt / total [s]: "
+                + str(round(_safe_float(prestress.get("collision_resolved_dt_s")), 9))
+                + " / "
+                + str(round(_safe_float(prestress.get("collision_resolved_total_time_s")), 6)),
+                "Peak contact force [kN]: " + str(round(_safe_float(prestress.get("collision_peak_contact_force_n")) / 1000.0, 4)),
+                "Max penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)),
+                "Max penetration ratio: " + str(round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)),
+                "Contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)),
+                "Contact patch: factor "
+                + str(round(_safe_float(prestress.get("collision_contact_patch_radius_factor")), 3))
+                + ", nodes "
+                + str(_safe_int(prestress.get("collision_contact_patch_min_nodes"), 0))
+                + "-"
+                + str(_safe_int(prestress.get("collision_contact_patch_max_nodes"), 0)),
+                "Saved steps: " + str(_safe_int(prestress.get("collision_saved_steps"), 0)),
+                "Deleted shell elements: " + str(_safe_int(prestress.get("collision_deleted_shell_elements"), 0)),
+            ])
+            if result.status == "running":
+                sphere_position = tuple(prestress.get("collision_live_sphere_position_m") or ())
+                lines.extend([
+                    "Live time [s]: " + str(round(_safe_float(prestress.get("collision_live_time_s")), 8)),
+                    "Live max displacement [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_live_max_displacement_m")), 6)),
+                ])
+                if sphere_position:
+                    lines.append(
+                        "Live sphere [m]: "
+                        + ", ".join(str(round(_safe_float(value), 5)) for value in sphere_position[:3])
+                    )
+            lines.extend([
+                "",
+                "Time snapshots are available from the Result Case selector.",
+            ])
         else:
             force = tuple((geometry.get("load_resultant") or {}).get("force_n") or ())
             applied_pressure = _safe_float(geometry.get("pressure_pa"))
@@ -4875,6 +6315,7 @@ class RuntimeFEMWindow:
     def _on_visualization_choice_changed(self, _event: Any = None) -> None:
         if self._selected_display_mode() != "time_history":
             self._last_mesh_result_case_label = str(self.result_case_choice.get())
+        self._sync_time_slider()
         self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
 
@@ -5150,13 +6591,23 @@ class RuntimeFEMWindow:
 
             fit_view = bool(canvas_created or self._force_fit_next_refresh or not preserve_view)
             self._force_fit_next_refresh = False
-            self.result_canvas.clear()
+            smooth_refresh = bool(
+                not canvas_created
+                and preserve_view
+                and (self._animation_running or str(getattr(self.current_result, "status", "") or "") == "running")
+            )
+            self.result_canvas.clear(keep_canvas=smooth_refresh)
             self.result_canvas.clear_thickness_legend()
 
             if show_base_geometry:
                 self._populate_canvas_with_geometry(self.result_canvas, fit_view=fit_view)
             else:
                 self._populate_canvas_with_results(self.result_canvas, fit_view=fit_view)
+            if smooth_refresh and self.result_canvas is not None:
+                cancel_redraw = getattr(self.result_canvas, "_cancel_scheduled_redraw", None)
+                if callable(cancel_redraw):
+                    cancel_redraw()
+                self.result_canvas.redraw()
         else:
             if self.result_canvas is not None:
                 try:
@@ -5182,6 +6633,8 @@ class RuntimeFEMWindow:
                     color_limits=self._manual_color_limits(),
                     probe_node_id=self._parse_probe_id(self.probe_node_id),
                     probe_element_id=self._parse_probe_id(self.probe_element_id),
+                    show_sphere=bool(self.show_collision_sphere_vis.get()),
+                    base_sphere=self._collision_sphere_preview_visualization(),
                 ),
                 self.figure_parent,
             )
@@ -5276,7 +6729,7 @@ class RuntimeFEMWindow:
             deformation_scale=max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
             custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
-            custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get()),
+            custom_use_nullspace_projection=(bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get())),
             custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0),
             plate_edge_x0_support=str(self.plate_edge_x0_support.get()),
             plate_edge_x1_support=str(self.plate_edge_x1_support.get()),
@@ -5318,6 +6771,51 @@ class RuntimeFEMWindow:
             capacity_buckling_mode_number=max(_safe_int(self.capacity_buckling_mode_number.get(), 1), 1),
             capacity_mesh_min_elements_per_half_wave=max(
                 _safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
+            fracture_enabled=bool(self.fracture_enabled.get()),
+            fracture_strain_threshold=max(_safe_float(self.fracture_strain_threshold.get(), 0.02), 1.0e-12),
+            fracture_residual_stiffness_fraction=min(max(_safe_float(self.fracture_residual_stiffness_fraction.get(), 1.0e-6), 0.0), 1.0),
+            fracture_max_deleted_fraction=min(max(_safe_float(self.fracture_max_deleted_fraction.get(), 0.25), 1.0e-9), 1.0),
+            fracture_min_load_factor=max(_safe_float(self.fracture_min_load_factor.get(), 0.0), 0.0),
+            collision_enabled=bool(self.collision_enabled.get()),
+            collision_include_static_load=bool(self.collision_include_static_load.get()),
+            collision_damage_enabled=bool(self.collision_damage_enabled.get()),
+            collision_material_nonlinear_enabled=bool(self.collision_material_nonlinear_enabled.get()),
+            collision_nonlinear_max_iterations=max(_safe_int(self.collision_nonlinear_max_iterations.get(), 20), 1),
+            collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
+            collision_nonlinear_cutbacks=max(_safe_int(self.collision_nonlinear_cutbacks.get(), 8), 0),
+            collision_plastic_damage_threshold=max(_safe_float(self.collision_plastic_damage_threshold.get(), 0.01), 1.0e-12),
+            collision_mass_kg=max(_safe_float(self.collision_mass_kg.get(), 1000.0), 1.0e-9),
+            collision_radius_m=max(_safe_float(self.collision_radius_m.get(), 0.25), 1.0e-9),
+            collision_start_x_m=_safe_float(self.collision_start_x_m.get(), 0.0),
+            collision_start_y_m=_safe_float(self.collision_start_y_m.get(), 0.0),
+            collision_start_z_m=_safe_float(self.collision_start_z_m.get(), 1.0),
+            collision_vector_x=_safe_float(self.collision_vector_x.get(), 0.0),
+            collision_vector_y=_safe_float(self.collision_vector_y.get(), 0.0),
+            collision_vector_z=_safe_float(self.collision_vector_z.get(), -1.0),
+            collision_speed_mps=max(_safe_float(self.collision_speed_mps.get(), 5.0), 0.0),
+            collision_time_mode=str(self.collision_time_mode.get()),
+            collision_auto_steps_per_radius=max(_safe_float(self.collision_auto_steps_per_radius.get(), 20.0), 2.0),
+            collision_auto_post_contact_radii=max(_safe_float(self.collision_auto_post_contact_radii.get(), 6.0), 0.0),
+            collision_bounce_back_time_s=max(_safe_float(self.collision_bounce_back_time_s.get(), 0.01), 0.0),
+            collision_total_time_s=max(_safe_float(self.collision_total_time_s.get(), 0.05), 1.0e-9),
+            collision_dt_s=max(_safe_float(self.collision_dt_s.get(), 0.0005), 1.0e-9),
+            collision_result_interval_s=max(_safe_float(self.collision_result_interval_s.get(), 0.0), 0.0),
+            collision_penalty_stiffness_n_per_m=max(_safe_float(self.collision_penalty_stiffness_n_per_m.get(), 0.0), 0.0),
+            collision_contact_damping=max(_safe_float(self.collision_contact_damping.get(), 0.0), 0.0),
+            collision_max_iterations=max(_safe_int(self.collision_max_iterations.get(), 25), 1),
+            collision_penetration_tolerance_m=max(_safe_float(self.collision_penetration_tolerance_m.get(), 1.0e-8), 1.0e-12),
+            collision_force_tolerance_n=max(_safe_float(self.collision_force_tolerance_n.get(), 1.0e-6), 1.0e-12),
+            collision_target_penetration_fraction=max(_safe_float(self.collision_target_penetration_fraction.get(), 0.01), 1.0e-9),
+            collision_max_event_substeps=max(_safe_int(self.collision_max_event_substeps.get(), 16), 1),
+            collision_contact_surface=str(self.collision_contact_surface.get()),
+            collision_damage_mode=str(self.collision_damage_mode.get()),
+            collision_damage_capacity_basis=str(self.collision_damage_capacity_basis.get()),
+            collision_damage_user_capacity_pa=max(_safe_float(self.collision_damage_user_capacity_mpa.get(), 0.0), 0.0) * 1.0e6,
+            collision_damage_softening_start=max(_safe_float(self.collision_damage_softening_start.get(), 0.6), 0.0),
+            collision_damage_delete_at=max(_safe_float(self.collision_damage_delete_at.get(), 1.0), 1.0e-9),
+            collision_damage_min_contact_area_m2=max(_safe_float(self.collision_damage_min_contact_area_m2.get(), 1.0e-6), 1.0e-12),
+            collision_damage_max_deleted_fraction=min(max(_safe_float(self.collision_damage_max_deleted_fraction.get(), 0.25), 1.0e-9), 1.0),
+            collision_damage_neighbor_smoothing=bool(self.collision_damage_neighbor_smoothing.get()),
         )
 
     def _bind_custom_load_list_traces(self) -> None:
@@ -5534,18 +7032,66 @@ class RuntimeFEMWindow:
             self._sync_custom_load_payloads()
             self._write_status("Deleted selected custom load from the run list.", keep_run_results=True)
 
+    def _collision_support_is_valid(self) -> bool:
+        boundary = str(self.boundary_condition.get() or "auto").strip().lower()
+        if boundary not in {"auto", "free", "none"}:
+            return True
+        if self.snapshot.is_cylinder:
+            supports = (self.cylinder_lower_support.get(), self.cylinder_upper_support.get())
+        else:
+            supports = (
+                self.plate_edge_x0_support.get(),
+                self.plate_edge_x1_support.get(),
+                self.plate_edge_y0_support.get(),
+                self.plate_edge_y1_support.get(),
+            )
+        return any(str(support or "free").strip().lower() not in {"free", "none"} for support in supports)
+
+    def _collision_inputs_are_valid(self) -> bool:
+        if not bool(self.collision_enabled.get()):
+            return True
+        if not self._collision_support_is_valid():
+            messagebox.showerror(
+                "Collision setup",
+                "Collision requires at least one fixed, pinned, clamped, or otherwise constrained side/top/bottom. "
+                "Choose a supported boundary condition or set custom edge/end supports; nullspace projection is not used for collision.",
+            )
+            return False
+        direction = np.array(
+            [
+                _safe_float(self.collision_vector_x.get(), 0.0),
+                _safe_float(self.collision_vector_y.get(), 0.0),
+                _safe_float(self.collision_vector_z.get(), 0.0),
+            ],
+            dtype=float,
+        )
+        if float(np.linalg.norm(direction)) <= 1.0e-12:
+            messagebox.showerror("Collision setup", "Sphere travel vector must be non-zero.")
+            return False
+        if str(self.collision_time_mode.get()).strip().lower() == "manual" and (
+            _safe_float(self.collision_dt_s.get(), 0.0) <= 0.0
+            or _safe_float(self.collision_total_time_s.get(), 0.0) <= 0.0
+        ):
+            messagebox.showerror("Collision setup", "Collision total time and time step must be positive.")
+            return False
+        return True
+
     def run(self) -> None:
         """Prepare/run the runtime FEM request and render Matplotlib results."""
 
         if self.solver_thread is not None and self.solver_thread.is_alive():
             return
+        self._stop_animation()
         if not self.include_stiffeners.get() and not self.include_girders.get():
             messagebox.showwarning("FEM solver", "At least one member beam family should normally be included.")
+        if not self._collision_inputs_are_valid():
+            return
 
         options = self._options()
         self._set_solver_running(True)
         self._cancel_requested = False
         self._last_run_result_status_text = ""
+        self._live_collision_sphere_visualization = {}
         self._run_status_history = ["The result plot will update when the solver finishes.", ""]
         self._write_status("Running FEM solver...\n\n" + "\n".join(self._run_status_history))
 
@@ -5574,6 +7120,10 @@ class RuntimeFEMWindow:
                 self._write_status("Running FEM solver...\n\n" + "\n".join(self._run_status_history))
                 self.window.after(100, self._poll_solver_result)
                 return
+            if isinstance(msg, dict) and msg.get("type") == "live_visualization":
+                self._apply_live_visualization(msg)
+                self.window.after(25, self._poll_solver_result)
+                return
             result, error = msg
         except queue.Empty:
             if self.solver_thread is not None and self.solver_thread.is_alive():
@@ -5589,6 +7139,7 @@ class RuntimeFEMWindow:
             return
 
         self.current_result = result
+        self._live_collision_sphere_visualization = {}
         self._display_base_geometry = False
         self._set_custom_load_selection_active(False, refresh=False)
         self._force_fit_next_refresh = True
@@ -5598,6 +7149,75 @@ class RuntimeFEMWindow:
         self._write_status(self._last_run_result_status_text)
         self._refresh_figure()
         self._update_buckling_handoff_button(is_running=False)
+
+    def _apply_live_visualization(self, payload: dict[str, Any]) -> None:
+        visualization = dict(payload.get("visualization") or {})
+        if not visualization:
+            return
+        live_sphere = visualization.get("rigid_sphere") if isinstance(visualization, dict) else None
+        self._live_collision_sphere_visualization = {"rigid_sphere": dict(live_sphere)} if isinstance(live_sphere, dict) else {}
+        live_sphere_position = ()
+        if isinstance(live_sphere, dict):
+            try:
+                live_sphere_position = tuple(float(value) for value in np.asarray(live_sphere.get("position", ()), dtype=float).reshape(-1)[:3])
+            except Exception:
+                live_sphere_position = ()
+        geometry = runtime_geometry_summary(self.snapshot)
+        time_value = _safe_float(payload.get("time_s"), 0.0)
+        summary = {
+            **geometry,
+            "line": self.snapshot.line_name,
+            "solver": "ANYstructure production FE mesh",
+            "analysis_type": "collision transient running",
+            "runtime_solver": "sphere collision transient",
+            "collision_enabled": True,
+            "prestress_summary": {
+                "collision_status": "running",
+                "collision_time_mode": str(self.collision_time_mode.get()),
+                "collision_saved_steps": _safe_int(payload.get("step_index"), 0) + 1,
+                "collision_live_time_s": float(time_value),
+                "collision_live_max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
+                "collision_live_sphere_position_m": live_sphere_position,
+            },
+            "max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
+        }
+        self.current_result = RuntimeFEMRunResult(
+            status="running",
+            summary=summary,
+            diagnostics=("Live collision visualization is throttled and will be replaced by the final result.",),
+            buckling_factors=(),
+            stress_percentiles=(("p95", 0.0), ("max", 0.0)),
+            displacement_scale=max(_safe_float(payload.get("displacement_max_m"), 0.0), 1.0e-12),
+            visualization=visualization,
+        )
+        self._display_base_geometry = False
+        self.result_case_labels = {"Live collision t=" + f"{time_value:.6g}" + " s": "static"}
+        self.result_case_choice.set(next(iter(self.result_case_labels)))
+        if self.result_case_selector is not None:
+            self.result_case_selector.configure(values=tuple(self.result_case_labels))
+        live_component_labels = {
+            "Displacement Magnitude": "disp_mag",
+            "Displacement X": "disp_x",
+            "Displacement Y": "disp_y",
+            "Displacement Z": "disp_z",
+        }
+        self.component_labels = live_component_labels
+        if self.component_choice.get() not in live_component_labels:
+            self.component_choice.set("Displacement Magnitude")
+        if self.component_selector is not None:
+            self.component_selector.configure(values=tuple(live_component_labels.keys()))
+        if bool(self.animation_fast_mode.get()):
+            self.use_interactive_3d.set(True)
+        self._sync_color_limit_controls(force=True)
+        self._refresh_figure(preserve_view=True)
+        if hasattr(self, "_run_status_history"):
+            self._write_status(
+                "Running FEM solver...\n\n"
+                + "\n".join(self._run_status_history[-8:])
+                + "\nLive collision t="
+                + f"{time_value:.6g}"
+                + " s",
+            )
 
     def _set_custom_load_selection_active(self, active: bool, refresh: bool = True) -> None:
         self._custom_load_selection_active = bool(active)
@@ -6672,3 +8292,7 @@ if __name__ == "__main__":
     my_app.window.protocol("WM_DELETE_WINDOW", root.destroy)
     my_app.window.focus_force()
     root.mainloop()
+
+
+
+

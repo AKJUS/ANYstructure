@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import time
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -36,6 +36,16 @@ from scipy import sparse
 
 from .assembly import build_constraint_transformation
 from .cases import make_result_case
+from .fracture import (
+    DeletedElementRecord,
+    FractureConfig,
+    detect_new_deletions,
+    deleted_pressure_load_resultant,
+    element_fracture_category,
+    filtered_load_case_for_deleted_elements,
+    fracture_summary,
+    mpc_warning_for_deleted_shells,
+)
 from .linalg import MatrixClass, factorize
 from .jit_compiler import numba_thread_scope
 from .matrix_assembly import (
@@ -258,6 +268,8 @@ class NonlinearStaticStep:
     max_equivalent_plastic_strain: float
     control_value: Optional[float] = None
     active_stage: Optional[str] = None
+    deleted_element_count: int = 0
+    max_fracture_utilization: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -269,6 +281,8 @@ class NonlinearStaticStep:
             "max_equivalent_plastic_strain": self.max_equivalent_plastic_strain,
             "control_value": self.control_value,
             "active_stage": self.active_stage,
+            "deleted_element_count": int(self.deleted_element_count),
+            "max_fracture_utilization": float(self.max_fracture_utilization),
         }
 
 
@@ -345,13 +359,28 @@ def _assemble_nonlinear_system(
     committed_states: Dict[int, Any],
     num_layers: int,
     tangent: bool = True,
+    deleted_element_ids: Optional[Sequence[int]] = None,
+    residual_stiffness_fraction: float = 1.0,
+    element_stiffness_scales: Optional[Mapping[int, float]] = None,
+    kinematics: str = "von_karman",
 ) -> Tuple[np.ndarray, Any, Dict[int, Any]]:
-    """Assemble F_int (and the tangent K_T when requested) at a state."""
+    """Assemble F_int (and the tangent K_T when requested) at a state.
+
+    ``kinematics`` selects between the default von Karman element response and
+    the element-independent corotational formulation for large rigid rotations
+    (linear-elastic local response; see :mod:`fe_solver.corotational`).
+    """
     mesh = model.mesh
     total_dofs = mesh.dof_manager.total_dofs
     F_int = np.zeros(total_dofs, dtype=float)
     data: list = []
     trial_states: Dict[int, Any] = {}
+    deleted_set = {int(element_id) for element_id in (deleted_element_ids or ())}
+    residual_fraction = float(residual_stiffness_fraction)
+    element_scales = {
+        int(element_id): min(max(float(scale), 0.0), 1.0)
+        for element_id, scale in (element_stiffness_scales or {}).items()
+    }
 
     if tangent:
         from .matrix_assembly import _get_cached_sparsity_pattern
@@ -362,6 +391,8 @@ def _assemble_nonlinear_system(
 
     groups = {}
     for elem_id, element in mesh.elements.items():
+        if kinematics == "corotational":
+            break
         if isinstance(element, ShellElement) and getattr(element, "_is_quadrilateral", False):
             key = (
                 element.num_nodes,
@@ -468,6 +499,8 @@ def _assemble_nonlinear_system(
                 # We need layer_stress for outputs if people use it, let's keep it simple: we can omit it if not strictly required, 
                 # but let's see if elements.py returned it. We didn't return it from batch_shell_nonlinear_response.
                 pass
+            if elem_id in deleted_set:
+                trial_state = committed_states.get(elem_id, trial_state)
             trial_states[elem_id] = trial_state
 
     for elem_id, element in mesh.elements.items():
@@ -480,13 +513,42 @@ def _assemble_nonlinear_system(
             k_elem = precomputed_K.get(elem_id) if tangent else None
             # trial_state already in trial_states dict
         else:
-            material = model.get_material(element.material_name)
-            u_elem = displacements[dof_mapping]
-            f_elem, k_elem, trial_state = element.compute_nonlinear_response(
-                mesh, material, u_elem, committed_states.get(elem_id), num_layers, tangent
-            )
-            if trial_state is not None:
-                trial_states[elem_id] = trial_state
+            f_elem = None
+            k_elem = None
+            if kinematics == "corotational":
+                from .corotational import corotational_element_response
+
+                f_elem, k_elem, cr_trial_state = corotational_element_response(
+                    model,
+                    int(elem_id),
+                    element,
+                    displacements[dof_mapping],
+                    tangent,
+                    committed_state=committed_states.get(elem_id),
+                    num_layers=num_layers,
+                )
+                if f_elem is not None and cr_trial_state is not None:
+                    trial_states[elem_id] = cr_trial_state
+            if f_elem is None:
+                material = model.get_material(element.material_name)
+                u_elem = displacements[dof_mapping]
+                f_elem, k_elem, trial_state = element.compute_nonlinear_response(
+                    mesh, material, u_elem, committed_states.get(elem_id), num_layers, tangent
+                )
+                if trial_state is not None:
+                    trial_states[elem_id] = trial_state
+
+        if elem_id in deleted_set:
+            f_elem = residual_fraction * np.asarray(f_elem, dtype=float)
+            if tangent and k_elem is not None:
+                k_elem = residual_fraction * np.asarray(k_elem, dtype=float)
+            if elem_id in committed_states:
+                trial_states[elem_id] = committed_states[elem_id]
+        elif elem_id in element_scales:
+            scale = float(element_scales[elem_id])
+            f_elem = scale * np.asarray(f_elem, dtype=float)
+            if tangent and k_elem is not None:
+                k_elem = scale * np.asarray(k_elem, dtype=float)
 
         np.add.at(F_int, dof_mapping, np.asarray(f_elem, dtype=float))
         if tangent and k_elem is not None:
@@ -574,6 +636,8 @@ def _nonlinear_status_category(status: str, failure_reason: Optional[str]) -> st
     if status == "empty_reduced_system":
         return "invalid_model"
     reason = str(failure_reason or "")
+    if reason.startswith("fracture_") or "deleted_fraction" in reason:
+        return "fracture_limit"
     if "singular" in reason or "factorization" in reason:
         return "singular_tangent"
     if "nonfinite" in reason:
@@ -605,6 +669,7 @@ def _solve_static_displacement_control(
     info: Dict[str, Any],
     start_time: float,
     resource_config: Optional[ResourceConfig] = None,
+    kinematics: str = "von_karman",
 ) -> NonlinearStaticResult:
     """Displacement-control Newton solve with load factor as an unknown."""
     if load_program is not None:
@@ -661,7 +726,7 @@ def _solve_static_displacement_control(
                 total_iterations += 1
                 u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
                 F_int, K_T, trial_states = _assemble_nonlinear_system(
-                    model, u, committed_states, num_layers
+                    model, u, committed_states, num_layers, kinematics=kinematics
                 )
                 residual = np.asarray(T.T @ (F_const_dc + lam * F_prop_dc - F_int), dtype=float).reshape(-1)
                 residual_norm = float(np.linalg.norm(residual))
@@ -751,7 +816,7 @@ def _solve_static_displacement_control(
         assembly_info={"load": {"vector_type": "load_program" if load_program is not None else "load"}, **info},
         solver_info={"convergence_info": {"status": status}},
         recovery={"displacements": True, "element_states": True, "force_displacement_history": True},
-        settings={"control": "displacement", "num_steps": num_steps, "num_layers": num_layers},
+        settings={"control": "displacement", "num_steps": num_steps, "num_layers": num_layers, "kinematics": kinematics},
     ).to_dict()
     return NonlinearStaticResult(steps, status, u_final, float(lam), committed_states, info)
 
@@ -773,6 +838,8 @@ def solve_static_nonlinear(
     initial_element_states: Optional[Mapping[int, Any]] = None,
     convergence_settings: Optional[Union[str, Mapping[str, Any], NonlinearConvergenceSettings]] = None,
     resource_config: Optional[ResourceConfig] = None,
+    fracture_config: Optional[FractureConfig] = None,
+    kinematics: str = "von_karman",
 ) -> NonlinearStaticResult:
     """Incremental nonlinear static solve with adaptive load stepping.
 
@@ -784,9 +851,26 @@ def solve_static_nonlinear(
     """
     if num_steps <= 0:
         raise ValueError("num_steps must be positive")
+    kinematics = str(kinematics).lower()
+    if kinematics not in {"von_karman", "corotational"}:
+        raise ValueError("kinematics must be 'von_karman' or 'corotational'")
+    if kinematics == "corotational":
+        from .corotational import validate_corotational_scope
+
+        validate_corotational_scope(model)
+        if fracture_config is not None:
+            raise ValueError("Corotational kinematics v1 does not support fracture/erosion")
     if max_load_factor <= 0.0:
         raise ValueError("max_load_factor must be positive")
+    if fracture_config is not None and not isinstance(fracture_config, FractureConfig):
+        raise TypeError("fracture_config must be a FractureConfig or None")
     settings = _coerce_convergence_settings(convergence_settings)
+    if kinematics == "corotational" and settings.line_search in {"auto", "rescue"}:
+        # Corotational Newton necessarily passes through a large intermediate
+        # residual while the element frames rotate toward the new state;
+        # residual-norm backtracking rejects that excursion and grinds the
+        # increment adaptation.  Plain Newton converges in a few iterations.
+        settings = dataclass_replace(settings, line_search="never")
     effective_min_step_fraction = settings.min_step_fraction if settings.min_step_fraction is not None else min_step_fraction
 
     start_time = time.time()
@@ -828,6 +912,7 @@ def solve_static_nonlinear(
         "total_dofs": model.mesh.dof_manager.total_dofs,
         "reduced_dofs": int(T.shape[1]),
         "control": str(control),
+        "kinematics": kinematics,
         "convergence_settings": settings.to_dict(),
         "resource_config": None if resource_config is None else resource_config.to_dict(),
     }
@@ -837,6 +922,8 @@ def solve_static_nonlinear(
     control_name = str(control).lower()
     if control_name not in {"force", "displacement"}:
         raise ValueError("control must be 'force' or 'displacement'")
+    if fracture_config is not None and control_name != "force":
+        raise ValueError("fracture_config is currently supported only with force control")
 
     n_red = int(T.shape[1])
     if n_red == 0:
@@ -850,7 +937,7 @@ def solve_static_nonlinear(
             assembly_info={"stiffness": stiffness_info, "load": load_info},
             solver_info={"convergence_info": {"status": "empty_reduced_system"}},
             recovery={"displacements": True, "element_states": True},
-            settings={"control": control_name, "num_steps": num_steps, "num_layers": num_layers},
+            settings={"control": control_name, "num_steps": num_steps, "num_layers": num_layers, "kinematics": kinematics},
         ).to_dict()
         return NonlinearStaticResult([], "empty_reduced_system", u0.copy(), 0.0, {}, info)
 
@@ -858,19 +945,38 @@ def solve_static_nonlinear(
     committed_states: Dict[int, Any] = _copy_initial_states(initial_element_states)
     steps: List[NonlinearStaticStep] = []
     status = "completed"
+    deleted_element_ids: set[int] = set()
+    deletion_records: List[DeletedElementRecord] = []
+    fracture_warnings: List[str] = []
+    max_fracture_utilization = 0.0
 
     if load_program is not None and max_load_factor == 1.0:
         target_load_factor = load_program.total_factor
     else:
         target_load_factor = float(max_load_factor)
 
+    def _load_vector_with_deleted(load: Optional["LoadCase"]) -> np.ndarray:
+        filtered = filtered_load_case_for_deleted_elements(load, deleted_element_ids)
+        vector, _info = assemble_load_vector(model, filtered)
+        return vector
+
     def external_load_at(path_factor: float) -> Tuple[np.ndarray, Dict[str, float], Optional[str]]:
+        if not deleted_element_ids:
+            if load_program is None:
+                return F_const + float(path_factor) * F_prop, {"proportional": float(path_factor)}, None
+            factors = load_program.stage_factors(path_factor)
+            F_ext = F_const.copy()
+            for stage, vector in zip(load_program.stages, stage_vectors):
+                F_ext += factors[stage.name] * vector
+            return F_ext, factors, load_program.active_stage(path_factor)
+
+        F_const_current = _load_vector_with_deleted(constant_load_case) if constant_load_case is not None else np.zeros_like(F_prop)
         if load_program is None:
-            return F_const + float(path_factor) * F_prop, {"proportional": float(path_factor)}, None
+            return F_const_current + float(path_factor) * _load_vector_with_deleted(load_case), {"proportional": float(path_factor)}, None
         factors = load_program.stage_factors(path_factor)
-        F_ext = F_const.copy()
-        for stage, vector in zip(load_program.stages, stage_vectors):
-            F_ext += factors[stage.name] * vector
+        F_ext = F_const_current.copy()
+        for stage in load_program.stages:
+            F_ext += factors[stage.name] * _load_vector_with_deleted(stage.load_case)
         return F_ext, factors, load_program.active_stage(path_factor)
 
     if control_name == "displacement":
@@ -890,6 +996,7 @@ def solve_static_nonlinear(
             num_steps=num_steps,
             max_iterations=max_iterations,
             tolerance=tolerance,
+            kinematics=kinematics,
             info=info,
             start_time=start_time,
             resource_config=resource_config,
@@ -912,7 +1019,15 @@ def solve_static_nonlinear(
         q_trial = q_start.copy()
         u = np.asarray(T @ q_trial + u0, dtype=float).reshape(-1)
         F_int, K_T, trial_states = _assemble_nonlinear_system(
-            model, u, committed_states, num_layers
+            model,
+            u,
+            committed_states,
+            num_layers,
+            kinematics=kinematics,
+            deleted_element_ids=tuple(deleted_element_ids),
+            residual_stiffness_fraction=(
+                fracture_config.residual_stiffness_fraction if fracture_config is not None else 1.0
+            ),
         )
         residual = F_ext_red - np.asarray(T.T @ F_int, dtype=float).reshape(-1)
         residual_norm = float(np.linalg.norm(residual))
@@ -940,7 +1055,15 @@ def solve_static_nonlinear(
                 q_trial = q_trial + dq
                 u = np.asarray(T @ q_trial + u0, dtype=float).reshape(-1)
                 F_int, K_T, trial_states = _assemble_nonlinear_system(
-                    model, u, committed_states, num_layers
+                    model,
+                    u,
+                    committed_states,
+                    num_layers,
+                    kinematics=kinematics,
+            deleted_element_ids=tuple(deleted_element_ids),
+                    residual_stiffness_fraction=(
+                        fracture_config.residual_stiffness_fraction if fracture_config is not None else 1.0
+                    ),
                 )
                 residual = F_ext_red - np.asarray(T.T @ F_int, dtype=float).reshape(-1)
                 residual_norm = float(np.linalg.norm(residual))
@@ -960,14 +1083,32 @@ def solve_static_nonlinear(
                 u = np.asarray(T @ q_candidate + u0, dtype=float).reshape(-1)
                 with_tangent = trial == 0
                 F_c, K_c, states_c = _assemble_nonlinear_system(
-                    model, u, committed_states, num_layers, tangent=with_tangent
+                    model,
+                    u,
+                    committed_states,
+                    num_layers,
+                    tangent=with_tangent,
+                    kinematics=kinematics,
+            deleted_element_ids=tuple(deleted_element_ids),
+                    residual_stiffness_fraction=(
+                        fracture_config.residual_stiffness_fraction if fracture_config is not None else 1.0
+                    ),
                 )
                 r_c = F_ext_red - np.asarray(T.T @ F_c, dtype=float).reshape(-1)
                 rn_c = float(np.linalg.norm(r_c))
                 if np.isfinite(rn_c) and rn_c < residual_norm:
                     if not with_tangent:
                         F_c, K_c, states_c = _assemble_nonlinear_system(
-                            model, u, committed_states, num_layers, tangent=True
+                            model,
+                            u,
+                            committed_states,
+                            num_layers,
+                            tangent=True,
+                            kinematics=kinematics,
+            deleted_element_ids=tuple(deleted_element_ids),
+                            residual_stiffness_fraction=(
+                                fracture_config.residual_stiffness_fraction if fracture_config is not None else 1.0
+                            ),
                         )
                         r_c = F_ext_red - np.asarray(T.T @ F_c, dtype=float).reshape(-1)
                         rn_c = float(np.linalg.norm(r_c))
@@ -1021,6 +1162,23 @@ def solve_static_nonlinear(
                 step_index += 1
                 u = np.asarray(T @ q + u0, dtype=float).reshape(-1)
                 control_value = float(np.linalg.norm(u))
+                new_records: Tuple[DeletedElementRecord, ...] = ()
+                if fracture_config is not None:
+                    new_records, step_fracture_utilization = detect_new_deletions(
+                        model,
+                        committed_states,
+                        fracture_config,
+                        deleted_element_ids,
+                        step_index=step_index,
+                        load_factor=float(lam),
+                    )
+                    max_fracture_utilization = max(max_fracture_utilization, step_fracture_utilization)
+                    if new_records:
+                        deletion_records.extend(new_records)
+                        deleted_element_ids.update(record.element_id for record in new_records)
+                        warning = mpc_warning_for_deleted_shells(model, (record.element_id for record in new_records))
+                        if warning is not None and warning not in fracture_warnings:
+                            fracture_warnings.append(warning)
                 steps.append(
                     NonlinearStaticStep(
                         step_index=step_index,
@@ -1031,8 +1189,21 @@ def solve_static_nonlinear(
                         max_equivalent_plastic_strain=_max_plastic_strain(committed_states),
                         control_value=control_value,
                         active_stage=active_stage,
+                        deleted_element_count=len(deleted_element_ids),
+                        max_fracture_utilization=max_fracture_utilization,
                     )
                 )
+                removed_load = np.zeros(3, dtype=float)
+                if fracture_config is not None and deleted_element_ids:
+                    if load_program is None:
+                        removed_load += float(lam) * deleted_pressure_load_resultant(model, load_case, deleted_element_ids)
+                    else:
+                        for stage in load_program.stages:
+                            removed_load += stage_factors[stage.name] * deleted_pressure_load_resultant(
+                                model, stage.load_case, deleted_element_ids
+                            )
+                    if constant_load_case is not None:
+                        removed_load += deleted_pressure_load_resultant(model, constant_load_case, deleted_element_ids)
                 force_displacement_history.append(
                     {
                         "step_index": step_index,
@@ -1045,8 +1216,24 @@ def solve_static_nonlinear(
                         "line_search_used": line_search_used,
                         "stage_factors": stage_factors,
                         "active_stage": active_stage,
+                        "deleted_element_count": len(deleted_element_ids),
+                        "newly_deleted_element_ids": [record.element_id for record in new_records],
+                        "max_fracture_utilization": max_fracture_utilization,
+                        "deleted_pressure_force_resultant": removed_load.tolist(),
                     }
                 )
+                if fracture_config is not None and deleted_element_ids:
+                    scoped_total = sum(
+                        1
+                        for element in model.mesh.elements.values()
+                        if element_fracture_category(element) in fracture_config.element_scope
+                    )
+                    deleted_fraction = len(deleted_element_ids) / max(scoped_total, 1)
+                    if deleted_fraction > fracture_config.max_deleted_fraction + 1.0e-12:
+                        status = "stopped_at_limit"
+                        info["failure_reason"] = "max_deleted_fraction_reached"
+                        info["deleted_fraction"] = float(deleted_fraction)
+                        break
                 next_step = step_size
                 action = "keep"
                 if iterations_used <= settings.fast_iterations and step_size < max_step:
@@ -1070,6 +1257,17 @@ def solve_static_nonlinear(
                 )
                 step_size = next_step
             else:
+                if fracture_config is not None and deleted_element_ids and failure_reason in {
+                    "singular_tangent_factorization",
+                    "maximum_iterations_reached",
+                    "line_search_failed",
+                }:
+                    failure_reason = "fracture_instability"
+                    status = "stopped_at_limit" if steps else "diverged"
+                    info["failure_reason"] = failure_reason
+                    info["first_failed_load_factor"] = float(lam_trial)
+                    info["first_failed_step_size"] = float(attempted_step_size)
+                    break
                 previous_step_size = step_size
                 step_size *= 0.5
                 force_line_search_next = True
@@ -1105,6 +1303,15 @@ def solve_static_nonlinear(
     info["force_displacement_history"] = force_displacement_history
     info["convergence_adaptation"] = convergence_adaptation
     info["strain_summary"] = _nonlinear_state_summary(committed_states)
+    if fracture_config is not None:
+        info["fracture_summary"] = fracture_summary(
+            model,
+            fracture_config,
+            deletion_records,
+            deleted_element_ids,
+            max_utilization=max_fracture_utilization,
+            warnings=fracture_warnings,
+        )
     if load_program is not None:
         info["load_program_stage_factors"] = load_program.stage_factors(lam)
     info["total_newton_iterations"] = total_iterations
@@ -1122,6 +1329,7 @@ def solve_static_nonlinear(
             "num_steps": num_steps,
             "num_layers": num_layers,
             "convergence_settings": settings.to_dict(),
+            "fracture": None if fracture_config is None else fracture_config.to_dict(),
         },
     ).to_dict()
     return NonlinearStaticResult(steps, status, u_final, float(lam), committed_states, info)
