@@ -1715,6 +1715,28 @@ class BeamElement(Element):
             return np.zeros((self.total_dofs, self.total_dofs))
         rho = material.density
         M = np.zeros((12, 12), dtype=float)
+        if bool(self.cross_section.get("consistent_mass", False)):
+            # Consistent mass on the element's own linear interpolation,
+            # mirroring the 3-node quadratic beam: N_i N_j blocks for the
+            # translations (rho A) and for each rotation with its matching
+            # section inertia (polar Iy+Iz for torsion).  Rigid-body
+            # translational and rotational inertia are exact, so no lumped
+            # bar-length correction terms are needed.
+            coupling = np.array([[1.0 / 3.0, 1.0 / 6.0], [1.0 / 6.0, 1.0 / 3.0]], dtype=float)
+            rotary_density = (
+                rho * (self._Iy + self._Iz),  # rx (torsion)
+                rho * self._Iy,  # ry
+                rho * self._Iz,  # rz
+            )
+            for i in range(2):
+                for j in range(2):
+                    factor = coupling[i, j] * L
+                    for d in range(3):
+                        M[i * 6 + d, j * 6 + d] = rho * self._A * factor
+                        M[i * 6 + 3 + d, j * 6 + 3 + d] = rotary_density[d] * factor
+            M_global = T.T @ M @ T
+            self._mass_matrix = M_global
+            return M_global
         mass_per_node = rho * self._A * L / 2.0
         # Lumped rotary inertia: bending rotations carry the rigid-bar term
         # rho*A*L^3/24 plus the section rotatory term rho*I*L/2; the torsion
@@ -1804,6 +1826,19 @@ class BeamElement(Element):
         for i, row in enumerate(w_ry):
             for j, col in enumerate(w_ry):
                 K_geo[row, col] += g_w[i, j]
+
+        # Wagner term: axial compression destabilizes twist about the shear
+        # center, enabling torsional and flexural-torsional column modes
+        # (stiffener tripping under axial stress).  The shear center is taken
+        # at the centroid and warping is neglected, consistent with the
+        # element's St. Venant torsion treatment, so the torsional critical
+        # load is G*J*A/Ip.
+        polar_ratio = (self._Iy + self._Iz) / max(self._A, 1.0e-30)
+        g_torsion = axial_compression * polar_ratio / L
+        K_geo[3, 3] += g_torsion
+        K_geo[3, 9] -= g_torsion
+        K_geo[9, 3] -= g_torsion
+        K_geo[9, 9] += g_torsion
 
         return T.T @ K_geo @ T
 
@@ -2189,6 +2224,7 @@ class QuadraticBeamElement(BeamElement):
         self._c_y = self.cross_section.get("c_y")
         self._c_z = self.cross_section.get("c_z")
         self._torsion_modulus = self.cross_section.get("torsion_modulus")
+        self._fiber_plasticity = self.cross_section.get("fiber_plasticity")
         self.eccentricity = np.zeros(3, dtype=float) if eccentricity is None else np.asarray(eccentricity, dtype=float)
 
     def _end_displacements(self, u_local: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -2206,11 +2242,138 @@ class QuadraticBeamElement(BeamElement):
         num_layers: int = 5,
         tangent: bool = True,
     ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[Any]]:
-        # The 2-node beam-column formulation does not apply to the 3-node
-        # topology; fall back to the linear elastic response.
-        return Element.compute_nonlinear_response(
-            self, mesh, material, u_elem, state, num_layers, tangent
-        )
+        """Gauss-point von Karman beam-column response on the quadratic interpolation.
+
+        At each integration point the axial strain includes the transverse
+        gradient coupling
+
+            eps = u' + (v'^2 + w'^2) / 2
+
+        with all gradients from the quadratic shape functions, giving internal
+        force and consistent tangent (including the string/geometric term) from
+        the same potential.  With ``cross_section["fiber_plasticity"]`` the
+        axial/bending response is integrated over the uniaxial fiber grid per
+        Gauss point using the material hardening curve; shear and torsion stay
+        linear elastic, matching the 2-node beam formulation.
+        """
+        coords = self.get_node_coordinates(mesh)
+        try:
+            L, T = self._beam_frame_and_transform(coords)
+        except ValueError:
+            return Element.compute_nonlinear_response(
+                self, mesh, material, u_elem, state, num_layers, tangent
+            )
+        u_loc = T @ np.asarray(u_elem, dtype=float)
+        E = material.elastic_modulus
+        G = material.shear_modulus
+        EA = E * self._A
+        EIy = E * self._Iy
+        EIz = E * self._Iz
+        GJ = G * self._J
+        GA_y = G * self._A * self._ky
+        GA_z = G * self._A * self._kz
+
+        fiber_config = self._fiber_plasticity_config(material)
+        num_gp = len(self.GAUSS_POINTS)
+        if fiber_config is not None:
+            y_f, z_f, w_f = self._fiber_section_grid(fiber_config)
+            n_fibers = y_f.size
+            fiber_strain_all = np.zeros(num_gp * n_fibers, dtype=float)
+            B_fiber_all = np.zeros((num_gp * n_fibers, 18), dtype=float)
+
+        F_loc = np.zeros(18, dtype=float)
+        K_loc = np.zeros((18, 18), dtype=float) if tangent else None
+        gp_data = []
+        axial_forces = []
+        for gp_index, (xi, weight) in enumerate(zip(self.GAUSS_POINTS, self.GAUSS_WEIGHTS)):
+            N, dN_dxi = self.compute_shape_functions(float(xi))
+            dN_dx = dN_dxi * 2.0 / L
+            jac = L / 2.0 * float(weight)
+
+            B_ax = np.zeros(18, dtype=float)
+            B_v = np.zeros(18, dtype=float)
+            B_w = np.zeros(18, dtype=float)
+            B_ry = np.zeros(18, dtype=float)
+            B_rz = np.zeros(18, dtype=float)
+            B_torsion = np.zeros(18, dtype=float)
+            B_shear_xy = np.zeros(18, dtype=float)
+            B_shear_xz = np.zeros(18, dtype=float)
+            for i in range(3):
+                b = i * 6
+                B_ax[b + 0] = dN_dx[i]
+                B_v[b + 1] = dN_dx[i]
+                B_w[b + 2] = dN_dx[i]
+                B_torsion[b + 3] = dN_dx[i]
+                B_ry[b + 4] = dN_dx[i]
+                B_rz[b + 5] = dN_dx[i]
+                B_shear_xy[b + 1] = dN_dx[i]
+                B_shear_xy[b + 5] = -N[i]
+                B_shear_xz[b + 2] = dN_dx[i]
+                B_shear_xz[b + 4] = N[i]
+
+            v_grad = float(B_v @ u_loc)
+            w_grad = float(B_w @ u_loc)
+            eps0 = float(B_ax @ u_loc) + 0.5 * (v_grad**2 + w_grad**2)
+            kappa_y = float(B_ry @ u_loc)
+            kappa_z = float(B_rz @ u_loc)
+            B_membrane = B_ax + v_grad * B_v + w_grad * B_w
+
+            # linear shear and torsion at every integration point
+            gamma_xy = float(B_shear_xy @ u_loc)
+            gamma_xz = float(B_shear_xz @ u_loc)
+            twist = float(B_torsion @ u_loc)
+            F_loc += jac * (GA_y * gamma_xy * B_shear_xy + GA_z * gamma_xz * B_shear_xz + GJ * twist * B_torsion)
+            if tangent:
+                K_loc += jac * (
+                    GA_y * np.outer(B_shear_xy, B_shear_xy)
+                    + GA_z * np.outer(B_shear_xz, B_shear_xz)
+                    + GJ * np.outer(B_torsion, B_torsion)
+                )
+
+            if fiber_config is not None:
+                rows = slice(gp_index * n_fibers, (gp_index + 1) * n_fibers)
+                fiber_strain_all[rows] = eps0 + z_f * kappa_y + y_f * kappa_z
+                B_fiber_all[rows] = (
+                    B_membrane[None, :] + z_f[:, None] * B_ry[None, :] + y_f[:, None] * B_rz[None, :]
+                )
+                gp_data.append((jac, B_v, B_w, rows))
+            else:
+                axial_force = EA * eps0
+                axial_forces.append(axial_force)
+                F_loc += jac * (axial_force * B_membrane + EIy * kappa_y * B_ry + EIz * kappa_z * B_rz)
+                if tangent:
+                    K_loc += jac * (
+                        EA * np.outer(B_membrane, B_membrane)
+                        + axial_force * (np.outer(B_v, B_v) + np.outer(B_w, B_w))
+                        + EIy * np.outer(B_ry, B_ry)
+                        + EIz * np.outer(B_rz, B_rz)
+                    )
+
+        trial_state: Optional[Any] = state
+        if fiber_config is not None:
+            stress, Et, plastic_new, alpha_new = self._uniaxial_return_map(
+                fiber_strain_all, state, E, fiber_config.material_curve
+            )
+            for jac, B_v, B_w, rows in gp_data:
+                weights_gp = w_f
+                stress_gp = stress[rows]
+                F_loc += jac * np.einsum("f,f,fj->j", weights_gp, stress_gp, B_fiber_all[rows])
+                axial_force = float(np.sum(weights_gp * stress_gp))
+                axial_forces.append(axial_force)
+                if tangent:
+                    K_loc += jac * np.einsum("f,f,fj,fk->jk", weights_gp, Et[rows], B_fiber_all[rows], B_fiber_all[rows])
+                    K_loc += jac * axial_force * (np.outer(B_v, B_v) + np.outer(B_w, B_w))
+            trial_state = {
+                "plastic_strain": plastic_new,
+                "alpha": alpha_new,
+                "fiber_strain": fiber_strain_all.copy(),
+                "fiber_stress": stress.copy(),
+                "axial_force": float(np.mean(axial_forces)) if axial_forces else 0.0,
+            }
+
+        if not tangent:
+            return T.T @ F_loc, None, trial_state
+        return T.T @ F_loc, T.T @ K_loc @ T, trial_state
 
     @property
     def num_nodes(self) -> int:
@@ -2348,15 +2511,20 @@ class QuadraticBeamElement(BeamElement):
             return np.zeros((self.total_dofs, self.total_dofs), dtype=float)
 
         KG = np.zeros((18, 18), dtype=float)
+        # Wagner term factor: see BeamElement.compute_geometric_stiffness_matrix.
+        polar_ratio = (self._Iy + self._Iz) / max(self._A, 1.0e-30)
         for xi, weight in zip(self.GAUSS_POINTS, self.GAUSS_WEIGHTS):
             _, dN_dxi = self.compute_shape_functions(float(xi))
             dN_dx = dN_dxi * 2.0 / L
             G_matrix = np.zeros((2, 18), dtype=float)
+            twist_gradient = np.zeros((1, 18), dtype=float)
             for i in range(3):
                 b = i * 6
                 G_matrix[0, b + 1] = dN_dx[i]
                 G_matrix[1, b + 2] = dN_dx[i]
+                twist_gradient[0, b + 3] = dN_dx[i]
             KG += axial_compression * (G_matrix.T @ G_matrix) * (L / 2.0 * weight)
+            KG += axial_compression * polar_ratio * (twist_gradient.T @ twist_gradient) * (L / 2.0 * weight)
         return T.T @ KG @ T
 
 

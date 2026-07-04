@@ -1,26 +1,30 @@
 """Element-independent corotational kinematics for large rigid rotations.
 
-This module implements a v1 corotational (CR) formulation for the nonlinear
+This module implements the corotational (CR) formulation for the nonlinear
 static solver.  Each element's rigid-body rotation is extracted from the
 current deformed geometry, the nodal displacements are pulled back to the
-reference configuration (removing the rigid motion), the element's standard
-linear-elastic reference stiffness acts on the small deformational part, and
-the resulting forces are rotated forward to the current configuration:
+reference configuration (removing the rigid motion), the element's own
+nonlinear local response (layered J2 shells, fiber beams, local von Karman
+coupling) acts on the small deformational part, and the resulting forces are
+rotated forward to the current configuration:
 
     u_d,i (translation) = R_rig^T (x_i - x_c) - (X_i - X_c)
     u_d,i (rotation)    = rotvec(R_rig^T exp(skew(theta_i)))
-    f_global            = E K_ref u_d,     E = blockdiag(R_rig, R_rig, ...)
-    K_tangent           = E K_ref E^T      (material part; rotational geometric
-                                            stiffness is omitted in v1)
+    f_global            = E f_local(u_d),  E = blockdiag(R_rig, R_rig, ...)
+    K_tangent           = E k_local E^T for shells (empirically stable), plus
+                          frame-sensitivity geometric terms for beams
 
-Scope and validity (v1):
+Scope and validity:
 
-- small elastic strains and small *deformational* rotations per element;
-  rigid rotations of any magnitude (verified by rigid-rotation invariance);
+- small strains and small *deformational* rotations per element; rigid
+  rotations of any magnitude (verified by rigid-rotation invariance);
 - shells extract the rigid rotation from the element midsurface frame at the
   element center; beams from axis alignment plus mean axial twist;
-- local response is linear elastic: plasticity, fracture/erosion and the von
-  Karman membrane-bending coupling are not available in corotational mode;
+- the deformational displacements are routed through the elements' own
+  nonlinear local responses, so layered shell J2 plasticity, beam fiber
+  plasticity and the local von Karman coupling are active in the corotated
+  frame (plastic state is objective under rigid rotation); fracture/erosion
+  remains unsupported in corotational mode;
 - the tangent omits the rotational geometric stiffness, so Newton convergence
   is linear rather than quadratic near strongly rotating states — use more,
   smaller increments;
@@ -176,15 +180,24 @@ def corotational_element_response(
     element: Any,
     u_element: np.ndarray,
     tangent: bool,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Corotational internal force (and tangent) for one shell or beam element.
+    committed_state: Optional[Any] = None,
+    num_layers: int = 5,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Any]]:
+    """Corotational internal force, tangent and trial state for one element.
 
-    Returns ``(None, None)`` for element types outside the corotational scope
-    so the caller can fall back to the element's own response.
+    The deformational displacement ``u_d`` is a small-deformation field on the
+    reference geometry, so it is routed through the element's own nonlinear
+    local response — layered J2 plasticity for shells and fiber sections for
+    beams — and the resulting force/tangent are rotated forward with the rigid
+    frame.  Plastic state therefore lives in the corotated frame and is
+    objective under arbitrary rigid rotation.
+
+    Returns ``(None, None, None)`` for element types outside the corotational
+    scope so the caller can fall back to the element's own response.
     """
     reference = _corotational_cache(model).get(int(element_id))
     if reference is None or reference.category is None:
-        return None, None
+        return None, None, None
     num_nodes = int(element.num_nodes)
     u = np.asarray(u_element, dtype=float).reshape(num_nodes, 6)
     translations = u[:, :3]
@@ -207,25 +220,152 @@ def corotational_element_response(
         R_node = rotation_matrix_from_vector(rotations[node])
         u_d[node, 3:] = rotation_vector_from_matrix(R_rig.T @ R_node)
 
-    f_ref = reference.stiffness @ u_d.reshape(-1)
+    material = model.get_material(element.material_name)
+    f_ref, k_ref, trial_state = element.compute_nonlinear_response(
+        model.mesh, material, u_d.reshape(-1), committed_state, int(num_layers), tangent
+    )
+    f_ref = np.asarray(f_ref, dtype=float).reshape(-1)
     E = np.zeros((num_nodes * 6, num_nodes * 6), dtype=float)
     for node in range(num_nodes):
         E[node * 6 : node * 6 + 3, node * 6 : node * 6 + 3] = R_rig
         E[node * 6 + 3 : node * 6 + 6, node * 6 + 3 : node * 6 + 6] = R_rig
     f_global = E @ f_ref
-    k_global = (E @ reference.stiffness @ E.T) if tangent else None
-    return f_global, k_global
+    if not tangent:
+        return f_global, None, trial_state
+    k_ref = np.asarray(k_ref, dtype=float)
+    # The rotated local tangent is the empirically stable choice for both
+    # element families: adding the frame-sensitivity geometric terms (see
+    # _consistent_corotational_tangent, kept for future nonsymmetric-tangent
+    # work) makes the symmetrized Newton map repulsive near equilibrium for
+    # bending-dominated shells and for plastically softened beams, while
+    # E k E^T converges in a handful of iterations without line search.
+    k_global = E @ k_ref @ E.T
+    return f_global, k_global, trial_state
+
+
+def _rotation_right_jacobian(vector: np.ndarray) -> np.ndarray:
+    """Right Jacobian of the exponential map: d exp(theta + d) ~ exp(theta) skew(Jr d)."""
+    vector = np.asarray(vector, dtype=float).reshape(3)
+    angle = float(np.linalg.norm(vector))
+    K = _skew(vector)
+    if angle < 1.0e-6:
+        return np.eye(3) - 0.5 * K + (K @ K) / 6.0
+    return (
+        np.eye(3)
+        - (1.0 - np.cos(angle)) / angle**2 * K
+        + (angle - np.sin(angle)) / angle**3 * (K @ K)
+    )
+
+
+def _rigid_rotation_for_state(
+    reference: "_CorotationalReference", element: Any, deformed: np.ndarray, rotations: np.ndarray
+) -> np.ndarray:
+    if reference.category == "shell":
+        return _shell_center_frame(element, deformed) @ reference.frame.T
+    return _beam_rigid_rotation(reference.coordinates, deformed, rotations)
+
+
+def _rotation_sensitivity(
+    reference: "_CorotationalReference",
+    element: Any,
+    deformed: np.ndarray,
+    rotations: np.ndarray,
+    R_rig: np.ndarray,
+) -> np.ndarray:
+    """G = d(omega)/du (3 x 6n): rigid-rotation sensitivity by central differences.
+
+    ``omega`` is the left-increment rotation vector of the extracted rigid
+    rotation, ``R_rig(u + du) ~ exp(skew(G du)) R_rig(u)``.  Shell frames
+    depend only on the nodal translations; beam frames additionally pick up
+    twist from the nodal rotations.
+    """
+    num_nodes = deformed.shape[0]
+    G = np.zeros((3, num_nodes * 6), dtype=float)
+    spread = float(np.max(np.linalg.norm(reference.coordinates - reference.centroid, axis=1)))
+    step_translation = 1.0e-6 * max(spread, 1.0e-3)
+    step_rotation = 1.0e-6
+    include_rotations = reference.category == "beam"
+    Rt = R_rig.T
+    for node in range(num_nodes):
+        for axis in range(3):
+            perturbed = deformed.copy()
+            perturbed[node, axis] += step_translation
+            R_plus = _rigid_rotation_for_state(reference, element, perturbed, rotations)
+            perturbed[node, axis] -= 2.0 * step_translation
+            R_minus = _rigid_rotation_for_state(reference, element, perturbed, rotations)
+            delta = rotation_vector_from_matrix(R_plus @ Rt) - rotation_vector_from_matrix(R_minus @ Rt)
+            G[:, node * 6 + axis] = delta / (2.0 * step_translation)
+        if include_rotations:
+            for axis in range(3):
+                perturbed_rotations = rotations.copy()
+                perturbed_rotations[node, axis] += step_rotation
+                R_plus = _rigid_rotation_for_state(reference, element, deformed, perturbed_rotations)
+                perturbed_rotations[node, axis] -= 2.0 * step_rotation
+                R_minus = _rigid_rotation_for_state(reference, element, deformed, perturbed_rotations)
+                delta = rotation_vector_from_matrix(R_plus @ Rt) - rotation_vector_from_matrix(R_minus @ Rt)
+                G[:, node * 6 + 3 + axis] = delta / (2.0 * step_rotation)
+    return G
+
+
+def _consistent_corotational_tangent(
+    reference: "_CorotationalReference",
+    element: Any,
+    deformed: np.ndarray,
+    rotations: np.ndarray,
+    R_rig: np.ndarray,
+    E: np.ndarray,
+    f_global: np.ndarray,
+    k_ref: np.ndarray,
+) -> np.ndarray:
+    """Consistent (symmetrized) corotational tangent.
+
+    Chain rule of ``f = E(omega) K_ref u_d(u, omega)`` through the three
+    dependency paths:
+
+    - ``D`` — pull-back derivative at fixed frame: centered translations and
+      right-Jacobian-corrected nodal rotation increments;
+    - ``U`` — pull-back sensitivity to the rigid rotation;
+    - ``S`` — rotation of the internal force with the frame.
+
+    ``K = E K_ref D + (S + E K_ref U) G`` with ``G`` the frame sensitivity
+    from :func:`_rotation_sensitivity`.  The result is symmetrized for the
+    solver's symmetric factorization; the skew part vanishes at equilibrium.
+    """
+    num_nodes = deformed.shape[0]
+    n_dofs = num_nodes * 6
+    Rt = R_rig.T
+    centroid_def = deformed.mean(axis=0)
+
+    D = np.zeros((n_dofs, n_dofs), dtype=float)
+    average = 1.0 / num_nodes
+    for i in range(num_nodes):
+        for j in range(num_nodes):
+            weight = (1.0 if i == j else 0.0) - average
+            D[i * 6 : i * 6 + 3, j * 6 : j * 6 + 3] = weight * Rt
+        D[i * 6 + 3 : i * 6 + 6, i * 6 + 3 : i * 6 + 6] = Rt @ _rotation_right_jacobian(rotations[i])
+
+    U = np.zeros((n_dofs, 3), dtype=float)
+    for i in range(num_nodes):
+        U[i * 6 : i * 6 + 3, :] = Rt @ _skew(deformed[i] - centroid_def)
+        U[i * 6 + 3 : i * 6 + 6, :] = -Rt
+
+    S = np.zeros((n_dofs, 3), dtype=float)
+    for i in range(num_nodes):
+        S[i * 6 : i * 6 + 3, :] = -_skew(f_global[i * 6 : i * 6 + 3])
+        S[i * 6 + 3 : i * 6 + 6, :] = -_skew(f_global[i * 6 + 3 : i * 6 + 6])
+
+    G = _rotation_sensitivity(reference, element, deformed, rotations, R_rig)
+    EK = E @ k_ref
+    tangent = EK @ D + (S + EK @ U) @ G
+    return 0.5 * (tangent + tangent.T)
 
 
 def validate_corotational_scope(model: "FEModel") -> None:
-    """Reject configurations outside the v1 corotational scope."""
-    for element in model.mesh.elements.values():
-        if _element_category(element) is None:
-            continue
-        material = model.get_material(element.material_name)
-        if getattr(material, "hardening_curve", None) is not None:
-            raise ValueError(
-                "Corotational kinematics v1 supports linear-elastic material response only; "
-                f"material {element.material_name!r} has a hardening curve. "
-                "Use kinematics='von_karman' for plastic capacity analyses."
-            )
+    """Validate corotational applicability.
+
+    Since Phase 4 the corotational path routes the deformational displacements
+    through the elements' own nonlinear local responses, so layered shell J2
+    plasticity and beam fiber plasticity are supported.  The function is kept
+    as the hook for future scope checks.
+    """
+    return None

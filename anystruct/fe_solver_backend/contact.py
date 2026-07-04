@@ -116,6 +116,7 @@ class SphereContactConfig:
     save_contact_history: bool = True
     post_separation_time: float = 0.0
     contact_relaxation: str = "aitken"
+    beam_contact: bool = False
 
     def __post_init__(self) -> None:
         if self.penalty_stiffness is not None and self.penalty_stiffness <= 0.0:
@@ -179,6 +180,7 @@ class SphereContactConfig:
             "save_contact_history": bool(self.save_contact_history),
             "post_separation_time": float(self.post_separation_time),
             "contact_relaxation": self.contact_relaxation,
+            "beam_contact": bool(self.beam_contact),
         }
 
 
@@ -198,8 +200,12 @@ class NonlinearTransientConfig:
     min_dt: float = 1.0e-8
     tangent_reuse_iterations: int = 0
     record_element_state_history: bool = True
+    kinematics: str = "von_karman"
 
     def __post_init__(self) -> None:
+        if str(self.kinematics).lower() not in {"von_karman", "corotational"}:
+            raise ValueError("NonlinearTransientConfig.kinematics must be 'von_karman' or 'corotational'")
+        object.__setattr__(self, "kinematics", str(self.kinematics).lower())
         if self.num_layers <= 0:
             raise ValueError("NonlinearTransientConfig.num_layers must be positive")
         if self.max_iterations <= 0:
@@ -233,6 +239,7 @@ class NonlinearTransientConfig:
             "min_dt": float(self.min_dt),
             "tangent_reuse_iterations": int(self.tangent_reuse_iterations),
             "record_element_state_history": bool(self.record_element_state_history),
+            "kinematics": self.kinematics,
         }
 
 
@@ -363,6 +370,27 @@ def _shell_contact_candidates(model: "FEModel") -> List[ShellElement]:
     return [element for element in model.mesh.elements.values() if isinstance(element, ShellElement)]
 
 
+def _beam_contact_candidates(model: "FEModel") -> List[Any]:
+    from .elements import BeamElement
+
+    return [element for element in model.mesh.elements.values() if isinstance(element, BeamElement)]
+
+
+def _beam_contact_radius(element: Any) -> float:
+    """Circular contact-radius proxy for a beam section.
+
+    ``cross_section["contact_radius"]`` takes precedence; the default is the
+    equivalent-area circle radius, an engineering proxy for the physical
+    stiffener/girder profile.
+    """
+    section = getattr(element, "cross_section", {}) or {}
+    explicit = section.get("contact_radius")
+    if explicit is not None:
+        return max(float(explicit), 0.0)
+    area = float(section.get("area", 0.0) or 0.0)
+    return float(np.sqrt(max(area, 0.0) / np.pi))
+
+
 class _ContactGeometry:
     """Mesh-constant shell contact geometry arrays, cached on the mesh revision.
 
@@ -383,15 +411,22 @@ class _ContactGeometry:
         "element_node_counts",
         "node_mask",
         "representative_edge_length",
+        "beam_segment_slots",
+        "beam_segment_radii",
+        "beam_segment_element_ids",
     )
 
     def __init__(self, model: "FEModel"):
         elements = _shell_contact_candidates(model)
+        beams = _beam_contact_candidates(model)
         self.elements = elements
         self.element_ids = np.asarray([int(element.element_id) for element in elements], dtype=np.int64)
         node_id_to_slot: Dict[int, int] = {}
         for element in elements:
             for node_id in element.node_ids:
+                node_id_to_slot.setdefault(int(node_id), len(node_id_to_slot))
+        for beam in beams:
+            for node_id in beam.node_ids:
                 node_id_to_slot.setdefault(int(node_id), len(node_id_to_slot))
         self.node_id_to_slot = node_id_to_slot
         self.node_ids = np.asarray(list(node_id_to_slot), dtype=np.int64)
@@ -418,6 +453,28 @@ class _ContactGeometry:
                 lengths.append(float(np.linalg.norm(corners[(corner + 1) % corner_count] - corners[corner])))
         self.node_mask = np.arange(max_nodes)[None, :] < self.element_node_counts[:, None]
         self.representative_edge_length = float(np.median(lengths)) if lengths else 0.0
+        # Beam contact segments: 2-node beams contribute one segment, 3-node
+        # quadratic beams two (end-mid, mid-end).  Only used when
+        # SphereContactConfig.beam_contact is enabled.
+        segment_slots: List[Tuple[int, int]] = []
+        segment_radii: List[float] = []
+        segment_element_ids: List[int] = []
+        for beam in beams:
+            radius = _beam_contact_radius(beam)
+            slots = [node_id_to_slot[int(node_id)] for node_id in beam.node_ids]
+            if len(slots) == 2:
+                pairs = [(slots[0], slots[1])]
+            elif len(slots) == 3:
+                pairs = [(slots[0], slots[1]), (slots[1], slots[2])]
+            else:
+                continue
+            for pair in pairs:
+                segment_slots.append(pair)
+                segment_radii.append(radius)
+                segment_element_ids.append(int(beam.element_id))
+        self.beam_segment_slots = np.asarray(segment_slots, dtype=np.intp).reshape(-1, 2)
+        self.beam_segment_radii = np.asarray(segment_radii, dtype=float)
+        self.beam_segment_element_ids = np.asarray(segment_element_ids, dtype=np.int64)
 
     def deformed_node_positions(self, displacement: Optional[np.ndarray]) -> np.ndarray:
         if displacement is None:
@@ -575,6 +632,7 @@ def _resolved_contact_config(model: "FEModel", sphere: RigidSphereImpact, config
         save_contact_history=raw.save_contact_history,
         post_separation_time=raw.post_separation_time,
         contact_relaxation=raw.contact_relaxation,
+        beam_contact=raw.beam_contact,
     )
 
 
@@ -601,7 +659,8 @@ def validate_contact_configuration(
 
     issues: List[ProductionValidationIssue] = []
     shells = _shell_contact_candidates(model)
-    if not shells:
+    beam_targets = bool(contact_config is not None and contact_config.beam_contact) and bool(_beam_contact_candidates(model))
+    if not shells and not beam_targets:
         issues.append(
             _contact_issue(
                 "CONTACT001",
@@ -717,14 +776,18 @@ def assemble_sphere_contact_load_vector(
     records: List[SphereContactRecord] = []
     contact_scales = {} if contact_scale_by_element is None else {int(k): float(v) for k, v in contact_scale_by_element.items()}
     geometry = _contact_geometry(model)
-    if geometry.element_ids.shape[0] == 0:
+    has_beam_targets = bool(contact_config.beam_contact) and geometry.beam_segment_slots.shape[0] > 0
+    if geometry.element_ids.shape[0] == 0 and not has_beam_targets:
         return load, sphere_force_total, tuple(records)
     node_positions = geometry.deformed_node_positions(u)
     element_nodes, centroids, radii = geometry.element_centroids_and_radii(node_positions)
     active_mask = geometry.active_element_mask(deleted_element_ids)
-    near_mask = active_mask & (
-        np.linalg.norm(centroids - center[None, :], axis=1) <= sphere.radius + radii + contact_config.search_margin
-    )
+    if geometry.element_ids.shape[0] == 0:
+        near_mask = np.zeros(0, dtype=bool)
+    else:
+        near_mask = active_mask & (
+            np.linalg.norm(centroids - center[None, :], axis=1) <= sphere.radius + radii + contact_config.search_margin
+        )
 
     for element_index in np.flatnonzero(near_mask):
         element = geometry.elements[element_index]
@@ -807,6 +870,66 @@ def assemble_sphere_contact_load_vector(
             )
         )
 
+    if bool(contact_config.beam_contact) and geometry.beam_segment_slots.shape[0]:
+        deleted = {int(element_id) for element_id in deleted_element_ids}
+        seg_a = node_positions[geometry.beam_segment_slots[:, 0]]
+        seg_b = node_positions[geometry.beam_segment_slots[:, 1]]
+        axis = seg_b - seg_a
+        length_sq = np.maximum(np.einsum("ij,ij->i", axis, axis), 1.0e-30)
+        t_param = np.clip(np.einsum("ij,ij->i", center[None, :] - seg_a, axis) / length_sq, 0.0, 1.0)
+        closest = seg_a + t_param[:, None] * axis
+        gap_vectors = center[None, :] - closest
+        distances = np.linalg.norm(gap_vectors, axis=1)
+        reach = sphere.radius + geometry.beam_segment_radii + contact_config.search_margin
+        for segment_index in np.flatnonzero(distances <= reach):
+            beam_id = int(geometry.beam_segment_element_ids[segment_index])
+            if beam_id in deleted:
+                continue
+            contact_scale = float(contact_scales.get(beam_id, 1.0))
+            if contact_scale <= 0.0:
+                continue
+            distance = float(distances[segment_index])
+            penetration = float(sphere.radius + geometry.beam_segment_radii[segment_index] - distance)
+            if penetration <= 0.0 or distance <= 1.0e-14:
+                continue
+            normal = gap_vectors[segment_index] / distance
+            t_value = float(t_param[segment_index])
+            slot_a = int(geometry.beam_segment_slots[segment_index, 0])
+            slot_b = int(geometry.beam_segment_slots[segment_index, 1])
+            surface_velocity = (1.0 - t_value) * v[geometry.node_dofs[slot_a]] + t_value * v[geometry.node_dofs[slot_b]]
+            relative_normal_velocity = float(np.dot(velocity - surface_velocity, normal))
+            normal_force = max(
+                float(contact_config.penalty_stiffness) * penetration
+                - float(contact_config.contact_damping) * relative_normal_velocity,
+                0.0,
+            )
+            normal_force *= min(max(contact_scale, 0.0), 1.0)
+            if normal_force <= 0.0:
+                continue
+            sphere_force = normal_force * normal
+            structure_force = -sphere_force
+            nodal_forces = {
+                int(geometry.node_ids[slot_a]): (1.0 - t_value) * structure_force,
+                int(geometry.node_ids[slot_b]): t_value * structure_force,
+            }
+            load[geometry.node_dofs[slot_a]] += nodal_forces[int(geometry.node_ids[slot_a])]
+            load[geometry.node_dofs[slot_b]] += nodal_forces[int(geometry.node_ids[slot_b])]
+            sphere_force_total += sphere_force
+            records.append(
+                SphereContactRecord(
+                    element_id=beam_id,
+                    local_coordinates=(2.0 * t_value - 1.0, 0.0),
+                    contact_point=closest[segment_index].copy(),
+                    normal=normal.copy(),
+                    penetration=penetration,
+                    normal_force=normal_force,
+                    sphere_force=sphere_force,
+                    structure_force=structure_force,
+                    contact_classification="beam",
+                    nodal_forces=nodal_forces,
+                )
+            )
+
     if len(records) > int(contact_config.max_active_contacts):
         deepest = max(record.penetration for record in records)
         tie_band = 0.95 * deepest
@@ -836,6 +959,11 @@ def _contact_default_config(sphere: RigidSphereImpact) -> SphereContactConfig:
 
 
 LinearElementMatrixTerms = Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+
+
+def _contact_erodible_element_count(model: "FEModel") -> int:
+    """Count elements that impact fracture can erode (shell midsurfaces + beams)."""
+    return sum(1 for element in model.mesh.elements.values() if element_fracture_category(element) is not None)
 
 
 def _linear_element_matrix_terms(model: "FEModel") -> Tuple[int, Tuple[LinearElementMatrixTerms, ...]]:
@@ -1018,6 +1146,11 @@ def _update_impact_damage_states(
         if element_id in deleted:
             continue
         element = model.mesh.get_element(element_id)
+        # Capacity-based impact damage is an area/contact-pressure screening
+        # model, which maps to shell midsurface contact only.  Beam line
+        # contact (force per length) is out of scope here; use
+        # ImpactFractureConfig (contact force/penetration) or the nonlinear
+        # PlasticImpactDamageConfig path for beam erosion.
         if element is None or element_fracture_category(element) != "shell":
             continue
         metrics = _impact_damage_metrics(model, record, config, sphere, dt)
@@ -1149,6 +1282,7 @@ def _impact_damage_preflight_warnings(
     sphere: RigidSphereImpact,
     *,
     fracture_config: Optional[ImpactFractureConfig] = None,
+    beam_contact: bool = False,
 ) -> Tuple[str, ...]:
     if config is None:
         return ()
@@ -1157,6 +1291,12 @@ def _impact_damage_preflight_warnings(
         warnings.append(
             "IMPACT_DAMAGE010: both ImpactFractureConfig and ImpactDamageConfig are active; "
             "either path may erode shell elements, and summaries report their own trigger ownership."
+        )
+    if beam_contact and _beam_contact_candidates(model):
+        warnings.append(
+            "IMPACT_DAMAGE014: beam contact targets are active but capacity-based ImpactDamageConfig "
+            "screens shell midsurface contact only; beam erosion needs ImpactFractureConfig "
+            "(contact force/penetration) or the nonlinear PlasticImpactDamageConfig path."
         )
     shell_elements = [element for element in model.mesh.elements.values() if element_fracture_category(element) == "shell"]
     if not shell_elements:
@@ -1229,7 +1369,13 @@ def _detect_impact_fracture_records(
         if element_id in deleted:
             continue
         element = model.mesh.get_element(element_id)
-        if element is None or element_fracture_category(element) != "shell":
+        if element is None:
+            continue
+        category = element_fracture_category(element)
+        # Contact-observable fracture triggers (force, penetration ratio,
+        # sphere-area pressure proxy) are geometry-agnostic, so any erodible
+        # contact target -- shell midsurface or beam segment -- can fracture.
+        if category is None:
             continue
         trigger_value = _impact_fracture_trigger_value(contact_record, config, sphere)
         utilization = trigger_value / config.threshold
@@ -1238,7 +1384,7 @@ def _detect_impact_fracture_records(
             new_records.append(
                 DeletedElementRecord(
                     element_id=element_id,
-                    element_type="shell",
+                    element_type=category,
                     step_index=int(step_index),
                     load_factor=float(time_value),
                     trigger_name=str(config.trigger),
@@ -1415,6 +1561,7 @@ def _solve_transient_sphere_impact_nonlinear(
             "residual_stiffness_fraction": float(
                 plastic_damage_config.residual_stiffness_fraction if plastic_damage_config is not None else 1.0
             ),
+            "kinematics": str(nl.kinematics),
         }
         if scales:
             kwargs["element_stiffness_scales"] = scales
@@ -1529,6 +1676,7 @@ def _solve_transient_sphere_impact_nonlinear(
     iteration_counts: List[int] = []
     energy_kinetic: List[float] = []
     energy_strain: List[float] = []
+    sphere_kinetic: List[float] = []
     plastic_work_history: List[float] = []
 
     def save_state(
@@ -1573,10 +1721,15 @@ def _solve_transient_sphere_impact_nonlinear(
         saved_contact_force.append(np.asarray(sphere_force, dtype=float).copy())
         saved_contacts.append(tuple(record.to_dict() for record in records) if config.save_contact_history else tuple())
         energy_kinetic.append(0.5 * float(v_state @ (M_red @ v_state)))
-        if K_energy_red is None:
-            energy_strain.append(0.0)
-        else:
+        sphere_kinetic.append(0.5 * float(sphere.mass) * float(sphere_v @ sphere_v))
+        if K_energy_red is not None:
             energy_strain.append(0.5 * float(q_state @ (K_energy_red @ q_state)))
+        else:
+            # internal work measure from the committed nonlinear internal
+            # force: exact strain energy for the elastic response, and an
+            # internal-work proxy (elastic + dissipated) once plasticity is
+            # active.
+            energy_strain.append(0.5 * float(full_u @ F_int_prev))
         plastic_work_history.append(float(_nonlinear_state_summary(committed_states).get("max_equivalent_plastic_strain", 0.0) or 0.0))
         if bool(nl.record_element_state_history):
             summary = _nonlinear_state_summary(committed_states)
@@ -2048,7 +2201,11 @@ def _solve_transient_sphere_impact_nonlinear(
             "verification_gate": "nonlinear_contact",
         },
     ).to_dict()
-    total_energy = np.asarray(energy_kinetic, dtype=float) + np.asarray(energy_strain, dtype=float)
+    total_energy = (
+        np.asarray(energy_kinetic, dtype=float)
+        + np.asarray(energy_strain, dtype=float)
+        + np.asarray(sphere_kinetic, dtype=float)
+    )
     nonzero_energy = total_energy[np.abs(total_energy) > 1.0e-30]
     energy_drift = 0.0
     if nonzero_energy.size:
@@ -2095,6 +2252,7 @@ def _solve_transient_sphere_impact_nonlinear(
         "sphere": result_case["analysis_case"]["settings"]["sphere"],
         "kinetic_energy": energy_kinetic,
         "strain_energy": energy_strain,
+        "sphere_kinetic_energy": sphere_kinetic,
         "plastic_work_proxy": plastic_work_history,
         "max_relative_energy_drift": energy_drift,
         "result_case": result_case,
@@ -2330,7 +2488,11 @@ def solve_transient_sphere_impact(
     warnings: List[str] = []
     for issue in validation.warnings:
         warnings.append(f"{issue.code}: {issue.message}")
-    warnings.extend(_impact_damage_preflight_warnings(model, damage_config, sphere, fracture_config=fracture_config))
+    warnings.extend(
+        _impact_damage_preflight_warnings(
+            model, damage_config, sphere, fracture_config=fracture_config, beam_contact=bool(config.beam_contact)
+        )
+    )
     if fracture_config is not None:
         warnings.append(
             "IMPACT_FRACTURE001: impact fracture uses contact-observable thresholds and residual element erosion; "
@@ -2542,7 +2704,7 @@ def solve_transient_sphere_impact(
                     current_red_load = _reduced_load(T, K, u0, base_load + contact_load)
                     F_red_prev = current_red_load
                     a_red = np.asarray(mass_handle.solve(current_red_load - C_red @ v_red - K_red @ q_red), dtype=float).reshape(-1)
-                    scoped_total = sum(1 for element in model.mesh.elements.values() if element_fracture_category(element) == "shell")
+                    scoped_total = _contact_erodible_element_count(model)
                     deleted_fraction = len(deleted_element_ids) / max(scoped_total, 1)
                     last_step_diag["fracture_new_deleted_element_ids"] = [record.element_id for record in new_fracture_records]
                     last_step_diag["fracture_deleted_fraction"] = float(deleted_fraction)
@@ -2551,7 +2713,7 @@ def solve_transient_sphere_impact(
                         status = "max_deleted_fraction_reached"
                         stop_reason = "impact_fracture_max_deleted_fraction_reached"
                         if not fracture_limit_warning_emitted:
-                            warnings.append("IMPACT_FRACTURE002: maximum deleted shell fraction reached; transient stopped at last eroded state.")
+                            warnings.append("IMPACT_FRACTURE002: maximum deleted contact-target fraction reached; transient stopped at last eroded state.")
                             fracture_limit_warning_emitted = True
             if damage_config is not None and records and status not in {"contact_iteration_failed", "max_deleted_fraction_reached"}:
                 new_damage_deletions, substep_damage_utilization, damage_diags, damage_changed = _update_impact_damage_states(

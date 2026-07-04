@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import time
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -518,9 +518,17 @@ def _assemble_nonlinear_system(
             if kinematics == "corotational":
                 from .corotational import corotational_element_response
 
-                f_elem, k_elem = corotational_element_response(
-                    model, int(elem_id), element, displacements[dof_mapping], tangent
+                f_elem, k_elem, cr_trial_state = corotational_element_response(
+                    model,
+                    int(elem_id),
+                    element,
+                    displacements[dof_mapping],
+                    tangent,
+                    committed_state=committed_states.get(elem_id),
+                    num_layers=num_layers,
                 )
+                if f_elem is not None and cr_trial_state is not None:
+                    trial_states[elem_id] = cr_trial_state
             if f_elem is None:
                 material = model.get_material(element.material_name)
                 u_elem = displacements[dof_mapping]
@@ -857,6 +865,12 @@ def solve_static_nonlinear(
     if fracture_config is not None and not isinstance(fracture_config, FractureConfig):
         raise TypeError("fracture_config must be a FractureConfig or None")
     settings = _coerce_convergence_settings(convergence_settings)
+    if kinematics == "corotational" and settings.line_search in {"auto", "rescue"}:
+        # Corotational Newton necessarily passes through a large intermediate
+        # residual while the element frames rotate toward the new state;
+        # residual-norm backtracking rejects that excursion and grinds the
+        # increment adaptation.  Plain Newton converges in a few iterations.
+        settings = dataclass_replace(settings, line_search="never")
     effective_min_step_fraction = settings.min_step_fraction if settings.min_step_fraction is not None else min_step_fraction
 
     start_time = time.time()
