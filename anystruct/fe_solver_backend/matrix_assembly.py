@@ -318,12 +318,33 @@ def assemble_stiffness_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict
 
 
 def assemble_mass_matrix(model: "FEModel") -> Tuple[sparse.csr_matrix, Dict[str, Any]]:
-    """Assemble the global mass matrix M only."""
-    return _assemble_element_matrix(
+    """Assemble the global mass matrix M only, including any added point masses."""
+    matrix, info = _assemble_element_matrix(
         model,
         "mass",
         lambda element, mesh, material: element.compute_mass_matrix(mesh, material),
     )
+    matrix = _add_point_masses_to_matrix(model, matrix)
+    info["diagnostics"]["point_mass_count"] = int(len(getattr(model.mesh, "point_masses", {}) or {}))
+    return matrix, info
+
+
+def _add_point_masses_to_matrix(model: "FEModel", matrix: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Add lumped point masses to the translational-DOF diagonal of ``matrix``."""
+    point_masses = getattr(model.mesh, "point_masses", None)
+    if not point_masses:
+        return matrix
+    total_dofs = model.mesh.dof_manager.total_dofs
+    diagonal = np.zeros(total_dofs, dtype=float)
+    for node_id, mass in point_masses.items():
+        node = model.mesh.get_node(int(node_id))
+        if node is None or float(mass) == 0.0:
+            continue
+        for axis in range(3):
+            diagonal[node.dofs[axis]] += float(mass)
+    if not diagonal.any():
+        return matrix
+    return (matrix + sparse.diags(diagonal, 0, shape=(total_dofs, total_dofs), format="csr")).tocsr()
 
 
 def _get_element_state(element_states: Optional[Any], element_id: int, element: Any) -> Any:

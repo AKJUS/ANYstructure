@@ -200,6 +200,11 @@ def _cross_section(item: Any) -> Dict[str, float]:
         vector = [float(component) for component in orientation]
         if len(vector) >= 3 and any(abs(component) > 0.0 for component in vector[:3]):
             section["orientation"] = tuple(vector[:3])
+    if bool(_value(source, "consistent_mass", default=False)):
+        section["consistent_mass"] = True
+    contact_radius = _value(source, "contact_radius", default=None)
+    if contact_radius is not None and float(contact_radius) > 0.0:
+        section["contact_radius"] = float(contact_radius)
     for key, aliases in (
         ("c_y", ("c_y", "cy", "fiber_distance_y")),
         ("c_z", ("c_z", "cz", "fiber_distance_z")),

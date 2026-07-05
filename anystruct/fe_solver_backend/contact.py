@@ -306,33 +306,44 @@ class SphereImpactResult:
 def _project_local_coordinates(
     element: ShellElement, coords: np.ndarray, point: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if element.num_nodes in (3, 6):
+    triangular = element.num_nodes in (3, 6)
+    if triangular:
         local = np.array([1.0 / 3.0, 1.0 / 3.0], dtype=float)
     else:
         local = np.zeros(2, dtype=float)
-    for _ in range(12):
-        N, dN_dxi, dN_deta = element.compute_shape_functions(float(local[0]), float(local[1]))
+    # Closest-point Newton projection.  A closed-form 2x2 solve and a
+    # contact-appropriate tolerance (1e-9 in natural coordinates) keep this
+    # inner loop cheap -- it is the dominant cost of penalty contact assembly.
+    N, dN_dxi, dN_deta = element.compute_shape_functions(float(local[0]), float(local[1]))
+    for _ in range(8):
         surface_point = N @ coords
-        jac = np.column_stack((dN_dxi @ coords, dN_deta @ coords))
+        j0 = dN_dxi @ coords
+        j1 = dN_deta @ coords
         residual = surface_point - point
-        lhs = jac.T @ jac
-        rhs = jac.T @ residual
-        try:
-            delta = np.linalg.solve(lhs + 1.0e-14 * np.eye(2), rhs)
-        except np.linalg.LinAlgError:
+        a = float(j0 @ j0)
+        b = float(j0 @ j1)
+        d = float(j1 @ j1)
+        r0 = float(j0 @ residual)
+        r1 = float(j1 @ residual)
+        det = a * d - b * b
+        if abs(det) <= 1.0e-30:
             break
-        local -= delta
-        if element.num_nodes in (3, 6):
+        delta0 = (d * r0 - b * r1) / det
+        delta1 = (a * r1 - b * r0) / det
+        local[0] -= delta0
+        local[1] -= delta1
+        if triangular:
             local[0] = max(float(local[0]), 0.0)
             local[1] = max(float(local[1]), 0.0)
             total = float(local[0] + local[1])
             if total > 1.0:
                 local /= total
         else:
-            local = np.clip(local, -1.0, 1.0)
-        if float(np.linalg.norm(delta)) < 1.0e-12:
+            local[0] = min(max(float(local[0]), -1.0), 1.0)
+            local[1] = min(max(float(local[1]), -1.0), 1.0)
+        N, dN_dxi, dN_deta = element.compute_shape_functions(float(local[0]), float(local[1]))
+        if delta0 * delta0 + delta1 * delta1 < 1.0e-18:
             break
-    N, dN_dxi, dN_deta = element.compute_shape_functions(float(local[0]), float(local[1]))
     surface_point = N @ coords
     return local, N, dN_dxi, dN_deta, surface_point
 
@@ -726,10 +737,12 @@ def validate_contact_configuration(
                 "warning",
                 "transient_config",
                 None,
-                "Time step is large relative to the contact penalty period.",
+                "Time step is large relative to the contact penalty period; the linear "
+                "impact solver auto-substeps during contact to compensate (capped by "
+                "max_event_substeps).",
                 measured=float(transient_config.dt),
                 limit=float(period_dt),
-                suggestion="Reduce dt, lower penalty stiffness, or accept lower contact-resolution accuracy.",
+                suggestion="No action needed unless max_event_substeps is reached; then reduce dt or lower penalty stiffness.",
             )
         )
     mesh_quality = {
@@ -1014,6 +1027,18 @@ def _assemble_damaged_linear_matrices(
     col_all = np.concatenate(cols)
     K = sparse.coo_matrix((np.concatenate(k_data), (row_all, col_all)), shape=(total_dofs, total_dofs)).tocsr()
     M = sparse.coo_matrix((np.concatenate(m_data), (row_all, col_all)), shape=(total_dofs, total_dofs)).tocsr()
+    # Preserve added point masses across erosion-driven matrix rebuilds.
+    point_masses = getattr(model.mesh, "point_masses", None)
+    if point_masses:
+        diagonal = np.zeros(total_dofs, dtype=float)
+        for node_id, mass in point_masses.items():
+            node = model.mesh.get_node(int(node_id))
+            if node is None or float(mass) == 0.0:
+                continue
+            for axis in range(3):
+                diagonal[node.dofs[axis]] += float(mass)
+        if diagonal.any():
+            M = (M + sparse.diags(diagonal, 0, shape=(total_dofs, total_dofs), format="csr")).tocsr()
     return K, M
 
 
@@ -2518,6 +2543,14 @@ def solve_transient_sphere_impact(
     separation_elapsed = 0.0
     separation_stop_time = float(config.post_separation_time)
     stop_after_separation = False
+    # Automatic contact-period substepping: while contact is active a coarse
+    # step under-resolves the penalty oscillation and produces spurious forces
+    # or non-convergence (the CONTACT006 warning condition).  Refine the step
+    # to keep dt below a fraction of the penalty period, capped by
+    # max_event_substeps, and only while contact is active so free flight and
+    # post-separation stay fast.
+    contact_period_dt = 0.2 * np.sqrt(float(sphere.mass) / max(float(config.penalty_stiffness), 1.0e-30))
+    contact_active_last_step = bool(initial_records)
     for step_index in range(1, len(times)):
         target_time = float(times[step_index])
         dt_total = float(times[step_index] - times[step_index - 1])
@@ -2525,7 +2558,10 @@ def solve_transient_sphere_impact(
             continue
         travel_scale = max(float(sphere.radius) * float(config.max_sphere_travel_fraction), 1.0e-12)
         predicted_travel = max(float(np.linalg.norm(sphere_velocity)) * dt_total, float(sphere.speed) * dt_total)
-        n_substeps = min(max(int(np.ceil(predicted_travel / travel_scale)), 1), int(config.max_event_substeps))
+        n_travel = max(int(np.ceil(predicted_travel / travel_scale)), 1)
+        n_contact = int(np.ceil(dt_total / contact_period_dt)) if contact_active_last_step and contact_period_dt > 0.0 else 1
+        n_substeps = min(max(n_travel, n_contact, 1), int(config.max_event_substeps))
+        contact_active_this_step = False
         total_substep_count += n_substeps
         if n_substeps > 1:
             event_substep_count += n_substeps - 1
@@ -2637,6 +2673,7 @@ def solve_transient_sphere_impact(
                 contact_step_count += 1
                 active_contact_duration += dt
                 separation_elapsed = 0.0
+                contact_active_this_step = True
             elif contact_step_count > 0 and separation_stop_time > 0.0:
                 separation_elapsed += dt
             if records:
@@ -2795,6 +2832,7 @@ def solve_transient_sphere_impact(
                 stop_after_separation = True
                 break
 
+        contact_active_last_step = contact_active_this_step
         save_time = float(last_step_diag.get("time", target_time)) if last_step_diag else target_time
         if step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1 or stop_after_separation:
             save_state(save_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, last_sphere_force, last_records)

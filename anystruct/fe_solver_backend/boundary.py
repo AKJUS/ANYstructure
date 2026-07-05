@@ -8,7 +8,7 @@ for the FE model.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -137,6 +137,7 @@ class LoadCase:
     element_loads: Dict[int, np.ndarray] = field(default_factory=dict)
     pressure_loads: Dict[int, float] = field(default_factory=dict)
     gravity: Optional[np.ndarray] = None
+    added_node_masses: Dict[int, float] = field(default_factory=dict)
 
     def add_nodal_load(
         self,
@@ -188,6 +189,38 @@ class LoadCase:
     def set_gravity(self, gx: float = 0.0, gy: float = 0.0, gz: float = -9.81):
         """Set gravity acceleration."""
         self.gravity = np.array([gx, gy, gz], dtype=float)
+
+    def set_acceleration(self, ax: float = 0.0, ay: float = 0.0, az: float = 0.0):
+        """Set a body-load acceleration field in x/y/z.
+
+        Produces the consistent inertial load ``M a`` over the structural mass
+        (element mass matrices) plus ``m_i a`` for any added nodal masses.  This
+        is the same mechanism as :meth:`set_gravity`; use it to describe design
+        accelerations (e.g. ship motions) in an arbitrary direction.
+        """
+        self.gravity = np.array([ax, ay, az], dtype=float)
+
+    def add_node_mass(self, node_id: int, mass: float):
+        """Add a lumped translational mass at a node.
+
+        The added mass contributes an inertial load ``mass * acceleration`` at
+        the node's translational DOFs whenever an acceleration/gravity field is
+        set.  Use the frontend edge/ring helpers to distribute a total mass
+        along a plate edge or a cylinder top/bottom ring.
+        """
+        mass = float(mass)
+        if mass == 0.0:
+            return
+        self.added_node_masses[int(node_id)] = self.added_node_masses.get(int(node_id), 0.0) + mass
+
+    def add_distributed_edge_mass(self, node_ids: Sequence[int], total_mass: float):
+        """Distribute ``total_mass`` equally over the given nodes."""
+        node_ids = [int(node_id) for node_id in node_ids]
+        if not node_ids or float(total_mass) == 0.0:
+            return
+        share = float(total_mass) / float(len(node_ids))
+        for node_id in node_ids:
+            self.add_node_mass(node_id, share)
 
     @staticmethod
     def _surface_jacobian_and_normal(coords: np.ndarray, dN_dxi: np.ndarray, dN_deta: np.ndarray) -> Tuple[float, np.ndarray]:
@@ -343,6 +376,23 @@ class LoadCase:
                 for i, dof in enumerate(dof_mapping):
                     if i < len(f_elem):
                         F[dof] += f_elem[i]
+
+        # Inertial load from added masses under the acceleration field: both
+        # model-level point masses (which also enter the mass matrix) and any
+        # load-case-only added masses.
+        if self.gravity is not None:
+            acceleration = np.asarray(self.gravity, dtype=float)
+            combined_masses: Dict[int, float] = {}
+            for node_id, mass in getattr(mesh, "point_masses", {}).items():
+                combined_masses[int(node_id)] = combined_masses.get(int(node_id), 0.0) + float(mass)
+            for node_id, mass in self.added_node_masses.items():
+                combined_masses[int(node_id)] = combined_masses.get(int(node_id), 0.0) + float(mass)
+            for node_id, mass in combined_masses.items():
+                node = mesh.get_node(int(node_id))
+                if node is None or mass == 0.0:
+                    continue
+                for axis in range(3):
+                    F[node.dofs[axis]] += float(mass) * acceleration[axis]
 
         return F
 

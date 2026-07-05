@@ -229,6 +229,51 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
     assert result.buckling_factors == tuple(sorted(result.buckling_factors))
 
 
+def test_run_runtime_fem_passes_phase_five_options_to_solver(monkeypatch):
+    captured = {}
+
+    def fake_run_production(geometry, config, status_callback=None, imported_fem_model=None):
+        captured["geometry"] = geometry
+        captured["config"] = config
+        return fe_solver.LightweightFEMResult(
+            status="ok",
+            stress_max_pa=0.0,
+            stress_p95_pa=0.0,
+            displacement_max_m=0.0,
+            mesh_info={"nodes": 1, "shells": 0, "beams": 0},
+            prestress_summary={},
+            load_resultant={},
+            visualization={},
+            solver_name="fake production",
+        )
+
+    monkeypatch.setattr(fe_runtime_solver.fe_solver, "full_backend_available", lambda: True)
+    monkeypatch.setattr(fe_runtime_solver.fe_solver, "run_production_fem", fake_run_production)
+
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+    result = fe_runtime_solver.run_runtime_fem(
+        snapshot,
+        fe_runtime_solver.RuntimeFEMOptions(
+            nonlinear_static_kinematics="Corotational",
+            collision_nonlinear_kinematics="Corotational",
+            collision_beam_contact_enabled=True,
+            beam_consistent_mass_enabled=True,
+        ),
+    )
+
+    config = captured["config"]
+
+    assert result.status == "ok"
+    assert config.nonlinear_static_kinematics == "corotational"
+    assert config.collision_nonlinear_kinematics == "corotational"
+    assert config.collision_beam_contact_enabled is True
+    assert config.beam_consistent_mass_enabled is True
+    assert result.summary["nonlinear_static_kinematics"] == "corotational"
+    assert result.summary["collision_nonlinear_kinematics"] == "corotational"
+    assert result.summary["collision_beam_contact_enabled"] is True
+    assert result.summary["beam_consistent_mass_enabled"] is True
+
+
 def test_fe_solver_kernel_warmup_manager_reports_runtime_state(monkeypatch):
     with fe_runtime_solver._FE_KERNEL_WARMUP_LOCK:
         fe_runtime_solver._FE_KERNEL_WARMUP_STATE.clear()
@@ -319,6 +364,61 @@ def test_run_runtime_fem_flat_member_geometry_matches_generated_fe_model():
     assert girder["section"]["area"] == pytest.approx(0.022)
     assert result.summary["mesh_info"]["beams"] == len(generated["beams"])
     assert {"stiffener", "girder"} <= roles
+
+
+def test_generated_beam_sections_preserve_consistent_mass_in_backend_model():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    summary = fe_runtime_solver.runtime_geometry_summary(snapshot)
+
+    disabled = fe_solver.build_generated_geometry(
+        summary,
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            include_stiffeners=True,
+            include_girders=True,
+            beam_consistent_mass_enabled=False,
+        ),
+    )
+    enabled = fe_solver.build_generated_geometry(
+        summary,
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            include_stiffeners=True,
+            include_girders=True,
+            beam_consistent_mass_enabled=True,
+        ),
+    )
+    flange_enabled = fe_solver.build_generated_geometry(
+        summary,
+        fe_solver.LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            include_stiffeners=True,
+            include_girders=True,
+            member_model="webs as shells, flanges as beams",
+            beam_consistent_mass_enabled=True,
+        ),
+    )
+
+    assert disabled["beams"]
+    assert enabled["beams"]
+    assert flange_enabled["beams"]
+    assert all("consistent_mass" not in beam["section"] for beam in disabled["beams"])
+    assert all(beam["section"].get("consistent_mass") is True for beam in enabled["beams"])
+    assert all(beam["section"].get("consistent_mass") is True for beam in flange_enabled["beams"])
+
+    backend = fe_solver.full_backend_api()
+    model = backend.build_fe_model_from_generated_geometry(
+        enabled,
+        backend.AnyStructureFEMConfig(pressure_pa=0.0, require_idealized_member_beams=False),
+    )
+    beam_elements = [
+        element
+        for element in model.mesh.elements.values()
+        if element.__class__.__name__ in {"BeamElement", "QuadraticBeamElement"}
+    ]
+
+    assert beam_elements
+    assert all(element.cross_section.get("consistent_mass") is True for element in beam_elements)
 
 
 def test_runtime_flat_girder_panel_uses_lg_width_and_span_girder_stations():
@@ -792,6 +892,69 @@ def test_production_solver_runs_incremental_material_nonlinear_static_path():
     assert "Ran incremental geometric/material nonlinear static solve: completed." in result.diagnostics
 
 
+def test_collision_nonlinear_config_normalizes_corotational_kinematics():
+    config = fe_solver.LightweightFEMConfig(
+        collision_material_nonlinear_enabled=True,
+        collision_nonlinear_kinematics="Corotational",
+    )
+
+    nonlinear_config = fe_solver._collision_nonlinear_config(config)
+
+    assert nonlinear_config is not None
+    assert nonlinear_config.kinematics == "corotational"
+
+
+def test_direct_nonlinear_static_records_corotational_kinematics():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "flat panel",
+            "length_m": 0.6,
+            "width_m": 0.3,
+            "thickness_m": 0.01,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=250.0,
+            mesh_fidelity="coarse",
+            num_buckling_modes=1,
+            analysis_type="geometric nonlinear static",
+            nonlinear_static_kinematics="corotational",
+            nonlinear_max_load_factor=0.25,
+            nonlinear_steps=1,
+            nonlinear_max_iterations=20,
+        ),
+    )
+
+    assert result.status == "ok"
+    assert result.prestress_summary["nonlinear_static_kinematics"] == "corotational"
+
+
+def test_corotational_static_with_fracture_is_rejected_before_backend_execution():
+    result = fe_solver.run_production_fem(
+        {
+            "geometry": "flat panel",
+            "length_m": 0.6,
+            "width_m": 0.3,
+            "thickness_m": 0.01,
+            "has_stiffener": False,
+            "has_girder": False,
+        },
+        fe_solver.LightweightFEMConfig(
+            pressure_pa=250.0,
+            mesh_fidelity="coarse",
+            num_buckling_modes=1,
+            analysis_type="geometric nonlinear static",
+            nonlinear_static_kinematics="corotational",
+            fracture_enabled=True,
+        ),
+    )
+
+    assert result.status == "invalid_static_kinematics"
+    assert result.prestress_summary["nonlinear_static_kinematics"] == "corotational"
+    assert any("Corotational nonlinear static does not support fracture/erosion" in item for item in result.diagnostics)
+
+
 def test_flat_automatic_nullspace_keeps_physical_edge_pressure_supports():
     geometry = {
         "geometry": "flat panel",
@@ -984,6 +1147,126 @@ def test_runtime_result_print_includes_dnv_curve_and_nonlinear_static_summary():
     assert "last converged load factor: 1.0" in text
 
 
+def test_runtime_result_print_includes_phase_five_controls_and_collision_energy():
+    result = fe_runtime_solver.RuntimeFEMRunResult(
+        status="ok",
+        summary={
+            "line": "line1",
+            "geometry": "flat panel",
+            "mesh_fidelity": "coarse",
+            "shell_element_order": "S8",
+            "beam_element_order": "B3",
+            "member_model": "plates as shell, girders as beams",
+            "boundary_condition": "auto",
+            "symmetry_mode": "none",
+            "analysis_type": "geom. + material nonlinear static",
+            "buckling_analysis_type": "linear eigenvalue",
+            "runtime_solver": "stepwise",
+            "solver_type": "direct",
+            "pressure_pa": 1000.0,
+            "pressure_side": "front",
+            "pressure_direction": "front",
+            "axial_force_n": 0.0,
+            "enforced_displacement_m": 0.0,
+            "mesh_size_m": 0.0,
+            "top_bottom_moment_nm": 0.0,
+            "include_stiffeners": True,
+            "include_girders": True,
+            "include_end_lids": False,
+            "member_orientation": "auto",
+            "stiffener_eccentricity_m": 0.0,
+            "girder_eccentricity_m": 0.0,
+            "material_model": "DNV-RP-C208 steel",
+            "steel_grade": "S355",
+            "steel_thickness_class": "auto",
+            "elastic_modulus_pa": 210.0e9,
+            "poisson_ratio": 0.3,
+            "yield_stress_pa": 355.0e6,
+            "stress_percentile": 95.0,
+            "nonlinear_max_load_factor": 1.0,
+            "nonlinear_steps": 2,
+            "nonlinear_max_iterations": 10,
+            "nonlinear_layers": 5,
+            "nonlinear_solution_control": "newton force control",
+            "nonlinear_static_kinematics": "corotational",
+            "nonlinear_convergence_profile": "auto",
+            "nonlinear_assembly_threads": 0,
+            "beam_consistent_mass_enabled": True,
+            "deformation_scale": 0.0,
+            "recovery_history_mode": "full",
+            "memory_limit_mb": 0.0,
+            "custom_load_bc_enabled": False,
+            "num_buckling_modes": 1,
+            "max_displacement_m": 0.0,
+            "collision_enabled": True,
+            "collision_mass_kg": 10.0,
+            "collision_radius_m": 0.1,
+            "collision_start_m": (0.0, 0.0, 1.0),
+            "collision_vector": (0.0, 0.0, -1.0),
+            "collision_speed_mps": 3.0,
+            "collision_time_mode": "auto",
+            "collision_total_time_s": 0.01,
+            "collision_dt_s": 0.001,
+            "collision_auto_steps_per_radius": 20.0,
+            "collision_auto_post_contact_radii": 6.0,
+            "collision_bounce_back_time_s": 0.001,
+            "collision_contact_surface": "midsurface",
+            "collision_beam_contact_enabled": True,
+            "collision_material_nonlinear_enabled": True,
+            "collision_nonlinear_kinematics": "corotational",
+            "collision_damage_enabled": True,
+            "mesh_info": {},
+            "prestress_summary": {
+                "nonlinear_static_status": "completed",
+                "nonlinear_static_control": "newton force control",
+                "nonlinear_static_kinematics": "corotational",
+                "nonlinear_static_load_factor": 1.0,
+                "nonlinear_static_steps": 2,
+                "nonlinear_static_total_iterations": 6,
+                "nonlinear_static_layers": 5,
+                "nonlinear_static_max_plastic_strain": 0.0,
+                "collision_status": "completed",
+                "collision_time_mode": "auto",
+                "collision_resolved_dt_s": 0.001,
+                "collision_resolved_total_time_s": 0.01,
+                "collision_peak_contact_force_n": 12_000.0,
+                "collision_max_penetration_m": 0.0005,
+                "collision_max_penetration_ratio": 0.005,
+                "collision_contact_duration_s": 0.002,
+                "collision_sphere_momentum_balance_error": 0.01,
+                "collision_saved_steps": 5,
+                "collision_damage_enabled": 1.0,
+                "collision_material_nonlinear_enabled": 1.0,
+                "collision_nonlinear_kinematics": "corotational",
+                "collision_beam_contact_enabled": 1.0,
+                "collision_nonlinear_status": "completed",
+                "collision_nonlinear_iterations": 9,
+                "collision_nonlinear_cutbacks": 1,
+                "collision_nonlinear_max_plastic_strain": 0.02,
+                "collision_plastic_damage_threshold": 0.01,
+                "collision_deleted_eroded_elements": 2,
+                "collision_energy_initial_j": 45.0,
+                "collision_energy_final_j": 44.5,
+                "collision_sphere_kinetic_initial_j": 45.0,
+                "collision_sphere_kinetic_final_j": 5.0,
+                "collision_energy_max_relative_drift": 0.011,
+                "impact_damage_max_utilization": 0.75,
+                "runtime_solver": "sphere collision transient",
+            },
+            "load_resultant": {},
+        },
+    )
+
+    text = fe_runtime_solver.format_runtime_fem_result(result)
+
+    assert "Nonlinear static kinematics: corotational" in text
+    assert "Consistent beam mass: True" in text
+    assert " - direct beam/stiffener contact: True" in text
+    assert " - impact kinematics: corotational" in text
+    assert "Impact energy balance:" in text
+    assert " - deleted/eroded elements: 2" in text
+
+
 def test_runtime_fem_popup_has_compact_3d_section_preview():
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
 
@@ -997,6 +1280,7 @@ def test_runtime_fem_popup_has_compact_3d_section_preview():
 
 def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_runtime_solver.py").read_text(encoding="utf-8")
+    solver_source = (Path(__file__).resolve().parents[1] / "anystruct" / "fe_solver.py").read_text(encoding="utf-8")
 
     assert "import queue" in source
     assert "import threading" in source
@@ -1034,6 +1318,10 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.beam_element_order = tk.StringVar(value=\"B2\")" in source
     assert "self.member_model = tk.StringVar(value=\"plates as shell, girders as beams\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
+    assert "self.nonlinear_static_kinematics = tk.StringVar(value=\"Von Karman\")" in source
+    assert "self.beam_consistent_mass_enabled = tk.BooleanVar(value=False)" in source
+    assert "self.collision_nonlinear_kinematics = tk.StringVar(value=\"Von Karman\")" in source
+    assert "self.collision_beam_contact_enabled = tk.BooleanVar(value=False)" in source
     assert "self.pressure_direction = tk.StringVar(value=\"front\")" in source
     assert "self._add_option_row(constraints, 2, \"pressure_direction\", \"Pressure side\", self.pressure_direction" in source
     assert "(\"front\", \"back\")" in source
@@ -1044,8 +1332,8 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.plate_alpha_vis = tk.StringVar(value=\"1.0\")" in source
     assert "self.plate_front_color_vis = tk.StringVar(value=\"#d1d5db\")" in source
     assert "self.plate_back_color_vis = tk.StringVar(value=\"#8b5e3c\")" in source
-    assert "self._add_entry_row(vis_group, 4, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
-    assert "self._add_entry_row(vis_group, 5, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
+    assert "self._add_entry_row(vis_group, 5, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
+    assert "self._add_entry_row(vis_group, 6, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "member_model=str(self.member_model.get())" in source
@@ -1078,7 +1366,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "def _custom_load_selection_visual_offset(self) -> float:" in source
     assert "draw_overlay=True" in source
     assert "custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get())" in source
-    assert "custom_use_nullspace_projection=bool(self.custom_use_nullspace_projection.get())" in source
+    assert "custom_use_nullspace_projection=(bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get()))" in source
     assert "custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0)" in source
     assert "custom_loads_json=str(self.custom_loads_json.get())" in source
     assert "self._add_entry_row(time_domain, 2, \"custom_pressure_pa\"" not in source
@@ -1089,6 +1377,23 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self._add_option_row(" in source and "\"member_model\"" in source
     assert "\"webs as shells, flanges as beams\"" in source
     assert "\"all shell\"" in source
+    assert "\"nonlinear_static_kinematics\"" in source
+    assert "\"beam_consistent_mass\"" in source
+    assert "\"collision_nonlinear_kinematics\"" in source
+    assert "\"collision_beam_contact\"" in source
+    assert "_normalise_kinematics(self.nonlinear_static_kinematics.get())" in source
+    assert "_normalise_kinematics(self.collision_nonlinear_kinematics.get())" in source
+    assert "collision_beam_contact_enabled=bool(self.collision_beam_contact_enabled.get())" in source
+    assert "beam_consistent_mass_enabled=bool(self.beam_consistent_mass_enabled.get())" in source
+    assert "beam_contact=bool(config.collision_beam_contact_enabled)" in solver_source
+    assert "kinematics=static_kinematics" in solver_source
+    assert "kinematics=_normalized_kinematics(config.collision_nonlinear_kinematics)" in solver_source
+    assert "section[\"consistent_mass\"] = True" in (
+        Path(__file__).resolve().parents[1]
+        / "anystruct"
+        / "fe_solver_backend"
+        / "anystructure_fem_mode.py"
+    ).read_text(encoding="utf-8")
     assert "plate_edge_x0_support=str(self.plate_edge_x0_support.get())" in source
     assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
     assert "\"nullspace_projection\"" in source
