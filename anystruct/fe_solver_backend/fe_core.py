@@ -127,6 +127,7 @@ class FEMesh:
     nodes: Dict[int, Node] = field(default_factory=dict)
     elements: Dict[int, 'Element'] = field(default_factory=dict)
     dof_manager: DOFManager = field(default_factory=DOFManager)
+    point_masses: Dict[int, float] = field(default_factory=dict)
     revisions: Dict[str, int] = field(default_factory=lambda: {
         "topology": 0,
         "geometry": 0,
@@ -258,7 +259,21 @@ class FEModel:
     def add_element(self, element_id: int, element: 'Element'):
         """Add an element to the model."""
         self.mesh.add_element(element_id, element)
-    
+
+    def add_point_mass(self, node_id: int, mass: float):
+        """Attach a lumped translational point mass to a node.
+
+        The mass enters the global mass matrix (so it shifts natural
+        frequencies and participates in transient/collision dynamics) and, when
+        an acceleration/gravity field is applied, produces the corresponding
+        inertial load.
+        """
+        mass = float(mass)
+        if mass == 0.0:
+            return
+        self.mesh.point_masses[int(node_id)] = self.mesh.point_masses.get(int(node_id), 0.0) + mass
+        self.mesh.bump_revision("material")
+
     def add_boundary_condition(self, bc: 'BoundaryCondition'):
         """Add a boundary condition to the model."""
         self.boundary_conditions.append(bc)

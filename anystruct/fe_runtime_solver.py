@@ -82,6 +82,26 @@ def _kinematics_label(value: Any) -> str:
     return "Corotational" if _normalise_kinematics(value) == "corotational" else "Von Karman"
 
 
+def _format_acceleration_summary(value: Any) -> str:
+    """Render an [ax, ay, az] acceleration vector, or 'none' when all zero."""
+    try:
+        vector = [float(component) for component in (value or (0.0, 0.0, 0.0))]
+    except (TypeError, ValueError):
+        return "none"
+    if len(vector) < 3 or not any(abs(component) > 0.0 for component in vector[:3]):
+        return "none"
+    return "[{:g}, {:g}, {:g}]".format(vector[0], vector[1], vector[2])
+
+
+def _format_added_mass_summary(summary: dict[str, Any]) -> str:
+    """Render the added-mass magnitude and location, or 'none'."""
+    mass = _safe_float(summary.get("added_mass_kg"), 0.0)
+    location = str(summary.get("added_mass_location", "none") or "none")
+    if mass <= 0.0 or location.lower() in {"", "none"}:
+        return "none"
+    return "{:g} at {}".format(mass, location)
+
+
 @dataclass(frozen=True)
 class RuntimeFEMLineSnapshot:
     """Minimal active-line payload passed from ANYstructure to the runtime FEM UI."""
@@ -110,6 +130,11 @@ class RuntimeFEMOptions:
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
+    acceleration_x_m_s2: float = 0.0
+    acceleration_y_m_s2: float = 0.0
+    acceleration_z_m_s2: float = 0.0
+    added_mass_kg: float = 0.0
+    added_mass_location: str = "none"
     boundary_condition: str = "auto"
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
@@ -196,6 +221,10 @@ class RuntimeFEMOptions:
     collision_material_nonlinear_enabled: bool = False
     collision_nonlinear_kinematics: str = "von_karman"
     collision_beam_contact_enabled: bool = False
+    collision_adaptive_mesh_enabled: bool = False
+    collision_adaptive_fine_factor: float = 0.3
+    collision_adaptive_fine_size_m: float = 0.0
+    collision_adaptive_zone_factor: float = 2.5
     collision_nonlinear_max_iterations: int = 20
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
@@ -818,27 +847,10 @@ def _runtime_custom_edges(options: RuntimeFEMOptions) -> list[dict[str, float | 
     return custom_edges
 
 
-def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions,
-                    status_callback=None, imported_fem_model=None) -> RuntimeFEMRunResult:
-    """Run the ANYstructure-owned lightweight FEM solver."""
-
-    geometry = runtime_geometry_summary(snapshot)
-    diagnostics = list(snapshot.diagnostics)
+def _solver_config_from_options(options: RuntimeFEMOptions):
+    """Build the LightweightFEMConfig from runtime options (shared by run and preview)."""
     pressure_side = _normalise_pressure_side(options.pressure_direction)
-    custom_load_entries = _runtime_custom_load_entries(options.custom_loads_json)
-    listed_pressure = sum(
-        abs(_safe_float(entry.get("pressure_pa"), 0.0))
-        for entry in custom_load_entries
-        if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}
-    )
-    effective_pressure = float(
-        options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
-    if options.custom_load_bc_enabled:
-        effective_pressure += float(listed_pressure if custom_load_entries else options.custom_pressure_pa)
-    if bool(options.collision_enabled) and bool(options.collision_material_nonlinear_enabled):
-        start_fe_solver_kernel_warmup((), background=False, status_callback=status_callback, include_nonlinear_impact=True)
-
-    solver_config = fe_solver.LightweightFEMConfig(
+    return fe_solver.LightweightFEMConfig(
         mesh_fidelity=options.mesh_fidelity,
         pressure_pa=options.pressure_pa,
         load_scale=options.load_scale,
@@ -848,6 +860,11 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         num_buckling_modes=options.num_buckling_modes,
         mesh_size_m=options.mesh_size_m,
         top_bottom_moment_nm=options.top_bottom_moment_nm,
+        acceleration_x_m_s2=options.acceleration_x_m_s2,
+        acceleration_y_m_s2=options.acceleration_y_m_s2,
+        acceleration_z_m_s2=options.acceleration_z_m_s2,
+        added_mass_kg=options.added_mass_kg,
+        added_mass_location=options.added_mass_location,
         boundary_condition=options.boundary_condition,
         symmetry_mode=options.symmetry_mode,
         shell_element_order=options.shell_element_order,
@@ -933,6 +950,10 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         collision_material_nonlinear_enabled=options.collision_material_nonlinear_enabled,
         collision_nonlinear_kinematics=_normalise_kinematics(options.collision_nonlinear_kinematics),
         collision_beam_contact_enabled=bool(options.collision_beam_contact_enabled),
+        collision_adaptive_mesh_enabled=bool(options.collision_adaptive_mesh_enabled),
+        collision_adaptive_fine_factor=float(options.collision_adaptive_fine_factor),
+        collision_adaptive_fine_size_m=float(options.collision_adaptive_fine_size_m),
+        collision_adaptive_zone_factor=float(options.collision_adaptive_zone_factor),
         collision_nonlinear_max_iterations=options.collision_nonlinear_max_iterations,
         collision_nonlinear_tolerance=options.collision_nonlinear_tolerance,
         collision_nonlinear_cutbacks=options.collision_nonlinear_cutbacks,
@@ -970,6 +991,29 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         collision_damage_max_deleted_fraction=options.collision_damage_max_deleted_fraction,
         collision_damage_neighbor_smoothing=options.collision_damage_neighbor_smoothing,
     )
+
+
+def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions,
+                    status_callback=None, imported_fem_model=None) -> RuntimeFEMRunResult:
+    """Run the ANYstructure-owned lightweight FEM solver."""
+
+    geometry = runtime_geometry_summary(snapshot)
+    diagnostics = list(snapshot.diagnostics)
+    pressure_side = _normalise_pressure_side(options.pressure_direction)
+    custom_load_entries = _runtime_custom_load_entries(options.custom_loads_json)
+    listed_pressure = sum(
+        abs(_safe_float(entry.get("pressure_pa"), 0.0))
+        for entry in custom_load_entries
+        if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}
+    )
+    effective_pressure = float(
+        options.pressure_pa if (not options.custom_load_bc_enabled or options.custom_loads_add_to_imported) else 0.0)
+    if options.custom_load_bc_enabled:
+        effective_pressure += float(listed_pressure if custom_load_entries else options.custom_pressure_pa)
+    if bool(options.collision_enabled) and bool(options.collision_material_nonlinear_enabled):
+        start_fe_solver_kernel_warmup((), background=False, status_callback=status_callback, include_nonlinear_impact=True)
+
+    solver_config = _solver_config_from_options(options)
     if fe_solver.full_backend_available():
         solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback, imported_fem_model=imported_fem_model)
         if solver_result.status in {"backend_unavailable", "invalid", "static_failed", "production_failed"}:
@@ -1008,6 +1052,9 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "pressure_direction": pressure_side,
         "pressure_side": pressure_side,
         "axial_force_n": float(options.axial_force_n),
+        "acceleration_m_s2": [float(options.acceleration_x_m_s2), float(options.acceleration_y_m_s2), float(options.acceleration_z_m_s2)],
+        "added_mass_kg": float(options.added_mass_kg),
+        "added_mass_location": str(options.added_mass_location),
         "enforced_displacement_m": float(options.enforced_displacement_m),
         "stiffener_eccentricity_m": float(options.stiffener_eccentricity_m),
         "girder_eccentricity_m": float(options.girder_eccentricity_m),
@@ -1093,6 +1140,10 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "collision_material_nonlinear_enabled": bool(options.collision_material_nonlinear_enabled),
         "collision_nonlinear_kinematics": _normalise_kinematics(options.collision_nonlinear_kinematics),
         "collision_beam_contact_enabled": bool(options.collision_beam_contact_enabled),
+        "collision_adaptive_mesh_enabled": bool(options.collision_adaptive_mesh_enabled),
+        "collision_adaptive_fine_factor": float(options.collision_adaptive_fine_factor),
+        "collision_adaptive_fine_size_m": float(options.collision_adaptive_fine_size_m),
+        "collision_adaptive_zone_factor": float(options.collision_adaptive_zone_factor),
         "collision_nonlinear_max_iterations": int(options.collision_nonlinear_max_iterations),
         "collision_nonlinear_tolerance": float(options.collision_nonlinear_tolerance),
         "collision_nonlinear_cutbacks": int(options.collision_nonlinear_cutbacks),
@@ -2340,6 +2391,64 @@ def create_runtime_fem_result_figure(
     return figure
 
 
+def create_runtime_fem_mesh_preview_figure(generated_geometry: dict) -> Figure:
+    """Top-down preview of the generated mesh with the impact refinement zone.
+
+    Renders every shell element as an outline so local adaptive refinement is
+    visible, marks the impact point and fine-mesh radius, and titles the plot
+    with concrete mesh metrics (element count and size range).  Intended for a
+    'Preview mesh' button so the user sees what the sizing options produce
+    before running.
+    """
+    figure = Figure(figsize=(3.4, 2.6), dpi=100)
+    axis = figure.add_subplot(111)
+    nodes = {int(n["id"]): n["coords"] for n in generated_geometry.get("nodes", ()) or () if "id" in n}
+    shells = generated_geometry.get("shells", ()) or ()
+    from matplotlib.collections import LineCollection
+
+    segments: list = []
+    for shell in shells:
+        ids = [int(i) for i in shell.get("node_ids", ()) or () if int(i) in nodes]
+        corners = ids[:4] if len(ids) >= 4 else ids
+        if len(corners) < 3:
+            continue
+        pts = [(float(nodes[i][0]), float(nodes[i][1])) for i in corners]
+        for k in range(len(pts)):
+            segments.append([pts[k], pts[(k + 1) % len(pts)]])
+    if segments:
+        axis.add_collection(LineCollection(segments, colors="#475569", linewidths=0.35))
+
+    metrics = generated_geometry.get("mesh_metrics", {}) or {}
+    adaptive = generated_geometry.get("adaptive_mesh", {}) or {}
+    if adaptive.get("enabled") and adaptive.get("impact_point_m"):
+        cx, cy = adaptive["impact_point_m"]
+        radius = float(adaptive.get("fine_radius_m", 0.0))
+        axis.plot([cx], [cy], marker="x", color="#dc2626", markersize=7, markeredgewidth=1.6, zorder=5)
+        if radius > 0.0:
+            theta = np.linspace(0.0, 2.0 * math.pi, 48)
+            axis.plot(cx + radius * np.cos(theta), cy + radius * np.sin(theta), color="#dc2626", linewidth=0.9, linestyle="--", zorder=5)
+
+    all_x = [float(c[0]) for c in nodes.values()]
+    all_y = [float(c[1]) for c in nodes.values()]
+    if all_x and all_y:
+        axis.set_xlim(min(all_x), max(all_x))
+        axis.set_ylim(min(all_y), max(all_y))
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlabel("x [m]", fontsize=6)
+    axis.set_ylabel("y [m]", fontsize=6)
+    axis.tick_params(labelsize=6)
+    count = int(metrics.get("shell_element_count", len(shells)))
+    if metrics:
+        title = f"{count} elements  |  {metrics.get('min_element_size_m', 0.0)*1000:.0f}-{metrics.get('max_element_size_m', 0.0)*1000:.0f} mm"
+    else:
+        title = f"{count} elements"
+    if adaptive.get("enabled"):
+        title += "  (adaptive)"
+    axis.set_title(title, fontsize=7)
+    figure.tight_layout(pad=0.5)
+    return figure
+
+
 def create_runtime_fem_geometry_preview_figure(snapshot: RuntimeFEMLineSnapshot, app: Any | None = None) -> Figure:
     """Create the 3D geometry preview shown in the runtime FEM popup."""
 
@@ -2451,6 +2560,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Enforced displacement [m]: " + str(round(_safe_float(summary.get("enforced_displacement_m")), 6)),
         "Mesh size override [m]: " + str(round(_safe_float(summary.get("mesh_size_m")), 4)),
         "Top/bottom moment [Nm]: " + str(round(_safe_float(summary.get("top_bottom_moment_nm")), 3)),
+        "Acceleration [m/s2]: " + _format_acceleration_summary(summary.get("acceleration_m_s2")),
+        "Added mass [kg]: " + _format_added_mass_summary(summary),
         "Include stiffener beams: " + str(bool(summary.get("include_stiffeners"))),
         "Include girder/frame beams: " + str(bool(summary.get("include_girders"))),
         "Include top/bottom lid: " + str(bool(summary.get("include_end_lids"))),
@@ -3095,7 +3206,13 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     "mesh_fidelity": {
         "title": "Mesh Fidelity",
         "purpose": "Controls the default shell mesh density when no explicit mesh size is given.",
-        "use": "The runtime generator refines the plating mesh and always inserts mesh lines at stiffeners and girders. Coarser meshes run faster; finer meshes give better stress and buckling-mode resolution.",
+        "use": (
+            "Each level sets a target number of shell elements across each plate field between members: "
+            "coarse ~= 4 per field, medium ~= 8, fine ~= 12, very fine ~= 20. The generator always inserts "
+            "mesh lines at stiffeners and girders, so the true element size also depends on member spacing. "
+            "Use the 'Preview mesh' button (Collision tab) to see the exact element count and size range in mm "
+            "for the current geometry."
+        ),
         "output": "Changes node, shell and beam counts, stress recovery, displacement shape and eigenvalue buckling factors.",
         "caution": "Very fine meshes can become expensive for cylinders with many stiffeners. Use explicit mesh size when you need a repeatable target element length.",
     },
@@ -3189,6 +3306,77 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "use": "The generated load case distributes nodal moments on the end rings. It is mainly useful for cylinder examples and controlled studies.",
         "output": "Shown in diagnostics and contributes to static displacement/stress recovery.",
         "caution": "This is a simplified end moment input, not a full end-cap or external frame model.",
+    },
+    "acceleration_x_m_s2": {
+        "title": "Acceleration X / Y / Z",
+        "purpose": "Body-load acceleration field in the global x, y and z directions (m/s^2).",
+        "use": (
+            "Each nonzero component applies a consistent inertial body load (mass x acceleration) over the whole "
+            "structure and over any added masses. Use it for design accelerations such as ship motions or a 1 g "
+            "gravity check (set Z to -9.81). Values add to any pressure and edge loads."
+        ),
+        "output": "Adds distributed nodal forces; reported in the load resultant and reaction summary.",
+        "caution": "This is a quasi-static body load. It is not a base-excitation transient; for impact use the collision tab.",
+    },
+    "added_mass_kg": {
+        "title": "Added Mass",
+        "purpose": "Total lumped mass (kg) attached to the selected location.",
+        "use": (
+            "The mass is split equally over the nodes of the chosen location. It enters the global mass matrix, so "
+            "it lowers natural frequencies and participates in transient/collision dynamics, and it produces an "
+            "inertial load under the acceleration field above."
+        ),
+        "output": "Changes modal frequencies, dynamic response and (with acceleration) the load resultant.",
+        "caution": "Zero mass or a location that matches no nodes is ignored (a diagnostic is printed).",
+    },
+    "added_mass_location": {
+        "title": "Added Mass Location",
+        "purpose": "Where the added mass is attached.",
+        "use": (
+            "Flat panels: a single plate edge (x0/x1/y0/y1) or all edges. Cylinders: the top or bottom end ring. "
+            "Nodes are matched from the generated mesh, so the count follows the mesh density."
+        ),
+        "output": "Determines which nodes receive the added mass and inertial load.",
+        "caution": "Choose a plate option for flat panels and a cylinder option for cylinders; a mismatch matches no nodes.",
+    },
+    "collision_adaptive_mesh": {
+        "title": "Adaptive Mesh at Impact",
+        "purpose": "Locally refines the plate mesh around the sphere impact point.",
+        "use": (
+            "The generator traces the sphere trajectory onto the panel and makes elements much smaller there, "
+            "grading back to the base size away from impact, while keeping stiffener/girder mesh lines. Use "
+            "'Preview mesh' to see the result. Flat panels only."
+        ),
+        "output": "Increases element count locally; improves contact-force and local-stress resolution at impact.",
+        "caution": "A very small fine factor with a large panel can create many elements; check the preview element count.",
+    },
+    "collision_adaptive_fine_factor": {
+        "title": "Impact Fine Factor",
+        "purpose": "Element size at the impact point as a fraction of the base element size.",
+        "use": (
+            "For example 0.25 makes impact elements about a quarter of the base size. Smaller = finer and more "
+            "elements. Ignored when an explicit 'Impact fine size' is given."
+        ),
+        "output": "Sets the finest local element size shown in the mesh preview metrics.",
+        "caution": "Values below ~0.05 rarely help and grow the model quickly; use 'Impact fine size' for an exact target.",
+    },
+    "collision_adaptive_fine_size_m": {
+        "title": "Impact Fine Size",
+        "purpose": "Exact finest element edge length at the impact point, in metres (0 = use the fine factor instead).",
+        "use": (
+            "Set an absolute target such as the plate thickness for a very fine impact mesh (e.g. 0.012 for a 12 mm "
+            "plate gives ~t x t elements). Takes precedence over the fine factor. The size is floored at the plate "
+            "thickness (elements are never smaller than t) and capped at the base element size."
+        ),
+        "output": "Sets the finest local element size; check the preview element count as small sizes grow the model fast.",
+        "caution": "A thickness-scale size on a large panel can produce many thousands of elements and a slow solve.",
+    },
+    "collision_adaptive_zone_factor": {
+        "title": "Fine Zone / Radius",
+        "purpose": "Radius of the fully-refined zone as a multiple of the sphere radius.",
+        "use": "For example 2.5 keeps the mesh fine out to 2.5 sphere radii from impact, then coarsens.",
+        "output": "Sets the dashed fine-zone circle in the mesh preview.",
+        "caution": "Large values refine most of the panel and defeat the adaptive saving.",
     },
     "include_stiffeners": {
         "title": "Include Stiffener Beams",
@@ -3991,6 +4179,11 @@ class RuntimeFEMWindow:
         self.buckling_analysis_type = tk.StringVar(value="linear eigenvalue")
         self.pressure_direction = tk.StringVar(value="front")
         self.axial_force_n = tk.DoubleVar(value=_safe_float(self.snapshot.axial_force_n, 0.0))
+        self.acceleration_x_m_s2 = tk.DoubleVar(value=0.0)
+        self.acceleration_y_m_s2 = tk.DoubleVar(value=0.0)
+        self.acceleration_z_m_s2 = tk.DoubleVar(value=0.0)
+        self.added_mass_kg = tk.DoubleVar(value=0.0)
+        self.added_mass_location = tk.StringVar(value="none")
         self.enforced_displacement_m = tk.DoubleVar(value=0.0)
         self.stiffener_eccentricity_m = tk.DoubleVar(value=0.0)
         self.girder_eccentricity_m = tk.DoubleVar(value=0.0)
@@ -4085,6 +4278,10 @@ class RuntimeFEMWindow:
         self.collision_material_nonlinear_enabled = tk.BooleanVar(value=False)
         self.collision_nonlinear_kinematics = tk.StringVar(value="Von Karman")
         self.collision_beam_contact_enabled = tk.BooleanVar(value=False)
+        self.collision_adaptive_mesh_enabled = tk.BooleanVar(value=False)
+        self.collision_adaptive_fine_factor = tk.DoubleVar(value=0.3)
+        self.collision_adaptive_fine_size_m = tk.DoubleVar(value=0.0)
+        self.collision_adaptive_zone_factor = tk.DoubleVar(value=2.5)
         self.collision_nonlinear_max_iterations = tk.IntVar(value=20)
         self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.collision_nonlinear_cutbacks = tk.IntVar(value=8)
@@ -4643,6 +4840,17 @@ class RuntimeFEMWindow:
         self._add_entry_row(mesh_loads, 5, "num_buckling_modes", "Buckling modes", self.num_buckling_modes, width=8)
         self._add_entry_row(mesh_loads, 6, "deformation_scale", "Def. scale", self.deformation_scale, width=8)
 
+        accel = ttk.LabelFrame(options, text="Acceleration and added mass")
+        accel.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(accel)
+        self._add_entry_row(accel, 0, "acceleration_x_m_s2", "Accel X [m/s2]", self.acceleration_x_m_s2, width=8)
+        self._add_entry_row(accel, 1, "acceleration_y_m_s2", "Accel Y [m/s2]", self.acceleration_y_m_s2, width=8)
+        self._add_entry_row(accel, 2, "acceleration_z_m_s2", "Accel Z [m/s2]", self.acceleration_z_m_s2, width=8)
+        self._add_entry_row(accel, 3, "added_mass_kg", "Added mass [kg]", self.added_mass_kg, width=8)
+        self._add_option_row(accel, 4, "added_mass_location", "Mass location", self.added_mass_location,
+                             ("none", "plate edge x0", "plate edge x1", "plate edge y0", "plate edge y1",
+                              "plate all edges", "cylinder bottom", "cylinder top"))
+
         contents = ttk.LabelFrame(options, text="Model contents")
         contents.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(contents)
@@ -5033,6 +5241,16 @@ class RuntimeFEMWindow:
                                  self.collision_contact_surface, ("midsurface", "top", "bottom"))
         self._add_compact_check(collision_main, 3, 0, "collision_beam_contact",
                                 "Direct beam/stiffener contact", self.collision_beam_contact_enabled)
+        self._add_compact_check(collision_main, 3, 1, "collision_adaptive_mesh",
+                                "Adaptive mesh at impact", self.collision_adaptive_mesh_enabled)
+        self._add_compact_entry(collision_main, 4, 0, "collision_adaptive_fine_factor", "Impact fine factor",
+                                self.collision_adaptive_fine_factor)
+        self._add_compact_entry(collision_main, 4, 1, "collision_adaptive_zone_factor", "Fine zone / radius",
+                                self.collision_adaptive_zone_factor)
+        self._add_compact_entry(collision_main, 5, 0, "collision_adaptive_fine_size_m", "Impact fine size [m]",
+                                self.collision_adaptive_fine_size_m)
+        self._mesh_preview_button = ttk.Button(collision_main, text="Preview mesh", command=self._preview_mesh)
+        self._mesh_preview_button.grid(row=5, column=1, sticky=tk.W, padx=6, pady=(2, 4))
 
         collision_path = ttk.LabelFrame(collision_body, text="Path and time")
         collision_path.pack(fill=tk.X, padx=8, pady=(0, 4))
@@ -5392,6 +5610,33 @@ class RuntimeFEMWindow:
         if not xs or not ys or not zs:
             return None
         return ((min(xs), max(xs)), (min(ys), max(ys)), (min(zs), max(zs)))
+
+    def _preview_mesh(self) -> None:
+        """Generate the mesh for the current options and render it in the plot area."""
+        try:
+            options = self._options()
+            config = _solver_config_from_options(options)
+            geometry = runtime_geometry_summary(self.snapshot)
+            generated = fe_solver.build_generated_geometry(geometry, config)
+            figure = create_runtime_fem_mesh_preview_figure(generated)
+        except Exception as error:
+            messagebox.showwarning("Mesh preview", "Could not build the mesh preview:\n" + str(error))
+            return
+        parent = getattr(self, "figure_parent", None)
+        if parent is None:
+            return
+        self._stop_animation()
+        self._show_preview_figure(figure, parent)
+        metrics = generated.get("mesh_metrics", {}) or {}
+        adaptive = generated.get("adaptive_mesh", {}) or {}
+        summary = "Mesh preview: {count} elements, {lo:.0f}-{hi:.0f} mm".format(
+            count=int(metrics.get("shell_element_count", 0)),
+            lo=float(metrics.get("min_element_size_m", 0.0)) * 1000.0,
+            hi=float(metrics.get("max_element_size_m", 0.0)) * 1000.0,
+        )
+        if adaptive.get("enabled"):
+            summary += " (adaptive refinement at impact)"
+        self._write_status(summary)
 
     def _show_preview_figure(self, figure: Figure, parent: Any) -> None:
         if self.preview_canvas is not None:
@@ -6926,6 +7171,11 @@ class RuntimeFEMWindow:
             num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
             mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
             top_bottom_moment_nm=_safe_float(self.top_bottom_moment_nm.get(), 0.0),
+            acceleration_x_m_s2=_safe_float(self.acceleration_x_m_s2.get(), 0.0),
+            acceleration_y_m_s2=_safe_float(self.acceleration_y_m_s2.get(), 0.0),
+            acceleration_z_m_s2=_safe_float(self.acceleration_z_m_s2.get(), 0.0),
+            added_mass_kg=_safe_float(self.added_mass_kg.get(), 0.0),
+            added_mass_location=str(self.added_mass_location.get() or "none"),
             boundary_condition=str(self.boundary_condition.get()),
             symmetry_mode=str(self.symmetry_mode.get()),
             shell_element_order=str(self.shell_element_order.get()),
@@ -7013,6 +7263,10 @@ class RuntimeFEMWindow:
             collision_material_nonlinear_enabled=bool(self.collision_material_nonlinear_enabled.get()),
             collision_nonlinear_kinematics=_normalise_kinematics(self.collision_nonlinear_kinematics.get()),
             collision_beam_contact_enabled=bool(self.collision_beam_contact_enabled.get()),
+            collision_adaptive_mesh_enabled=bool(self.collision_adaptive_mesh_enabled.get()),
+            collision_adaptive_fine_factor=_safe_float(self.collision_adaptive_fine_factor.get(), 0.3),
+            collision_adaptive_fine_size_m=_safe_float(self.collision_adaptive_fine_size_m.get(), 0.0),
+            collision_adaptive_zone_factor=_safe_float(self.collision_adaptive_zone_factor.get(), 2.5),
             collision_nonlinear_max_iterations=max(_safe_int(self.collision_nonlinear_max_iterations.get(), 20), 1),
             collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             collision_nonlinear_cutbacks=max(_safe_int(self.collision_nonlinear_cutbacks.get(), 8), 0),

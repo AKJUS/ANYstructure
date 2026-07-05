@@ -283,15 +283,27 @@ def _full_initial_vector(value: Optional[np.ndarray], size: int) -> np.ndarray:
     return vector
 
 
+def _translation_peak_index(model: "FEModel") -> Tuple[np.ndarray, np.ndarray]:
+    """Cached (node_ids, translation-DOF-index) arrays for peak scans."""
+    mesh = model.mesh
+    signature = mesh.revision_signature()
+    cached = getattr(mesh, "_translation_peak_index_cache", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1], cached[2]
+    node_ids = np.fromiter((int(node_id) for node_id in mesh.nodes), dtype=np.int64, count=len(mesh.nodes))
+    dof_index = np.asarray([node.dofs[:3] for node in mesh.nodes.values()], dtype=np.intp).reshape(-1, 3)
+    mesh._translation_peak_index_cache = (signature, node_ids, dof_index)
+    return node_ids, dof_index
+
+
 def _translation_peak(model: "FEModel", displacement: np.ndarray) -> Tuple[float, Optional[int]]:
-    peak = 0.0
-    peak_node = None
-    for node_id, node in model.mesh.nodes.items():
-        value = float(np.linalg.norm(displacement[node.dofs[:3]]))
-        if value > peak:
-            peak = value
-            peak_node = int(node_id)
-    return peak, peak_node
+    node_ids, dof_index = _translation_peak_index(model)
+    if node_ids.size == 0:
+        return 0.0, None
+    translations = np.asarray(displacement, dtype=float)[dof_index]
+    magnitudes_sq = np.einsum("ij,ij->i", translations, translations)
+    best = int(np.argmax(magnitudes_sq))
+    return float(np.sqrt(magnitudes_sq[best])), int(node_ids[best])
 
 
 def _saved_step_count(times: np.ndarray, save_every: int) -> int:

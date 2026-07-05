@@ -102,6 +102,11 @@ class LightweightFEMConfig:
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
+    acceleration_x_m_s2: float = 0.0
+    acceleration_y_m_s2: float = 0.0
+    acceleration_z_m_s2: float = 0.0
+    added_mass_kg: float = 0.0
+    added_mass_location: str = "none"
     boundary_condition: str = "auto"
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
@@ -200,6 +205,10 @@ class LightweightFEMConfig:
     collision_vector_y: float = 0.0
     collision_vector_z: float = -1.0
     collision_speed_mps: float = 5.0
+    collision_adaptive_mesh_enabled: bool = False
+    collision_adaptive_fine_factor: float = 0.3
+    collision_adaptive_fine_size_m: float = 0.0
+    collision_adaptive_zone_factor: float = 2.5
     collision_time_mode: str = "auto"
     collision_auto_steps_per_radius: float = 20.0
     collision_auto_post_contact_radii: float = 6.0
@@ -422,6 +431,219 @@ def _axis_breaks(
                 changed = True
                 break
     return clean
+
+
+def _graded_axis_breaks(
+    span: float,
+    center: float,
+    fine_size: float,
+    coarse_size: float,
+    fine_radius: float,
+    transition: float,
+    mandatory: tuple[float, ...] = (),
+) -> list[float]:
+    """Break coordinates graded from ``fine_size`` at ``center`` to ``coarse_size`` away.
+
+    Within ``fine_radius`` of ``center`` the local element size is ``fine_size``;
+    it then grows linearly over ``transition`` up to ``coarse_size``.  The walk
+    is symmetric about the center so the impact region is finely and evenly
+    resolved.  Mandatory coordinates (member lines) are inserted afterwards.
+    """
+    span = max(float(span), 1.0e-9)
+    center = min(max(float(center), 0.0), span)
+    fine_size = max(float(fine_size), span * 1.0e-4)
+    coarse_size = max(float(coarse_size), fine_size)
+    fine_radius = max(float(fine_radius), 0.0)
+    transition = max(float(transition), fine_size)
+
+    def local_size(x: float) -> float:
+        distance = abs(x - center)
+        if distance <= fine_radius:
+            return fine_size
+        blend = min((distance - fine_radius) / transition, 1.0)
+        return fine_size + blend * (coarse_size - fine_size)
+
+    # Walk outward from the center in both directions so the fine zone is
+    # centered on the impact point regardless of where it falls.
+    right = [center]
+    x = center
+    while x < span - 1.0e-12:
+        x = min(x + local_size(x), span)
+        right.append(x)
+    left = []
+    x = center
+    while x > 1.0e-12:
+        x = max(x - local_size(x), 0.0)
+        left.append(x)
+    values = sorted(set([0.0, span] + left + right))
+
+    tol = max(span * 1.0e-9, 1.0e-12)
+    for value in mandatory:
+        try:
+            coordinate = float(value)
+        except (TypeError, ValueError):
+            continue
+        if tol < coordinate < span - tol:
+            values.append(coordinate)
+    mandatory_keys = {round(min(max(float(v), 0.0), span), 12) for v in mandatory if _is_number(v)}
+    mandatory_keys.update({0.0, round(span, 12)})
+    clean: list[float] = []
+    for value in sorted(values):
+        value = min(max(float(value), 0.0), span)
+        if not clean or abs(value - clean[-1]) > tol:
+            clean.append(round(value, 12))
+    clean[0] = 0.0
+    clean[-1] = round(span, 12)
+    # Drop non-mandatory breaks that would create slivers thinner than 40% of
+    # the fine size (they hurt conditioning without adding resolution).
+    min_size = 0.4 * fine_size
+    merged = [clean[0]]
+    for index in range(1, len(clean)):
+        value = clean[index]
+        is_last = index == len(clean) - 1
+        if not is_last and round(value, 12) not in mandatory_keys and (value - merged[-1]) < min_size:
+            continue
+        merged.append(value)
+    if len(merged) >= 2 and (merged[-1] - merged[-2]) < min_size and len(merged) > 2:
+        # collapse a trailing sliver into the interior neighbour
+        keep_last = merged[-1]
+        if round(merged[-2], 12) not in mandatory_keys:
+            merged.pop(-2)
+        merged[-1] = keep_last
+    return merged
+
+
+def _is_number(value: object) -> bool:
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _collision_impact_point(
+    config: "LightweightFEMConfig", length: float, width: float
+) -> tuple[float, float] | None:
+    """Panel (x, y) where the sphere trajectory crosses the panel plane z = 0.
+
+    Returns ``None`` when the trajectory does not reach the panel plane; the
+    result is clamped to the panel extent so a near-miss still refines the
+    closest region.
+    """
+    start = (
+        float(config.collision_start_x_m),
+        float(config.collision_start_y_m),
+        float(config.collision_start_z_m),
+    )
+    direction = (
+        float(config.collision_vector_x),
+        float(config.collision_vector_y),
+        float(config.collision_vector_z),
+    )
+    dz = direction[2]
+    if abs(dz) < 1.0e-12:
+        # travelling parallel to the panel: refine under the start point
+        if abs(start[2]) > max(length, width):
+            return None
+        return (
+            min(max(start[0], 0.0), float(length)),
+            min(max(start[1], 0.0), float(width)),
+        )
+    t = -start[2] / dz
+    if t < 0.0:
+        return None
+    impact_x = start[0] + t * direction[0]
+    impact_y = start[1] + t * direction[1]
+    return (
+        min(max(impact_x, 0.0), float(length)),
+        min(max(impact_y, 0.0), float(width)),
+    )
+
+
+_ADDED_MASS_LOCATIONS = (
+    "none",
+    "plate edge x0",
+    "plate edge x1",
+    "plate edge y0",
+    "plate edge y1",
+    "plate all edges",
+    "cylinder bottom",
+    "cylinder top",
+)
+
+
+def _resolve_added_mass_nodes(generated_geometry: dict, geometry: dict, location: str) -> list[int]:
+    """Node IDs for an added-mass location (plate edge or cylinder end ring)."""
+    location = str(location or "none").strip().lower()
+    if location in {"", "none"}:
+        return []
+    nodes = generated_geometry.get("nodes", ()) or ()
+    if not nodes:
+        return []
+    coords = {int(n["id"]): [float(c) for c in n["coords"]] for n in nodes if "id" in n}
+    if not coords:
+        return []
+    is_cylinder = str(generated_geometry.get("plot_type", "")).lower() == "cylinder" or geometry.get("geometry") == "cylinder"
+    xs = [c[0] for c in coords.values()]
+    ys = [c[1] for c in coords.values()]
+    zs = [c[2] for c in coords.values()]
+    tol_x = max((max(xs) - min(xs)) * 1.0e-4, 1.0e-6)
+    tol_y = max((max(ys) - min(ys)) * 1.0e-4, 1.0e-6)
+    tol_z = max((max(zs) - min(zs)) * 1.0e-4, 1.0e-6)
+
+    def near(value: float, target: float, tol: float) -> bool:
+        return abs(value - target) <= tol
+
+    if is_cylinder:
+        # Cylinder end rings are the extreme axial (z) coordinates.
+        if "top" in location:
+            return sorted(nid for nid, c in coords.items() if near(c[2], max(zs), tol_z))
+        if "bottom" in location:
+            return sorted(nid for nid, c in coords.items() if near(c[2], min(zs), tol_z))
+        return []
+    # Flat panel edges.
+    selected: set[int] = set()
+    if "x0" in location or "all edges" in location:
+        selected.update(nid for nid, c in coords.items() if near(c[0], min(xs), tol_x))
+    if "x1" in location or "all edges" in location:
+        selected.update(nid for nid, c in coords.items() if near(c[0], max(xs), tol_x))
+    if "y0" in location or "all edges" in location:
+        selected.update(nid for nid, c in coords.items() if near(c[1], min(ys), tol_y))
+    if "y1" in location or "all edges" in location:
+        selected.update(nid for nid, c in coords.items() if near(c[1], max(ys), tol_y))
+    return sorted(selected)
+
+
+def _apply_acceleration_and_masses(model, load_case, generated_geometry: dict, geometry: dict, config: "LightweightFEMConfig") -> dict[str, object]:
+    """Apply an acceleration body-load field and any added edge/node masses.
+
+    Returns a small summary for diagnostics/reporting.
+    """
+    ax = float(config.acceleration_x_m_s2)
+    ay = float(config.acceleration_y_m_s2)
+    az = float(config.acceleration_z_m_s2)
+    summary: dict[str, object] = {"acceleration_m_s2": [ax, ay, az], "added_mass_kg": 0.0, "added_mass_nodes": 0, "added_mass_location": str(config.added_mass_location)}
+    if ax == 0.0 and ay == 0.0 and az == 0.0 and float(config.added_mass_kg) <= 0.0:
+        return summary
+    if ax != 0.0 or ay != 0.0 or az != 0.0:
+        existing = getattr(load_case, "gravity", None)
+        if existing is not None:
+            load_case.set_acceleration(float(existing[0]) + ax, float(existing[1]) + ay, float(existing[2]) + az)
+        else:
+            load_case.set_acceleration(ax, ay, az)
+    total_mass = float(config.added_mass_kg)
+    if total_mass > 0.0:
+        node_ids = _resolve_added_mass_nodes(generated_geometry, geometry, config.added_mass_location)
+        if node_ids:
+            # Register on the model so the mass enters the global mass matrix
+            # (modal/transient/collision dynamics) as well as the acceleration
+            # load; equal split over the selected nodes.
+            share = total_mass / float(len(node_ids))
+            for node_id in node_ids:
+                model.add_point_mass(int(node_id), share)
+            summary["added_mass_kg"] = total_mass
+            summary["added_mass_nodes"] = len(node_ids)
+    return summary
 
 
 def _positive_spacing(value: object) -> float:
@@ -1731,6 +1953,49 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     y_breaks = _axis_breaks(width, div_y, tuple(stiffener_positions) + custom_y_breaks, member_spacing_cap)
     mesh_generation: dict[str, object] = {}
 
+    adaptive_mesh_info: dict[str, object] = {"enabled": False}
+    if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled):
+        impact = _collision_impact_point(config, length, width)
+        if impact is not None:
+            base_x = length / max(len(x_breaks) - 1, 1)
+            base_y = width / max(len(y_breaks) - 1, 1)
+            base_size = min(base_x, base_y)
+            # Finest element edge at impact.  An explicit size (m) takes
+            # precedence; otherwise it is a fraction of the base mesh.  The
+            # size is floored at the plate thickness so a "very fine" impact
+            # mesh can reach the t x t scale but not go below it, and capped at
+            # the base size so it always refines.
+            requested_fine = float(config.collision_adaptive_fine_size_m)
+            if requested_fine > 0.0:
+                fine_size = requested_fine
+            else:
+                fine_factor = min(max(float(config.collision_adaptive_fine_factor), 0.02), 1.0)
+                fine_size = base_size * fine_factor
+            floored_at_thickness = fine_size < thickness
+            fine_size = min(max(fine_size, thickness), base_size)
+            zone_factor = max(float(config.collision_adaptive_zone_factor), 0.5)
+            radius = max(float(config.collision_radius_m), 1.0e-6)
+            fine_radius = radius * zone_factor
+            transition = max(2.0 * radius, base_x, base_y)
+            x_breaks = _graded_axis_breaks(
+                length, impact[0], fine_size, base_x, fine_radius, transition,
+                tuple(girder_positions) + custom_x_breaks,
+            )
+            y_breaks = _graded_axis_breaks(
+                width, impact[1], fine_size, base_y, fine_radius, transition,
+                tuple(stiffener_positions) + custom_y_breaks,
+            )
+            adaptive_mesh_info = {
+                "enabled": True,
+                "impact_point_m": [float(impact[0]), float(impact[1])],
+                "fine_element_size_m": float(fine_size),
+                "coarse_element_size_m": float(max(base_x, base_y)),
+                "fine_radius_m": float(fine_radius),
+                "requested_fine_size_m": float(requested_fine),
+                "floored_at_thickness": bool(floored_at_thickness),
+                "plate_thickness_m": float(thickness),
+            }
+
     def add_breakpoint(values: list[float], value: object, limit: float) -> list[float]:
         coordinate = float(value or 0.0)
         if 1.0e-9 < coordinate < limit - 1.0e-9:
@@ -1942,6 +2207,30 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         "plot_grid": [[node_id(row, col) for col in range(cols)] for row in range(rows)],
         "plot_type": "flat",
         "mesh_generation": mesh_generation,
+        "mesh_metrics": _mesh_metrics_from_breaks(x_breaks, y_breaks, len(shells), len(nodes)),
+        "adaptive_mesh": adaptive_mesh_info,
+    }
+
+
+def _mesh_metrics_from_breaks(
+    x_breaks: list[float], y_breaks: list[float], shell_count: int, node_count: int
+) -> dict[str, float | int]:
+    """Concrete mesh sizing metrics for GUI display (what 'fine' actually means)."""
+    dx = np.diff(np.asarray(x_breaks, dtype=float)) if len(x_breaks) > 1 else np.asarray([0.0])
+    dy = np.diff(np.asarray(y_breaks, dtype=float)) if len(y_breaks) > 1 else np.asarray([0.0])
+    edges = np.concatenate([dx, dy])
+    edges = edges[edges > 0.0]
+    if edges.size == 0:
+        edges = np.asarray([0.0])
+    diagonals = np.sqrt(dx[:, None] ** 2 + dy[None, :] ** 2).reshape(-1) if dx.size and dy.size else edges
+    return {
+        "shell_element_count": int(shell_count),
+        "node_count": int(node_count),
+        "nominal_element_size_m": float(np.median(edges)),
+        "min_element_size_m": float(edges.min()),
+        "max_element_size_m": float(edges.max()),
+        "min_edge_over_max_edge": float(edges.min() / edges.max()) if edges.max() > 0.0 else 1.0,
+        "max_diagonal_m": float(diagonals.max()),
     }
 
 
@@ -5353,6 +5642,32 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             else "Generated shells and stiffener/girder beams from active-line geometry."
         ),
     ]
+    _mesh_metrics = generated_geometry.get("mesh_metrics", {}) or {}
+    _adaptive_mesh = generated_geometry.get("adaptive_mesh", {}) or {}
+    if _mesh_metrics:
+        diagnostics.append(
+            "Mesh: {count} shell elements, size {lo:.0f}-{hi:.0f} mm (nominal {nom:.0f} mm).".format(
+                count=int(_mesh_metrics.get("shell_element_count", 0)),
+                lo=float(_mesh_metrics.get("min_element_size_m", 0.0)) * 1000.0,
+                hi=float(_mesh_metrics.get("max_element_size_m", 0.0)) * 1000.0,
+                nom=float(_mesh_metrics.get("nominal_element_size_m", 0.0)) * 1000.0,
+            )
+        )
+    if _adaptive_mesh.get("enabled"):
+        _impact = _adaptive_mesh.get("impact_point_m", [0.0, 0.0])
+        diagnostics.append(
+            "Adaptive impact mesh: refined to {fine:.1f} mm around impact at ({x:.2f}, {y:.2f}) m.".format(
+                fine=float(_adaptive_mesh.get("fine_element_size_m", 0.0)) * 1000.0,
+                x=float(_impact[0]), y=float(_impact[1]),
+            )
+        )
+        if _adaptive_mesh.get("floored_at_thickness"):
+            diagnostics.append(
+                "Requested impact fine size {req:.1f} mm was floored at the plate thickness {t:.1f} mm.".format(
+                    req=float(_adaptive_mesh.get("requested_fine_size_m", 0.0)) * 1000.0,
+                    t=float(_adaptive_mesh.get("plate_thickness_m", 0.0)) * 1000.0,
+                )
+            )
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if (not config.custom_load_bc_enabled) and geometry.get("geometry") != "cylinder":
@@ -5491,6 +5806,22 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             _add_generated_axial_force(model, load_case, generated_geometry, float(config.axial_force_n))
             _add_generated_end_moments(model, load_case, generated_geometry, float(config.top_bottom_moment_nm))
         _add_custom_edge_loads(model, load_case, generated_geometry, config)
+        added_mass_summary = _apply_acceleration_and_masses(model, load_case, generated_geometry, geometry, config)
+        accel_vec = added_mass_summary.get("acceleration_m_s2", [0.0, 0.0, 0.0])
+        if any(abs(float(component)) > 0.0 for component in accel_vec):
+            diagnostics.append(
+                "Applied acceleration body load [{:g}, {:g}, {:g}] m/s2 over the structural and added mass.".format(
+                    float(accel_vec[0]), float(accel_vec[1]), float(accel_vec[2])
+                )
+            )
+        if added_mass_summary.get("added_mass_kg", 0.0) and not added_mass_summary.get("added_mass_nodes"):
+            diagnostics.append("Added mass requested but no nodes matched the selected location; mass ignored.")
+        elif added_mass_summary.get("added_mass_nodes"):
+            diagnostics.append(
+                "Applied " + str(added_mass_summary["added_mass_kg"]) + " kg added mass over "
+                + str(added_mass_summary["added_mass_nodes"]) + " node(s) at " + str(config.added_mass_location)
+                + "; added to the mass matrix (affects modal/dynamic response)."
+            )
         load_resultant = _backend_load_case_resultant(model, load_case)
         if config.collision_enabled:
             return _run_collision_response(

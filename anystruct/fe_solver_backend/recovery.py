@@ -211,6 +211,40 @@ def default_recovery_config(config: Optional[RecoveryConfig] = None) -> Recovery
     return config if config is not None else RecoveryConfig()
 
 
+def _estimate_matrix_nnz(model: "FEModel") -> int:
+    """Assembled-matrix nonzero count, cached on the mesh topology revision.
+
+    Only element connectivity determines the sparsity, so the (topological)
+    count is cached and reused across the preflight and recovery memory checks
+    of a solve, and across repeated solves on the same mesh.  The union of
+    per-element DOF-pair blocks is computed vectorized rather than with a
+    Python set of tuples.
+    """
+    mesh = model.mesh
+    signature = mesh.revision_signature()
+    cached = getattr(mesh, "_matrix_nnz_cache", None)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    total_dofs = int(mesh.dof_manager.total_dofs)
+    encoded_blocks = []
+    for element in mesh.elements.values():
+        try:
+            mapping = np.asarray(element.get_dof_mapping(mesh), dtype=np.int64).reshape(-1)
+        except Exception:
+            continue
+        if mapping.size == 0:
+            continue
+        rows = np.repeat(mapping, mapping.size)
+        cols = np.tile(mapping, mapping.size)
+        encoded_blocks.append(rows * total_dofs + cols)
+    if encoded_blocks:
+        matrix_nnz = int(np.unique(np.concatenate(encoded_blocks)).size)
+    else:
+        matrix_nnz = 0
+    mesh._matrix_nnz_cache = (signature, matrix_nnz)
+    return matrix_nnz
+
+
 def estimate_model_memory(
     model: "FEModel",
     *,
@@ -226,17 +260,8 @@ def estimate_model_memory(
     total_dofs = int(model.mesh.dof_manager.total_dofs)
     num_nodes = int(len(model.mesh.nodes))
     num_elements = int(len(model.mesh.elements))
-    nnz_pairs = set()
     notes = []
-    for element in model.mesh.elements.values():
-        try:
-            mapping = tuple(int(dof) for dof in element.get_dof_mapping(model.mesh))
-        except Exception:
-            continue
-        for row in mapping:
-            for col in mapping:
-                nnz_pairs.add((row, col))
-    matrix_nnz = len(nnz_pairs)
+    matrix_nnz = _estimate_matrix_nnz(model)
     if matrix_nnz == 0 and total_dofs:
         matrix_nnz = total_dofs
         notes.append("matrix sparsity estimated as diagonal because no element mapping was available")
