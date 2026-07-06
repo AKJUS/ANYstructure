@@ -1456,7 +1456,22 @@ def _plastic_impact_damage_update(
         if category not in set(config.element_scope):
             continue
         trigger_value, location = state_equivalent_plastic_strain(state)
-        utilization = float(trigger_value) / max(float(config.threshold), 1.0e-30)
+        
+        threshold = float(config.threshold)
+        if getattr(config, "criterion", "fixed") == "mesh_scaled_gl":
+            if category == "shell":
+                thickness = float(getattr(element, "thickness", 0.0))
+                area = float(element_measure(model.mesh, element))
+                l_e = float(np.sqrt(area)) if area > 0.0 else 0.0
+                if l_e > 1.0e-6 and thickness > 1.0e-6:
+                    threshold = 0.056 + 0.54 * (thickness / l_e)
+            elif category == "beam":
+                thickness = float(getattr(element, "cross_section", {}).get("web_thickness", 0.0))
+                l_e = float(element_measure(model.mesh, element))
+                if l_e > 1.0e-6 and thickness > 1.0e-6:
+                    threshold = 0.056 + 0.54 * (thickness / l_e)
+
+        utilization = float(trigger_value) / max(threshold, 1.0e-30)
         max_utilization = max(max_utilization, utilization)
         previous = damage_states.get(int(element_id), {})
         previous_damage = float(previous.get("damage", 0.0) or 0.0)

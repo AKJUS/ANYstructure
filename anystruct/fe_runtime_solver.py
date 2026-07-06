@@ -245,6 +245,7 @@ class RuntimeFEMOptions:
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
     collision_plastic_damage_threshold: float = 0.01
+    collision_damage_criterion: str = "fixed"
     collision_mass_kg: float = 1000.0
     collision_radius_m: float = 0.25
     collision_start_x_m: float = 0.0
@@ -4272,6 +4273,13 @@ FEM_OPTION_INFO.update({
         "output": "Increases robustness at the cost of more substeps.",
         "caution": "Many cutbacks indicate the requested dt/penalty/contact setup should be reviewed.",
     },
+    "collision_damage_criterion": {
+        "title": "Damage Criterion",
+        "purpose": "Select the evaluation method for the plastic damage strain limit.",
+        "use": "Fixed applies the manual threshold. Mesh-scaled (GL) calculates the limit automatically per element.",
+        "output": "Mesh-scaled (GL) reduces the limit for larger elements to prevent mesh sensitivity.",
+        "caution": "Mesh-scaled (GL) ignores the manual threshold for all elements.",
+    },
     "collision_plastic_damage_threshold": {
         "title": "Plastic Damage Strain",
         "purpose": "Equivalent plastic strain threshold for plasticity-based impact damage/erosion.",
@@ -4535,7 +4543,8 @@ class RuntimeFEMWindow:
         self.collision_nonlinear_max_iterations = tk.IntVar(value=20)
         self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.collision_nonlinear_cutbacks = tk.IntVar(value=8)
-        self.collision_plastic_damage_threshold = tk.DoubleVar(value=0.01)
+        self.collision_plastic_damage_threshold = tk.DoubleVar(value=0.05)
+        self.collision_damage_criterion = tk.StringVar(value="fixed")
         self.collision_mass_kg = tk.DoubleVar(value=1000.0)
         self.collision_radius_m = tk.DoubleVar(value=0.25)
         self.collision_start_x_m = tk.DoubleVar(value=0.0)
@@ -4755,6 +4764,11 @@ class RuntimeFEMWindow:
             except Exception:
                 pass
 
+        criterion_fixed = (self.collision_damage_criterion.get() != "mesh_scaled_gl")
+        if hasattr(self, "_collision_plastic_damage_threshold_control"):
+            is_active = criterion_fixed and bool(self.collision_damage_enabled.get())
+            self._set_control_state(self._collision_plastic_damage_threshold_control, is_active)
+
     def _bind_option_state_traces(self) -> None:
         variables: tuple[tk.Variable, ...] = (
             self.analysis_type,
@@ -4764,6 +4778,7 @@ class RuntimeFEMWindow:
             self.collision_material_nonlinear_enabled,
             self.collision_beam_contact_enabled,
             self.collision_damage_enabled,
+            self.collision_damage_criterion,
         )
         for variable in variables:
             try:
@@ -5642,32 +5657,36 @@ class RuntimeFEMWindow:
                                 self.collision_material_nonlinear_enabled)
         self._add_compact_check(collision_damage, 1, 0, "collision_damage_smoothing", "Neighbor smoothing",
                                 self.collision_damage_neighbor_smoothing)
-        self._add_compact_entry(collision_damage, 1, 1, "collision_plastic_damage_threshold", "Plastic strain lim.",
-                                self.collision_plastic_damage_threshold)
-        self._add_compact_option(collision_damage, 2, 0, "collision_damage_mode", "Mode",
+        self._add_compact_option(collision_damage, 1, 1, "collision_damage_criterion", "Damage Criterion",
+                                 self.collision_damage_criterion, ("fixed", "mesh_scaled_gl"))
+        self._collision_plastic_damage_threshold_control = self._add_compact_entry(
+            collision_damage, 2, 0, "collision_plastic_damage_threshold", "Plastic strain lim.",
+            self.collision_plastic_damage_threshold)
+        self._add_compact_option(collision_damage, 2, 1, "collision_damage_mode", "Mode",
                                  self.collision_damage_mode, ("accumulated_damage", "instant_threshold"))
-        self._add_compact_option(collision_damage, 2, 1, "collision_damage_capacity", "Capacity",
+        self._add_compact_option(collision_damage, 3, 0, "collision_damage_capacity", "Capacity",
                                  self.collision_damage_capacity_basis, ("yield", "ultimate_proxy", "user"))
-        self._add_compact_entry(collision_damage, 3, 0, "collision_damage_user_capacity", "User cap. [MPa]",
+        self._add_compact_entry(collision_damage, 3, 1, "collision_damage_user_capacity", "User cap. [MPa]",
                                 self.collision_damage_user_capacity_mpa)
-        self._add_compact_entry(collision_damage, 3, 1, "collision_damage_min_area", "Min area [m2]",
+        self._add_compact_entry(collision_damage, 4, 0, "collision_damage_min_area", "Min area [m2]",
                                 self.collision_damage_min_contact_area_m2)
-        self._add_compact_entry(collision_damage, 4, 0, "collision_damage_softening", "Softening start",
+        self._add_compact_entry(collision_damage, 4, 1, "collision_damage_softening", "Softening start",
                                 self.collision_damage_softening_start)
-        self._add_compact_entry(collision_damage, 4, 1, "collision_damage_delete_at", "Delete damage",
+        self._add_compact_entry(collision_damage, 5, 0, "collision_damage_delete_at", "Delete damage",
                                 self.collision_damage_delete_at)
-        self._add_compact_entry(collision_damage, 5, 0, "collision_damage_max_deleted", "Max deleted frac.",
+        self._add_compact_entry(collision_damage, 5, 1, "collision_damage_max_deleted", "Max deleted frac.",
                                 self.collision_damage_max_deleted_fraction)
-        self._add_compact_entry(collision_damage, 5, 1, "collision_nonlinear_iterations", "NL iters",
+        
+        self._add_compact_entry(collision_damage, 6, 0, "collision_nonlinear_iterations", "NL iters",
                                 self.collision_nonlinear_max_iterations, width=8)
-        self._add_compact_entry(collision_damage, 6, 0, "collision_nonlinear_tolerance", "NL tol.",
+        self._add_compact_entry(collision_damage, 6, 1, "collision_nonlinear_tolerance", "NL tol.",
                                 self.collision_nonlinear_tolerance)
-        self._add_compact_entry(collision_damage, 6, 1, "collision_nonlinear_cutbacks", "NL cutbacks",
+        self._add_compact_entry(collision_damage, 7, 0, "collision_nonlinear_cutbacks", "NL cutbacks",
                                 self.collision_nonlinear_cutbacks, width=8)
         self._collision_nonlinear_kinematics_control = self._add_compact_option(
             collision_damage,
             7,
-            0,
+            1,
             "collision_nonlinear_kinematics",
             "Kinematics",
             self.collision_nonlinear_kinematics,
@@ -7902,6 +7921,7 @@ class RuntimeFEMWindow:
             collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             collision_nonlinear_cutbacks=max(_safe_int(self.collision_nonlinear_cutbacks.get(), 8), 0),
             collision_plastic_damage_threshold=max(_safe_float(self.collision_plastic_damage_threshold.get(), 0.01), 1.0e-12),
+            collision_damage_criterion=str(self.collision_damage_criterion.get()),
             collision_mass_kg=max(_safe_float(self.collision_mass_kg.get(), 1000.0), 1.0e-9),
             collision_radius_m=max(_safe_float(self.collision_radius_m.get(), 0.25), 1.0e-9),
             collision_start_x_m=_safe_float(self.collision_start_x_m.get(), 0.0),

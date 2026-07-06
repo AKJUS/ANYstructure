@@ -1366,7 +1366,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.member_model = tk.StringVar(value=\"plates as shell, girders as beams\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
     assert "self.nonlinear_static_kinematics = tk.StringVar(value=\"Von Karman\")" in source
-    assert "self.beam_consistent_mass_enabled = tk.BooleanVar(value=False)" in source
+    assert "self.beam_consistent_mass_enabled = tk.BooleanVar(value=True)" in source
     assert "self.collision_nonlinear_kinematics = tk.StringVar(value=\"Von Karman\")" in source
     assert "self.collision_beam_contact_enabled = tk.BooleanVar(value=False)" in source
     assert "self.pressure_direction = tk.StringVar(value=\"front\")" in source

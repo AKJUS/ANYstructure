@@ -208,6 +208,7 @@ class PlasticImpactDamageConfig:
     """
 
     threshold: float = 0.01
+    criterion: str = "fixed"
     softening_start: float = 0.6
     delete_at: float = 1.0
     residual_stiffness_fraction: float = 1.0e-6
@@ -218,6 +219,8 @@ class PlasticImpactDamageConfig:
     def __post_init__(self) -> None:
         if not np.isfinite(self.threshold) or self.threshold <= 0.0:
             raise ValueError("PlasticImpactDamageConfig.threshold must be positive")
+        if self.criterion not in {"fixed", "mesh_scaled_gl"}:
+            raise ValueError("PlasticImpactDamageConfig.criterion must be 'fixed' or 'mesh_scaled_gl'")
         if not np.isfinite(self.softening_start) or not (0.0 <= self.softening_start < 1.0):
             raise ValueError("PlasticImpactDamageConfig.softening_start must be in [0, 1)")
         if not np.isfinite(self.delete_at) or self.delete_at <= self.softening_start:
@@ -240,6 +243,7 @@ class PlasticImpactDamageConfig:
         return {
             "trigger": "equivalent_plastic_strain",
             "threshold": float(self.threshold),
+            "criterion": str(self.criterion),
             "softening_start": float(self.softening_start),
             "delete_at": float(self.delete_at),
             "residual_stiffness_fraction": float(self.residual_stiffness_fraction),

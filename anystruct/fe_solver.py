@@ -210,6 +210,7 @@ class LightweightFEMConfig:
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
     collision_plastic_damage_threshold: float = 0.01
+    collision_damage_criterion: str = "fixed"
     collision_mass_kg: float = 1000.0
     collision_radius_m: float = 0.25
     collision_start_x_m: float = 0.0
