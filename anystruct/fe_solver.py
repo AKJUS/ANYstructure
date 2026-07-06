@@ -3729,20 +3729,51 @@ def _collision_initial_penetration(generated_geometry: dict, config: Lightweight
     }
 
 
-def _collision_dynamic_penalty(config: LightweightFEMConfig, dt: float) -> dict[str, float | str]:
+def _collision_dynamic_penalty(
+    config: LightweightFEMConfig, dt: float, representative_edge: float = 0.0
+) -> dict[str, float | str]:
     radius = max(float(config.collision_radius_m), 1.0e-9)
     mass = max(float(config.collision_mass_kg), 1.0e-9)
     speed = max(float(config.collision_speed_mps), 0.0)
     target_fraction = max(float(config.collision_target_penetration_fraction), 1.0e-6)
     target_penetration = max(radius * target_fraction, 1.0e-9)
+    kinetic_energy = 0.5 * mass * speed * speed
+    # Penalty that stores the full kinetic energy within the requested target
+    # penetration (k = 2*KE/delta^2 = m*v^2/delta^2).
     desired = max(mass * speed * speed / max(target_penetration * target_penetration, 1.0e-18), 1.0)
+    # Explicit contact-stability ceiling (oscillation period ~ dt).
     stable = max(mass * (0.16 / max(float(dt), 1.0e-12)) ** 2, 1.0)
     selected = min(desired, stable)
+
+    # High-energy softening.  When the kinetic energy dwarfs the elastic energy
+    # the contact spring can hold at the target penetration, the stability
+    # ceiling binds and pins the penalty at a very stiff value.  That is not
+    # required for the implicit Newmark solve and it makes the contact tangent
+    # hypersensitive (large contact-force jumps per penetration increment),
+    # destabilising Newton on an already-softening (plastic/buckling) structure.
+    # Scale the penalty down with sqrt(severity), bounded, and floored so the
+    # sphere still cannot tunnel past a physical penetration cap.
+    elastic_at_target = 0.5 * selected * target_penetration * target_penetration
+    severity = kinetic_energy / max(elastic_at_target, 1.0e-18)
+    softening = 1.0
+    if severity > 1.0 and speed > 0.0:
+        softening = min(math.sqrt(severity), 4.0)
+        penetration_cap = 0.15 * radius
+        if representative_edge > 0.0:
+            penetration_cap = min(penetration_cap, 1.5 * representative_edge)
+        penetration_cap = max(penetration_cap, 4.0 * target_penetration)
+        penalty_floor = mass * speed * speed / max(penetration_cap * penetration_cap, 1.0e-18)
+        selected = min(max(selected / softening, penalty_floor), selected)
+    selected = max(selected, 1.0)
+    effective_penetration = math.sqrt(mass * speed * speed / selected) if speed > 0.0 else target_penetration
     return {
         "penalty_stiffness": float(selected),
         "desired_penalty_stiffness": float(desired),
         "dt_stable_penalty_stiffness": float(stable),
         "target_penetration_m": float(target_penetration),
+        "effective_penetration_m": float(effective_penetration),
+        "impact_energy_j": float(kinetic_energy),
+        "energy_softening_factor": float(softening),
         "basis": "dynamic_auto",
     }
 
@@ -3824,7 +3855,7 @@ def _collision_auto_time_settings(generated_geometry: dict, config: LightweightF
             "basis": "user",
         }
     else:
-        penalty_info = _collision_dynamic_penalty(config, dt)
+        penalty_info = _collision_dynamic_penalty(config, dt, representative_edge)
     target_steps = max(int(math.ceil(total_time / max(dt, 1.0e-12))), 1)
     if target_steps < 120:
         dt = min(dt, total_time / 120.0)
