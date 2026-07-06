@@ -1,6 +1,8 @@
-"""Adaptive impact meshing, mesh sizing metrics, and mesh preview."""
+"""Local detail meshing, mesh sizing metrics, and mesh preview."""
 
 from __future__ import annotations
+
+import json
 
 import matplotlib
 
@@ -22,6 +24,16 @@ from anystruct.fe_runtime_solver import (
 )
 
 FLAT = {"geometry": "flat panel", "length_m": 4.0, "width_m": 3.0, "thickness_m": 0.012, "has_stiffener": False, "has_girder": False}
+CYLINDER = {
+    "geometry": "cylinder",
+    "radius_m": 2.0,
+    "length_m": 8.0,
+    "thickness_m": 0.018,
+    "has_stiffener": True,
+    "has_girder": True,
+    "stiffener_spacing_m": 0.75,
+    "girder_spacing_m": 3.5,
+}
 
 
 def test_graded_axis_breaks_are_fine_at_center_and_coarse_away() -> None:
@@ -74,6 +86,122 @@ def test_adaptive_mesh_refines_at_impact_and_reports_metrics() -> None:
     assert m["min_element_size_m"] < 0.6 * base["mesh_metrics"]["nominal_element_size_m"]
     assert m["max_element_size_m"] / m["min_element_size_m"] > 3.0
     assert m["shell_element_count"] > base["mesh_metrics"]["shell_element_count"]
+    assert a["sources"][0]["source"] == "impact"
+    assert a["sources"][0]["growth_factor"] == pytest.approx(1.35)
+
+
+def test_point_detail_mesh_refines_at_selected_point_and_reports_extent() -> None:
+    base = build_generated_geometry(FLAT, LightweightFEMConfig(mesh_fidelity="medium"))
+    cfg = LightweightFEMConfig(
+        mesh_fidelity="medium",
+        point_refinement_enabled=True,
+        point_refinement_x_m=2.2,
+        point_refinement_y_m=1.2,
+        point_refinement_fine_size_m=0.05,
+        point_refinement_extent_m=0.35,
+        point_refinement_growth_factor=1.22,
+    )
+    refined = build_generated_geometry(FLAT, cfg)
+    adaptive = refined["adaptive_mesh"]
+    source = adaptive["sources"][0]
+    assert adaptive["enabled"] is True
+    assert source["source"] == "selected_point"
+    assert source["point_m"] == pytest.approx([2.2, 1.2])
+    assert source["extent_m"] == pytest.approx(0.35)
+    assert source["growth_factor"] == pytest.approx(1.22)
+    assert source["fine_element_size_m"] == pytest.approx(0.05)
+    assert 0.02 <= refined["mesh_metrics"]["min_element_size_m"] <= 0.055
+    assert refined["mesh_metrics"]["shell_element_count"] > base["mesh_metrics"]["shell_element_count"]
+
+
+def test_selected_panel_detail_mesh_refines_patch_and_preview_draws_region() -> None:
+    cfg = LightweightFEMConfig(
+        mesh_fidelity="medium",
+        local_refinement_enabled=True,
+        local_refinement_patches_json='[{"min_a": 1.0, "max_a": 1.5, "min_b": 0.75, "max_b": 1.25}]',
+        local_refinement_fine_size_m=0.04,
+        local_refinement_extent_m=0.1,
+        local_refinement_growth_factor=1.2,
+    )
+    refined = build_generated_geometry(FLAT, cfg)
+    source = refined["adaptive_mesh"]["sources"][0]
+    assert source["source"] == "selected_panels"
+    assert source["region_count"] == 1
+    assert source["extent_m"] == pytest.approx(0.1)
+    assert source["growth_factor"] == pytest.approx(1.2)
+    assert source["fine_element_size_m"] == pytest.approx(0.04)
+    assert 0.016 <= refined["mesh_metrics"]["min_element_size_m"] <= 0.045
+
+    figure = create_runtime_fem_mesh_preview_figure(refined)
+    assert figure.axes[0].lines
+
+
+def test_cylinder_selected_panel_detail_mesh_refines_centered_patch() -> None:
+    base = build_generated_geometry(CYLINDER, LightweightFEMConfig(mesh_fidelity="coarse"))
+    cfg = LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        local_refinement_enabled=True,
+        local_refinement_patches_json=json.dumps(
+            [{"min_a": -1.0, "max_a": 1.0, "min_b": 3.0, "max_b": 4.5, "axis_a_origin": "centered"}]
+        ),
+        local_refinement_fine_size_m=0.1,
+        local_refinement_extent_m=0.2,
+        local_refinement_growth_factor=1.25,
+    )
+    refined = build_generated_geometry(CYLINDER, cfg)
+    source = refined["adaptive_mesh"]["sources"][0]
+
+    assert refined["adaptive_mesh"]["enabled"] is True
+    assert source["source"] == "selected_panels"
+    assert source["coordinates"] == "cylinder_axial_arc"
+    assert source["regions"][0]["min_a"] == pytest.approx(3.0)
+    assert source["regions"][0]["max_a"] == pytest.approx(5.0)
+    assert source["growth_factor"] == pytest.approx(1.25)
+    assert refined["mesh_metrics"]["shell_element_count"] > base["mesh_metrics"]["shell_element_count"]
+    assert refined["mesh_metrics"]["min_element_size_m"] < base["mesh_metrics"]["min_element_size_m"]
+
+
+def test_cylinder_impact_detail_mesh_refines_axial_arc_impact_point() -> None:
+    base_cfg = LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        collision_enabled=True,
+        collision_start_x_m=6.0,
+        collision_start_y_m=0.0,
+        collision_start_z_m=5.0,
+        collision_vector_x=-1.0,
+        collision_vector_y=0.0,
+        collision_vector_z=0.0,
+        collision_radius_m=0.2,
+    )
+    base = build_generated_geometry(CYLINDER, base_cfg)
+    cfg = LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        collision_enabled=True,
+        collision_adaptive_mesh_enabled=True,
+        collision_adaptive_fine_size_m=0.08,
+        collision_adaptive_extent_m=0.35,
+        collision_adaptive_growth_factor=1.2,
+        collision_start_x_m=6.0,
+        collision_start_y_m=0.0,
+        collision_start_z_m=5.0,
+        collision_vector_x=-1.0,
+        collision_vector_y=0.0,
+        collision_vector_z=0.0,
+        collision_radius_m=0.2,
+    )
+    refined = build_generated_geometry(CYLINDER, cfg)
+    source = refined["adaptive_mesh"]["sources"][0]
+
+    assert source["source"] == "impact"
+    assert source["coordinates"] == "cylinder_axial_arc"
+    # Sphere at (6,0,5) travelling -x strikes the wall (radius 2) at (2,0,5):
+    # axial height 5.0, circumferential arc 0.0 (theta = 0).
+    assert source["impact_point_m"] == pytest.approx([5.0, 0.0])
+    assert source["marker_xyz_m"] == pytest.approx([2.0, 0.0, 5.0])
+    assert source["extent_m"] == pytest.approx(0.35)
+    assert source["growth_factor"] == pytest.approx(1.2)
+    assert refined["mesh_metrics"]["shell_element_count"] > base["mesh_metrics"]["shell_element_count"]
+    assert refined["mesh_metrics"]["min_element_size_m"] < base["mesh_metrics"]["min_element_size_m"]
 
 
 def test_mesh_metrics_present_for_uniform_mesh() -> None:

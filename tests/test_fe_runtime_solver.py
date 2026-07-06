@@ -258,6 +258,19 @@ def test_run_runtime_fem_passes_phase_five_options_to_solver(monkeypatch):
             collision_nonlinear_kinematics="Corotational",
             collision_beam_contact_enabled=True,
             beam_consistent_mass_enabled=True,
+            local_refinement_enabled=True,
+            local_refinement_patches_json='[{"min_a": 0.1, "max_a": 0.4, "min_b": 0.2, "max_b": 0.5}]',
+            local_refinement_fine_size_m=0.03,
+            local_refinement_extent_m=0.08,
+            local_refinement_growth_factor=1.2,
+            point_refinement_enabled=True,
+            point_refinement_x_m=0.3,
+            point_refinement_y_m=0.4,
+            point_refinement_fine_size_m=0.025,
+            point_refinement_extent_m=0.12,
+            point_refinement_growth_factor=1.25,
+            collision_adaptive_extent_m=0.45,
+            collision_adaptive_growth_factor=1.3,
         ),
     )
 
@@ -268,10 +281,27 @@ def test_run_runtime_fem_passes_phase_five_options_to_solver(monkeypatch):
     assert config.collision_nonlinear_kinematics == "corotational"
     assert config.collision_beam_contact_enabled is True
     assert config.beam_consistent_mass_enabled is True
+    assert config.local_refinement_enabled is True
+    assert config.local_refinement_fine_size_m == pytest.approx(0.03)
+    assert config.local_refinement_extent_m == pytest.approx(0.08)
+    assert config.local_refinement_growth_factor == pytest.approx(1.2)
+    assert config.point_refinement_enabled is True
+    assert config.point_refinement_x_m == pytest.approx(0.3)
+    assert config.point_refinement_y_m == pytest.approx(0.4)
+    assert config.point_refinement_fine_size_m == pytest.approx(0.025)
+    assert config.point_refinement_extent_m == pytest.approx(0.12)
+    assert config.point_refinement_growth_factor == pytest.approx(1.25)
+    assert config.collision_adaptive_extent_m == pytest.approx(0.45)
+    assert config.collision_adaptive_growth_factor == pytest.approx(1.3)
     assert result.summary["nonlinear_static_kinematics"] == "corotational"
     assert result.summary["collision_nonlinear_kinematics"] == "corotational"
     assert result.summary["collision_beam_contact_enabled"] is True
     assert result.summary["beam_consistent_mass_enabled"] is True
+    assert result.summary["local_refinement_enabled"] is True
+    assert result.summary["local_refinement_patch_count"] == 1
+    assert result.summary["point_refinement_enabled"] is True
+    assert result.summary["collision_adaptive_extent_m"] == pytest.approx(0.45)
+    assert result.summary["collision_adaptive_growth_factor"] == pytest.approx(1.3)
 
 
 def test_fe_solver_kernel_warmup_manager_reports_runtime_state(monkeypatch):
@@ -1293,7 +1323,24 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "def _show_solver_info(self, key: str) -> None:" in source
     assert "ttk.Button(parent, text=\"i\", width=2" in source
     assert "self.options_notebook = ttk.Notebook(mid_panel)" in source
-    assert "constraints = ttk.LabelFrame(tab_general, text=\"Supports and load path\")" in source
+    assert "self.options_notebook.add(tab_mesh, text=\"Mesh\")" in source
+    assert "self.options_notebook.add(tab_loads, text=\"Loads and boundary conditions\")" in source
+    assert "self.options_notebook.add(tab_transient, text=\"Transient runs\")" in source
+    assert "mesh_size = ttk.LabelFrame(tab_mesh, text=\"Mesh size\")" in source
+    assert "local_mesh = ttk.LabelFrame(tab_mesh, text=\"Local mesh refinement (select panels under load and BCs)\")" in source
+    assert "self._add_compact_check(local_mesh, 0, 0, \"local_refinement_enabled\", \"Refine selected panels\"" in source
+    assert "text=\"Pick point\"" in source
+    assert "self._add_compact_check(impact_group, 0, 0, \"collision_adaptive_mesh\", \"Adopt impact point\"" in source
+    assert "\"local_refinement_enabled\": {" in source
+    assert "\"point_refinement_enabled\": {" in source
+    assert "\"collision_adaptive_growth_factor\": {" in source
+    assert "def _format_run_status_text(" in source
+    assert "mesh_preview = ttk.LabelFrame(tab_mesh, text=\"Mesh preview and statistics\")" in source
+    assert "self._mesh_preview_button = ttk.Button(preview_actions, text=\"Preview mesh\", command=self._preview_mesh)" in source
+    assert "self.mesh_statistics_text = tk.Text(mesh_preview" in source
+    assert "constraints = ttk.LabelFrame(tab_loads, text=\"Supports and load path\")" in source
+    assert "accel = ttk.LabelFrame(tab_loads, text=\"Acceleration and added mass\")" in source
+    assert "time_domain = ttk.LabelFrame(collision_body, text=\"Custom time-domain load\")" in source
     assert "solver_options = ttk.LabelFrame(tab_general, text=\"Solver\")" in source
     assert "members = ttk.LabelFrame(tab_properties, text=\"Member modelling\")" in source
     assert "material = ttk.LabelFrame(tab_properties, text=\"Material and recovery\")" in source
@@ -1356,9 +1403,9 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()" in source
 
     assert "self.deformation_scale = tk.StringVar(value=\"0.0\")" in source
-    assert "custom = ttk.LabelFrame(tab_advanced, text=\"Custom loads and boundary conditions\")" in source
+    assert "custom = ttk.LabelFrame(tab_loads, text=\"Custom loads and boundary conditions\")" in source
     assert "selection = ttk.LabelFrame(custom, text=\"Panel and edge selection\")" in source
-    assert "load_list = ttk.LabelFrame(tab_advanced, text=\"Loads to run\")" in source
+    assert "load_list = ttk.LabelFrame(tab_loads, text=\"Loads to run\")" in source
     assert "ttk.Button(actions, text=\"Add load\", command=self._add_custom_load_from_selection)" in source
     assert "ttk.Button(actions, text=\"Delete load\", command=self._delete_selected_custom_load)" in source
     assert "self._custom_load_tree = ttk.Treeview(" in source
