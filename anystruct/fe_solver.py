@@ -551,6 +551,12 @@ def _detail_axis_breaks(
 
     values = {0.0, span, center, left_extent, right_extent}
 
+    # Grade outward from the fine zone until an element reaches the coarse size,
+    # then STOP: beyond the transition the base grid (merged in later) provides
+    # the far-field coarse elements.  Tiling the whole span with growth breaks
+    # here would misalign with the base grid and streak alternating
+    # small/large elements across the entire domain (badly so for the periodic
+    # circumference of a cylinder).
     x = center
     while x < right_extent - 1.0e-12:
         x = min(x + fine_size, right_extent)
@@ -560,6 +566,8 @@ def _detail_axis_breaks(
         step = min(coarse_size, step * growth_factor)
         x = min(x + step, span)
         values.add(x)
+        if step >= coarse_size - 1.0e-12:
+            break
 
     x = center
     while x > left_extent + 1.0e-12:
@@ -570,6 +578,8 @@ def _detail_axis_breaks(
         step = min(coarse_size, step * growth_factor)
         x = max(x - step, 0.0)
         values.add(x)
+        if step >= coarse_size - 1.0e-12:
+            break
 
     tol = max(span * 1.0e-9, 1.0e-12)
     for value in mandatory:
@@ -640,6 +650,38 @@ def _merge_axis_breaks(
                 del clean[index]
             changed = True
             break
+
+    # Relative sliver removal: where the graded refinement interleaves with the
+    # base grid it can leave an element much smaller than BOTH of its neighbours
+    # (e.g. a transition break landing just short of a base grid line).  A
+    # genuine graded transition element is smaller than its coarse neighbour but
+    # not its fine one, so it survives this test.  Merge each such sliver into
+    # its smaller neighbour by dropping the shared non-mandatory break.
+    sliver_frac = 0.6
+    changed = True
+    while changed and len(clean) > 3:
+        changed = False
+        for k in range(1, len(clean) - 2):
+            e_prev = clean[k] - clean[k - 1]
+            e_cur = clean[k + 1] - clean[k]
+            e_next = clean[k + 2] - clean[k + 1]
+            if e_cur >= sliver_frac * e_prev or e_cur >= sliver_frac * e_next:
+                continue
+            left_mandatory = round(clean[k], 12) in mandatory_keys
+            right_mandatory = round(clean[k + 1], 12) in mandatory_keys
+            if left_mandatory and right_mandatory:
+                continue
+            # Merge into the smaller neighbour so the grade stays smooth.
+            if e_prev <= e_next and not left_mandatory:
+                del clean[k]
+            elif not right_mandatory:
+                del clean[k + 1]
+            elif not left_mandatory:
+                del clean[k]
+            else:
+                continue
+            changed = True
+            break
     return clean
 
 
@@ -688,6 +730,54 @@ def _collision_impact_point(
         min(max(impact_x, 0.0), float(length)),
         min(max(impact_y, 0.0), float(width)),
     )
+
+
+def _collision_impact_point_cylinder(
+    config: "LightweightFEMConfig", radius: float, length: float, circumference: float
+) -> tuple[float, float] | None:
+    """Cylinder (axial z, arc length) where the sphere trajectory meets the wall.
+
+    The cylinder axis is the global Z from 0 to ``length`` with the wall at
+    ``x**2 + y**2 = radius**2``.  The trajectory is intersected with that wall
+    (the physically correct impact location, matching where the transient
+    contact actually occurs) and mapped to the mesh's parametric coordinates:
+    the first value is the axial height, the second is the circumferential
+    arc length.  Falls back to the start point's height/angle for a near-miss.
+    """
+    radius = max(float(radius), 1.0e-9)
+    start = (
+        float(config.collision_start_x_m),
+        float(config.collision_start_y_m),
+        float(config.collision_start_z_m),
+    )
+    direction = (
+        float(config.collision_vector_x),
+        float(config.collision_vector_y),
+        float(config.collision_vector_z),
+    )
+    sx, sy, sz = start
+    dx, dy, dz = direction
+    a = dx * dx + dy * dy
+    b = 2.0 * (sx * dx + sy * dy)
+    c = sx * sx + sy * sy - radius * radius
+    t_hit: float | None = None
+    if a > 1.0e-12:
+        disc = b * b - 4.0 * a * c
+        if disc >= 0.0:
+            sq = math.sqrt(disc)
+            for candidate in sorted(((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a))):
+                if candidate >= -1.0e-9:
+                    t_hit = candidate
+                    break
+    if t_hit is None:
+        hit = start
+    else:
+        hit = (sx + t_hit * dx, sy + t_hit * dy, sz + t_hit * dz)
+    axial = min(max(float(hit[2]), 0.0), float(length))
+    theta = math.atan2(float(hit[1]), float(hit[0])) % (2.0 * math.pi)
+    arc = (theta / (2.0 * math.pi)) * float(circumference)
+    arc = min(max(arc, 0.0), float(circumference))
+    return (axial, arc)
 
 
 _ADDED_MASS_LOCATIONS = (
@@ -4486,6 +4576,7 @@ def _apply_detail_point_refinement(
     coarse_x: float | None = None,
     coarse_y: float | None = None,
     extra: dict[str, object] | None = None,
+    radius: float | None = None,
 ) -> tuple[list[float], list[float], dict[str, object]]:
     base_x = float(coarse_x) if coarse_x and coarse_x > 0.0 else float(length) / max(len(x_breaks) - 1, 1)
     base_y = float(coarse_y) if coarse_y and coarse_y > 0.0 else float(width) / max(len(y_breaks) - 1, 1)
@@ -4501,10 +4592,21 @@ def _apply_detail_point_refinement(
     candidate_y = _detail_axis_breaks(width, point[1], fine_size, base_y, extent, growth, mandatory_y)
     x_breaks = _merge_axis_breaks(length, x_breaks, candidate_x, fine_size, mandatory_x)
     y_breaks = _merge_axis_breaks(width, y_breaks, candidate_y, fine_size, mandatory_y)
+    # World-space marker for the refinement origin so the GUI can highlight it.
+    if radius and float(radius) > 0.0:
+        theta = float(point[1]) / max(float(radius), 1.0e-9)
+        marker_xyz = [
+            float(radius) * math.cos(theta),
+            float(radius) * math.sin(theta),
+            float(point[0]),
+        ]
+    else:
+        marker_xyz = [float(point[0]), float(point[1]), 0.0]
     info: dict[str, object] = {
         "enabled": True,
         "source": source,
         "point_m": [float(point[0]), float(point[1])],
+        "marker_xyz_m": marker_xyz,
         "fine_element_size_m": float(fine_size),
         "coarse_element_size_m": float(max(base_x, base_y)),
         "extent_m": float(extent),
@@ -4613,6 +4715,7 @@ def _apply_cylinder_detail_refinement(
 ) -> tuple[list[float], list[float], dict[str, object]]:
     base_z = float(length) / max(len(z_breaks) - 1, 1)
     base_arc = float(circumference) / max(len(arc_breaks) - 1, 1)
+    radius = float(circumference) / (2.0 * math.pi) if circumference > 0.0 else 0.0
     adaptive_sources: list[dict[str, object]] = []
 
     if bool(config.point_refinement_enabled):
@@ -4634,6 +4737,7 @@ def _apply_cylinder_detail_refinement(
             coarse_x=base_z,
             coarse_y=base_arc,
             extra={"coordinates": "cylinder_axial_arc"},
+            radius=radius,
         )
         adaptive_sources.append(info)
 
@@ -4697,7 +4801,7 @@ def _apply_cylinder_detail_refinement(
             )
 
     if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled):
-        impact = _collision_impact_point(config, length, circumference)
+        impact = _collision_impact_point_cylinder(config, radius, length, circumference)
         if impact is not None:
             zone_factor = max(float(config.collision_adaptive_zone_factor), 0.5)
             sphere_radius = max(float(config.collision_radius_m), 1.0e-6)
@@ -4727,6 +4831,7 @@ def _apply_cylinder_detail_refinement(
                     "fine_radius_m": float(extent),
                     "sphere_radius_m": float(sphere_radius),
                 },
+                radius=radius,
             )
             adaptive_sources.append(info)
 

@@ -4436,7 +4436,7 @@ class RuntimeFEMWindow:
         self.nonlinear_convergence_profile = tk.StringVar(value="auto")
         self.nonlinear_assembly_threads = tk.IntVar(value=0)
         self.nonlinear_static_kinematics = tk.StringVar(value="Von Karman")
-        self.beam_consistent_mass_enabled = tk.BooleanVar(value=False)
+        self.beam_consistent_mass_enabled = tk.BooleanVar(value=True)
         self.deformation_scale = tk.StringVar(value="0.0")
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)

@@ -1327,7 +1327,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.options_notebook.add(tab_loads, text=\"Loads and boundary conditions\")" in source
     assert "self.options_notebook.add(tab_transient, text=\"Transient runs\")" in source
     assert "mesh_size = ttk.LabelFrame(tab_mesh, text=\"Mesh size\")" in source
-    assert "local_mesh = ttk.LabelFrame(tab_mesh, text=\"Local mesh refinement\")" in source
+    assert "local_mesh = ttk.LabelFrame(tab_mesh, text=\"Local mesh refinement (select panels under load and BCs)\")" in source
     assert "self._add_compact_check(local_mesh, 0, 0, \"local_refinement_enabled\", \"Refine selected panels\"" in source
     assert "text=\"Pick point\"" in source
     assert "self._add_compact_check(impact_group, 0, 0, \"collision_adaptive_mesh\", \"Adopt impact point\"" in source

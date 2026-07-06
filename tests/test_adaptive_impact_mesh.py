@@ -165,10 +165,12 @@ def test_cylinder_impact_detail_mesh_refines_axial_arc_impact_point() -> None:
     base_cfg = LightweightFEMConfig(
         mesh_fidelity="coarse",
         collision_enabled=True,
-        collision_start_x_m=4.0,
-        collision_start_y_m=5.0,
-        collision_start_z_m=0.5,
-        collision_vector_z=-1.0,
+        collision_start_x_m=6.0,
+        collision_start_y_m=0.0,
+        collision_start_z_m=5.0,
+        collision_vector_x=-1.0,
+        collision_vector_y=0.0,
+        collision_vector_z=0.0,
         collision_radius_m=0.2,
     )
     base = build_generated_geometry(CYLINDER, base_cfg)
@@ -179,10 +181,12 @@ def test_cylinder_impact_detail_mesh_refines_axial_arc_impact_point() -> None:
         collision_adaptive_fine_size_m=0.08,
         collision_adaptive_extent_m=0.35,
         collision_adaptive_growth_factor=1.2,
-        collision_start_x_m=4.0,
-        collision_start_y_m=5.0,
-        collision_start_z_m=0.5,
-        collision_vector_z=-1.0,
+        collision_start_x_m=6.0,
+        collision_start_y_m=0.0,
+        collision_start_z_m=5.0,
+        collision_vector_x=-1.0,
+        collision_vector_y=0.0,
+        collision_vector_z=0.0,
         collision_radius_m=0.2,
     )
     refined = build_generated_geometry(CYLINDER, cfg)
@@ -190,7 +194,10 @@ def test_cylinder_impact_detail_mesh_refines_axial_arc_impact_point() -> None:
 
     assert source["source"] == "impact"
     assert source["coordinates"] == "cylinder_axial_arc"
-    assert source["impact_point_m"] == pytest.approx([4.0, 5.0])
+    # Sphere at (6,0,5) travelling -x strikes the wall (radius 2) at (2,0,5):
+    # axial height 5.0, circumferential arc 0.0 (theta = 0).
+    assert source["impact_point_m"] == pytest.approx([5.0, 0.0])
+    assert source["marker_xyz_m"] == pytest.approx([2.0, 0.0, 5.0])
     assert source["extent_m"] == pytest.approx(0.35)
     assert source["growth_factor"] == pytest.approx(1.2)
     assert refined["mesh_metrics"]["shell_element_count"] > base["mesh_metrics"]["shell_element_count"]
