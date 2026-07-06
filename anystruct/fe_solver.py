@@ -158,6 +158,20 @@ class LightweightFEMConfig:
     custom_pressure_patches_json: str = "[]"
     custom_edge_segments_json: str = "[]"
     custom_selected_edge_load_n_per_m: float = 0.0
+    local_refinement_enabled: bool = False
+    local_refinement_patches_json: str = "[]"
+    local_refinement_fine_factor: float = 0.3
+    local_refinement_fine_size_m: float = 0.0
+    local_refinement_extent_m: float = 0.0
+    local_refinement_zone_factor: float = 1.0
+    local_refinement_growth_factor: float = 1.35
+    point_refinement_enabled: bool = False
+    point_refinement_x_m: float = 0.0
+    point_refinement_y_m: float = 0.0
+    point_refinement_fine_factor: float = 0.3
+    point_refinement_fine_size_m: float = 0.0
+    point_refinement_extent_m: float = 0.25
+    point_refinement_growth_factor: float = 1.35
     custom_time_domain_enabled: bool = False
     custom_time_domain_duration_s: float = 0.01
     custom_time_domain_total_time_s: float = 0.05
@@ -208,6 +222,8 @@ class LightweightFEMConfig:
     collision_adaptive_mesh_enabled: bool = False
     collision_adaptive_fine_factor: float = 0.3
     collision_adaptive_fine_size_m: float = 0.0
+    collision_adaptive_extent_m: float = 0.0
+    collision_adaptive_growth_factor: float = 1.35
     collision_adaptive_zone_factor: float = 2.5
     collision_time_mode: str = "auto"
     collision_auto_steps_per_radius: float = 20.0
@@ -511,6 +527,120 @@ def _graded_axis_breaks(
             merged.pop(-2)
         merged[-1] = keep_last
     return merged
+
+
+def _detail_axis_breaks(
+    span: float,
+    center: float,
+    fine_size: float,
+    coarse_size: float,
+    extent: float,
+    growth_factor: float,
+    mandatory: tuple[float, ...] = (),
+) -> list[float]:
+    """Break coordinates for a point detail zone with geometric growth."""
+
+    span = max(float(span), 1.0e-9)
+    center = min(max(float(center), 0.0), span)
+    fine_size = max(float(fine_size), span * 1.0e-4)
+    coarse_size = max(float(coarse_size), fine_size)
+    extent = max(float(extent), 0.0)
+    growth_factor = max(float(growth_factor), 1.01)
+    left_extent = max(center - extent, 0.0)
+    right_extent = min(center + extent, span)
+
+    values = {0.0, span, center, left_extent, right_extent}
+
+    x = center
+    while x < right_extent - 1.0e-12:
+        x = min(x + fine_size, right_extent)
+        values.add(x)
+    step = fine_size
+    while x < span - 1.0e-12:
+        step = min(coarse_size, step * growth_factor)
+        x = min(x + step, span)
+        values.add(x)
+
+    x = center
+    while x > left_extent + 1.0e-12:
+        x = max(x - fine_size, left_extent)
+        values.add(x)
+    step = fine_size
+    while x > 1.0e-12:
+        step = min(coarse_size, step * growth_factor)
+        x = max(x - step, 0.0)
+        values.add(x)
+
+    tol = max(span * 1.0e-9, 1.0e-12)
+    for value in mandatory:
+        try:
+            coordinate = float(value)
+        except (TypeError, ValueError):
+            continue
+        if tol < coordinate < span - tol:
+            values.add(coordinate)
+
+    clean: list[float] = []
+    for value in sorted(values):
+        coordinate = min(max(float(value), 0.0), span)
+        if not clean or abs(coordinate - clean[-1]) > tol:
+            clean.append(round(coordinate, 12))
+    clean[0] = 0.0
+    clean[-1] = round(span, 12)
+    return clean
+
+
+def _merge_axis_breaks(
+    span: float,
+    current: list[float],
+    candidate: list[float],
+    fine_size: float,
+    mandatory: tuple[float, ...] = (),
+) -> list[float]:
+    """Merge refinement break coordinates without keeping avoidable slivers."""
+
+    span = max(float(span), 1.0e-9)
+    tol = max(span * 1.0e-9, 1.0e-12)
+    mandatory_keys = {0.0, round(span, 12)}
+    for value in mandatory:
+        if _is_number(value):
+            mandatory_keys.add(round(min(max(float(value), 0.0), span), 12))
+    values = [0.0, span]
+    for sequence in (current, candidate):
+        for value in sequence:
+            if not _is_number(value):
+                continue
+            coordinate = min(max(float(value), 0.0), span)
+            values.append(coordinate)
+    clean: list[float] = []
+    for value in sorted(values):
+        if not clean or abs(value - clean[-1]) > tol:
+            clean.append(round(float(value), 12))
+    clean[0] = 0.0
+    clean[-1] = round(span, 12)
+
+    min_size = max(0.4 * max(float(fine_size), 0.0), tol)
+    if len(clean) <= 2 or min_size <= tol:
+        return clean
+    changed = True
+    while changed and len(clean) > 2:
+        changed = False
+        for index in range(1, len(clean)):
+            if clean[index] - clean[index - 1] >= min_size:
+                continue
+            left_key = round(clean[index - 1], 12)
+            right_key = round(clean[index], 12)
+            left_mandatory = left_key in mandatory_keys or index - 1 == 0
+            right_mandatory = right_key in mandatory_keys or index == len(clean) - 1
+            if left_mandatory and right_mandatory:
+                continue
+            if right_mandatory and not left_mandatory:
+                del clean[index - 1]
+            else:
+                del clean[index]
+            changed = True
+            break
+    return clean
 
 
 def _is_number(value: object) -> bool:
@@ -1811,6 +1941,7 @@ def _add_cylinder_member_shell_model(
         index: int,
         config: LightweightFEMConfig,
         intersection_heights: dict[float, list[float]] | None = None,
+        arc_breaks: list[float] | None = None,
 ) -> tuple[int, int]:
     web_height = _member_section_dimension(section, "web_height")
     web_thickness = _member_section_dimension(section, "web_thickness")
@@ -1821,9 +1952,17 @@ def _add_cylinder_member_shell_model(
     inner_radius = max(radius - web_height, 1.0e-6)
     flange_section = _flange_beam_section(section, web_thickness)
 
+    def theta_at_col(col_index: int) -> float:
+        if arc_breaks and len(arc_breaks) >= 2:
+            index = int(col_index)
+            if index >= cols:
+                return float(arc_breaks[-1]) / max(radius, 1.0e-9)
+            return float(arc_breaks[index % max(cols, 1)]) / max(radius, 1.0e-9)
+        return 2.0 * math.pi * int(col_index) / max(cols, 1)
+
     if role == "stiffener":
         col = int(index) % max(cols, 1)
-        theta = 2.0 * math.pi * col / max(cols, 1)
+        theta = theta_at_col(col)
         dtheta = 0.5 * flange_width / inner_radius if inner_radius > 0.0 else 0.0
         for row in range(len(z_breaks) - 1):
             z0 = float(z_breaks[row])
@@ -1867,8 +2006,8 @@ def _add_cylinder_member_shell_model(
     row = int(index)
     z = float(z_breaks[row])
     for col in range(cols):
-        theta0 = 2.0 * math.pi * col / max(cols, 1)
-        theta1 = 2.0 * math.pi * (col + 1) / max(cols, 1)
+        theta0 = theta_at_col(col)
+        theta1 = theta_at_col(col + 1)
         base0 = node_id(row, col)
         base1 = node_id(row, col + 1)
         start_levels = _intersection_height_levels(intersection_heights, float(col % max(cols, 1)), web_height)
@@ -1949,51 +2088,96 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     div_y = _line_divisions(width, config, base_div, member_spacing_cap)
     custom_x_breaks = _custom_patch_axis_breaks(config, "a", length)
     custom_y_breaks = _custom_patch_axis_breaks(config, "b", width)
-    x_breaks = _axis_breaks(length, div_x, tuple(girder_positions) + custom_x_breaks, member_spacing_cap)
-    y_breaks = _axis_breaks(width, div_y, tuple(stiffener_positions) + custom_y_breaks, member_spacing_cap)
+    mandatory_x = tuple(girder_positions) + custom_x_breaks
+    mandatory_y = tuple(stiffener_positions) + custom_y_breaks
+    x_breaks = _axis_breaks(length, div_x, mandatory_x, member_spacing_cap)
+    y_breaks = _axis_breaks(width, div_y, mandatory_y, member_spacing_cap)
+    global_base_x = length / max(len(x_breaks) - 1, 1)
+    global_base_y = width / max(len(y_breaks) - 1, 1)
     mesh_generation: dict[str, object] = {}
 
-    adaptive_mesh_info: dict[str, object] = {"enabled": False}
+    adaptive_sources: list[dict[str, object]] = []
+    adaptive_mesh_info: dict[str, object] = {"enabled": False, "sources": adaptive_sources}
+    if bool(config.point_refinement_enabled):
+        x_breaks, y_breaks, point_refinement_info = _apply_detail_point_refinement(
+            length,
+            width,
+            thickness,
+            x_breaks,
+            y_breaks,
+            mandatory_x,
+            mandatory_y,
+            float(config.point_refinement_x_m),
+            float(config.point_refinement_y_m),
+            float(config.point_refinement_fine_size_m),
+            float(config.point_refinement_fine_factor),
+            float(config.point_refinement_extent_m),
+            float(config.point_refinement_growth_factor),
+            "selected_point",
+            coarse_x=global_base_x,
+            coarse_y=global_base_y,
+        )
+        adaptive_sources.append(point_refinement_info)
+        adaptive_mesh_info = {
+            **point_refinement_info,
+            "enabled": True,
+            "sources": adaptive_sources,
+        }
+
+    x_breaks, y_breaks, panel_refinement_info = _apply_local_patch_refinement(
+        config,
+        length,
+        width,
+        thickness,
+        x_breaks,
+        y_breaks,
+        mandatory_x,
+        mandatory_y,
+    )
+    if panel_refinement_info.get("enabled"):
+        adaptive_sources.append(panel_refinement_info)
+        adaptive_mesh_info = {
+            **panel_refinement_info,
+            "enabled": True,
+            "sources": adaptive_sources,
+        }
+
     if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled):
         impact = _collision_impact_point(config, length, width)
         if impact is not None:
-            base_x = length / max(len(x_breaks) - 1, 1)
-            base_y = width / max(len(y_breaks) - 1, 1)
-            base_size = min(base_x, base_y)
-            # Finest element edge at impact.  An explicit size (m) takes
-            # precedence; otherwise it is a fraction of the base mesh.  The
-            # size is floored at the plate thickness so a "very fine" impact
-            # mesh can reach the t x t scale but not go below it, and capped at
-            # the base size so it always refines.
-            requested_fine = float(config.collision_adaptive_fine_size_m)
-            if requested_fine > 0.0:
-                fine_size = requested_fine
-            else:
-                fine_factor = min(max(float(config.collision_adaptive_fine_factor), 0.02), 1.0)
-                fine_size = base_size * fine_factor
-            floored_at_thickness = fine_size < thickness
-            fine_size = min(max(fine_size, thickness), base_size)
             zone_factor = max(float(config.collision_adaptive_zone_factor), 0.5)
             radius = max(float(config.collision_radius_m), 1.0e-6)
-            fine_radius = radius * zone_factor
-            transition = max(2.0 * radius, base_x, base_y)
-            x_breaks = _graded_axis_breaks(
-                length, impact[0], fine_size, base_x, fine_radius, transition,
-                tuple(girder_positions) + custom_x_breaks,
+            extent = float(config.collision_adaptive_extent_m or 0.0)
+            if extent <= 0.0:
+                extent = radius * zone_factor
+            x_breaks, y_breaks, impact_refinement_info = _apply_detail_point_refinement(
+                length,
+                width,
+                thickness,
+                x_breaks,
+                y_breaks,
+                mandatory_x,
+                mandatory_y,
+                impact[0],
+                impact[1],
+                float(config.collision_adaptive_fine_size_m),
+                float(config.collision_adaptive_fine_factor),
+                extent,
+                float(config.collision_adaptive_growth_factor),
+                "impact",
+                coarse_x=global_base_x,
+                coarse_y=global_base_y,
+                extra={
+                    "impact_point_m": [float(impact[0]), float(impact[1])],
+                    "fine_radius_m": float(extent),
+                    "sphere_radius_m": float(radius),
+                },
             )
-            y_breaks = _graded_axis_breaks(
-                width, impact[1], fine_size, base_y, fine_radius, transition,
-                tuple(stiffener_positions) + custom_y_breaks,
-            )
+            adaptive_sources.append(impact_refinement_info)
             adaptive_mesh_info = {
+                **impact_refinement_info,
                 "enabled": True,
-                "impact_point_m": [float(impact[0]), float(impact[1])],
-                "fine_element_size_m": float(fine_size),
-                "coarse_element_size_m": float(max(base_x, base_y)),
-                "fine_radius_m": float(fine_radius),
-                "requested_fine_size_m": float(requested_fine),
-                "floored_at_thickness": bool(floored_at_thickness),
-                "plate_thickness_m": float(thickness),
+                "sources": adaptive_sources,
             }
 
     def add_breakpoint(values: list[float], value: object, limit: float) -> list[float]:
@@ -2234,6 +2418,30 @@ def _mesh_metrics_from_breaks(
     }
 
 
+def _mesh_metrics_from_cylinder_breaks(
+    z_breaks: list[float],
+    arc_breaks: list[float],
+    shell_count: int,
+    node_count: int,
+) -> dict[str, float | int]:
+    dz = np.diff(np.asarray(z_breaks, dtype=float)) if len(z_breaks) > 1 else np.asarray([0.0])
+    da = np.diff(np.asarray(arc_breaks, dtype=float)) if len(arc_breaks) > 1 else np.asarray([0.0])
+    edges = np.concatenate([dz, da])
+    edges = edges[edges > 0.0]
+    if edges.size == 0:
+        edges = np.asarray([0.0])
+    diagonals = np.sqrt(dz[:, None] ** 2 + da[None, :] ** 2).reshape(-1) if dz.size and da.size else edges
+    return {
+        "shell_element_count": int(shell_count),
+        "node_count": int(node_count),
+        "nominal_element_size_m": float(np.median(edges)),
+        "min_element_size_m": float(edges.min()),
+        "max_element_size_m": float(edges.max()),
+        "min_edge_over_max_edge": float(edges.min() / edges.max()) if edges.max() > 0.0 else 1.0,
+        "max_diagonal_m": float(diagonals.max()) if diagonals.size else 0.0,
+    }
+
+
 def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> dict[str, object]:
     orientation = config.member_orientation
     if _normalized_choice(orientation) == "auto":
@@ -2306,9 +2514,19 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         mesh_generation["pressure_patch_boundary_breaks"] = "cylinder_axial_exact_circumferential_refined"
     if _wants_b3(config) and config.include_stiffeners and geometry.get("has_stiffener"):
         z_breaks = _refined_midpoint_breaks(z_breaks)
+    arc_breaks = _axis_breaks(circumference, circumferential_div, ())
+    z_breaks, arc_breaks, adaptive_mesh_info = _apply_cylinder_detail_refinement(
+        config,
+        length,
+        circumference,
+        thickness,
+        z_breaks,
+        arc_breaks,
+        axial_mandatory_breaks,
+    )
     rows = len(z_breaks)
     axial_div = rows - 1
-    cols = circumferential_div
+    cols = max(len(arc_breaks) - 1, 1)
 
     def node_id(row: int, col: int) -> int:
         return 1 + row * cols + (col % cols)
@@ -2317,7 +2535,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     for row in range(rows):
         z = z_breaks[row]
         for col in range(cols):
-            theta = 2.0 * math.pi * col / cols
+            theta = float(arc_breaks[col]) / max(radius, 1.0e-9)
             nodes.append({"id": node_id(row, col), "coords": [radius * math.cos(theta), radius * math.sin(theta), z]})
 
     shells = []
@@ -2357,10 +2575,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         )
         count = stiffener_count if stiffener_count > 0 else min(8, cols)
         for offset in range(count):
-            col = int(round(offset * cols / count)) % cols
+            target_arc = circumference * offset / max(count, 1)
+            col = min(range(cols), key=lambda candidate: abs(float(arc_breaks[candidate]) - target_arc)) % cols
             section = dict(base_section)
             if _normalized_choice(orientation) == "radial":
-                theta = 2.0 * math.pi * col / cols
+                theta = float(arc_breaks[col]) / max(radius, 1.0e-9)
                 section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
             stiffener_columns.append(col)
             stiffener_sections[col] = section
@@ -2406,6 +2625,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     col,
                     config,
                     intersection_heights=stiffener_web_intersections,
+                    arc_breaks=arc_breaks,
                 )
                 continue
             row_range = range(0, axial_div - 1, 2) if _wants_b3(config) else range(axial_div)
@@ -2445,13 +2665,18 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     row,
                     config,
                     intersection_heights=girder_web_intersections,
+                    arc_breaks=arc_breaks,
                 )
                 continue
             col_range = range(0, cols, 2) if _wants_b3(config) else range(cols)
             for col in col_range:
                 section = dict(girder_base_section)
                 if _normalized_choice(orientation) == "radial":
-                    theta = 2.0 * math.pi * (col + 0.5) / cols
+                    theta0 = float(arc_breaks[col]) / max(radius, 1.0e-9)
+                    theta1 = float(arc_breaks[(col + 1) % len(arc_breaks)]) / max(radius, 1.0e-9)
+                    if col + 1 >= len(arc_breaks):
+                        theta1 = 2.0 * math.pi
+                    theta = 0.5 * (theta0 + theta1)
                     section["orientation"] = (math.cos(theta), math.sin(theta), 0.0)
                 beam_nodes = (
                     [node_id(row, col), node_id(row, col + 1), node_id(row, col + 2)]
@@ -2562,6 +2787,8 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         "bottom_ring_node_ids": start_ring,
         "top_ring_node_ids": end_ring,
         "mesh_generation": mesh_generation,
+        "mesh_metrics": _mesh_metrics_from_cylinder_breaks(z_breaks, arc_breaks, len(shells), len(nodes)),
+        "adaptive_mesh": adaptive_mesh_info,
     }
 
 
@@ -4204,6 +4431,314 @@ def _custom_patch_min_width(config: LightweightFEMConfig, axis: str, fallback: f
     return min_width if min_width > 1.0e-9 else 0.0
 
 
+def _local_refinement_patches(config: LightweightFEMConfig) -> list[dict[str, object]]:
+    if not bool(config.local_refinement_enabled):
+        return []
+    try:
+        raw_patches = json.loads(config.local_refinement_patches_json) if config.local_refinement_patches_json else []
+    except Exception:
+        return []
+    return _normalised_custom_pressure_patches(raw_patches)
+
+
+def _local_refinement_patch_area(patches: list[dict[str, object]]) -> float:
+    area = 0.0
+    for patch in patches:
+        try:
+            area += max(0.0, float(patch.get("max_a", 0.0)) - float(patch.get("min_a", 0.0))) * max(
+                0.0,
+                float(patch.get("max_b", 0.0)) - float(patch.get("min_b", 0.0)),
+            )
+        except (TypeError, ValueError):
+            continue
+    return float(area)
+
+
+def _refinement_fine_size(base_size: float, thickness: float, requested_size: float, fine_factor: float) -> tuple[float, float, bool]:
+    base_size = max(float(base_size), 1.0e-9)
+    thickness = max(float(thickness), 0.0)
+    requested = max(float(requested_size or 0.0), 0.0)
+    if requested > 0.0:
+        fine_size = requested
+    else:
+        factor = min(max(float(fine_factor or 0.3), 0.02), 1.0)
+        fine_size = base_size * factor
+    floored_at_thickness = thickness > 0.0 and fine_size < thickness
+    fine_size = min(max(fine_size, thickness, base_size * 1.0e-4), base_size)
+    return float(fine_size), float(requested), bool(floored_at_thickness)
+
+
+def _apply_detail_point_refinement(
+    length: float,
+    width: float,
+    thickness: float,
+    x_breaks: list[float],
+    y_breaks: list[float],
+    mandatory_x: tuple[float, ...],
+    mandatory_y: tuple[float, ...],
+    point_x: float,
+    point_y: float,
+    fine_size_m: float,
+    fine_factor: float,
+    extent_m: float,
+    growth_factor: float,
+    source: str,
+    coarse_x: float | None = None,
+    coarse_y: float | None = None,
+    extra: dict[str, object] | None = None,
+) -> tuple[list[float], list[float], dict[str, object]]:
+    base_x = float(coarse_x) if coarse_x and coarse_x > 0.0 else float(length) / max(len(x_breaks) - 1, 1)
+    base_y = float(coarse_y) if coarse_y and coarse_y > 0.0 else float(width) / max(len(y_breaks) - 1, 1)
+    base_size = min(base_x, base_y)
+    fine_size, requested_fine, floored = _refinement_fine_size(base_size, thickness, fine_size_m, fine_factor)
+    extent = max(float(extent_m or 0.0), fine_size)
+    growth = max(float(growth_factor or 1.35), 1.01)
+    point = (
+        min(max(float(point_x), 0.0), float(length)),
+        min(max(float(point_y), 0.0), float(width)),
+    )
+    candidate_x = _detail_axis_breaks(length, point[0], fine_size, base_x, extent, growth, mandatory_x)
+    candidate_y = _detail_axis_breaks(width, point[1], fine_size, base_y, extent, growth, mandatory_y)
+    x_breaks = _merge_axis_breaks(length, x_breaks, candidate_x, fine_size, mandatory_x)
+    y_breaks = _merge_axis_breaks(width, y_breaks, candidate_y, fine_size, mandatory_y)
+    info: dict[str, object] = {
+        "enabled": True,
+        "source": source,
+        "point_m": [float(point[0]), float(point[1])],
+        "fine_element_size_m": float(fine_size),
+        "coarse_element_size_m": float(max(base_x, base_y)),
+        "extent_m": float(extent),
+        "growth_factor": float(growth),
+        "requested_fine_size_m": float(requested_fine),
+        "floored_at_thickness": bool(floored),
+        "plate_thickness_m": float(thickness),
+    }
+    if extra:
+        info.update(extra)
+    return x_breaks, y_breaks, info
+
+
+def _apply_local_patch_refinement(
+    config: LightweightFEMConfig,
+    length: float,
+    width: float,
+    thickness: float,
+    x_breaks: list[float],
+    y_breaks: list[float],
+    mandatory_x: tuple[float, ...],
+    mandatory_y: tuple[float, ...],
+) -> tuple[list[float], list[float], dict[str, object]]:
+    patches = _local_refinement_patches(config)
+    if not patches:
+        return x_breaks, y_breaks, {"enabled": False}
+
+    base_x = float(length) / max(len(x_breaks) - 1, 1)
+    base_y = float(width) / max(len(y_breaks) - 1, 1)
+    base_size = min(base_x, base_y)
+    fine_size, requested_fine, floored = _refinement_fine_size(
+        base_size,
+        thickness,
+        float(config.local_refinement_fine_size_m),
+        float(config.local_refinement_fine_factor),
+    )
+    extent_pad = max(float(config.local_refinement_extent_m or 0.0), 0.0)
+    growth_factor = max(float(config.local_refinement_growth_factor or 1.35), 1.01)
+    refined_regions: list[dict[str, float]] = []
+
+    for patch in patches:
+        min_x, max_x = _custom_patch_axis_interval(patch, "a", length)
+        min_y, max_y = _custom_patch_axis_interval(patch, "b", width)
+        if max_x <= min_x or max_y <= min_y:
+            continue
+        patch_width = max_x - min_x
+        patch_height = max_y - min_y
+        x_mandatory = tuple(mandatory_x) + (min_x, max_x)
+        y_mandatory = tuple(mandatory_y) + (min_y, max_y)
+        candidate_x = _detail_axis_breaks(
+            length,
+            0.5 * (min_x + max_x),
+            fine_size,
+            base_x,
+            max(0.5 * patch_width + extent_pad, 0.5 * fine_size),
+            growth_factor,
+            x_mandatory,
+        )
+        candidate_y = _detail_axis_breaks(
+            width,
+            0.5 * (min_y + max_y),
+            fine_size,
+            base_y,
+            max(0.5 * patch_height + extent_pad, 0.5 * fine_size),
+            growth_factor,
+            y_mandatory,
+        )
+        x_breaks = _merge_axis_breaks(length, x_breaks, candidate_x, fine_size, x_mandatory)
+        y_breaks = _merge_axis_breaks(width, y_breaks, candidate_y, fine_size, y_mandatory)
+        refined_regions.append(
+            {
+                "min_a": float(min_x),
+                "max_a": float(max_x),
+                "min_b": float(min_y),
+                "max_b": float(max_y),
+            }
+        )
+
+    if not refined_regions:
+        return x_breaks, y_breaks, {"enabled": False}
+    return x_breaks, y_breaks, {
+        "enabled": True,
+        "source": "selected_panels",
+        "region_count": len(refined_regions),
+        "area_m2": _local_refinement_patch_area(refined_regions),
+        "fine_element_size_m": float(fine_size),
+        "coarse_element_size_m": float(max(base_x, base_y)),
+        "requested_fine_size_m": float(requested_fine),
+        "floored_at_thickness": bool(floored),
+        "plate_thickness_m": float(thickness),
+        "extent_m": float(extent_pad),
+        "growth_factor": float(growth_factor),
+        "regions": refined_regions,
+    }
+
+
+def _apply_cylinder_detail_refinement(
+    config: LightweightFEMConfig,
+    length: float,
+    circumference: float,
+    thickness: float,
+    z_breaks: list[float],
+    arc_breaks: list[float],
+    mandatory_z: tuple[float, ...],
+    mandatory_arc: tuple[float, ...] = (),
+) -> tuple[list[float], list[float], dict[str, object]]:
+    base_z = float(length) / max(len(z_breaks) - 1, 1)
+    base_arc = float(circumference) / max(len(arc_breaks) - 1, 1)
+    adaptive_sources: list[dict[str, object]] = []
+
+    if bool(config.point_refinement_enabled):
+        z_breaks, arc_breaks, info = _apply_detail_point_refinement(
+            length,
+            circumference,
+            thickness,
+            z_breaks,
+            arc_breaks,
+            mandatory_z,
+            mandatory_arc,
+            float(config.point_refinement_x_m),
+            float(config.point_refinement_y_m),
+            float(config.point_refinement_fine_size_m),
+            float(config.point_refinement_fine_factor),
+            float(config.point_refinement_extent_m),
+            float(config.point_refinement_growth_factor),
+            "selected_point",
+            coarse_x=base_z,
+            coarse_y=base_arc,
+            extra={"coordinates": "cylinder_axial_arc"},
+        )
+        adaptive_sources.append(info)
+
+    patches = _local_refinement_patches(config)
+    if patches:
+        fine_size, requested_fine, floored = _refinement_fine_size(
+            min(base_z, base_arc),
+            thickness,
+            float(config.local_refinement_fine_size_m),
+            float(config.local_refinement_fine_factor),
+        )
+        extent_pad = max(float(config.local_refinement_extent_m or 0.0), 0.0)
+        growth_factor = max(float(config.local_refinement_growth_factor or 1.35), 1.01)
+        regions: list[dict[str, float]] = []
+        for patch in patches:
+            min_z, max_z = _custom_patch_axis_interval(patch, "a", length)
+            min_arc = max(0.0, min(float(patch.get("min_b", 0.0)), circumference))
+            max_arc = max(0.0, min(float(patch.get("max_b", 0.0)), circumference))
+            if max_z <= min_z or max_arc <= min_arc:
+                continue
+            z_mandatory = tuple(mandatory_z) + (min_z, max_z)
+            arc_mandatory = tuple(mandatory_arc) + (min_arc, max_arc)
+            candidate_z = _detail_axis_breaks(
+                length,
+                0.5 * (min_z + max_z),
+                fine_size,
+                base_z,
+                max(0.5 * (max_z - min_z) + extent_pad, 0.5 * fine_size),
+                growth_factor,
+                z_mandatory,
+            )
+            candidate_arc = _detail_axis_breaks(
+                circumference,
+                0.5 * (min_arc + max_arc),
+                fine_size,
+                base_arc,
+                max(0.5 * (max_arc - min_arc) + extent_pad, 0.5 * fine_size),
+                growth_factor,
+                arc_mandatory,
+            )
+            z_breaks = _merge_axis_breaks(length, z_breaks, candidate_z, fine_size, z_mandatory)
+            arc_breaks = _merge_axis_breaks(circumference, arc_breaks, candidate_arc, fine_size, arc_mandatory)
+            regions.append({"min_a": float(min_z), "max_a": float(max_z), "min_b": float(min_arc), "max_b": float(max_arc)})
+        if regions:
+            adaptive_sources.append(
+                {
+                    "enabled": True,
+                    "source": "selected_panels",
+                    "coordinates": "cylinder_axial_arc",
+                    "region_count": len(regions),
+                    "area_m2": _local_refinement_patch_area(regions),
+                    "fine_element_size_m": float(fine_size),
+                    "coarse_element_size_m": float(max(base_z, base_arc)),
+                    "requested_fine_size_m": float(requested_fine),
+                    "floored_at_thickness": bool(floored),
+                    "plate_thickness_m": float(thickness),
+                    "extent_m": float(extent_pad),
+                    "growth_factor": float(growth_factor),
+                    "regions": regions,
+                }
+            )
+
+    if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled):
+        impact = _collision_impact_point(config, length, circumference)
+        if impact is not None:
+            zone_factor = max(float(config.collision_adaptive_zone_factor), 0.5)
+            sphere_radius = max(float(config.collision_radius_m), 1.0e-6)
+            extent = float(config.collision_adaptive_extent_m or 0.0)
+            if extent <= 0.0:
+                extent = sphere_radius * zone_factor
+            z_breaks, arc_breaks, info = _apply_detail_point_refinement(
+                length,
+                circumference,
+                thickness,
+                z_breaks,
+                arc_breaks,
+                mandatory_z,
+                mandatory_arc,
+                float(impact[0]),
+                float(impact[1]),
+                float(config.collision_adaptive_fine_size_m),
+                float(config.collision_adaptive_fine_factor),
+                extent,
+                float(config.collision_adaptive_growth_factor),
+                "impact",
+                coarse_x=base_z,
+                coarse_y=base_arc,
+                extra={
+                    "coordinates": "cylinder_axial_arc",
+                    "impact_point_m": [float(impact[0]), float(impact[1])],
+                    "fine_radius_m": float(extent),
+                    "sphere_radius_m": float(sphere_radius),
+                },
+            )
+            adaptive_sources.append(info)
+
+    if not adaptive_sources:
+        return z_breaks, arc_breaks, {"enabled": False, "sources": []}
+    return z_breaks, arc_breaks, {
+        **adaptive_sources[-1],
+        "enabled": True,
+        "sources": adaptive_sources,
+    }
+
+
 def _custom_pressure_patch_element_ids_from_patches(
         model,
         generated_geometry: dict,
@@ -5654,20 +6189,42 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             )
         )
     if _adaptive_mesh.get("enabled"):
-        _impact = _adaptive_mesh.get("impact_point_m", [0.0, 0.0])
-        diagnostics.append(
-            "Adaptive impact mesh: refined to {fine:.1f} mm around impact at ({x:.2f}, {y:.2f}) m.".format(
-                fine=float(_adaptive_mesh.get("fine_element_size_m", 0.0)) * 1000.0,
-                x=float(_impact[0]), y=float(_impact[1]),
-            )
-        )
-        if _adaptive_mesh.get("floored_at_thickness"):
-            diagnostics.append(
-                "Requested impact fine size {req:.1f} mm was floored at the plate thickness {t:.1f} mm.".format(
-                    req=float(_adaptive_mesh.get("requested_fine_size_m", 0.0)) * 1000.0,
-                    t=float(_adaptive_mesh.get("plate_thickness_m", 0.0)) * 1000.0,
+        _sources = _adaptive_mesh.get("sources") or [_adaptive_mesh]
+        for _source in _sources:
+            if not isinstance(_source, dict):
+                continue
+            if _source.get("source") == "selected_panels":
+                diagnostics.append(
+                    "Local mesh refinement: {count} selected panel region(s), refined to {fine:.1f} mm.".format(
+                        count=int(_source.get("region_count", 0)),
+                        fine=float(_source.get("fine_element_size_m", 0.0)) * 1000.0,
+                    )
                 )
-            )
+            elif _source.get("source") == "selected_point":
+                _point = _source.get("point_m", [0.0, 0.0])
+                diagnostics.append(
+                    "Point mesh refinement: refined to {fine:.1f} mm inside radius {extent:.0f} mm at ({x:.2f}, {y:.2f}) m.".format(
+                        fine=float(_source.get("fine_element_size_m", 0.0)) * 1000.0,
+                        extent=float(_source.get("extent_m", 0.0)) * 1000.0,
+                        x=float(_point[0]), y=float(_point[1]),
+                    )
+                )
+            elif _source.get("impact_point_m"):
+                _impact = _source.get("impact_point_m", [0.0, 0.0])
+                diagnostics.append(
+                    "Impact mesh preset: refined to {fine:.1f} mm inside radius {extent:.0f} mm at ({x:.2f}, {y:.2f}) m.".format(
+                        fine=float(_source.get("fine_element_size_m", 0.0)) * 1000.0,
+                        extent=float(_source.get("extent_m", _source.get("fine_radius_m", 0.0))) * 1000.0,
+                        x=float(_impact[0]), y=float(_impact[1]),
+                    )
+                )
+            if _source.get("floored_at_thickness"):
+                diagnostics.append(
+                    "Requested local fine size {req:.1f} mm was floored at the plate thickness {t:.1f} mm.".format(
+                        req=float(_source.get("requested_fine_size_m", 0.0)) * 1000.0,
+                        t=float(_source.get("plate_thickness_m", 0.0)) * 1000.0,
+                    )
+                )
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if (not config.custom_load_bc_enabled) and geometry.get("geometry") != "cylinder":
