@@ -1585,6 +1585,7 @@ def _solve_transient_sphere_impact_nonlinear(
     nonlinear_config: Optional[NonlinearTransientConfig] = None,
     plastic_damage_config: Optional[PlasticImpactDamageConfig] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
 ) -> SphereImpactResult:
     """Implicit Newmark nonlinear impact with material/geometric element response."""
     from .nonlinear_static import _assemble_nonlinear_system, _nonlinear_state_summary
@@ -1898,6 +1899,8 @@ def _solve_transient_sphere_impact_nonlinear(
         factor_diagnostics: Dict[str, Any] = {}
         convergence_reason = "standard"
         for iteration in range(1, int(nl.max_iterations) + 1):
+            if status_callback:
+                status_callback(f"\r  Time {sub_time:.4f} s, Iteration {iteration}: Res {residual_norm:.2e}")
             full_u = reconstruct_full_solution(T, q_trial, u0)
             F_int, K_T, trial_states = assemble_nonlinear(
                 full_u,
@@ -2336,6 +2339,7 @@ def solve_transient_sphere_impact(
     nonlinear_config: Optional[NonlinearTransientConfig] = None,
     plastic_damage_config: Optional[PlasticImpactDamageConfig] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
 ) -> SphereImpactResult:
     """Solve a limited rigid-sphere-to-shell impact transient."""
 
@@ -2363,6 +2367,7 @@ def solve_transient_sphere_impact(
             nonlinear_config=nonlinear_config,
             plastic_damage_config=plastic_damage_config,
             progress_callback=progress_callback,
+            status_callback=status_callback,
         )
     model.apply_boundary_conditions()
     K, stiffness_info = assemble_stiffness_matrix(model)

@@ -4764,6 +4764,13 @@ class RuntimeFEMWindow:
             except Exception:
                 pass
 
+        try:
+            # We had forced beam contact here, but the user explicitly wants manual control over beam contact.
+            pass
+        except Exception:
+            pass
+
+
         criterion_fixed = (self.collision_damage_criterion.get() != "mesh_scaled_gl")
         if hasattr(self, "_collision_plastic_damage_threshold_control"):
             is_active = criterion_fixed and bool(self.collision_damage_enabled.get())
@@ -5595,7 +5602,7 @@ class RuntimeFEMWindow:
                                 self.collision_speed_mps)
         self._add_compact_option(collision_main, 2, 1, "collision_contact_surface", "Surface",
                                  self.collision_contact_surface, ("midsurface", "top", "bottom"))
-        self._add_compact_check(collision_main, 3, 0, "collision_beam_contact",
+        self._collision_beam_contact_control = self._add_compact_check(collision_main, 3, 0, "collision_beam_contact",
                                 "Direct beam/stiffener contact", self.collision_beam_contact_enabled)
         ttk.Label(collision_main, text="Mesh refinement at the impact point is configured on the Mesh tab.",
                   foreground="#475569").grid(row=3, column=3, columnspan=3, sticky=tk.W, padx=6, pady=2)
@@ -6660,13 +6667,10 @@ class RuntimeFEMWindow:
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
             if show_plate and plate_alpha > 0.0:
-                canvas.add_polygon(
-                    [
-                        Point3D(0.0, 0.0, 0.0),
-                        Point3D(length, 0.0, 0.0),
-                        Point3D(length, width, 0.0),
-                        Point3D(0.0, width, 0.0)
-                    ],
+                canvas.add_rectangular_plate(
+                    x_start=0.0, x_end=length,
+                    y_start=0.0, y_end=width,
+                    z=0.0,
                     color=plate_front_color,
                     back_color=plate_back_color,
                     outline="#64748b",
@@ -6684,35 +6688,16 @@ class RuntimeFEMWindow:
                             spacing,
                             fallback_midpoint=True,
                     ):
-                        spans = [(0.0, 0.5 * length), (0.5 * length, length)]
-                        for stf_start, stf_end in spans:
-                            canvas.add_polygon(
-                                [
-                                    Point3D(stf_start, y_pos, 0.0),
-                                    Point3D(stf_end, y_pos, 0.0),
-                                    Point3D(stf_end, y_pos, hw),
-                                    Point3D(stf_start, y_pos, hw)
-                                ],
-                                color="#94a3b8",
-                                outline="#1f2937",
-                                width=2,
-                                layer=12,
-                                stipple=member_stipple
-                            )
-                            if b > 0.0:
-                                canvas.add_polygon(
-                                    [
-                                        Point3D(stf_start, y_pos - 0.5 * b, hw),
-                                        Point3D(stf_end, y_pos - 0.5 * b, hw),
-                                        Point3D(stf_end, y_pos + 0.5 * b, hw),
-                                        Point3D(stf_start, y_pos + 0.5 * b, hw)
-                                    ],
-                                    color="#334155",
-                                    outline="#111827",
-                                    width=2,
-                                    layer=13,
-                                    stipple=member_stipple
-                                )
+                        canvas.add_flat_stiffener(
+                            x_start=0.0, x_end=length,
+                            y=y_pos,
+                            z_base=0.0,
+                            hw=hw,
+                            b=b,
+                            color="#94a3b8",
+                            outline="#1f2937",
+                            stipple=member_stipple,
+                        )
             if show_girders and member_alpha > 0.0 and geometry.get("has_girder"):
                 gir_sec = geometry.get("girder_section") or {}
                 ghw = _safe_float(gir_sec.get("web_height") or gir_sec.get("web_h") or 0.15)
@@ -6723,33 +6708,16 @@ class RuntimeFEMWindow:
                         spacing,
                         fallback_midpoint=True,
                 ):
-                    canvas.add_polygon(
-                        [
-                            Point3D(x_mid, 0.0, 0.0),
-                            Point3D(x_mid, width, 0.0),
-                            Point3D(x_mid, width, ghw),
-                            Point3D(x_mid, 0.0, ghw)
-                        ],
+                    canvas.add_flat_girder(
+                        x=x_mid,
+                        y_start=0.0, y_end=width,
+                        z_base=0.0,
+                        ghw=ghw,
+                        gb=gb,
                         color="#fca5a5",
                         outline="#991b1b",
-                        width=2,
-                        layer=12,
-                        stipple=member_stipple
+                        stipple=member_stipple,
                     )
-                    if gb > 0.0:
-                        canvas.add_polygon(
-                            [
-                                Point3D(x_mid - 0.5 * gb, 0.0, ghw),
-                                Point3D(x_mid - 0.5 * gb, width, ghw),
-                                Point3D(x_mid + 0.5 * gb, width, ghw),
-                                Point3D(x_mid + 0.5 * gb, 0.0, ghw)
-                            ],
-                            color="#b91c1c",
-                            outline="#7f1d1d",
-                            width=2,
-                            layer=13,
-                            stipple=member_stipple
-                        )
         if callable(getattr(canvas, "add_line", None)) and callable(getattr(canvas, "add_text", None)):
             self._draw_base_dimension_annotations(canvas, geometry)
             RuntimeFEMWindow._draw_pressure_side_indicators(self, canvas, geometry)
@@ -7715,11 +7683,19 @@ class RuntimeFEMWindow:
                 else float(options.collision_radius_m) * max(float(options.collision_adaptive_zone_factor), 0.5)
             )
             detail_bits.append("impact r={:.2f}m".format(extent))
+        if bool(options.collision_enabled):
+            if bool(options.collision_include_static_load):
+                analysis_text = f"collision transient (+{options.analysis_type})"
+            else:
+                analysis_text = "collision transient (standalone)"
+        else:
+            analysis_text = str(options.analysis_type)
+            
         lines = [
             "Running FEM solver...",
             "",
             "Setup",
-            " - analysis: " + str(options.analysis_type),
+            " - analysis: " + analysis_text,
             " - mesh: "
             + str(options.mesh_fidelity)
             + ", "
@@ -8355,48 +8331,77 @@ class RuntimeFEMWindow:
         self.window.after(100, self._poll_solver_result)
 
     def _poll_solver_result(self) -> None:
-        try:
-            msg = self.solver_queue.get_nowait()
-            if isinstance(msg, str):
-                if not hasattr(self, "_run_status_history"):
-                    self._run_status_history = []
-                self._run_status_history.append(msg)
-                self._run_status_history = self._run_status_history[-8:]
-                options = self._active_run_options or self._options()
-                self._write_status(self._format_run_status_text(options, self._run_status_history))
-                self.window.after(100, self._poll_solver_result)
+        messages_processed = 0
+        needs_status_update = False
+        options = self._active_run_options or self._options()
+
+        if not hasattr(self, "_run_status_history"):
+            self._run_status_history = []
+
+        while messages_processed < 50:
+            try:
+                msg = self.solver_queue.get_nowait()
+            except queue.Empty:
+                if self.solver_thread is not None and self.solver_thread.is_alive():
+                    if needs_status_update:
+                        self._write_status(self._format_run_status_text(options, self._run_status_history))
+                    self.window.after(100, self._poll_solver_result)
+                    return
+                if needs_status_update:
+                    self._write_status(self._format_run_status_text(options, self._run_status_history))
+                self._set_solver_running(False)
+                self._active_run_options = None
                 return
+
+            if isinstance(msg, str):
+                if msg.startswith("\r"):
+                    clean_msg = msg[1:]
+                    if self._run_status_history:
+                        self._run_status_history[-1] = clean_msg
+                    else:
+                        self._run_status_history.append(clean_msg)
+                else:
+                    self._run_status_history.append(msg)
+                    self._run_status_history = self._run_status_history[-8:]
+                needs_status_update = True
+                messages_processed += 1
+                continue
+
             if isinstance(msg, dict) and msg.get("type") == "live_visualization":
                 self._apply_live_visualization(msg)
-                self.window.after(25, self._poll_solver_result)
-                return
+                messages_processed += 1
+                # Visualizations are slightly heavy, maybe break to yield back to UI
+                break
+
+            # If we get here, it must be the result tuple
             result, error = msg
-        except queue.Empty:
-            if self.solver_thread is not None and self.solver_thread.is_alive():
-                self.window.after(100, self._poll_solver_result)
-                return
+            if needs_status_update:
+                self._write_status(self._format_run_status_text(options, self._run_status_history))
             self._set_solver_running(False)
             self._active_run_options = None
+            if error is not None:
+                self._write_status("Runtime FEM failed:\n" + str(error))
+                messagebox.showerror("FEM solver", str(error))
+                return
+
+            self.current_result = result
+            self._live_collision_sphere_visualization = {}
+            self._display_base_geometry = False
+            self._set_custom_load_selection_active(False, refresh=False)
+            self._force_fit_next_refresh = True
+            self._set_display_modes(result)
+            self._sync_color_limit_controls(force=True)
+            self._last_run_result_status_text = format_runtime_fem_result(result)
+            self._write_status(self._last_run_result_status_text)
+            self._refresh_figure()
+            self._update_buckling_handoff_button(is_running=False)
             return
 
-        self._set_solver_running(False)
-        self._active_run_options = None
-        if error is not None:
-            self._write_status("Runtime FEM failed:\n" + str(error))
-            messagebox.showerror("FEM solver", str(error))
-            return
+        if needs_status_update:
+            self._write_status(self._format_run_status_text(options, self._run_status_history))
+        self.window.after(20, self._poll_solver_result)
 
-        self.current_result = result
-        self._live_collision_sphere_visualization = {}
-        self._display_base_geometry = False
-        self._set_custom_load_selection_active(False, refresh=False)
-        self._force_fit_next_refresh = True
-        self._set_display_modes(result)
-        self._sync_color_limit_controls(force=True)
-        self._last_run_result_status_text = format_runtime_fem_result(result)
-        self._write_status(self._last_run_result_status_text)
-        self._refresh_figure()
-        self._update_buckling_handoff_button(is_running=False)
+
 
     def _apply_live_visualization(self, payload: dict[str, Any]) -> None:
         visualization = dict(payload.get("visualization") or {})
@@ -8412,6 +8417,7 @@ class RuntimeFEMWindow:
                 live_sphere_position = ()
         geometry = runtime_geometry_summary(self.snapshot)
         time_value = _safe_float(payload.get("time_s"), 0.0)
+        options = self._active_run_options or self._options()
         summary = {
             **geometry,
             "line": self.snapshot.line_name,
@@ -8426,6 +8432,10 @@ class RuntimeFEMWindow:
                 "collision_live_time_s": float(time_value),
                 "collision_live_max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
                 "collision_live_sphere_position_m": live_sphere_position,
+                "collision_beam_contact_enabled": 1.0 if bool(options.collision_beam_contact_enabled) else 0.0,
+                "collision_damage_enabled": 1.0 if bool(options.collision_damage_enabled) else 0.0,
+                "collision_material_nonlinear_enabled": 1.0 if bool(options.collision_material_nonlinear_enabled) else 0.0,
+                "collision_nonlinear_kinematics": str(options.collision_nonlinear_kinematics),
             },
             "max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
         }
@@ -9400,16 +9410,22 @@ class RuntimeFEMWindow:
                 min_b + (max_b - min_b) * index / circumferential_bays
                 for index in range(circumferential_bays + 1)
             ]
-        elif geometry.get("has_stiffener"):
-            spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
-            if spacing > 0.0:
-                b_breaks = [min_b]
-                count = int((max_b - min_b) / spacing) + 1
-                for index in range(count):
-                    coordinate = min_b + index * spacing
-                    if min_b < coordinate < max_b:
-                        b_breaks.append(coordinate)
-                b_breaks.append(max_b)
+        else:
+            if geometry.get("has_girder"):
+                girder_spacing = float(geometry.get("girder_spacing_m") or 0.0)
+                if girder_spacing > 0.0:
+                    for pos in representation_geometry.centered_member_positions(
+                            max_a - min_a, girder_spacing, fallback_midpoint=True
+                    ):
+                        a_breaks.append(min_a + pos)
+
+            if geometry.get("has_stiffener"):
+                stiffener_spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
+                if stiffener_spacing > 0.0:
+                    for pos in representation_geometry.centered_member_positions(
+                            max_b - min_b, stiffener_spacing, fallback_midpoint=True
+                    ):
+                        b_breaks.append(min_b + pos)
 
         a_breaks = sorted(set(a_breaks))
         b_breaks = sorted(set(b_breaks))
@@ -9636,7 +9652,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--example",
         choices=("girder_panel", "cylinder"),
-        default="cylinder",
+        default="girder_panel",
         help="Standalone example to open. Default is the flat stiffened girder panel.",
     )
     args = parser.parse_args()

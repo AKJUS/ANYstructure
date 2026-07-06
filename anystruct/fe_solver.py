@@ -4315,6 +4315,15 @@ def _apply_material_curve_to_model(model, curve: object | None, properties: dict
         material.elastic_modulus = float(properties.get("E_pa", material.elastic_modulus))
         material.yield_stress = float(properties.get("sigma_yield", material.yield_stress))
 
+    for element in getattr(model.mesh, "elements", {}).values():
+        if element.__class__.__name__ in {"BeamElement", "QuadraticBeamElement"}:
+            if not hasattr(element, "cross_section") or element.cross_section is None:
+                element.cross_section = {}
+            if isinstance(element.cross_section, dict):
+                element.cross_section["fiber_plasticity"] = True
+            if hasattr(element, "_fiber_plasticity"):
+                element._fiber_plasticity = True
+
 
 def _shell_element_ids(model) -> tuple[int, ...]:
     ids: list[int] = []
@@ -6665,6 +6674,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                     load_case,
                     imperfection=selected_imperfection,
                     config=workflow_config,
+                    status_callback=status_callback,
                 )
                 nonlinear_static_result = capacity_workflow_result.nonlinear_result
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
@@ -6734,6 +6744,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         arc_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         num_layers=_nonlinear_layer_count(config.nonlinear_layers),
+                        status_callback=status_callback,
                     )
                 else:
                     nonlinear_resource_config = _resource_config(config, generated_geometry, auto_assembly=True)
@@ -6749,6 +6760,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         resource_config=nonlinear_resource_config,
                         fracture_config=_runtime_fracture_config(config),
                         kinematics=static_kinematics,
+                        status_callback=status_callback,
                     )
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
                 _nl_info = nonlinear_static_result.info or {}

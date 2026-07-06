@@ -840,6 +840,7 @@ def solve_static_nonlinear(
     resource_config: Optional[ResourceConfig] = None,
     fracture_config: Optional[FractureConfig] = None,
     kinematics: str = "von_karman",
+    status_callback: Optional[Callable[[str], None]] = None,
 ) -> NonlinearStaticResult:
     """Incremental nonlinear static solve with adaptive load stepping.
 
@@ -1033,6 +1034,8 @@ def solve_static_nonlinear(
         residual_norm = float(np.linalg.norm(residual))
 
         for iteration in range(1, max_iterations + 1):
+            if status_callback:
+                status_callback(f"\r  Step {step_index}/{num_steps}, Iteration {iteration}: Res {residual_norm:.2e}")
             total_iterations += 1
             if residual_norm <= tolerance * reference:
                 return True, q_trial, trial_states, residual_norm, iteration, None

@@ -2074,6 +2074,137 @@ class Tkinter3DCanvas(tk.Frame):
     def set_iso_view(self) -> None:
         self.set_view(-45.0, 25.0)
 
+    def add_rectangular_plate(
+        self,
+        x_start: float,
+        x_end: float,
+        y_start: float,
+        y_end: float,
+        z: float = 0.0,
+        color: str = "gray",
+        outline: str = "black",
+        stipple: str = "",
+        layer: int = 5,
+        back_color: str = "",
+        nx: int = 12,
+        ny: int = 12,
+    ) -> None:
+        dx = (x_end - x_start) / nx
+        dy = (y_end - y_start) / ny
+        for i in range(nx):
+            for j in range(ny):
+                x0 = x_start + i * dx
+                x1 = x0 + dx
+                y0 = y_start + j * dy
+                y1 = y0 + dy
+                self.add_polygon(
+                    vertices=[
+                        Point3D(x0, y0, z),
+                        Point3D(x1, y0, z),
+                        Point3D(x1, y1, z),
+                        Point3D(x0, y1, z),
+                    ],
+                    color=color,
+                    outline=outline,
+                    stipple=stipple,
+                    layer=layer,
+                    back_color=back_color,
+                )
+
+    def add_flat_stiffener(
+        self,
+        x_start: float,
+        x_end: float,
+        y: float,
+        z_base: float,
+        hw: float,
+        b: float,
+        color: str = "gray",
+        outline: str = "black",
+        stipple: str = "",
+        layer_web: int = 12,
+        layer_flange: int = 13,
+        nx: int = 12,
+    ) -> None:
+        dx = (x_end - x_start) / nx
+        for i in range(nx):
+            x0 = x_start + i * dx
+            x1 = x0 + dx
+            # Web
+            self.add_polygon(
+                vertices=[
+                    Point3D(x0, y, z_base),
+                    Point3D(x1, y, z_base),
+                    Point3D(x1, y, z_base + hw),
+                    Point3D(x0, y, z_base + hw),
+                ],
+                color=color,
+                outline=outline,
+                stipple=stipple,
+                layer=layer_web,
+            )
+            # Flange
+            if b > 0.0:
+                self.add_polygon(
+                    vertices=[
+                        Point3D(x0, y - 0.5 * b, z_base + hw),
+                        Point3D(x1, y - 0.5 * b, z_base + hw),
+                        Point3D(x1, y + 0.5 * b, z_base + hw),
+                        Point3D(x0, y + 0.5 * b, z_base + hw),
+                    ],
+                    color=color,
+                    outline=outline,
+                    stipple=stipple,
+                    layer=layer_flange,
+                )
+
+    def add_flat_girder(
+        self,
+        x: float,
+        y_start: float,
+        y_end: float,
+        z_base: float,
+        ghw: float,
+        gb: float,
+        color: str = "gray",
+        outline: str = "black",
+        stipple: str = "",
+        layer_web: int = 12,
+        layer_flange: int = 13,
+        ny: int = 12,
+    ) -> None:
+        dy = (y_end - y_start) / ny
+        for j in range(ny):
+            y0 = y_start + j * dy
+            y1 = y0 + dy
+            # Web
+            self.add_polygon(
+                vertices=[
+                    Point3D(x, y0, z_base),
+                    Point3D(x, y1, z_base),
+                    Point3D(x, y1, z_base + ghw),
+                    Point3D(x, y0, z_base + ghw),
+                ],
+                color=color,
+                outline=outline,
+                stipple=stipple,
+                layer=layer_web,
+            )
+            # Flange
+            if gb > 0.0:
+                self.add_polygon(
+                    vertices=[
+                        Point3D(x - 0.5 * gb, y0, z_base + ghw),
+                        Point3D(x - 0.5 * gb, y1, z_base + ghw),
+                        Point3D(x + 0.5 * gb, y1, z_base + ghw),
+                        Point3D(x + 0.5 * gb, y0, z_base + ghw),
+                    ],
+                    color=color,
+                    outline=outline,
+                    stipple=stipple,
+                    layer=layer_flange,
+                )
+
     def set_top_view(self) -> None:
         self.set_view(-90.0, 89.0)
 
@@ -2257,6 +2388,150 @@ def populate_stiffened_cylinder(canvas_3d: Tkinter3DCanvas) -> None:
     canvas_3d.after_idle(canvas_3d.fit_to_scene)
 
 
+def populate_stiffened_plate(canvas_3d: Tkinter3DCanvas) -> None:
+    length = 4.0
+    width = 4.0
+
+    # Base plate
+    canvas_3d.add_rectangular_plate(
+        x_start=-length/2, x_end=length/2,
+        y_start=-width/2, y_end=width/2,
+        z=0.0,
+        color="#d8e2ea",
+        outline="#708090",
+        stipple="gray50",
+    )
+
+    # Stiffeners along X
+    num_stiffeners = 5
+    for k in range(num_stiffeners):
+        y = -width/2 + (k + 1) * width / (num_stiffeners + 1)
+        canvas_3d.add_flat_stiffener(
+            x_start=-length/2, x_end=length/2,
+            y=y,
+            z_base=0.0,
+            hw=0.15,
+            b=0.10,
+            color="#a0a0ff",
+            outline="#404080",
+        )
+
+    # Girders along Y
+    num_girders = 1
+    for k in range(num_girders):
+        x = 0.0
+        canvas_3d.add_flat_girder(
+            x=x,
+            y_start=-width/2, y_end=width/2,
+            z_base=0.0,
+            ghw=0.3,
+            gb=0.2,
+            color="#ffa0a0",
+            outline="#804040",
+        )
+    canvas_3d.after_idle(canvas_3d.fit_to_scene)
+
+
+def populate_fe_gui_cylinder(canvas_3d: Tkinter3DCanvas) -> None:
+    cylinder_radius = 2.0
+    cylinder_height = 4.0
+
+    canvas_3d.add_cylinder(
+        radius=cylinder_radius,
+        height=cylinder_height,
+        center=Point3D(0.0, 0.0, 0.0),
+        color="#1f77b4",
+        outline="black",
+        segments=48,
+        height_segments=24,
+        capped=False,
+        opacity=0.78,
+        show_backfaces=True,
+    )
+
+    number_of_longitudinals = 8
+    for index in range(number_of_longitudinals):
+        angle = 2.0 * math.pi * index / number_of_longitudinals
+        canvas_3d.add_longitudinal_stiffener(
+            radius=cylinder_radius,
+            height=cylinder_height,
+            angle=angle,
+            web_height=0.15,
+            web_thickness=0.01,
+            flange_width=0.10,
+            flange_thickness=0.02,
+            color="#2ca02c",
+            outline="black",
+            segments=4,
+            height_segments=16,
+            inside=True,
+        )
+
+    number_of_rings = 4
+    for index in range(number_of_rings):
+        z_position = (
+            -cylinder_height / 2.0
+            + (index + 1) * cylinder_height / (number_of_rings + 1)
+        )
+        canvas_3d.add_ring_stiffener(
+            radius=cylinder_radius,
+            z_position=z_position,
+            web_height=0.12,
+            web_thickness=0.02,
+            flange_width=0.08,
+            flange_thickness=0.015,
+            color="#d62728",
+            outline="black",
+            segments=48,
+            inside=True,
+        )
+    canvas_3d.after_idle(canvas_3d.fit_to_scene)
+
+
+def populate_fe_gui_plate(canvas_3d: Tkinter3DCanvas) -> None:
+    length = 4.0
+    width = 4.0
+
+    # Base plate
+    canvas_3d.add_rectangular_plate(
+        x_start=-length/2, x_end=length/2,
+        y_start=-width/2, y_end=width/2,
+        z=0.0,
+        color="#1f77b4",
+        outline="black",
+        stipple="gray75",
+    )
+
+    # Stiffeners along X
+    num_stiffeners = 5
+    for k in range(num_stiffeners):
+        y = -width/2 + (k + 1) * width / (num_stiffeners + 1)
+        canvas_3d.add_flat_stiffener(
+            x_start=-length/2, x_end=length/2,
+            y=y,
+            z_base=0.0,
+            hw=0.15,
+            b=0.10,
+            color="#2ca02c",
+            outline="black",
+        )
+
+    # Girders along Y
+    num_girders = 1
+    for k in range(num_girders):
+        x = 0.0
+        canvas_3d.add_flat_girder(
+            x=x,
+            y_start=-width/2, y_end=width/2,
+            z_base=0.0,
+            ghw=0.3,
+            gb=0.2,
+            color="#d62728",
+            outline="black",
+        )
+    canvas_3d.after_idle(canvas_3d.fit_to_scene)
+
+
 def _add_controls(parent: tk.Misc, canvas_3d: Tkinter3DCanvas) -> tk.Frame:
     controls = tk.Frame(parent)
     controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 4))
@@ -2270,34 +2545,73 @@ def _add_controls(parent: tk.Misc, canvas_3d: Tkinter3DCanvas) -> tk.Frame:
 
     tk.Label(
         controls,
-        text="Right-drag to rotate; left-drag to move; use the wheel to zoom.",
+        text="Right-drag: rotate | Left-drag: move | Wheel: zoom",
     ).pack(side=tk.RIGHT, padx=6)
     return controls
+
+
+def _create_viewport(parent: tk.Misc, title: str, populate_func: Any) -> tk.Frame:
+    frame = tk.Frame(parent, bd=2, relief=tk.GROOVE)
+    
+    lbl = tk.Label(frame, text=title, font=("TkDefaultFont", 10, "bold"))
+    lbl.pack(side=tk.TOP, fill=tk.X, pady=2)
+    
+    canvas_3d = Tkinter3DCanvas(frame, width=400, height=300, bg="white")
+    _add_controls(frame, canvas_3d)
+    canvas_3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+    
+    populate_func(canvas_3d)
+    return frame
 
 
 def create_stiffened_cylinder_demo(root: tk.Misc) -> tk.Toplevel:
     """Open the demonstration in a child window."""
     demo_window = tk.Toplevel(root)
-    demo_window.title("Tkinter 3D - Stiffened Cylinder Demo")
-    demo_window.geometry("1120x800")
-    demo_window.minsize(500, 400)
+    demo_window.title("Tkinter 3D - Four Viewports Demo")
+    demo_window.geometry("1400x1000")
+    demo_window.minsize(800, 600)
 
-    canvas_3d = Tkinter3DCanvas(demo_window, width=1120, height=720, bg="white")
-    _add_controls(demo_window, canvas_3d)
-    canvas_3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
-    populate_stiffened_cylinder(canvas_3d)
+    demo_window.rowconfigure(0, weight=1)
+    demo_window.rowconfigure(1, weight=1)
+    demo_window.columnconfigure(0, weight=1)
+    demo_window.columnconfigure(1, weight=1)
+
+    v1 = _create_viewport(demo_window, "Present cylinder", populate_stiffened_cylinder)
+    v1.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    v2 = _create_viewport(demo_window, "Stiffened plate (same style)", populate_stiffened_plate)
+    v2.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+
+    v3 = _create_viewport(demo_window, "Cylinder (fe-gui style)", populate_fe_gui_cylinder)
+    v3.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+
+    v4 = _create_viewport(demo_window, "Stiffened plate (fe-gui style)", populate_fe_gui_plate)
+    v4.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
+
     return demo_window
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Tkinter 3D - Stiffened Cylinder Demo")
-    root.geometry("1120x800")
-    root.minsize(500, 400)
+    root.title("Tkinter 3D - Four Viewports Demo")
+    root.geometry("1400x1000")
+    root.minsize(800, 600)
 
-    canvas_3d = Tkinter3DCanvas(root, width=1120, height=720, bg="white")
-    _add_controls(root, canvas_3d)
-    canvas_3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
-    populate_stiffened_cylinder(canvas_3d)
+    root.rowconfigure(0, weight=1)
+    root.rowconfigure(1, weight=1)
+    root.columnconfigure(0, weight=1)
+    root.columnconfigure(1, weight=1)
+
+    v1 = _create_viewport(root, "Present cylinder", populate_stiffened_cylinder)
+    v1.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    v2 = _create_viewport(root, "Stiffened plate (same style)", populate_stiffened_plate)
+    v2.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+
+    v3 = _create_viewport(root, "Cylinder (fe-gui style)", populate_fe_gui_cylinder)
+    v3.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+
+    v4 = _create_viewport(root, "Stiffened plate (fe-gui style)", populate_fe_gui_plate)
+    v4.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
 
     root.mainloop()
