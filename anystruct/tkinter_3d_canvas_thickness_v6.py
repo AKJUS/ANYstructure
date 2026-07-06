@@ -362,6 +362,15 @@ class Tkinter3DCanvas(tk.Frame):
         # World-space primitive caches. Camera movement does not invalidate them.
         self._world_primitive_cache: Dict[str, List[Dict[str, Any]]] = {}
 
+        # Animation Cache Fields
+        self._animation_cache: List[List[Tuple[str, Tuple[float, ...], Dict[str, Any]]]] = []
+        self._is_capturing_animation = False
+        self._current_animation_frame: List[Tuple[str, Tuple[float, ...], Dict[str, Any]]] = []
+        self._is_playing_animation = False
+        self._animation_frame_index = 0
+        self._animation_after_id: Optional[str] = None
+        self._animation_fps = 30
+
         self.canvas.bind("<Configure>", self._on_resize, add="+")
         self.canvas.bind("<ButtonPress-1>", lambda event: self._on_mouse_down(event, "pan"), add="+")
         self.canvas.bind("<B1-Motion>", self._on_mouse_drag, add="+")
@@ -691,6 +700,9 @@ class Tkinter3DCanvas(tk.Frame):
         self._request_redraw()
 
     def _on_mouse_drag(self, event: tk.Event) -> None:
+        if self._is_playing_animation:
+            self.stop_animation()
+            
         if not self._is_dragging:
             return
 
@@ -710,6 +722,9 @@ class Tkinter3DCanvas(tk.Frame):
         self._request_redraw(interactive=True)
 
     def _on_mouse_wheel(self, event: tk.Event) -> str:
+        if self._is_playing_animation:
+            self.stop_animation()
+            
         event_num = getattr(event, "num", None)
         event_delta = getattr(event, "delta", 0)
 
@@ -769,6 +784,56 @@ class Tkinter3DCanvas(tk.Frame):
     # Scene lifecycle and cache management
     # ------------------------------------------------------------------
 
+    def begin_animation_cache(self) -> None:
+        self.stop_animation()
+        self._animation_cache.clear()
+
+    def capture_animation_frame(self) -> None:
+        self._is_capturing_animation = True
+        self._current_animation_frame = []
+        self.redraw()
+        self._animation_cache.append(self._current_animation_frame)
+        self._current_animation_frame = []
+        self._is_capturing_animation = False
+
+    def play_animation(self, fps: int = 30) -> None:
+        if not self._animation_cache:
+            return
+        self.stop_animation()
+        self._animation_fps = max(1, fps)
+        self._is_playing_animation = True
+        self._animation_frame_index = 0
+        self._animation_tick()
+
+    def stop_animation(self) -> None:
+        self._is_playing_animation = False
+        if self._animation_after_id is not None:
+            self.after_cancel(self._animation_after_id)
+            self._animation_after_id = None
+        # Restore normal view
+        self._request_redraw(interactive=False)
+
+    def _animation_tick(self) -> None:
+        if not self._is_playing_animation or not self._animation_cache:
+            return
+        
+        frame = self._animation_cache[self._animation_frame_index]
+        self._clear_canvas_only()
+        for kind, coords, kwargs in frame:
+            if kind == "polygon":
+                self.canvas.create_polygon(*coords, **kwargs)
+            elif kind == "line":
+                self.canvas.create_line(*coords, **kwargs)
+            elif kind == "text":
+                self.canvas.create_text(*coords, **kwargs)
+
+        self._draw_thickness_legend()
+        self._draw_axis_indicator()
+
+        self._animation_frame_index = (self._animation_frame_index + 1) % len(self._animation_cache)
+        delay_ms = max(1, int(1000.0 / self._animation_fps))
+        self._animation_after_id = self.after(delay_ms, self._animation_tick)
+
     def _invalidate_geometry_cache(self) -> None:
         self._world_primitive_cache.clear()
 
@@ -789,7 +854,8 @@ class Tkinter3DCanvas(tk.Frame):
 
         self.width = max(1, self.canvas.winfo_width())
         self.height = max(1, self.canvas.winfo_height())
-        self._clear_canvas_only()
+        if not self._is_capturing_animation:
+            self._clear_canvas_only()
 
         interactive = self._interactive_render
         quality = "fast" if interactive else "full"
@@ -954,54 +1020,55 @@ class Tkinter3DCanvas(tk.Frame):
         # Layer is only a near-coplanar tie-breaker.  The old far/near-based
         # bias was large enough to draw internal members through an opaque shell.
         scene_scale = max(float(self.camera.distance), 1.0)
-        layer_epsilon = max(1.0e-9, scene_scale * 1.0e-7)
+        layer_epsilon = max(1.0e-9, scene_scale * 1.0e-6)
         render_items.sort(key=lambda item: (
             item[0],
             -(item[1] - item[2] * layer_epsilon),
             item[2],
         ))
 
+        target_list = self._current_animation_frame if self._is_capturing_animation else None
+
         for _phase, _depth, _layer, primitive, coords in render_items:
             if primitive["kind"] == "line":
-                self.canvas.create_line(
-                    *coords,
-                    fill=primitive["color"],
-                    width=primitive["width"],
-                )
+                kwargs = {
+                    "fill": primitive["color"],
+                    "width": primitive["width"],
+                }
+                if target_list is not None:
+                    target_list.append(("line", coords, kwargs))
+                else:
+                    self.canvas.create_line(*coords, **kwargs)
             elif primitive["kind"] == "text":
-                self.canvas.create_text(
-                    *coords,
-                    text=primitive["text"],
-                    fill=primitive["color"],
-                    font=primitive["font"],
-                    anchor=primitive["anchor"],
-                )
+                kwargs = {
+                    "text": primitive["text"],
+                    "fill": primitive["color"],
+                    "font": primitive["font"],
+                    "anchor": primitive["anchor"],
+                }
+                if target_list is not None:
+                    target_list.append(("text", coords, kwargs))
+                else:
+                    self.canvas.create_text(*coords, **kwargs)
             else:
                 outline = "" if interactive and primitive.get("fast_no_outline") else primitive["outline"]
                 fill_color = primitive["color"]
                 if not primitive.get("_front_facing", True):
                     fill_color = primitive.get("back_color") or fill_color
                 stipple = "" if interactive else primitive.get("stipple", "")
+                kwargs = {
+                    "fill": fill_color,
+                    "outline": outline,
+                    "width": primitive["width"],
+                    "stipple": stipple,
+                }
                 if primitive.get("tags"):
-                    kwargs = {
-                        "fill": fill_color,
-                        "outline": outline,
-                        "width": primitive["width"],
-                        "stipple": stipple,
-                        "tags": primitive.get("tags"),
-                    }
-                    self.canvas.create_polygon(
-                        *coords,
-                        **kwargs
-                    )
+                    kwargs["tags"] = primitive.get("tags")
+                
+                if target_list is not None:
+                    target_list.append(("polygon", coords, kwargs))
                 else:
-                    self.canvas.create_polygon(
-                        *coords,
-                        fill=fill_color,
-                        outline=outline,
-                        width=primitive["width"],
-                        stipple=stipple,
-                    )
+                    self.canvas.create_polygon(*coords, **kwargs)
 
         overlay_items.sort(key=lambda item: (
             item[0],
@@ -1010,23 +1077,30 @@ class Tkinter3DCanvas(tk.Frame):
         ))
         for _phase, _depth, _layer, primitive, coords in overlay_items:
             if primitive["kind"] == "line":
-                self.canvas.create_line(
-                    *coords,
-                    fill=primitive["color"],
-                    width=primitive["width"],
-                )
+                kwargs = {
+                    "fill": primitive["color"],
+                    "width": primitive["width"],
+                }
+                if target_list is not None:
+                    target_list.append(("line", coords, kwargs))
+                else:
+                    self.canvas.create_line(*coords, **kwargs)
             elif primitive["kind"] == "text":
-                self.canvas.create_text(
-                    *coords,
-                    text=primitive["text"],
-                    fill=primitive["color"],
-                    font=primitive["font"],
-                    anchor=primitive["anchor"],
-                )
+                kwargs = {
+                    "text": primitive["text"],
+                    "fill": primitive["color"],
+                    "font": primitive["font"],
+                    "anchor": primitive["anchor"],
+                }
+                if target_list is not None:
+                    target_list.append(("text", coords, kwargs))
+                else:
+                    self.canvas.create_text(*coords, **kwargs)
 
-        if not interactive:
+        if not interactive and not self._is_capturing_animation:
             self._draw_thickness_legend()
-        self._draw_axis_indicator()
+        if not self._is_capturing_animation:
+            self._draw_axis_indicator()
 
     def _get_world_primitives(self, quality: str) -> List[Dict[str, Any]]:
         cached = self._world_primitive_cache.get(quality)
@@ -2086,8 +2160,8 @@ class Tkinter3DCanvas(tk.Frame):
         stipple: str = "",
         layer: int = 5,
         back_color: str = "",
-        nx: int = 12,
-        ny: int = 12,
+        nx: int = 24,
+        ny: int = 24,
     ) -> None:
         dx = (x_end - x_start) / nx
         dy = (y_end - y_start) / ny
@@ -2124,7 +2198,7 @@ class Tkinter3DCanvas(tk.Frame):
         stipple: str = "",
         layer_web: int = 12,
         layer_flange: int = 13,
-        nx: int = 12,
+        nx: int = 24,
     ) -> None:
         dx = (x_end - x_start) / nx
         for i in range(nx):
@@ -2169,9 +2243,9 @@ class Tkinter3DCanvas(tk.Frame):
         color: str = "gray",
         outline: str = "black",
         stipple: str = "",
-        layer_web: int = 12,
-        layer_flange: int = 13,
-        ny: int = 12,
+        layer_web: int = 14,
+        layer_flange: int = 15,
+        ny: int = 24,
     ) -> None:
         dy = (y_end - y_start) / ny
         for j in range(ny):

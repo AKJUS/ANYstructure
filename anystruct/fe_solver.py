@@ -183,6 +183,7 @@ class LightweightFEMConfig:
     imperfection_amplitude_m: float = 0.0
     imperfection_wave_a: int = 1
     imperfection_wave_b: int = 1
+    imperfection_mode_shapes_json: str = "[]"
     runtime_solver: str = "stepwise"
     allow_unbalanced_free_free: bool = False
     buckling_shift_load_factor: float = 0.0
@@ -260,6 +261,7 @@ class LightweightFEMResult:
     stress_p95_pa: float
     displacement_max_m: float
     buckling_factors: tuple[float, ...] = field(default_factory=tuple)
+    buckling_modes: list = field(default_factory=list)
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
     mesh_info: dict[str, int] = field(default_factory=dict)
     prestress_summary: dict[str, float] = field(default_factory=dict)
@@ -2026,7 +2028,8 @@ def _add_cylinder_member_shell_model(
         node_id,
         z_breaks: list[float],
         cols: int,
-        radius: float,
+        reference_radius: float,
+        radius_at_z,
         section: dict[str, float],
         role: str,
         index: int,
@@ -2047,14 +2050,13 @@ def _add_cylinder_member_shell_model(
         if arc_breaks and len(arc_breaks) >= 2:
             index = int(col_index)
             if index >= cols:
-                return float(arc_breaks[-1]) / max(radius, 1.0e-9)
-            return float(arc_breaks[index % max(cols, 1)]) / max(radius, 1.0e-9)
+                return float(arc_breaks[-1]) / max(reference_radius, 1.0e-9)
+            return float(arc_breaks[index % max(cols, 1)]) / max(reference_radius, 1.0e-9)
         return 2.0 * math.pi * int(col_index) / max(cols, 1)
 
     if role == "stiffener":
         col = int(index) % max(cols, 1)
         theta = theta_at_col(col)
-        dtheta = 0.5 * flange_width / inner_radius if inner_radius > 0.0 else 0.0
         for row in range(len(z_breaks) - 1):
             z0 = float(z_breaks[row])
             z1 = float(z_breaks[row + 1])
@@ -2072,7 +2074,8 @@ def _add_cylinder_member_shell_model(
             def web_node(z: float, base_node: int, depth: float) -> int:
                 if abs(float(depth)) <= 1.0e-12:
                     return base_node
-                return _add_cached_node(nodes, node_cache, _cylinder_point(max(radius - float(depth), 1.0e-6), theta, z))
+                current_radius = radius_at_z(z)
+                return _add_cached_node(nodes, node_cache, _cylinder_point(max(current_radius - float(depth), 1.0e-6), theta, z))
 
             for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
                 outer0 = web_node(z0, base0, outer_depth)
@@ -2086,16 +2089,22 @@ def _add_cylinder_member_shell_model(
                 beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
                 beam_id += 1
             elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-                left0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta - dtheta, z0))
-                left1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta - dtheta, z1))
-                right0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta + dtheta, z0))
-                right1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_radius, theta + dtheta, z1))
+                inner_r0 = max(radius_at_z(z0) - web_height, 1.0e-6)
+                inner_r1 = max(radius_at_z(z1) - web_height, 1.0e-6)
+                dtheta0 = 0.5 * flange_width / inner_r0 if inner_r0 > 0.0 else 0.0
+                dtheta1 = 0.5 * flange_width / inner_r1 if inner_r1 > 0.0 else 0.0
+                left0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_r0, theta - dtheta0, z0))
+                left1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_r1, theta - dtheta1, z1))
+                right0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_r0, theta + dtheta0, z0))
+                right1 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_r1, theta + dtheta1, z1))
                 element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
                 element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
         return element_id, beam_id
 
     row = int(index)
     z = float(z_breaks[row])
+    current_radius = radius_at_z(z)
+    inner_radius = max(current_radius - web_height, 1.0e-6)
     for col in range(cols):
         theta0 = theta_at_col(col)
         theta1 = theta_at_col(col + 1)
@@ -2113,7 +2122,7 @@ def _add_cylinder_member_shell_model(
         def web_node(theta: float, base_node: int, depth: float) -> int:
             if abs(float(depth)) <= 1.0e-12:
                 return base_node
-            return _add_cached_node(nodes, node_cache, _cylinder_point(max(radius - float(depth), 1.0e-6), theta, z))
+            return _add_cached_node(nodes, node_cache, _cylinder_point(max(current_radius - float(depth), 1.0e-6), theta, z))
 
         for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
             outer0 = web_node(theta0, base0, outer_depth)
@@ -2537,8 +2546,25 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     orientation = config.member_orientation
     if _normalized_choice(orientation) == "auto":
         orientation = "radial"
+    is_cone = geometry.get("is_cone", False)
+    cone_r1 = _positive(geometry.get("cone_r1_m", 1.0), 1.0)
+    cone_r2 = _positive(geometry.get("cone_r2_m", 1.0), 1.0)
+    cone_length = _positive(geometry.get("cone_length_m", 1.0), 1.0)
+
     radius = _positive(geometry.get("radius_m", 1.0), 1.0)
     length = _positive(geometry.get("length_m", 1.0), 1.0)
+    
+    if is_cone:
+        length = cone_length
+        radius = (cone_r1 + cone_r2) / 2.0  # Equivalent reference radius
+        
+    def radius_at_z(z: float) -> float:
+        if not is_cone:
+            return radius
+        if length <= 1.0e-9:
+            return cone_r1
+        return cone_r1 + (cone_r2 - cone_r1) * (z / length)
+
     thickness = _positive(geometry.get("thickness_m", 0.01), 0.01)
     circumference = 2.0 * math.pi * radius
     stiffener_spacing = _positive_spacing(geometry.get("stiffener_spacing_m", 0.0))
@@ -2625,9 +2651,10 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     nodes = []
     for row in range(rows):
         z = z_breaks[row]
+        current_radius = radius_at_z(z)
         for col in range(cols):
             theta = float(arc_breaks[col]) / max(radius, 1.0e-9)
-            nodes.append({"id": node_id(row, col), "coords": [radius * math.cos(theta), radius * math.sin(theta), z]})
+            nodes.append({"id": node_id(row, col), "coords": [current_radius * math.cos(theta), current_radius * math.sin(theta), z]})
 
     shells = []
     element_id = 1
@@ -2711,6 +2738,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     z_breaks,
                     cols,
                     radius,
+                    radius_at_z,
                     section,
                     "stiffener",
                     col,
@@ -2751,6 +2779,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     z_breaks,
                     cols,
                     radius,
+                    radius_at_z,
                     section,
                     "girder",
                     row,
@@ -6264,7 +6293,86 @@ def _add_cylinder_buckling_gauge(model, generated_geometry: dict) -> bool:
             "buckling_gauge_top_lid",
             [top_center],
             {"ux": 0.0, "uy": 0.0},))
-def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_callback=None, imported_fem_model=None) -> LightweightFEMResult:
+def apply_mode_shape_imperfections(generated_geometry: dict, config: LightweightFEMConfig, geometry: dict) -> dict:
+    """Build mesh, run linear buckling, extract mode shapes, and perturb the mesh."""
+    import copy
+    import json
+    import numpy as np
+    import dataclasses
+
+    try:
+        mode_factors = json.loads(config.imperfection_mode_shapes_json)
+    except Exception:
+        mode_factors = []
+
+    if not mode_factors or _full_backend is None:
+        return generated_geometry
+
+    max_mode = max(item["mode"] for item in mode_factors)
+    temp_config = dataclasses.replace(config, num_buckling_modes=max(int(config.num_buckling_modes), max_mode))
+    
+    result = run_production_fem(geometry, temp_config, precomputed_generated_geometry=generated_geometry)
+    
+    if not result.buckling_modes:
+        raise RuntimeError("Buckling analysis failed to extract mode shapes. Check boundary conditions and loads.")
+
+    perturbed_geometry = copy.deepcopy(generated_geometry)
+    
+    first_mode = result.buckling_modes[0]
+    total_disp = np.zeros_like(first_mode.mode_shape)
+    
+    for item in mode_factors:
+        mode_num = int(item["mode"])
+        factor = float(item["factor"])
+        
+        mode = next((m for m in result.buckling_modes if m.mode_number == mode_num), None)
+        if mode is None:
+            raise RuntimeError(f"Mode {mode_num} was not found in buckling results.")
+            
+        total_disp += np.asarray(mode.mode_shape, dtype=float) * factor
+
+    effective_elastic_modulus = float(config.elastic_modulus_pa)
+    effective_yield_stress = float(config.yield_stress_pa)
+    effective_pressure = _effective_pressure_pa(config)
+    symmetric_pressure = effective_pressure
+    if _custom_pressure_uses_selected_patches(config):
+        symmetric_pressure = float(config.pressure_pa or 0.0) if _include_imported_loads(config) else 0.0
+
+    backend_config = _full_backend.AnyStructureFEMConfig(
+        pressure_pa=abs(float(symmetric_pressure)),
+        pressure_sign=_pressure_sign(config),
+        load_scale=float(config.load_scale),
+        num_buckling_modes=int(config.num_buckling_modes),
+        solver_type=_solver_type(config),
+        stress_percentile=min(max(float(config.stress_percentile), 0.0), 100.0),
+        add_inplane_edge_loads=False,
+        auto_idealize_member_plates_as_beams=not _member_webs_as_shells(config),
+        exclude_idealized_member_plates=not _member_webs_as_shells(config),
+        require_idealized_member_beams=False,
+        elastic_modulus=effective_elastic_modulus,
+        poisson_ratio=config.poisson_ratio,
+        yield_stress=effective_yield_stress,
+    )
+    
+    model = _full_backend.build_fe_model_from_generated_geometry(perturbed_geometry, backend_config)
+
+    for n in perturbed_geometry.get("nodes", []):
+        nid = n["id"]
+        backend_node = model.mesh.nodes.get(nid)
+        if backend_node is None:
+            continue
+        dofs = backend_node.dofs
+        dx = float(total_disp[dofs[0]])
+        dy = float(total_disp[dofs[1]])
+        dz = float(total_disp[dofs[2]])
+        
+        n["coords"][0] += dx
+        n["coords"][1] += dy
+        n["coords"][2] += dz
+
+    return perturbed_geometry
+
+def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_callback=None, imported_fem_model=None, precomputed_generated_geometry=None) -> LightweightFEMResult:
     """Run the vendored production FE mesh backend for generated ANYstructure geometry."""
 
     if _full_backend is None or _backend_solve_linear is None or _backend_solve_buckling is None or _backend_load_case_resultant is None:
@@ -6278,7 +6386,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         )
 
     if status_callback: status_callback("Building generated geometry...")
-    if imported_fem_model is not None:
+    if precomputed_generated_geometry is not None:
+        generated_geometry = precomputed_generated_geometry
+    elif imported_fem_model is not None:
         nodes = []
         for nid, n in imported_fem_model.mesh.nodes.items():
             nodes.append({"id": nid, "coords": list(n.coords())})

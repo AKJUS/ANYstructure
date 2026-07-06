@@ -212,6 +212,7 @@ class RuntimeFEMOptions:
     imperfection_amplitude_m: float = 0.0
     imperfection_wave_a: int = 1
     imperfection_wave_b: int = 1
+    imperfection_mode_shapes_json: str = "[]"
     runtime_solver: str = "stepwise"
     allow_unbalanced_free_free: bool = False
     buckling_shift_load_factor: float = 0.0
@@ -325,10 +326,10 @@ def _warmup_disabled() -> bool:
 
 
 def _summarize_kernel_warmup_report(
-    report: dict[str, Any],
-    shell_orders: tuple[str, ...],
-    *,
-    include_nonlinear_impact: bool = False,
+        report: dict[str, Any],
+        shell_orders: tuple[str, ...],
+        *,
+        include_nonlinear_impact: bool = False,
 ) -> dict[str, Any]:
     warmed = report.get("shell_orders") if isinstance(report, dict) else {}
     warmed = warmed if isinstance(warmed, dict) else {}
@@ -360,11 +361,11 @@ def fe_solver_kernel_warmup_status() -> dict[str, Any]:
 
 
 def start_fe_solver_kernel_warmup(
-    shell_orders: tuple[str, ...] = ("S4", "Q8", "Q8R"),
-    *,
-    background: bool = True,
-    status_callback=None,
-    include_nonlinear_impact: bool = False,
+        shell_orders: tuple[str, ...] = ("S4", "Q8", "Q8R"),
+        *,
+        background: bool = True,
+        status_callback=None,
+        include_nonlinear_impact: bool = False,
 ) -> dict[str, Any]:
     """Start optional FE backend kernel warmup once per process."""
 
@@ -406,9 +407,11 @@ def start_fe_solver_kernel_warmup(
         start = time.perf_counter()
         try:
             if status_callback is not None:
-                status_callback("Warming FE solver shell kernels" + (" and nonlinear impact kernels" if include_nonlinear_impact else "") + "...")
+                status_callback("Warming FE solver shell kernels" + (
+                    " and nonlinear impact kernels" if include_nonlinear_impact else "") + "...")
             report = fe_solver.warm_fe_solver_kernels(requested, include_nonlinear_impact=include_nonlinear_impact)
-            summary = _summarize_kernel_warmup_report(report, requested, include_nonlinear_impact=include_nonlinear_impact)
+            summary = _summarize_kernel_warmup_report(report, requested,
+                                                      include_nonlinear_impact=include_nonlinear_impact)
             summary["total_seconds"] = summary["total_seconds"] or float(time.perf_counter() - start)
             with _FE_KERNEL_WARMUP_LOCK:
                 _FE_KERNEL_WARMUP_STATE.update(summary)
@@ -762,11 +765,17 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
     shell = getattr(cyl_obj, "ShellObj", None)
     stiffener = getattr(cyl_obj, "LongStfObj", None)
     girder = getattr(cyl_obj, "RingFrameObj", None)
+    cone_r1 = _safe_float(_read_attr_or_call(shell, "cone_r1", default=None), 0.0)
+    cone_r2 = _safe_float(_read_attr_or_call(shell, "cone_r2", default=None), 0.0)
     return {
         "geometry": "cylinder",
         "radius_m": _safe_float(_read_attr_or_call(shell, "radius", default=None), 1.0),
         "length_m": _safe_float(_read_attr_or_call(shell, "length_of_shell", "tot_cyl_length", default=None), 1.0),
         "thickness_m": _safe_float(_read_attr_or_call(shell, "thk", default=None), 0.0),
+        "is_cone": bool(cone_r1 > 0.0 and cone_r2 > 0.0),
+        "cone_r1_m": cone_r1,
+        "cone_r2_m": cone_r2,
+        "cone_length_m": _safe_float(_read_attr_or_call(shell, "cone_length", default=None), 0.0),
         "has_stiffener": stiffener is not None,
         "has_girder": girder is not None,
         "stiffener_spacing_m": _safe_float(_read_attr_or_call(stiffener, "get_s", "spacing", "s", default=None), 0.0),
@@ -984,6 +993,7 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         imperfection_amplitude_m=options.imperfection_amplitude_m,
         imperfection_wave_a=options.imperfection_wave_a,
         imperfection_wave_b=options.imperfection_wave_b,
+        imperfection_mode_shapes_json=options.imperfection_mode_shapes_json,
         runtime_solver=options.runtime_solver,
         allow_unbalanced_free_free=options.allow_unbalanced_free_free,
         buckling_shift_load_factor=options.buckling_shift_load_factor,
@@ -1053,7 +1063,8 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
 
 
 def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions,
-                    status_callback=None, imported_fem_model=None) -> RuntimeFEMRunResult:
+                    status_callback=None, imported_fem_model=None,
+                    precomputed_generated_geometry=None) -> RuntimeFEMRunResult:
     """Run the ANYstructure-owned lightweight FEM solver."""
 
     geometry = runtime_geometry_summary(snapshot)
@@ -1070,11 +1081,14 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
     if options.custom_load_bc_enabled:
         effective_pressure += float(listed_pressure if custom_load_entries else options.custom_pressure_pa)
     if bool(options.collision_enabled) and bool(options.collision_material_nonlinear_enabled):
-        start_fe_solver_kernel_warmup((), background=False, status_callback=status_callback, include_nonlinear_impact=True)
+        start_fe_solver_kernel_warmup((), background=False, status_callback=status_callback,
+                                      include_nonlinear_impact=True)
 
     solver_config = _solver_config_from_options(options)
     if fe_solver.full_backend_available():
-        solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback, imported_fem_model=imported_fem_model)
+        solver_result = fe_solver.run_production_fem(geometry, solver_config, status_callback=status_callback,
+                                                     imported_fem_model=imported_fem_model,
+                                                     precomputed_generated_geometry=precomputed_generated_geometry)
         if solver_result.status in {"backend_unavailable", "invalid", "static_failed", "production_failed"}:
             fallback = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
             diagnostics.extend(solver_result.diagnostics)
@@ -1112,7 +1126,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "pressure_direction": pressure_side,
         "pressure_side": pressure_side,
         "axial_force_n": float(options.axial_force_n),
-        "acceleration_m_s2": [float(options.acceleration_x_m_s2), float(options.acceleration_y_m_s2), float(options.acceleration_z_m_s2)],
+        "acceleration_m_s2": [float(options.acceleration_x_m_s2), float(options.acceleration_y_m_s2),
+                              float(options.acceleration_z_m_s2)],
         "added_mass_kg": float(options.added_mass_kg),
         "added_mass_location": str(options.added_mass_location),
         "enforced_displacement_m": float(options.enforced_displacement_m),
@@ -1197,6 +1212,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "imperfection_amplitude_m": float(options.imperfection_amplitude_m),
         "imperfection_wave_a": int(options.imperfection_wave_a),
         "imperfection_wave_b": int(options.imperfection_wave_b),
+        "imperfection_mode_shapes_json": str(options.imperfection_mode_shapes_json),
         "runtime_solver": str(options.runtime_solver),
         "allow_unbalanced_free_free": bool(options.allow_unbalanced_free_free),
         "buckling_shift_load_factor": float(options.buckling_shift_load_factor),
@@ -1635,7 +1651,8 @@ def _plot_geometry_dimension_annotations(axis: Any, geometry: dict[str, Any], is
         x = 1.18 * radius
         y2 = 1.18 * radius
         axis.plot([x, x], [y2, y2], [0.0, length], color=color, linewidth=0.8, alpha=0.6)
-        axis.text(x, y2, 0.5 * length, "L " + _format_dimension(length), color=color, fontsize=8, ha="left", va="center")
+        axis.text(x, y2, 0.5 * length, "L " + _format_dimension(length), color=color, fontsize=8, ha="left",
+                  va="center")
         return
     length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
     width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
@@ -1646,8 +1663,10 @@ def _plot_geometry_dimension_annotations(axis: Any, geometry: dict[str, Any], is
     axis.text(-offset, 0.5 * width, 0.0, _format_dimension(width), color=color, fontsize=8, ha="right", va="center")
     height = _base_geometry_height_extent(geometry)
     if height > 0.0:
-        axis.plot([length + offset, length + offset], [width + offset, width + offset], [0.0, height], color=color, linewidth=0.8, alpha=0.6)
-        axis.text(length + offset, width + offset, 0.5 * height, _format_dimension(height), color=color, fontsize=8, ha="left", va="center")
+        axis.plot([length + offset, length + offset], [width + offset, width + offset], [0.0, height], color=color,
+                  linewidth=0.8, alpha=0.6)
+        axis.text(length + offset, width + offset, 0.5 * height, _format_dimension(height), color=color, fontsize=8,
+                  ha="left", va="center")
 
 
 def _buckling_mode_shapes(result: RuntimeFEMRunResult | None) -> list[dict[str, Any]]:
@@ -1748,14 +1767,15 @@ def _summary_uses_nonlinear_material(summary: dict[str, Any] | None) -> bool:
 
 
 def _include_member_component_in_color_range(
-    summary: dict[str, Any] | None,
-    component: str,
-    *,
-    is_mode: bool,
+        summary: dict[str, Any] | None,
+        component: str,
+        *,
+        is_mode: bool,
 ) -> bool:
     if is_mode or component.startswith("disp"):
         return True
-    if component in {"plastic_strain", "impact_damage", "impact_damage_utilization", "impact_damage_scale", "strain_x_membrane", "strain_y_membrane", "strain_xy_membrane"}:
+    if component in {"plastic_strain", "impact_damage", "impact_damage_utilization", "impact_damage_scale",
+                     "strain_x_membrane", "strain_y_membrane", "strain_xy_membrane"}:
         return False
     if component in {"stress_x_membrane_pa", "stress_y_membrane_pa", "stress_xy_membrane_pa"}:
         return False
@@ -2379,7 +2399,8 @@ def _plot_time_history(
         selected_element = probe_element_id
         if selected_element is None:
             for snapshot in snapshots:
-                surfaces = tuple((snapshot or {}).get("skin_shell_surfaces", ()) or ()) + tuple((snapshot or {}).get("shell_surfaces", ()) or ())
+                surfaces = tuple((snapshot or {}).get("skin_shell_surfaces", ()) or ()) + tuple(
+                    (snapshot or {}).get("shell_surfaces", ()) or ())
                 if surfaces:
                     try:
                         selected_element = int((surfaces[0] or {}).get("id"))
@@ -2390,7 +2411,8 @@ def _plot_time_history(
             values = []
             for snapshot in snapshots:
                 found = None
-                for surface in tuple((snapshot or {}).get("skin_shell_surfaces", ()) or ()) + tuple((snapshot or {}).get("shell_surfaces", ()) or ()):
+                for surface in tuple((snapshot or {}).get("skin_shell_surfaces", ()) or ()) + tuple(
+                        (snapshot or {}).get("shell_surfaces", ()) or ()):
                     try:
                         if int((surface or {}).get("id")) == int(selected_element):
                             found = _safe_float(((surface or {}).get("field_values", {}) or {}).get(component), 0.0)
@@ -2549,7 +2571,7 @@ def create_runtime_fem_mesh_preview_figure(generated_geometry: dict) -> Figure:
     axis.tick_params(labelsize=6)
     count = int(metrics.get("shell_element_count", len(shells)))
     if metrics:
-        title = f"{count} elements  |  {metrics.get('min_element_size_m', 0.0)*1000:.0f}-{metrics.get('max_element_size_m', 0.0)*1000:.0f} mm"
+        title = f"{count} elements  |  {metrics.get('min_element_size_m', 0.0) * 1000:.0f}-{metrics.get('max_element_size_m', 0.0) * 1000:.0f} mm"
     else:
         title = f"{count} elements"
     if adaptive.get("enabled"):
@@ -2682,7 +2704,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Point detail mesh: "
         + (
             "("
-            + ", ".join(str(round(_safe_float(value), 3)) for value in (summary.get("point_refinement_point_m") or (0.0, 0.0)))
+            + ", ".join(
+                str(round(_safe_float(value), 3)) for value in (summary.get("point_refinement_point_m") or (0.0, 0.0)))
             + ") m, radius "
             + str(round(_safe_float(summary.get("point_refinement_extent_m")), 4))
             + " m, growth "
@@ -2717,7 +2740,9 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Nonlinear solution control: " + str(summary.get("nonlinear_solution_control", "newton force control")),
         "Nonlinear static kinematics: " + str(summary.get("nonlinear_static_kinematics", "von_karman")),
         "Nonlinear convergence profile: " + str(summary.get("nonlinear_convergence_profile", "auto")),
-        "Nonlinear assembly threads: " + ("auto" if _safe_int(summary.get("nonlinear_assembly_threads"), 0) <= 0 else str(_safe_int(summary.get("nonlinear_assembly_threads"), 0))),
+        "Nonlinear assembly threads: " + (
+            "auto" if _safe_int(summary.get("nonlinear_assembly_threads"), 0) <= 0 else str(
+                _safe_int(summary.get("nonlinear_assembly_threads"), 0))),
         "Consistent beam mass: " + str(bool(summary.get("beam_consistent_mass_enabled"))),
         "Deformation plot scale: " + ("auto" if _safe_float(summary.get("deformation_scale"), 0.0) <= 0.0 else str(
             round(_safe_float(summary.get("deformation_scale")), 3))),
@@ -2735,9 +2760,11 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         lines.append("Allow unbalanced free-free loads: " + str(bool(summary.get("allow_unbalanced_free_free"))))
         lines.append("Custom pressure [Pa]: " + str(round(_safe_float(summary.get("custom_pressure_pa")), 3)))
         lines.append("Selected pressure panels: " + str(_safe_int(summary.get("custom_pressure_patch_count"), 0)))
-        lines.append("Selected pressure panel area [m2]: " + str(round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)))
+        lines.append("Selected pressure panel area [m2]: " + str(
+            round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)))
         lines.append("Selected edge segments: " + str(_safe_int(summary.get("custom_edge_segment_count"), 0)))
-        lines.append("Selected edge load [N/m]: " + str(round(_safe_float(summary.get("custom_selected_edge_load_n_per_m")), 3)))
+        lines.append(
+            "Selected edge load [N/m]: " + str(round(_safe_float(summary.get("custom_selected_edge_load_n_per_m")), 3)))
         if str(summary.get("geometry", "")).lower().startswith("cylinder"):
             lines.extend(
                 [
@@ -2791,7 +2818,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 "",
                 "Nonlinear static fracture input:",
                 " - plastic strain threshold: " + str(round(_safe_float(summary.get("fracture_strain_threshold")), 6)),
-                " - residual stiffness fraction: " + str(round(_safe_float(summary.get("fracture_residual_stiffness_fraction")), 10)),
+                " - residual stiffness fraction: " + str(
+                    round(_safe_float(summary.get("fracture_residual_stiffness_fraction")), 10)),
                 " - max deleted fraction: " + str(round(_safe_float(summary.get("fracture_max_deleted_fraction")), 6)),
                 " - min load factor: " + str(round(_safe_float(summary.get("fracture_min_load_factor")), 6)),
             ]
@@ -2812,8 +2840,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     else str(round(_safe_float(summary.get("custom_time_domain_result_interval_s")), 8))
                 ),
                 " - selected patches: " + str(_safe_int(summary.get("custom_pressure_patch_count"), 0)),
-                " - selected patch area [m2]: " + str(round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)),
-                " - include static load in time domain: " + str(bool(summary.get("custom_time_domain_include_static_load"))),
+                " - selected patch area [m2]: " + str(
+                    round(_safe_float(summary.get("custom_pressure_patch_area_m2")), 4)),
+                " - include static load in time domain: " + str(
+                    bool(summary.get("custom_time_domain_include_static_load"))),
             ]
         )
     if summary.get("collision_enabled"):
@@ -2826,8 +2856,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 + " kg / "
                 + str(round(_safe_float(summary.get("collision_radius_m")), 6))
                 + " m",
-                " - start [m]: " + ", ".join(str(round(_safe_float(v), 6)) for v in summary.get("collision_start_m", ()) or ()),
-                " - vector: " + ", ".join(str(round(_safe_float(v), 6)) for v in summary.get("collision_vector", ()) or ()),
+                " - start [m]: " + ", ".join(
+                    str(round(_safe_float(v), 6)) for v in summary.get("collision_start_m", ()) or ()),
+                " - vector: " + ", ".join(
+                    str(round(_safe_float(v), 6)) for v in summary.get("collision_vector", ()) or ()),
                 " - speed [m/s]: " + str(round(_safe_float(summary.get("collision_speed_mps")), 6)),
                 " - time setup: " + str(summary.get("collision_time_mode", "auto")),
                 " - total time / dt [s]: "
@@ -2892,10 +2924,12 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             lines.append(" - shell orders: " + orders)
         if _safe_float(summary.get("kernel_warmup_total_seconds"), 0.0) > 0.0:
             lines.append(" - time [s]: " + str(round(_safe_float(summary.get("kernel_warmup_total_seconds")), 3)))
-        lines.append(" - JIT: " + ("enabled" if bool(summary.get("kernel_warmup_jit_enabled")) else "disabled or unavailable"))
+        lines.append(
+            " - JIT: " + ("enabled" if bool(summary.get("kernel_warmup_jit_enabled")) else "disabled or unavailable"))
         if summary.get("kernel_warmup_parallel_threads") is not None:
             lines.append(" - threads: " + str(summary.get("kernel_warmup_parallel_threads")))
-        lines.append(" - max matrix difference: " + str(round(_safe_float(summary.get("kernel_warmup_max_matrix_difference_norm")), 12)))
+        lines.append(" - max matrix difference: " + str(
+            round(_safe_float(summary.get("kernel_warmup_max_matrix_difference_norm")), 12)))
     mesh_info = summary.get("mesh_info") or {}
     if mesh_info:
         lines.extend([
@@ -3124,7 +3158,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(" - mode mesh adequacy: " + str(prestress.get("buckling_mesh_status", "")))
                 lines.append(" - active elements per estimated half-wave: " + str(
                     round(_safe_float(prestress.get("buckling_mesh_elements_per_half_wave")), 3)))
-                lines.append(" - estimated half-waves: " + str(_safe_int(prestress.get("buckling_mesh_estimated_half_waves"), 0)))
+                lines.append(" - estimated half-waves: " + str(
+                    _safe_int(prestress.get("buckling_mesh_estimated_half_waves"), 0)))
         capacity_status = str(prestress.get("capacity_workflow_status", "") or "")
         if capacity_status:
             lines.extend(["", "ANYintelligent capacity workflow:"])
@@ -3142,21 +3177,25 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         nonlinear_static_status = str(prestress.get("nonlinear_static_status", "") or "")
         if nonlinear_static_status:
             lines.extend(["", "Incremental nonlinear static solve:"])
-            control_mode = str(prestress.get("nonlinear_static_control", summary.get("nonlinear_solution_control", "newton force control")))
+            control_mode = str(prestress.get("nonlinear_static_control",
+                                             summary.get("nonlinear_solution_control", "newton force control")))
             lines.append(" - control: " + control_mode)
-            lines.append(" - kinematics: " + str(prestress.get("nonlinear_static_kinematics", summary.get("nonlinear_static_kinematics", "von_karman"))))
+            lines.append(" - kinematics: " + str(
+                prestress.get("nonlinear_static_kinematics", summary.get("nonlinear_static_kinematics", "von_karman"))))
             lines.append(" - status: " + nonlinear_static_status.replace("_", " "))
             lines.append(" - last converged load factor: " + str(
                 round(_safe_float(prestress.get("nonlinear_static_load_factor")), 4)))
             if _safe_float(prestress.get("nonlinear_static_peak_load_factor"), 0.0) > 0.0:
-                lines.append(" - peak load factor: " + str(round(_safe_float(prestress.get("nonlinear_static_peak_load_factor")), 4)))
+                lines.append(" - peak load factor: " + str(
+                    round(_safe_float(prestress.get("nonlinear_static_peak_load_factor")), 4)))
             if _safe_float(prestress.get("nonlinear_static_peak_step"), -1.0) >= 0.0:
                 lines.append(" - peak step: " + str(_safe_int(prestress.get("nonlinear_static_peak_step"), 0)))
             lines.append(" - completed steps: " + str(_safe_int(prestress.get("nonlinear_static_steps"), 0)))
             lines.append(
                 " - Newton iterations: " + str(_safe_int(prestress.get("nonlinear_static_total_iterations"), 0)))
             if _safe_float(prestress.get("nonlinear_static_assembly_threads"), 0.0) > 0.0:
-                lines.append(" - resolved assembly threads: " + str(_safe_int(prestress.get("nonlinear_static_assembly_threads"), 0)))
+                lines.append(" - resolved assembly threads: " + str(
+                    _safe_int(prestress.get("nonlinear_static_assembly_threads"), 0)))
             lines.append(" - through-thickness layers: " + str(_safe_int(prestress.get("nonlinear_static_layers"), 0)))
             lines.append(" - max equivalent plastic strain: " + str(
                 round(_safe_float(prestress.get("nonlinear_static_max_plastic_strain")), 6)))
@@ -3167,8 +3206,10 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                 lines.append(
                     " - interpretation: the adaptive Newton solve stopped at the last stable converged load increment.")
             if _safe_float(prestress.get("fracture_enabled"), 0.0) > 0.0:
-                lines.append(" - fracture deleted elements: " + str(_safe_int(prestress.get("fracture_deleted_count"), 0)))
-                lines.append(" - fracture max utilization: " + str(round(_safe_float(prestress.get("fracture_max_utilization")), 6)))
+                lines.append(
+                    " - fracture deleted elements: " + str(_safe_int(prestress.get("fracture_deleted_count"), 0)))
+                lines.append(" - fracture max utilization: " + str(
+                    round(_safe_float(prestress.get("fracture_max_utilization")), 6)))
                 first_lf = _safe_float(prestress.get("fracture_first_deletion_load_factor"), 0.0)
                 if first_lf > 0.0:
                     lines.append(" - first deletion load factor: " + str(round(first_lf, 4)))
@@ -3189,13 +3230,15 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         if custom_time_domain_status:
             lines.extend(["", "Custom time-domain response:"])
             lines.append(" - status: " + custom_time_domain_status)
-            lines.append(" - selected shell elements: " + str(_safe_int(prestress.get("custom_time_domain_selected_shells"), 0)))
+            lines.append(
+                " - selected shell elements: " + str(_safe_int(prestress.get("custom_time_domain_selected_shells"), 0)))
             lines.append(" - peak displacement [mm]: " + str(
                 round(1000.0 * _safe_float(prestress.get("custom_time_domain_peak_displacement_m")), 4)))
             lines.append(" - peak von Mises [MPa]: " + str(
                 round(_safe_float(prestress.get("custom_time_domain_peak_von_mises_pa")) / 1.0e6, 3)))
             if _safe_float(prestress.get("custom_time_domain_saved_steps"), 0.0) > 0.0:
-                lines.append(" - saved result steps: " + str(_safe_int(prestress.get("custom_time_domain_saved_steps"), 0)))
+                lines.append(
+                    " - saved result steps: " + str(_safe_int(prestress.get("custom_time_domain_saved_steps"), 0)))
             if _safe_float(prestress.get("custom_time_domain_result_interval_s"), 0.0) > 0.0:
                 lines.append(" - result interval [s]: " + str(
                     round(_safe_float(prestress.get("custom_time_domain_result_interval_s")), 8)))
@@ -3205,13 +3248,17 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         if collision_status:
             lines.extend(["", "Rigid-sphere collision response:"])
             lines.append(" - status: " + collision_status.replace("_", " "))
-            lines.append(" - time mode: " + str(prestress.get("collision_time_mode", summary.get("collision_time_mode", ""))))
+            lines.append(
+                " - time mode: " + str(prestress.get("collision_time_mode", summary.get("collision_time_mode", ""))))
             if _safe_float(prestress.get("collision_resolved_dt_s"), 0.0) > 0.0:
-                lines.append(" - resolved dt [s]: " + str(round(_safe_float(prestress.get("collision_resolved_dt_s")), 9)))
+                lines.append(
+                    " - resolved dt [s]: " + str(round(_safe_float(prestress.get("collision_resolved_dt_s")), 9)))
             if _safe_float(prestress.get("collision_resolved_total_time_s"), 0.0) > 0.0:
-                lines.append(" - resolved total time [s]: " + str(round(_safe_float(prestress.get("collision_resolved_total_time_s")), 6)))
+                lines.append(" - resolved total time [s]: " + str(
+                    round(_safe_float(prestress.get("collision_resolved_total_time_s")), 6)))
             if _safe_float(prestress.get("collision_estimated_arrival_time_s"), 0.0) > 0.0:
-                lines.append(" - estimated arrival [s]: " + str(round(_safe_float(prestress.get("collision_estimated_arrival_time_s")), 6)))
+                lines.append(" - estimated arrival [s]: " + str(
+                    round(_safe_float(prestress.get("collision_estimated_arrival_time_s")), 6)))
             if _safe_float(prestress.get("collision_contact_penalty_stiffness_n_per_m"), 0.0) > 0.0:
                 lines.append(
                     " - contact penalty [N/m]: "
@@ -3221,38 +3268,57 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     + ")"
                 )
             if _safe_float(prestress.get("collision_target_penetration_m"), 0.0) > 0.0:
-                lines.append(" - target penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_target_penetration_m")), 4)))
+                lines.append(" - target penetration [mm]: " + str(
+                    round(1000.0 * _safe_float(prestress.get("collision_target_penetration_m")), 4)))
             if str(prestress.get("collision_stop_reason", "") or ""):
                 lines.append(" - stop reason: " + str(prestress.get("collision_stop_reason", "")).replace("_", " "))
             if _safe_float(prestress.get("collision_separation_stop_time_s"), 0.0) > 0.0:
-                lines.append(" - separation stop hold [s]: " + str(round(_safe_float(prestress.get("collision_separation_stop_time_s")), 9)))
+                lines.append(" - separation stop hold [s]: " + str(
+                    round(_safe_float(prestress.get("collision_separation_stop_time_s")), 9)))
             if _safe_float(prestress.get("collision_auto_impact_window_s"), 0.0) > 0.0:
-                lines.append(" - auto impact window [s]: " + str(round(_safe_float(prestress.get("collision_auto_impact_window_s")), 6)))
-            lines.append(" - peak contact force [kN]: " + str(round(_safe_float(prestress.get("collision_peak_contact_force_n")) / 1000.0, 4)))
-            lines.append(" - max penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)))
-            lines.append(" - max penetration ratio: " + str(round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)))
-            lines.append(" - contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)))
+                lines.append(" - auto impact window [s]: " + str(
+                    round(_safe_float(prestress.get("collision_auto_impact_window_s")), 6)))
+            lines.append(" - peak contact force [kN]: " + str(
+                round(_safe_float(prestress.get("collision_peak_contact_force_n")) / 1000.0, 4)))
+            lines.append(" - max penetration [mm]: " + str(
+                round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)))
+            lines.append(" - max penetration ratio: " + str(
+                round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)))
+            lines.append(
+                " - contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)))
             lines.append(" - saved result steps: " + str(_safe_int(prestress.get("collision_saved_steps"), 0)))
             if _safe_float(prestress.get("collision_adaptive_cutback_retries"), 0.0) > 0.0:
-                lines.append(" - adaptive contact cutbacks: " + str(_safe_int(prestress.get("collision_adaptive_cutback_retries"), 0)))
+                lines.append(" - adaptive contact cutbacks: " + str(
+                    _safe_int(prestress.get("collision_adaptive_cutback_retries"), 0)))
             if str(prestress.get("collision_solution_control", "") or ""):
-                lines.append(" - solution control: " + str(prestress.get("collision_solution_control", "")).replace("_", " "))
+                lines.append(
+                    " - solution control: " + str(prestress.get("collision_solution_control", "")).replace("_", " "))
             if str(prestress.get("collision_arc_length_applicability", "") or ""):
                 lines.append(" - arc length: static continuation only; not used for collision impact")
             if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0:
                 lines.append(" - direct beam/stiffener contact: enabled")
             if _safe_float(prestress.get("collision_material_nonlinear_enabled"), 0.0) > 0.0:
                 lines.append(" - material nonlinear impact: enabled")
-                lines.append(" - impact kinematics: " + str(prestress.get("collision_nonlinear_kinematics", summary.get("collision_nonlinear_kinematics", "von_karman"))))
+                lines.append(" - impact kinematics: " + str(prestress.get("collision_nonlinear_kinematics",
+                                                                          summary.get("collision_nonlinear_kinematics",
+                                                                                      "von_karman"))))
                 if _safe_float(prestress.get("collision_nonlinear_assembly_threads"), 0.0) > 0.0:
-                    lines.append(" - resolved assembly threads: " + str(_safe_int(prestress.get("collision_nonlinear_assembly_threads"), 0)))
+                    lines.append(" - resolved assembly threads: " + str(
+                        _safe_int(prestress.get("collision_nonlinear_assembly_threads"), 0)))
                 if str(prestress.get("collision_nonlinear_status", "") or ""):
-                    lines.append(" - nonlinear impact status: " + str(prestress.get("collision_nonlinear_status", "")).replace("_", " "))
-                lines.append(" - nonlinear Newton iterations: " + str(_safe_int(prestress.get("collision_nonlinear_iterations"), 0)))
-                lines.append(" - nonlinear cutbacks: " + str(_safe_int(prestress.get("collision_nonlinear_cutbacks"), 0)))
-                lines.append(" - max equivalent plastic strain: " + str(round(_safe_float(prestress.get("collision_nonlinear_max_plastic_strain")), 8)))
-                lines.append(" - plastic damage strain limit: " + str(round(_safe_float(prestress.get("collision_plastic_damage_threshold")), 8)))
-            lines.append(" - sphere momentum balance error: " + str(round(_safe_float(prestress.get("collision_sphere_momentum_balance_error")), 6)))
+                    lines.append(
+                        " - nonlinear impact status: " + str(prestress.get("collision_nonlinear_status", "")).replace(
+                            "_", " "))
+                lines.append(" - nonlinear Newton iterations: " + str(
+                    _safe_int(prestress.get("collision_nonlinear_iterations"), 0)))
+                lines.append(
+                    " - nonlinear cutbacks: " + str(_safe_int(prestress.get("collision_nonlinear_cutbacks"), 0)))
+                lines.append(" - max equivalent plastic strain: " + str(
+                    round(_safe_float(prestress.get("collision_nonlinear_max_plastic_strain")), 8)))
+                lines.append(" - plastic damage strain limit: " + str(
+                    round(_safe_float(prestress.get("collision_plastic_damage_threshold")), 8)))
+            lines.append(" - sphere momentum balance error: " + str(
+                round(_safe_float(prestress.get("collision_sphere_momentum_balance_error")), 6)))
             if "collision_energy_initial_j" in prestress or "collision_energy_final_j" in prestress:
                 lines.extend(["", "Impact energy balance:"])
                 lines.append(
@@ -3267,50 +3333,64 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
                     + " / "
                     + str(round(_safe_float(prestress.get("collision_sphere_kinetic_final_j")), 6))
                 )
-                lines.append(" - max relative drift: " + str(round(_safe_float(prestress.get("collision_energy_max_relative_drift")), 8)))
+                lines.append(" - max relative drift: " + str(
+                    round(_safe_float(prestress.get("collision_energy_max_relative_drift")), 8)))
             if collision_status in {"contact_iteration_failed", "nonlinear_iteration_failed"}:
                 lines.extend(["", "Collision solver failure detail:"])
                 if _safe_float(prestress.get("collision_failure_time_s"), 0.0) > 0.0:
-                    lines.append(" - failure time [s]: " + str(round(_safe_float(prestress.get("collision_failure_time_s")), 9)))
+                    lines.append(
+                        " - failure time [s]: " + str(round(_safe_float(prestress.get("collision_failure_time_s")), 9)))
                 if _safe_float(prestress.get("collision_failure_dt_s"), 0.0) > 0.0:
-                    lines.append(" - failed local dt [s]: " + str(round(_safe_float(prestress.get("collision_failure_dt_s")), 9)))
+                    lines.append(" - failed local dt [s]: " + str(
+                        round(_safe_float(prestress.get("collision_failure_dt_s")), 9)))
                 lines.append(" - iterations used: " + str(_safe_int(prestress.get("collision_failure_iterations"), 0)))
                 if _safe_float(prestress.get("collision_failure_residual_norm"), 0.0) > 0.0:
-                    lines.append(" - residual norm: " + str(round(_safe_float(prestress.get("collision_failure_residual_norm")), 6)))
+                    lines.append(" - residual norm: " + str(
+                        round(_safe_float(prestress.get("collision_failure_residual_norm")), 6)))
                 if _safe_float(prestress.get("collision_failure_effective_residual_tolerance_n"), 0.0) > 0.0:
-                    lines.append(" - effective residual tolerance [N]: " + str(round(_safe_float(prestress.get("collision_failure_effective_residual_tolerance_n")), 6)))
+                    lines.append(" - effective residual tolerance [N]: " + str(
+                        round(_safe_float(prestress.get("collision_failure_effective_residual_tolerance_n")), 6)))
                 if _safe_float(prestress.get("collision_failure_displacement_increment_m"), 0.0) > 0.0:
-                    lines.append(" - displacement increment [m]: " + str(round(_safe_float(prestress.get("collision_failure_displacement_increment_m")), 9)))
-                lines.append(" - force change [N]: " + str(round(_safe_float(prestress.get("collision_failure_force_change_n")), 6)))
+                    lines.append(" - displacement increment [m]: " + str(
+                        round(_safe_float(prestress.get("collision_failure_displacement_increment_m")), 9)))
+                lines.append(" - force change [N]: " + str(
+                    round(_safe_float(prestress.get("collision_failure_force_change_n")), 6)))
                 if _safe_float(prestress.get("collision_failure_effective_force_tolerance_n"), 0.0) > 0.0:
                     lines.append(
                         " - effective force tolerance [N]: "
                         + str(round(_safe_float(prestress.get("collision_failure_effective_force_tolerance_n")), 6))
                     )
-                lines.append(" - penetration change [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_failure_penetration_change_m")), 6)))
-                lines.append(" - failure penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_failure_max_penetration_m")), 6)))
+                lines.append(" - penetration change [mm]: " + str(
+                    round(1000.0 * _safe_float(prestress.get("collision_failure_penetration_change_m")), 6)))
+                lines.append(" - failure penetration [mm]: " + str(
+                    round(1000.0 * _safe_float(prestress.get("collision_failure_max_penetration_m")), 6)))
                 active_ids = str(prestress.get("collision_failure_active_element_ids", "") or "")
                 if active_ids:
                     lines.append(" - active element(s): " + active_ids)
                 if collision_status == "nonlinear_iteration_failed":
-                    lines.append(" - suggestion: reduce manual dt, increase NL cutbacks, or reduce contact penalty/target stiffness.")
+                    lines.append(
+                        " - suggestion: reduce manual dt, increase NL cutbacks, or reduce contact penalty/target stiffness.")
                 else:
                     lines.append(" - suggestion: reduce dt/penalty or increase event substeps/contact iterations.")
             if _safe_float(prestress.get("collision_damage_enabled"), 0.0) > 0.0:
-                lines.append(" - impact damage max utilization: " + str(round(_safe_float(prestress.get("impact_damage_max_utilization")), 6)))
+                lines.append(" - impact damage max utilization: " + str(
+                    round(_safe_float(prestress.get("impact_damage_max_utilization")), 6)))
                 deleted_count = _safe_int(
-                    prestress.get("collision_deleted_eroded_elements", prestress.get("collision_deleted_shell_elements")),
+                    prestress.get("collision_deleted_eroded_elements",
+                                  prestress.get("collision_deleted_shell_elements")),
                     0,
                 )
                 lines.append(" - deleted/eroded elements: " + str(deleted_count))
             if _safe_float(prestress.get("collision_material_nonlinear_enabled"), 0.0) > 0.0:
                 lines.append(
                     " - meaning: this is a material-nonlinear implicit transient with frictionless sphere-shell contact"
-                    + (" and direct beam/stiffener contact." if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "."))
+                    + (" and direct beam/stiffener contact." if _safe_float(
+                        prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "."))
             else:
                 lines.append(
                     " - meaning: this is a linear structural transient with nonlinear frictionless sphere-shell contact"
-                    + (" and direct beam/stiffener contact." if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "."))
+                    + (" and direct beam/stiffener contact." if _safe_float(
+                        prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "."))
         for key, value in prestress.items():
             if key in special_keys:
                 continue
@@ -4046,7 +4126,6 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
     },
 }
 
-
 FEM_OPTION_INFO.update({
     "collision_enabled": {
         "title": "Collision Transient",
@@ -4363,7 +4442,8 @@ FEM_OPTION_INFO.update({
 class RuntimeFEMWindow:
     """Popup window for the experimental full-geometry FEM runtime solver."""
 
-    def __init__(self, parent: Any, app: Any, use_parent_as_window: bool = False, imported_fem_model=None, imported_path=None):
+    def __init__(self, parent: Any, app: Any, use_parent_as_window: bool = False, imported_fem_model=None,
+                 imported_path=None):
         self.app = app
         self.imported_fem_model = imported_fem_model
         if self.imported_fem_model is not None:
@@ -4511,6 +4591,7 @@ class RuntimeFEMWindow:
         self.imperfection_amplitude_m = tk.DoubleVar(value=0.0)
         self.imperfection_wave_a = tk.IntVar(value=1)
         self.imperfection_wave_b = tk.IntVar(value=1)
+        self.imperfection_mode_shapes_json = tk.StringVar(value="[]")
         self.runtime_solver = tk.StringVar(value="stepwise")
         self.allow_unbalanced_free_free = tk.BooleanVar(value=False)
         self.buckling_shift_load_factor = tk.DoubleVar(value=0.0)
@@ -4753,10 +4834,10 @@ class RuntimeFEMWindow:
         if self._collision_damage_beam_hint is not None:
             hint = ""
             if (
-                bool(self.collision_enabled.get())
-                and bool(self.collision_beam_contact_enabled.get())
-                and bool(self.collision_damage_enabled.get())
-                and not bool(self.collision_material_nonlinear_enabled.get())
+                    bool(self.collision_enabled.get())
+                    and bool(self.collision_beam_contact_enabled.get())
+                    and bool(self.collision_damage_enabled.get())
+                    and not bool(self.collision_material_nonlinear_enabled.get())
             ):
                 hint = "Capacity damage is shell-contact based; use material nonlinear plastic damage for beam erosion."
             try:
@@ -4769,7 +4850,6 @@ class RuntimeFEMWindow:
             pass
         except Exception:
             pass
-
 
         criterion_fixed = (self.collision_damage_criterion.get() != "mesh_scaled_gl")
         if hasattr(self, "_collision_plastic_damage_threshold_control"):
@@ -5220,13 +5300,13 @@ class RuntimeFEMWindow:
         mesh_preview.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         preview_actions = ttk.Frame(mesh_preview)
         preview_actions.pack(fill=tk.X, padx=8, pady=(8, 4))
-        self._mesh_preview_button = ttk.Button(preview_actions, text="Preview mesh", command=self._preview_mesh)
+        self._mesh_preview_button = ttk.Button(preview_actions, text="Generate mesh", command=self._generate_mesh)
         self._mesh_preview_button.pack(side=tk.LEFT)
         self.mesh_statistics_text = tk.Text(mesh_preview, height=4, wrap=tk.WORD)
         self.mesh_statistics_text.pack(fill=tk.X, padx=8, pady=(0, 6))
         self.mesh_statistics_text.insert(
             "1.0",
-            "Press \"Preview mesh\" to build the mesh and see element counts, node counts and element sizes.",
+            "Press \"Generate mesh\" to build the mesh and see element counts, node counts and element sizes.",
         )
         self.mesh_statistics_text.configure(state=tk.DISABLED)
         self.mesh_preview_parent = ttk.Frame(mesh_preview)
@@ -5379,6 +5459,8 @@ class RuntimeFEMWindow:
                                                                                       padx=(0, 8), pady=4)
         imperfections.columnconfigure(3, weight=1)
 
+        self._build_mode_shape_imperfection_ui(tab_properties)
+
         fracture = ttk.LabelFrame(tab_properties, text="Nonlinear static fracture / erosion")
         fracture.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(fracture)
@@ -5399,11 +5481,13 @@ class RuntimeFEMWindow:
         self._configure_option_grid(general_loads)
         self._add_entry_row(general_loads, 0, "pressure_pa", "Pressure [Pa]", self.pressure_pa)
         self._add_entry_row(general_loads, 1, "load_scale", "Load scale", self.load_scale)
-        self._add_entry_row(general_loads, 2, "top_bottom_moment_nm", "Top/bottom moment [Nm]", self.top_bottom_moment_nm)
+        self._add_entry_row(general_loads, 2, "top_bottom_moment_nm", "Top/bottom moment [Nm]",
+                            self.top_bottom_moment_nm)
 
         constraints = ttk.LabelFrame(tab_loads, text="Supports and load path")
         constraints.pack(fill=tk.X, padx=8, pady=(0, 6))
         self._configure_option_grid(constraints)
+
         self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition,
                              ("auto", "free", "simply supported", "pinned", "clamped"))
         self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode,
@@ -5424,7 +5508,6 @@ class RuntimeFEMWindow:
         self._add_option_row(accel, 4, "added_mass_location", "Mass location", self.added_mass_location,
                              ("none", "plate edge x0", "plate edge x1", "plate edge y0", "plate edge y1",
                               "plate all edges", "cylinder bottom", "cylinder top"))
-
         custom = ttk.LabelFrame(tab_loads, text="Custom loads and boundary conditions")
         custom.pack(fill=tk.X, padx=8, pady=(0, 8))
         self._configure_option_grid(custom)
@@ -5549,6 +5632,7 @@ class RuntimeFEMWindow:
                 width=event.width,
             ),
         )
+
         def _scroll_collision_tab(event: Any, canvas: tk.Canvas = collision_canvas) -> str:
             if getattr(event, "num", None) == 4:
                 canvas.yview_scroll(-3, "units")
@@ -5579,12 +5663,16 @@ class RuntimeFEMWindow:
         self._configure_option_grid(time_domain)
         self._add_check_row(time_domain, 0, "custom_time_domain_enabled", "Run custom load in time domain",
                             self.custom_time_domain_enabled)
-        self._add_check_row(time_domain, 1, "custom_time_domain_include_static_load", "Include static load in time domain",
+        self._add_check_row(time_domain, 1, "custom_time_domain_include_static_load",
+                            "Include static load in time domain",
                             self.custom_time_domain_include_static_load)
-        self._add_entry_row(time_domain, 2, "custom_time_domain_duration_s", "Duration [s]", self.custom_time_domain_duration_s)
-        self._add_entry_row(time_domain, 3, "custom_time_domain_total_time_s", "Total time [s]", self.custom_time_domain_total_time_s)
+        self._add_entry_row(time_domain, 2, "custom_time_domain_duration_s", "Duration [s]",
+                            self.custom_time_domain_duration_s)
+        self._add_entry_row(time_domain, 3, "custom_time_domain_total_time_s", "Total time [s]",
+                            self.custom_time_domain_total_time_s)
         self._add_entry_row(time_domain, 4, "custom_time_domain_dt_s", "dt [s]", self.custom_time_domain_dt_s)
-        self._add_entry_row(time_domain, 5, "custom_time_domain_result_interval_s", "Result interval [s]", self.custom_time_domain_result_interval_s)
+        self._add_entry_row(time_domain, 5, "custom_time_domain_result_interval_s", "Result interval [s]",
+                            self.custom_time_domain_result_interval_s)
         time_domain.columnconfigure(3, weight=1)
 
         collision_main = ttk.LabelFrame(collision_body, text="Rigid-sphere collision")
@@ -5603,7 +5691,8 @@ class RuntimeFEMWindow:
         self._add_compact_option(collision_main, 2, 1, "collision_contact_surface", "Surface",
                                  self.collision_contact_surface, ("midsurface", "top", "bottom"))
         self._collision_beam_contact_control = self._add_compact_check(collision_main, 3, 0, "collision_beam_contact",
-                                "Direct beam/stiffener contact", self.collision_beam_contact_enabled)
+                                                                       "Direct beam/stiffener contact",
+                                                                       self.collision_beam_contact_enabled)
         ttk.Label(collision_main, text="Mesh refinement at the impact point is configured on the Mesh tab.",
                   foreground="#475569").grid(row=3, column=3, columnspan=3, sticky=tk.W, padx=6, pady=2)
 
@@ -5683,7 +5772,7 @@ class RuntimeFEMWindow:
                                 self.collision_damage_delete_at)
         self._add_compact_entry(collision_damage, 5, 1, "collision_damage_max_deleted", "Max deleted frac.",
                                 self.collision_damage_max_deleted_fraction)
-        
+
         self._add_compact_entry(collision_damage, 6, 0, "collision_nonlinear_iterations", "NL iters",
                                 self.collision_nonlinear_max_iterations, width=8)
         self._add_compact_entry(collision_damage, 6, 1, "collision_nonlinear_tolerance", "NL tol.",
@@ -5724,7 +5813,8 @@ class RuntimeFEMWindow:
         ttk.Button(vis_actions, text="Next step", command=self._next_time_step).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Button(vis_actions, text="Play", command=self._play_animation).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(vis_actions, text="Stop", command=self._stop_animation).pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Checkbutton(vis_actions, text="Fast animation", variable=self.animation_fast_mode).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Checkbutton(vis_actions, text="Fast animation", variable=self.animation_fast_mode).pack(side=tk.LEFT,
+                                                                                                    padx=(8, 0))
         ttk.Label(vis_actions, text="x").pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Entry(vis_actions, textvariable=self.animation_speed_multiplier, width=5).pack(side=tk.RIGHT)
         ttk.Label(vis_actions, text="speed").pack(side=tk.RIGHT, padx=(8, 0))
@@ -5746,11 +5836,16 @@ class RuntimeFEMWindow:
         self.time_step_slider.grid(row=0, column=1, sticky=tk.EW)
         view_actions = ttk.Frame(vis_group)
         view_actions.grid(row=12, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
-        ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(view_actions, text="ISO", command=lambda: self._set_runtime_3d_view("iso")).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(view_actions, text="Front", command=lambda: self._set_runtime_3d_view("front")).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(view_actions, text="Side", command=lambda: self._set_runtime_3d_view("side")).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT,
+                                                                                                    padx=(0, 4))
+        ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT,
+                                                                                                        padx=(0, 4))
+        ttk.Button(view_actions, text="ISO", command=lambda: self._set_runtime_3d_view("iso")).pack(side=tk.LEFT,
+                                                                                                    padx=(0, 4))
+        ttk.Button(view_actions, text="Front", command=lambda: self._set_runtime_3d_view("front")).pack(side=tk.LEFT,
+                                                                                                        padx=(0, 4))
+        ttk.Button(view_actions, text="Side", command=lambda: self._set_runtime_3d_view("side")).pack(side=tk.LEFT,
+                                                                                                      padx=(0, 4))
         ttk.Button(view_actions, text="Top", command=lambda: self._set_runtime_3d_view("top")).pack(side=tk.LEFT)
 
         self.upper_result_frame = ttk.LabelFrame(right_panel, text="Result text")
@@ -5840,6 +5935,69 @@ class RuntimeFEMWindow:
         self.color_max_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
         self._refresh_figure()
         self._write_status("Ready. ANYstructure production FE mesh solver is available.")
+
+    def _build_mode_shape_imperfection_ui(self, parent: ttk.Widget) -> None:
+        group = ttk.LabelFrame(parent, text="Mode Shape Imperfections")
+        group.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        note = ttk.Label(group,
+                         text="Note: The first imperfection type (DNVGL recommendations) can be set before obtaining the mode shape. The second type requires you to obtain the mode shape first.",
+                         wraplength=400, justify=tk.LEFT)
+        note.pack(fill=tk.X, padx=8, pady=4)
+
+        columns = ("mode", "factor")
+        self.mode_shape_tree = ttk.Treeview(group, columns=columns, show="headings", height=3)
+        self.mode_shape_tree.heading("mode", text="Mode shape number")
+        self.mode_shape_tree.heading("factor", text="Scaling factor")
+        self.mode_shape_tree.column("mode", width=150)
+        self.mode_shape_tree.column("factor", width=150)
+        self.mode_shape_tree.pack(fill=tk.X, padx=8, pady=4)
+
+        controls = ttk.Frame(group)
+        controls.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(controls, text="Mode:").pack(side=tk.LEFT, padx=(0, 4))
+        self.mode_shape_entry = ttk.Entry(controls, width=10)
+        self.mode_shape_entry.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(controls, text="Factor:").pack(side=tk.LEFT, padx=(0, 4))
+        self.mode_factor_entry = ttk.Entry(controls, width=10)
+        self.mode_factor_entry.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(controls, text="Add", command=self._add_mode_shape_imperfection).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(controls, text="Remove", command=self._remove_mode_shape_imperfection).pack(side=tk.LEFT,
+                                                                                               padx=(0, 4))
+
+        ttk.Button(group, text="Set to mesh", command=self._set_mode_shapes_to_mesh).pack(anchor=tk.W, padx=8,
+                                                                                          pady=(4, 8))
+
+        self._sync_mode_shapes_from_json()
+
+    def _add_mode_shape_imperfection(self):
+        mode = self.mode_shape_entry.get().strip()
+        factor = self.mode_factor_entry.get().strip()
+        if mode and factor:
+            self.mode_shape_tree.insert("", tk.END, values=(mode, factor))
+            self._sync_mode_shapes_to_json()
+
+    def _remove_mode_shape_imperfection(self):
+        for item in self.mode_shape_tree.selection():
+            self.mode_shape_tree.delete(item)
+        self._sync_mode_shapes_to_json()
+
+    def _sync_mode_shapes_to_json(self):
+        items = []
+        for item in self.mode_shape_tree.get_children():
+            values = self.mode_shape_tree.item(item, "values")
+            items.append({"mode": int(values[0]), "factor": float(values[1])})
+        self.imperfection_mode_shapes_json.set(json.dumps(items))
+
+    def _sync_mode_shapes_from_json(self):
+        for item in self.mode_shape_tree.get_children():
+            self.mode_shape_tree.delete(item)
+        try:
+            items = json.loads(self.imperfection_mode_shapes_json.get())
+            for item in items:
+                self.mode_shape_tree.insert("", tk.END, values=(str(item["mode"]), str(item["factor"])))
+        except Exception:
+            pass
 
     def cancel_run(self) -> None:
         self._cancel_requested = True
@@ -5971,24 +6129,30 @@ class RuntimeFEMWindow:
             return None
         return ((min(xs), max(xs)), (min(ys), max(ys)), (min(zs), max(zs)))
 
-    def _preview_mesh(self) -> None:
+    def _generate_mesh(self) -> None:
         """Build the mesh for the current options and draw the full 3D model (no analysis run).
 
         The mesh is rendered in the internal 2.5D tkinter viewer embedded on the
         Mesh tab - the same viewer used for results, but showing the bare mesh.
         """
+        if getattr(self, "_imperfection_mesh", None) is not None:
+            if not messagebox.askyesno("Generate mesh",
+                                       "Warning: You are about to overwrite the generated custom imperfection mesh. Do you want to continue?"):
+                return
+            self._imperfection_mesh = None
+
         try:
             options = self._options()
             config = _solver_config_from_options(options)
             geometry = runtime_geometry_summary(self.snapshot)
             generated = fe_solver.build_generated_geometry(geometry, config)
         except Exception as error:
-            messagebox.showwarning("Mesh preview", "Could not build the mesh preview:\n" + str(error))
+            messagebox.showwarning("Mesh generation", "Could not build the mesh:\n" + str(error))
             return
         self._render_mesh_preview_canvas(generated)
         metrics = generated.get("mesh_metrics", {}) or {}
         adaptive = generated.get("adaptive_mesh", {}) or {}
-        summary = "Mesh preview: {count} elements, {lo:.0f}-{hi:.0f} mm".format(
+        summary = "Generated mesh: {count} elements, {lo:.0f}-{hi:.0f} mm".format(
             count=int(metrics.get("shell_element_count", 0)),
             lo=float(metrics.get("min_element_size_m", 0.0)) * 1000.0,
             hi=float(metrics.get("max_element_size_m", 0.0)) * 1000.0,
@@ -5997,6 +6161,28 @@ class RuntimeFEMWindow:
             summary += " (adaptive refinement)"
         self._write_status(summary)
         self._write_mesh_statistics(generated, metrics, adaptive)
+
+    def _set_mode_shapes_to_mesh(self):
+        """Build mesh, run linear buckling, extract mode shapes, and perturb the mesh."""
+        try:
+            options = self._options()
+            config = _solver_config_from_options(options)
+            geometry = runtime_geometry_summary(self.snapshot)
+            generated = fe_solver.build_generated_geometry(geometry, config)
+
+            # We need to run a buckling solve using fe_solver.
+            # But the buckling is normally run in run_production_fem or lightweight.
+            # I will add a helper to run just buckling and perturb the mesh.
+            self._write_status("Running buckling analysis to extract mode shapes...")
+            self.update_idletasks()
+            perturbed_mesh = fe_solver.apply_mode_shape_imperfections(generated, config, geometry)
+            self._imperfection_mesh = perturbed_mesh
+
+            self._render_mesh_preview_canvas(self._imperfection_mesh)
+            self._write_status("Mode shape imperfections applied successfully.")
+        except Exception as error:
+            messagebox.showwarning("Imperfection generation",
+                                   "Could not generate mode shape imperfections:\n" + str(error))
 
     def _render_mesh_preview_canvas(self, generated: dict) -> None:
         """Draw the generated mesh into the embedded Mesh-tab 3D viewer."""
@@ -6120,8 +6306,10 @@ class RuntimeFEMWindow:
                     min_arc = _safe_float(region.get("min_b")) - extent
                     max_arc = _safe_float(region.get("max_b")) + extent
                     steps = max(4, int(math.ceil(abs(max_arc - min_arc) / max(radius * math.pi / 36.0, 1.0e-9))))
-                    lower = [surface_point(min_z, min_arc + (max_arc - min_arc) * index / steps) for index in range(steps + 1)]
-                    upper = [surface_point(max_z, min_arc + (max_arc - min_arc) * index / steps) for index in range(steps + 1)]
+                    lower = [surface_point(min_z, min_arc + (max_arc - min_arc) * index / steps) for index in
+                             range(steps + 1)]
+                    upper = [surface_point(max_z, min_arc + (max_arc - min_arc) * index / steps) for index in
+                             range(steps + 1)]
                     draw_polyline(lower, "#f59e0b")
                     draw_polyline(upper, "#f59e0b")
                     draw_polyline([surface_point(min_z, min_arc), surface_point(max_z, min_arc)], "#f59e0b")
@@ -6395,9 +6583,33 @@ class RuntimeFEMWindow:
         if not labels:
             self._write_status("No saved time-domain result steps are available for animation.", keep_run_results=True)
             return
+
         self._stop_animation()
-        if bool(self.animation_fast_mode.get()):
+
+        if bool(self.animation_fast_mode.get()) and self.result_canvas is not None:
             self.use_interactive_3d.set(True)
+            self._write_status(f"Pre-calculating {len(labels)} animation frames for fast playback...")
+            self.window.update_idletasks()
+
+            self.result_canvas.begin_animation_cache()
+            for index, label in enumerate(labels):
+                self.result_case_choice.set(label)
+                self._sync_time_slider(index=index)
+
+                # Suppress the automatic full refresh during capture by temporarily disabling _animation_running
+                self._animation_running = False
+                self._refresh_figure(preserve_view=True)
+                self.result_canvas.capture_animation_frame()
+
+            self._write_status(f"Captured {len(labels)} frames. Playing at high speed.", keep_run_results=True)
+
+            speed = max(_safe_float(self.animation_speed_multiplier.get(), 1.0), 0.05)
+            interval = max(int(round(max(_safe_int(self.animation_interval_ms.get(), 80), 20) / speed)), 5)
+            fps = 1000 // interval
+            self._animation_running = True
+            self.result_canvas.play_animation(fps=fps)
+            return
+
         current = str(self.result_case_choice.get())
         self._animation_index = labels.index(current) if current in labels else 0
         self._animation_running = True
@@ -6411,6 +6623,10 @@ class RuntimeFEMWindow:
             except Exception:
                 pass
             self._animation_after_id = None
+        if self.result_canvas is not None:
+            stop_anim = getattr(self.result_canvas, "stop_animation", None)
+            if callable(stop_anim):
+                stop_anim()
 
     def _advance_animation_frame(self) -> None:
         if not self._animation_running:
@@ -6585,7 +6801,7 @@ class RuntimeFEMWindow:
                     if len(nodes) >= 2 and all(n is not None for n in nodes):
                         pts = [Point3D(*n.coords()) for n in nodes]
                         for i in range(len(pts) - 1):
-                            canvas.add_line(pts[i], pts[i+1], color="blue", width=2)
+                            canvas.add_line(pts[i], pts[i + 1], color="blue", width=2)
             if fit_view:
                 canvas.fit_to_scene()
             return
@@ -6649,7 +6865,7 @@ class RuntimeFEMWindow:
                             length,
                             gir_spacing,
                             fallback_midpoint=True,
-                ):
+                    ):
                         z_pos = station
                         canvas.add_ring_stiffener(
                             radius=radius,
@@ -6734,24 +6950,35 @@ class RuntimeFEMWindow:
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             y = -1.18 * radius
             z = -0.18 * radius
-            canvas.add_line(Point3D(-radius, y, z), Point3D(radius, y, z), color=color, width=1, layer=2, draw_overlay=False)
-            canvas.add_text(Point3D(0.0, y, z), "D " + _format_dimension(2.0 * radius), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+            canvas.add_line(Point3D(-radius, y, z), Point3D(radius, y, z), color=color, width=1, layer=2,
+                            draw_overlay=False)
+            canvas.add_text(Point3D(0.0, y, z), "D " + _format_dimension(2.0 * radius), color=color,
+                            font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
             x = 1.18 * radius
             y2 = 1.18 * radius
-            canvas.add_line(Point3D(x, y2, 0.0), Point3D(x, y2, length), color=color, width=1, layer=2, draw_overlay=False)
-            canvas.add_text(Point3D(x, y2, 0.5 * length), "L " + _format_dimension(length), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+            canvas.add_line(Point3D(x, y2, 0.0), Point3D(x, y2, length), color=color, width=1, layer=2,
+                            draw_overlay=False)
+            canvas.add_text(Point3D(x, y2, 0.5 * length), "L " + _format_dimension(length), color=color,
+                            font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
             return
         length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
         width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-6)
         offset = 0.06 * max(length, width, 1.0)
-        canvas.add_line(Point3D(0.0, -offset, 0.0), Point3D(length, -offset, 0.0), color=color, width=1, layer=2, draw_overlay=False)
-        canvas.add_text(Point3D(0.5 * length, -offset, 0.0), _format_dimension(length), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
-        canvas.add_line(Point3D(-offset, 0.0, 0.0), Point3D(-offset, width, 0.0), color=color, width=1, layer=2, draw_overlay=False)
-        canvas.add_text(Point3D(-offset, 0.5 * width, 0.0), _format_dimension(width), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+        canvas.add_line(Point3D(0.0, -offset, 0.0), Point3D(length, -offset, 0.0), color=color, width=1, layer=2,
+                        draw_overlay=False)
+        canvas.add_text(Point3D(0.5 * length, -offset, 0.0), _format_dimension(length), color=color,
+                        font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+        canvas.add_line(Point3D(-offset, 0.0, 0.0), Point3D(-offset, width, 0.0), color=color, width=1, layer=2,
+                        draw_overlay=False)
+        canvas.add_text(Point3D(-offset, 0.5 * width, 0.0), _format_dimension(width), color=color,
+                        font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
         height = _base_geometry_height_extent(geometry)
         if height > 0.0:
-            canvas.add_line(Point3D(length + offset, width + offset, 0.0), Point3D(length + offset, width + offset, height), color=color, width=1, layer=2, draw_overlay=False)
-            canvas.add_text(Point3D(length + offset, width + offset, 0.5 * height), _format_dimension(height), color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+            canvas.add_line(Point3D(length + offset, width + offset, 0.0),
+                            Point3D(length + offset, width + offset, height), color=color, width=1, layer=2,
+                            draw_overlay=False)
+            canvas.add_text(Point3D(length + offset, width + offset, 0.5 * height), _format_dimension(height),
+                            color=color, font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
 
     def _collision_sphere_preview_visualization(self) -> dict[str, Any]:
         if not bool(self.collision_enabled.get()):
@@ -6795,11 +7022,12 @@ class RuntimeFEMWindow:
                     center=Point3D(0.0, 0.0, 0.5 * max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)),
                 )
 
-
         visualization, title, is_mode = _selected_visualization(result, display_mode, component)
 
-        show_stiffeners_for_range = self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis", None) is not None else True
-        show_girders_for_range = self.show_girder_vis.get() if getattr(self, "show_girder_vis", None) is not None else True
+        show_stiffeners_for_range = self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis",
+                                                                             None) is not None else True
+        show_girders_for_range = self.show_girder_vis.get() if getattr(self, "show_girder_vis",
+                                                                       None) is not None else True
         all_vals, color_grid, colorbar_label = _visualization_color_values(
             visualization,
             component,
@@ -6897,8 +7125,8 @@ class RuntimeFEMWindow:
                         p4 = point_grid[i][j + 1]
 
                         avg_val = 0.25 * (
-                                    color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
-                                j + 1])
+                                color_grid[i][j] + color_grid[i + 1][j] + color_grid[i + 1][j + 1] + color_grid[i][
+                            j + 1])
                         color = _interpolate_thickness_color(avg_val, vmin, vmax)
                         canvas.add_polygon(
                             [p1, p2, p3, p4],
@@ -7185,7 +7413,8 @@ class RuntimeFEMWindow:
                     lines.append(f"{prefix}{idx}\t{round(factor, 4)}")
             else:
                 lines.append("No positive buckling modes found.")
-        elif bool(geometry.get("collision_enabled")) or str((geometry.get("prestress_summary") or {}).get("collision_status", "") or ""):
+        elif bool(geometry.get("collision_enabled")) or str(
+                (geometry.get("prestress_summary") or {}).get("collision_status", "") or ""):
             prestress = geometry.get("prestress_summary") or {}
             lines.extend([
                 "--- RIGID-SPHERE COLLISION TRANSIENT ---",
@@ -7196,12 +7425,18 @@ class RuntimeFEMWindow:
                 + str(round(_safe_float(prestress.get("collision_resolved_dt_s")), 9))
                 + " / "
                 + str(round(_safe_float(prestress.get("collision_resolved_total_time_s")), 6)),
-                "Peak contact force [kN]: " + str(round(_safe_float(prestress.get("collision_peak_contact_force_n")) / 1000.0, 4)),
-                "Max penetration [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)),
-                "Max penetration ratio: " + str(round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)),
+                "Peak contact force [kN]: " + str(
+                    round(_safe_float(prestress.get("collision_peak_contact_force_n")) / 1000.0, 4)),
+                "Max penetration [mm]: " + str(
+                    round(1000.0 * _safe_float(prestress.get("collision_max_penetration_m")), 4)),
+                "Max penetration ratio: " + str(
+                    round(_safe_float(prestress.get("collision_max_penetration_ratio")), 6)),
                 "Contact duration [s]: " + str(round(_safe_float(prestress.get("collision_contact_duration_s")), 8)),
-                "Beam contact: " + ("enabled" if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "off"),
-                "Impact kinematics: " + str(prestress.get("collision_nonlinear_kinematics", geometry.get("collision_nonlinear_kinematics", "von_karman"))),
+                "Beam contact: " + (
+                    "enabled" if _safe_float(prestress.get("collision_beam_contact_enabled"), 0.0) > 0.0 else "off"),
+                "Impact kinematics: " + str(prestress.get("collision_nonlinear_kinematics",
+                                                          geometry.get("collision_nonlinear_kinematics",
+                                                                       "von_karman"))),
                 "Contact patch: factor "
                 + str(round(_safe_float(prestress.get("collision_contact_patch_radius_factor")), 3))
                 + ", nodes "
@@ -7210,7 +7445,8 @@ class RuntimeFEMWindow:
                 + str(_safe_int(prestress.get("collision_contact_patch_max_nodes"), 0)),
                 "Saved steps: " + str(_safe_int(prestress.get("collision_saved_steps"), 0)),
                 "Deleted/eroded elements: "
-                + str(_safe_int(prestress.get("collision_deleted_eroded_elements", prestress.get("collision_deleted_shell_elements")), 0)),
+                + str(_safe_int(prestress.get("collision_deleted_eroded_elements",
+                                              prestress.get("collision_deleted_shell_elements")), 0)),
             ])
             if "collision_energy_initial_j" in prestress or "collision_energy_final_j" in prestress:
                 lines.extend([
@@ -7225,7 +7461,8 @@ class RuntimeFEMWindow:
                 sphere_position = tuple(prestress.get("collision_live_sphere_position_m") or ())
                 lines.extend([
                     "Live time [s]: " + str(round(_safe_float(prestress.get("collision_live_time_s")), 8)),
-                    "Live max displacement [mm]: " + str(round(1000.0 * _safe_float(prestress.get("collision_live_max_displacement_m")), 6)),
+                    "Live max displacement [mm]: " + str(
+                        round(1000.0 * _safe_float(prestress.get("collision_live_max_displacement_m")), 6)),
                 ])
                 if sphere_position:
                     lines.append(
@@ -7450,7 +7687,8 @@ class RuntimeFEMWindow:
         if element_id is None and node_id is None:
             return
 
-        surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(visualization.get("shell_surfaces") or ())
+        surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(
+            visualization.get("shell_surfaces") or ())
         all_points: list[Point3D] = []
         surface_points_by_id: dict[int, list[Point3D]] = {}
         node_points: dict[int, Point3D] = {}
@@ -7466,7 +7704,8 @@ class RuntimeFEMWindow:
             candidate_element_id = _safe_int(surface.get("id"), -1)
             if candidate_element_id >= 0:
                 surface_points_by_id[candidate_element_id] = polygon
-                element_values[candidate_element_id] = _shell_surface_component_value(surface, component, is_mode=is_mode)
+                element_values[candidate_element_id] = _shell_surface_component_value(surface, component,
+                                                                                      is_mode=is_mode)
             element_value = element_values.get(candidate_element_id)
             node_ids = tuple(int(candidate) for candidate in surface.get("node_ids", ()) or ())
             for index, candidate_node_id in enumerate(node_ids):
@@ -7534,7 +7773,8 @@ class RuntimeFEMWindow:
                     adjacent = node_adjacent_element_values.get(node_id)
                     if adjacent is not None:
                         adjacent_element_id, adjacent_value = adjacent
-                        label_text = self._format_probe_value_label(f"E{adjacent_element_id}", component, adjacent_value)
+                        label_text = self._format_probe_value_label(f"E{adjacent_element_id}", component,
+                                                                    adjacent_value)
                     else:
                         label_text = f"N{node_id} selected"
                 label_point = point + label_offset
@@ -7690,7 +7930,7 @@ class RuntimeFEMWindow:
                 analysis_text = "collision transient (standalone)"
         else:
             analysis_text = str(options.analysis_type)
-            
+
         lines = [
             "Running FEM solver...",
             "",
@@ -7720,7 +7960,8 @@ class RuntimeFEMWindow:
                 " - nonlinear static: "
                 + _normalise_kinematics(options.nonlinear_static_kinematics)
                 + ", threads="
-                + ("auto" if int(options.nonlinear_assembly_threads) <= 0 else str(int(options.nonlinear_assembly_threads)))
+                + ("auto" if int(options.nonlinear_assembly_threads) <= 0 else str(
+                    int(options.nonlinear_assembly_threads)))
             )
         messages = [str(message) for message in history if str(message).strip()]
         lines.extend(["", "Solver messages"])
@@ -7820,7 +8061,8 @@ class RuntimeFEMWindow:
             deformation_scale=max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
             custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
-            custom_use_nullspace_projection=(bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get())),
+            custom_use_nullspace_projection=(
+                        bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get())),
             custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0),
             plate_edge_x0_support=str(self.plate_edge_x0_support.get()),
             plate_edge_x1_support=str(self.plate_edge_x1_support.get()),
@@ -7856,13 +8098,15 @@ class RuntimeFEMWindow:
             custom_time_domain_duration_s=max(_safe_float(self.custom_time_domain_duration_s.get(), 0.01), 0.0),
             custom_time_domain_total_time_s=max(_safe_float(self.custom_time_domain_total_time_s.get(), 0.05), 0.0),
             custom_time_domain_dt_s=max(_safe_float(self.custom_time_domain_dt_s.get(), 0.0005), 1.0e-9),
-            custom_time_domain_result_interval_s=max(_safe_float(self.custom_time_domain_result_interval_s.get(), 0.0), 0.0),
+            custom_time_domain_result_interval_s=max(_safe_float(self.custom_time_domain_result_interval_s.get(), 0.0),
+                                                     0.0),
             custom_time_domain_include_static_load=bool(self.custom_time_domain_include_static_load.get()),
             imperfection_enabled=bool(self.imperfection_enabled.get()),
             imperfection_shape=str(self.imperfection_shape.get()),
             imperfection_amplitude_m=max(_safe_float(self.imperfection_amplitude_m.get(), 0.0), 0.0),
             imperfection_wave_a=max(_safe_int(self.imperfection_wave_a.get(), 1), 1),
             imperfection_wave_b=max(_safe_int(self.imperfection_wave_b.get(), 1), 1),
+            imperfection_mode_shapes_json=str(self.imperfection_mode_shapes_json.get()),
             runtime_solver=str(self.runtime_solver.get()),
             allow_unbalanced_free_free=bool(self.allow_unbalanced_free_free.get()),
             buckling_shift_load_factor=max(_safe_float(self.buckling_shift_load_factor.get(), 0.0), 0.0),
@@ -7878,8 +8122,10 @@ class RuntimeFEMWindow:
                 _safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
             fracture_enabled=bool(self.fracture_enabled.get()),
             fracture_strain_threshold=max(_safe_float(self.fracture_strain_threshold.get(), 0.02), 1.0e-12),
-            fracture_residual_stiffness_fraction=min(max(_safe_float(self.fracture_residual_stiffness_fraction.get(), 1.0e-6), 0.0), 1.0),
-            fracture_max_deleted_fraction=min(max(_safe_float(self.fracture_max_deleted_fraction.get(), 0.25), 1.0e-9), 1.0),
+            fracture_residual_stiffness_fraction=min(
+                max(_safe_float(self.fracture_residual_stiffness_fraction.get(), 1.0e-6), 0.0), 1.0),
+            fracture_max_deleted_fraction=min(max(_safe_float(self.fracture_max_deleted_fraction.get(), 0.25), 1.0e-9),
+                                              1.0),
             fracture_min_load_factor=max(_safe_float(self.fracture_min_load_factor.get(), 0.0), 0.0),
             collision_enabled=bool(self.collision_enabled.get()),
             collision_include_static_load=bool(self.collision_include_static_load.get()),
@@ -7896,7 +8142,8 @@ class RuntimeFEMWindow:
             collision_nonlinear_max_iterations=max(_safe_int(self.collision_nonlinear_max_iterations.get(), 20), 1),
             collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             collision_nonlinear_cutbacks=max(_safe_int(self.collision_nonlinear_cutbacks.get(), 8), 0),
-            collision_plastic_damage_threshold=max(_safe_float(self.collision_plastic_damage_threshold.get(), 0.01), 1.0e-12),
+            collision_plastic_damage_threshold=max(_safe_float(self.collision_plastic_damage_threshold.get(), 0.01),
+                                                   1.0e-12),
             collision_damage_criterion=str(self.collision_damage_criterion.get()),
             collision_mass_kg=max(_safe_float(self.collision_mass_kg.get(), 1000.0), 1.0e-9),
             collision_radius_m=max(_safe_float(self.collision_radius_m.get(), 0.25), 1.0e-9),
@@ -7914,21 +8161,27 @@ class RuntimeFEMWindow:
             collision_total_time_s=max(_safe_float(self.collision_total_time_s.get(), 0.05), 1.0e-9),
             collision_dt_s=max(_safe_float(self.collision_dt_s.get(), 0.0005), 1.0e-9),
             collision_result_interval_s=max(_safe_float(self.collision_result_interval_s.get(), 0.0), 0.0),
-            collision_penalty_stiffness_n_per_m=max(_safe_float(self.collision_penalty_stiffness_n_per_m.get(), 0.0), 0.0),
+            collision_penalty_stiffness_n_per_m=max(_safe_float(self.collision_penalty_stiffness_n_per_m.get(), 0.0),
+                                                    0.0),
             collision_contact_damping=max(_safe_float(self.collision_contact_damping.get(), 0.0), 0.0),
             collision_max_iterations=max(_safe_int(self.collision_max_iterations.get(), 25), 1),
-            collision_penetration_tolerance_m=max(_safe_float(self.collision_penetration_tolerance_m.get(), 1.0e-8), 1.0e-12),
+            collision_penetration_tolerance_m=max(_safe_float(self.collision_penetration_tolerance_m.get(), 1.0e-8),
+                                                  1.0e-12),
             collision_force_tolerance_n=max(_safe_float(self.collision_force_tolerance_n.get(), 1.0e-6), 1.0e-12),
-            collision_target_penetration_fraction=max(_safe_float(self.collision_target_penetration_fraction.get(), 0.01), 1.0e-9),
+            collision_target_penetration_fraction=max(
+                _safe_float(self.collision_target_penetration_fraction.get(), 0.01), 1.0e-9),
             collision_max_event_substeps=max(_safe_int(self.collision_max_event_substeps.get(), 16), 1),
             collision_contact_surface=str(self.collision_contact_surface.get()),
             collision_damage_mode=str(self.collision_damage_mode.get()),
             collision_damage_capacity_basis=str(self.collision_damage_capacity_basis.get()),
-            collision_damage_user_capacity_pa=max(_safe_float(self.collision_damage_user_capacity_mpa.get(), 0.0), 0.0) * 1.0e6,
+            collision_damage_user_capacity_pa=max(_safe_float(self.collision_damage_user_capacity_mpa.get(), 0.0),
+                                                  0.0) * 1.0e6,
             collision_damage_softening_start=max(_safe_float(self.collision_damage_softening_start.get(), 0.6), 0.0),
             collision_damage_delete_at=max(_safe_float(self.collision_damage_delete_at.get(), 1.0), 1.0e-9),
-            collision_damage_min_contact_area_m2=max(_safe_float(self.collision_damage_min_contact_area_m2.get(), 1.0e-6), 1.0e-12),
-            collision_damage_max_deleted_fraction=min(max(_safe_float(self.collision_damage_max_deleted_fraction.get(), 0.25), 1.0e-9), 1.0),
+            collision_damage_min_contact_area_m2=max(
+                _safe_float(self.collision_damage_min_contact_area_m2.get(), 1.0e-6), 1.0e-12),
+            collision_damage_max_deleted_fraction=min(
+                max(_safe_float(self.collision_damage_max_deleted_fraction.get(), 0.25), 1.0e-9), 1.0),
             collision_damage_neighbor_smoothing=bool(self.collision_damage_neighbor_smoothing.get()),
         )
 
@@ -7974,44 +8227,44 @@ class RuntimeFEMWindow:
             flags.append("allow free-free")
         if self.snapshot.is_cylinder:
             supports = (
-                "lower=" + str(self.cylinder_lower_support.get())
-                + ", upper=" + str(self.cylinder_upper_support.get())
+                    "lower=" + str(self.cylinder_lower_support.get())
+                    + ", upper=" + str(self.cylinder_upper_support.get())
             )
             edge_loads = (
-                "lower "
-                + f"{_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0):g}"
-                + ", upper "
-                + f"{_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0):g}"
-                + " N/m"
+                    "lower "
+                    + f"{_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0):g}"
+                    + ", upper "
+                    + f"{_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0):g}"
+                    + " N/m"
             )
         else:
             supports = (
-                "x0=" + str(self.plate_edge_x0_support.get())
-                + ", x1=" + str(self.plate_edge_x1_support.get())
-                + ", y0=" + str(self.plate_edge_y0_support.get())
-                + ", y1=" + str(self.plate_edge_y1_support.get())
+                    "x0=" + str(self.plate_edge_x0_support.get())
+                    + ", x1=" + str(self.plate_edge_x1_support.get())
+                    + ", y0=" + str(self.plate_edge_y0_support.get())
+                    + ", y1=" + str(self.plate_edge_y1_support.get())
             )
             edge_loads = (
-                "x0 "
-                + f"{_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0):g}"
-                + ", x1 "
-                + f"{_safe_float(self.plate_edge_x1_load_n_per_m.get(), 0.0):g}"
-                + ", y0 "
-                + f"{_safe_float(self.plate_edge_y0_load_n_per_m.get(), 0.0):g}"
-                + ", y1 "
-                + f"{_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0):g}"
-                + " N/m"
+                    "x0 "
+                    + f"{_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0):g}"
+                    + ", x1 "
+                    + f"{_safe_float(self.plate_edge_x1_load_n_per_m.get(), 0.0):g}"
+                    + ", y0 "
+                    + f"{_safe_float(self.plate_edge_y0_load_n_per_m.get(), 0.0):g}"
+                    + ", y1 "
+                    + f"{_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0):g}"
+                    + " N/m"
             )
         time_domain = "time off"
         if bool(self.custom_time_domain_enabled.get()):
             time_domain = (
-                "time dt="
-                + f"{_safe_float(self.custom_time_domain_dt_s.get(), 0.0):g}"
-                + " s, duration="
-                + f"{_safe_float(self.custom_time_domain_duration_s.get(), 0.0):g}"
-                + " s, total="
-                + f"{_safe_float(self.custom_time_domain_total_time_s.get(), 0.0):g}"
-                + " s"
+                    "time dt="
+                    + f"{_safe_float(self.custom_time_domain_dt_s.get(), 0.0):g}"
+                    + " s, duration="
+                    + f"{_safe_float(self.custom_time_domain_duration_s.get(), 0.0):g}"
+                    + " s, total="
+                    + f"{_safe_float(self.custom_time_domain_total_time_s.get(), 0.0):g}"
+                    + " s"
             )
             interval = _safe_float(self.custom_time_domain_result_interval_s.get(), 0.0)
             if interval > 0.0:
@@ -8058,7 +8311,8 @@ class RuntimeFEMWindow:
         for index, entry in enumerate(self._custom_load_entries):
             entry_type = str(entry.get("type", "")).lower()
             type_text = "Pressure" if entry_type in {"pressure", "panel_pressure"} else "Edge load"
-            notes = "time-domain capable" if type_text == "Pressure" and bool(self.custom_time_domain_enabled.get()) else ""
+            notes = "time-domain capable" if type_text == "Pressure" and bool(
+                self.custom_time_domain_enabled.get()) else ""
             tree.insert(
                 "",
                 tk.END,
@@ -8097,12 +8351,14 @@ class RuntimeFEMWindow:
             if bool(patch.get("selected", False))
         ]
         if not selected_patches:
-            self._write_status("Select one or more panels in the 3D selection view before adding panel refinement.", keep_run_results=True)
+            self._write_status("Select one or more panels in the 3D selection view before adding panel refinement.",
+                               keep_run_results=True)
             return
         self.local_refinement_patches_json.set(json.dumps(selected_patches))
         self.local_refinement_enabled.set(True)
         self._refresh_local_refinement_summary()
-        self._write_status(f"Added {len(selected_patches)} selected panel(s) as local mesh refinement regions.", keep_run_results=True)
+        self._write_status(f"Added {len(selected_patches)} selected panel(s) as local mesh refinement regions.",
+                           keep_run_results=True)
 
     def _clear_local_refinement_patches(self) -> None:
         self.local_refinement_patches_json.set("[]")
@@ -8122,7 +8378,8 @@ class RuntimeFEMWindow:
     def _set_point_refinement_from_selected_panel(self) -> None:
         patch = self._selected_or_active_custom_load_patch()
         if patch is None:
-            self._write_status("Select a panel before using its center as a point refinement source.", keep_run_results=True)
+            self._write_status("Select a panel before using its center as a point refinement source.",
+                               keep_run_results=True)
             return
         min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(patch)
         x = 0.5 * (min_a + max_a)
@@ -8140,7 +8397,8 @@ class RuntimeFEMWindow:
         if self.result_canvas is not None:
             try:
                 self.result_canvas.canvas.configure(
-                    cursor="crosshair" if (self._mesh_point_selection_active or self._custom_load_selection_active) else ""
+                    cursor="crosshair" if (
+                                self._mesh_point_selection_active or self._custom_load_selection_active) else ""
                 )
             except Exception:
                 pass
@@ -8155,7 +8413,9 @@ class RuntimeFEMWindow:
             self._force_fit_next_refresh = self.result_canvas is None
             self._set_custom_load_selection_active(False, refresh=False)
             self._set_mesh_point_selection_active(True, refresh=False)
-            self._write_status("Point mesh selection is active. Click a panel in the 3D view to set the detail-mesh center.", keep_run_results=True)
+            self._write_status(
+                "Point mesh selection is active. Click a panel in the 3D view to set the detail-mesh center.",
+                keep_run_results=True)
         else:
             self._set_mesh_point_selection_active(False, refresh=False)
             self._write_status("Point mesh selection cancelled.", keep_run_results=True)
@@ -8223,7 +8483,8 @@ class RuntimeFEMWindow:
             return
         iid = selected[0]
         if not iid.startswith("load:"):
-            self._write_status("Boundary-condition information cannot be deleted from the load list.", keep_run_results=True)
+            self._write_status("Boundary-condition information cannot be deleted from the load list.",
+                               keep_run_results=True)
             return
         try:
             index = int(iid.split(":", 1)[1])
@@ -8271,8 +8532,8 @@ class RuntimeFEMWindow:
             messagebox.showerror("Collision setup", "Sphere travel vector must be non-zero.")
             return False
         if str(self.collision_time_mode.get()).strip().lower() == "manual" and (
-            _safe_float(self.collision_dt_s.get(), 0.0) <= 0.0
-            or _safe_float(self.collision_total_time_s.get(), 0.0) <= 0.0
+                _safe_float(self.collision_dt_s.get(), 0.0) <= 0.0
+                or _safe_float(self.collision_total_time_s.get(), 0.0) <= 0.0
         ):
             messagebox.showerror("Collision setup", "Collision total time and time step must be positive.")
             return False
@@ -8280,9 +8541,9 @@ class RuntimeFEMWindow:
 
     def _static_inputs_are_valid(self) -> bool:
         if (
-            self._static_kinematics_selector_enabled()
-            and _normalise_kinematics(self.nonlinear_static_kinematics.get()) == "corotational"
-            and bool(self.fracture_enabled.get())
+                self._static_kinematics_selector_enabled()
+                and _normalise_kinematics(self.nonlinear_static_kinematics.get()) == "corotational"
+                and bool(self.fracture_enabled.get())
         ):
             messagebox.showerror(
                 "FEM solver",
@@ -8322,7 +8583,10 @@ class RuntimeFEMWindow:
                 self.solver_queue.put(msg)
 
             try:
-                self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb, imported_fem_model=self.imported_fem_model), None))
+                precomputed = getattr(self, "_imperfection_mesh", None)
+                self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb,
+                                                       imported_fem_model=self.imported_fem_model,
+                                                       precomputed_generated_geometry=precomputed), None))
             except Exception as error:
                 self.solver_queue.put((None, error))
 
@@ -8401,18 +8665,18 @@ class RuntimeFEMWindow:
             self._write_status(self._format_run_status_text(options, self._run_status_history))
         self.window.after(20, self._poll_solver_result)
 
-
-
     def _apply_live_visualization(self, payload: dict[str, Any]) -> None:
         visualization = dict(payload.get("visualization") or {})
         if not visualization:
             return
         live_sphere = visualization.get("rigid_sphere") if isinstance(visualization, dict) else None
-        self._live_collision_sphere_visualization = {"rigid_sphere": dict(live_sphere)} if isinstance(live_sphere, dict) else {}
+        self._live_collision_sphere_visualization = {"rigid_sphere": dict(live_sphere)} if isinstance(live_sphere,
+                                                                                                      dict) else {}
         live_sphere_position = ()
         if isinstance(live_sphere, dict):
             try:
-                live_sphere_position = tuple(float(value) for value in np.asarray(live_sphere.get("position", ()), dtype=float).reshape(-1)[:3])
+                live_sphere_position = tuple(
+                    float(value) for value in np.asarray(live_sphere.get("position", ()), dtype=float).reshape(-1)[:3])
             except Exception:
                 live_sphere_position = ()
         geometry = runtime_geometry_summary(self.snapshot)
@@ -8434,7 +8698,8 @@ class RuntimeFEMWindow:
                 "collision_live_sphere_position_m": live_sphere_position,
                 "collision_beam_contact_enabled": 1.0 if bool(options.collision_beam_contact_enabled) else 0.0,
                 "collision_damage_enabled": 1.0 if bool(options.collision_damage_enabled) else 0.0,
-                "collision_material_nonlinear_enabled": 1.0 if bool(options.collision_material_nonlinear_enabled) else 0.0,
+                "collision_material_nonlinear_enabled": 1.0 if bool(
+                    options.collision_material_nonlinear_enabled) else 0.0,
                 "collision_nonlinear_kinematics": str(options.collision_nonlinear_kinematics),
             },
             "max_displacement_m": _safe_float(payload.get("displacement_max_m"), 0.0),
@@ -8489,7 +8754,8 @@ class RuntimeFEMWindow:
         if self.result_canvas is not None:
             try:
                 self.result_canvas.canvas.configure(
-                    cursor="crosshair" if (self._custom_load_selection_active or self._mesh_point_selection_active) else ""
+                    cursor="crosshair" if (
+                                self._custom_load_selection_active or self._mesh_point_selection_active) else ""
                 )
             except Exception:
                 pass
@@ -8537,13 +8803,15 @@ class RuntimeFEMWindow:
                 return
             point = self._pick_mesh_refinement_point(self.result_canvas, float(event.x), float(event.y))
             if point is None:
-                self._write_status("Point mesh selection: no panel was found at the clicked position.", keep_run_results=True)
+                self._write_status("Point mesh selection: no panel was found at the clicked position.",
+                                   keep_run_results=True)
                 return
             self.point_refinement_x_m.set(float(point[0]))
             self.point_refinement_y_m.set(float(point[1]))
             self.point_refinement_enabled.set(True)
             self._set_mesh_point_selection_active(False, refresh=False)
-            self._write_status(f"Point mesh refinement set at ({point[0]:.3f}, {point[1]:.3f}) m.", keep_run_results=True)
+            self._write_status(f"Point mesh refinement set at ({point[0]:.3f}, {point[1]:.3f}) m.",
+                               keep_run_results=True)
             self._refresh_figure(preserve_view=True)
             return
 
@@ -8563,7 +8831,8 @@ class RuntimeFEMWindow:
 
         patch_index = self._pick_custom_load_patch(self.result_canvas, float(event.x), float(event.y))
         if patch_index is None:
-            self._write_status("Custom load selection: no panel was found at the clicked position.", keep_run_results=True)
+            self._write_status("Custom load selection: no panel was found at the clicked position.",
+                               keep_run_results=True)
             return
 
         self._custom_load_selected_index = patch_index
@@ -8596,7 +8865,8 @@ class RuntimeFEMWindow:
             visualization,
             max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
         )
-        surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(visualization.get("shell_surfaces") or ())
+        surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(
+            visualization.get("shell_surfaces") or ())
         best_element_id: int | None = None
         best_element_depth = float("inf")
         best_node_id: int | None = None
@@ -8685,7 +8955,8 @@ class RuntimeFEMWindow:
 
         edge = self._pick_custom_load_edge(self.result_canvas, float(event.x), float(event.y))
         if edge is None:
-            self._write_status("Custom load selection: no edge was found at the clicked position.", keep_run_results=True)
+            self._write_status("Custom load selection: no edge was found at the clicked position.",
+                               keep_run_results=True)
             return
 
         key = self._custom_load_edge_key(*edge)
@@ -9129,12 +9400,12 @@ class RuntimeFEMWindow:
                 mid_b = 0.5 * (b_values[index_b] + b_values[index_b + 1])
                 for patch in selected_patches:
                     if (
-                        _safe_float(patch.get("min_a")) - 1.0e-9
-                        <= mid_a
-                        <= _safe_float(patch.get("max_a")) + 1.0e-9
-                        and _safe_float(patch.get("min_b")) - 1.0e-9
-                        <= mid_b
-                        <= _safe_float(patch.get("max_b")) + 1.0e-9
+                            _safe_float(patch.get("min_a")) - 1.0e-9
+                            <= mid_a
+                            <= _safe_float(patch.get("max_a")) + 1.0e-9
+                            and _safe_float(patch.get("min_b")) - 1.0e-9
+                            <= mid_b
+                            <= _safe_float(patch.get("max_b")) + 1.0e-9
                     ):
                         selected_cells.add((index_a, index_b))
                         break
@@ -9488,7 +9759,8 @@ class RuntimeFEMWindow:
         self._write_status("3D view set to " + view + ".", keep_run_results=True)
 
 
-def open_runtime_fem_window(parent: Any, app: Any, imported_fem_model=None, imported_path=None) -> RuntimeFEMWindow | None:
+def open_runtime_fem_window(parent: Any, app: Any, imported_fem_model=None,
+                            imported_path=None) -> RuntimeFEMWindow | None:
     """Open the experimental runtime FEM popup for the app active line, or a direct FEM import."""
 
     try:
@@ -9652,7 +9924,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--example",
         choices=("girder_panel", "cylinder"),
-        default="girder_panel",
+        default="cylinder",
         help="Standalone example to open. Default is the flat stiffened girder panel.",
     )
     args = parser.parse_args()
