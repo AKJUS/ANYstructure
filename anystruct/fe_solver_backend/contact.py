@@ -1588,7 +1588,7 @@ def _solve_transient_sphere_impact_nonlinear(
     status_callback: Optional[Callable[[str], None]] = None,
 ) -> SphereImpactResult:
     """Implicit Newmark nonlinear impact with material/geometric element response."""
-    from .nonlinear_static import _assemble_nonlinear_system, _nonlinear_state_summary
+    from .nonlinear_static import _assemble_nonlinear_system, _nonlinear_state_summary, states_von_mises_map
 
     def assemble_nonlinear(
         displacements: np.ndarray,
@@ -1708,6 +1708,7 @@ def _solve_transient_sphere_impact_nonlinear(
     saved_contacts: List[Tuple[Dict[str, Any], ...]] = []
     node_history_values: Dict[int, list[np.ndarray]] = {int(node_id): [] for node_id in output_node_ids}
     element_state_history: List[Dict[str, Any]] = []
+    state_von_mises_history: List[Dict[int, float]] = []
     peak_displacement = 0.0
     peak_displacement_node = None
     max_penetration = 0.0
@@ -1730,6 +1731,7 @@ def _solve_transient_sphere_impact_nonlinear(
         sphere_a: np.ndarray,
         sphere_force: np.ndarray,
         records: Tuple[SphereContactRecord, ...],
+        state_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         nonlocal peak_displacement, peak_displacement_node, max_penetration, peak_contact_force
         full_u = reconstruct_full_solution(T, q_state, u0)
@@ -1771,10 +1773,19 @@ def _solve_transient_sphere_impact_nonlinear(
             # internal-work proxy (elastic + dissipated) once plasticity is
             # active.
             energy_strain.append(0.5 * float(full_u @ F_int_prev))
-        plastic_work_history.append(float(_nonlinear_state_summary(committed_states).get("max_equivalent_plastic_strain", 0.0) or 0.0))
+        # One summary pass per saved step: it walks every element state, so
+        # repeating it for the plastic-work history, the state history and
+        # the progress payload triples a cost that rivals the Newton solves.
+        # The stepping loop passes its own summary in to avoid recomputing.
+        summary = state_summary if state_summary is not None else _nonlinear_state_summary(committed_states)
+        max_alpha = float(summary.get("max_equivalent_plastic_strain", 0.0) or 0.0)
+        plastic_work_history.append(max_alpha)
         if bool(nl.record_element_state_history):
-            summary = _nonlinear_state_summary(committed_states)
             element_state_history.append({"time": float(time), **summary})
+            # True (return-mapped) stress envelope per element at this saved
+            # step: an elastic recovery from the saved displacements ignores
+            # the plastic strain and overshoots the material curve.
+            state_von_mises_history.append(states_von_mises_map(model, committed_states))
         if progress_callback is not None and history_storage_mode == "full":
             try:
                 progress_callback(
@@ -1788,7 +1799,7 @@ def _solve_transient_sphere_impact_nonlinear(
                         "contact_force": np.asarray(sphere_force, dtype=float).copy(),
                         "active_contacts": tuple(record.to_dict() for record in records) if config.save_contact_history else tuple(),
                         "nonlinear": True,
-                        "max_equivalent_plastic_strain": float(_nonlinear_state_summary(committed_states).get("max_equivalent_plastic_strain", 0.0) or 0.0),
+                        "max_equivalent_plastic_strain": max_alpha,
                     }
                 )
             except Exception:
@@ -2136,7 +2147,7 @@ def _solve_transient_sphere_impact_nonlinear(
         )
         step_complete = float(sub_time) >= float(times[step_index]) - 1.0e-12 * max(abs(float(times[step_index])), 1.0)
         if step_complete and (step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1):
-            save_state(sub_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, sphere_force, records)
+            save_state(sub_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, sphere_force, records, state_summary=state_summary)
             pending_save = None
         else:
             pending_save = (float(sub_time), sphere_force.copy(), records)
@@ -2288,6 +2299,7 @@ def _solve_transient_sphere_impact_nonlinear(
         "strain_summary": _nonlinear_state_summary(committed_states),
         "element_states": committed_states,
         "element_state_history": element_state_history,
+        "state_von_mises_history": tuple(state_von_mises_history),
         "plastic_impact_damage_summary": plastic_damage_summary,
         "impact_damage_summary": plastic_damage_summary,
         "erosion_summary": erosion_summary,

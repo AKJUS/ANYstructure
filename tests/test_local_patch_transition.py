@@ -162,6 +162,79 @@ def test_cylinder_local_patch_quality_beats_graded() -> None:
     assert worst_aspect(patched) < worst_aspect(graded)
 
 
+def _cylinder_skin_normal_counts(generated: dict) -> tuple[int, int]:
+    """(outward, inward) radial-normal counts over cylinder skin shells."""
+    nodes = {int(n["id"]): np.asarray([float(c) for c in n["coords"]]) for n in generated["nodes"]}
+    outward = inward = 0
+    for shell in _skin_shells(generated):
+        pts = [nodes[int(i)] for i in shell["node_ids"]]
+        centroid = np.mean(pts, axis=0)
+        normal = np.cross(pts[1] - pts[0], pts[2] - pts[0])
+        radial = np.asarray([centroid[0], centroid[1], 0.0])
+        if np.linalg.norm(normal) < 1e-14 or np.linalg.norm(radial) < 1e-9:
+            continue
+        if float(np.dot(normal, radial)) > 0.0:
+            outward += 1
+        else:
+            inward += 1
+    return outward, inward
+
+
+def test_cylinder_local_patch_window_on_seam_is_conforming() -> None:
+    """A refinement window crossing the periodic seam (theta=0) must not slit
+    the cylinder open: no duplicate skin nodes and no hanging edges."""
+    generated = build_generated_geometry(
+        CYLINDER,
+        LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            point_refinement_enabled=True,
+            point_refinement_x_m=4.0,   # u = axial
+            point_refinement_y_m=0.0,   # v = arc: window straddles the seam
+            point_refinement_fine_size_m=0.05,
+            point_refinement_extent_m=0.4,
+            detail_transition_style="local patch (quad+tri)",
+        ),
+    )
+    assert generated["adaptive_mesh"]["transition"] == "local patch (quad+tri)"
+    assert generated["adaptive_mesh"]["refined_cells"] > 0
+
+    def on_end_ring(p, q):
+        length = CYLINDER["length_m"]
+        return (abs(p[2]) < 1e-8 and abs(q[2]) < 1e-8) or (
+            abs(p[2] - length) < 1e-8 and abs(q[2] - length) < 1e-8
+        )
+
+    _assert_conforming(generated, on_end_ring)
+    # No duplicated skin nodes along the seam (a slit doubles seam nodes).
+    nodes = {int(n["id"]): tuple(round(float(c), 7) for c in n["coords"]) for n in generated["nodes"]}
+    skin_ids = {int(i) for shell in _skin_shells(generated) for i in shell["node_ids"]}
+    coords = [nodes[i] for i in skin_ids]
+    assert len(coords) == len(set(coords)), "duplicate skin nodes (seam slit)"
+
+
+def test_cylinder_local_patch_keeps_normal_winding() -> None:
+    """Emitted refinement elements must keep the base mesh's surface normal
+    orientation, or pressure loads on the patch act in the wrong direction."""
+    generated = build_generated_geometry(
+        CYLINDER,
+        LightweightFEMConfig(
+            mesh_fidelity="coarse",
+            point_refinement_enabled=True,
+            point_refinement_x_m=4.0,
+            point_refinement_y_m=1.0,
+            point_refinement_fine_size_m=0.05,
+            point_refinement_extent_m=0.4,
+            detail_transition_style="local patch (quad+tri)",
+        ),
+    )
+    assert generated["adaptive_mesh"]["refined_cells"] > 0
+    outward, inward = _cylinder_skin_normal_counts(generated)
+    assert outward > 0
+    assert min(outward, inward) == 0, (
+        f"mixed skin normals after refinement: {outward} outward vs {inward} inward"
+    )
+
+
 def test_local_patch_falls_back_for_shell_web_members() -> None:
     generated = build_generated_geometry(
         FLAT, _impact_config(member_model="webs as shells, flanges as beams")

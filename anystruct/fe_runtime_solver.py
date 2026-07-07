@@ -785,7 +785,7 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
         "radius_m": _safe_float(_read_attr_or_call(shell, "radius", default=None), 1.0),
         "length_m": _safe_float(_read_attr_or_call(shell, "length_of_shell", "tot_cyl_length", default=None), 1.0),
         "thickness_m": _safe_float(_read_attr_or_call(shell, "thk", default=None), 0.0),
-        "is_cone": bool(cone_r1 > 0.0 and cone_r2 > 0.0),
+        "is_cone": bool(cone_r1 > 0.0 and cone_r2 > 0.0 and abs(cone_r1 - cone_r2) > 1e-6),
         "cone_r1_m": cone_r1,
         "cone_r2_m": cone_r2,
         "cone_length_m": _safe_float(_read_attr_or_call(shell, "cone_length", default=None), 0.0),

@@ -854,7 +854,13 @@ def _apply_local_patch_transition(
         if not periodic_v:
             return v
         wrapped = v % v_span
-        return v_span if abs(wrapped) < tol and v > 0.5 * v_span else wrapped
+        # Canonical seam key: v == 0 and v == v_span are the same physical
+        # line on a periodic surface.  Both must map to the SAME key or
+        # seam-adjacent refinement creates duplicate nodes and unmatched
+        # edge signatures -- a slit along the seam.
+        if abs(wrapped) < tol or abs(wrapped - v_span) < tol:
+            return 0.0
+        return wrapped
 
     # Map each skin quad to an axis-aligned parametric rectangle.
     cells: list[dict[str, object]] = []
@@ -868,7 +874,19 @@ def _apply_local_patch_transition(
         vs = sorted({round(v, 9) for v in vs_raw})
         if len(us) != 2 or len(vs) != 2:
             return None
-        cells.append({"shell": shell, "u0": us[0], "u1": us[1], "v0": vs[0], "v1": vs[1]})
+        # Signed area of the quad in (u, v) node order: negative means the
+        # original winding is clockwise in parametric space, so emitted
+        # sub-elements (built counter-clockwise in (u, v)) must be reversed
+        # to keep the surface normal -- and thus the pressure direction --
+        # consistent with the untouched base mesh.
+        poly = [(params[k][0], vs_raw[k]) for k in range(4)]
+        area2 = sum(
+            poly[k][0] * poly[(k + 1) % 4][1] - poly[(k + 1) % 4][0] * poly[k][1]
+            for k in range(4)
+        )
+        cells.append(
+            {"shell": shell, "u0": us[0], "u1": us[1], "v0": vs[0], "v1": vs[1], "flip": area2 < 0.0}
+        )
 
     cell_sizes = [min(c["u1"] - c["u0"], c["v1"] - c["v0"]) for c in cells]
     base_size = float(np.median(cell_sizes)) if cell_sizes else 0.0
@@ -955,12 +973,15 @@ def _apply_local_patch_transition(
     tri_count = 0
     quad_count = 0
 
+    emit_flip = [False]  # per-cell winding flag set in the refinement loop
+
     def emit(shell_template: dict[str, object], node_ids: list[int]) -> None:
         nonlocal max_shell_id, tri_count, quad_count
         max_shell_id += 1
         entry = {key: value for key, value in shell_template.items() if key not in ("id", "node_ids")}
         entry["id"] = max_shell_id
-        entry["node_ids"] = [int(i) for i in node_ids]
+        ordered = list(reversed(node_ids)) if emit_flip[0] else list(node_ids)
+        entry["node_ids"] = [int(i) for i in ordered]
         new_shells.append(entry)
         if len(node_ids) == 3:
             tri_count += 1
@@ -978,6 +999,7 @@ def _apply_local_patch_transition(
         if ell == 0 and not any(hang_side.values()):
             continue  # untouched coarse cell
         replaced_ids.add(int(cell["shell"]["id"]))
+        emit_flip[0] = bool(cell.get("flip"))
         n = 2 ** ell
         u0, u1, v0, v1 = cell["u0"], cell["u1"], cell["v0"], cell["v1"]
         du = (u1 - u0) / n
@@ -4930,7 +4952,12 @@ def _nonlinear_layer_count(value: object) -> int:
 def _nonlinear_curve_payload(config: LightweightFEMConfig, geometry: dict) -> tuple[object | None, dict[str, float | str]]:
     if _backend_curve_from_properties is None:
         return None, {}
-    if not _wants_material_nonlinear_analysis(config):
+    # Collision runs with material nonlinearity enabled need the hardening
+    # curve on the model even when the static material model dropdown is
+    # left at "linear elastic"; without it the "nonlinear" impact transient
+    # silently degenerates to an elastic response with unbounded stresses.
+    collision_wants_curve = bool(config.collision_enabled) and bool(config.collision_material_nonlinear_enabled)
+    if not (_wants_material_nonlinear_analysis(config) or collision_wants_curve):
         return None, {}
     thickness = _positive(geometry.get("thickness_m", 0.0), 0.016)
     properties = dnv_c208_steel_properties(config.steel_grade, thickness, config.steel_thickness_class)
@@ -6017,6 +6044,30 @@ def _ensure_runtime_density(model, density: float = 7850.0) -> None:
                 pass
 
 
+def _collision_snapshot_stresses(
+        model,
+        displacement,
+        state_von_mises: dict[int, float] | None,
+) -> dict[int, dict[str, object]]:
+    """Element stresses for a collision snapshot.
+
+    For material-nonlinear runs, the elastic recovery from total
+    displacements overshoots the material curve wherever plastic strain has
+    accumulated, so the von Mises component is replaced by the true
+    (return-mapped) envelope recorded from the committed plastic states.
+    Returns an empty dict for linear runs so the caller's elastic recovery
+    applies unchanged.
+    """
+    if not state_von_mises or _backend_compute_stresses is None:
+        return {}
+    stresses = _backend_compute_stresses(model, np.asarray(displacement, dtype=float))
+    for element_id, value in state_von_mises.items():
+        entry = stresses.get(int(element_id))
+        if isinstance(entry, dict) and "von_mises" in entry:
+            entry["von_mises"] = np.asarray([float(value)], dtype=float)
+    return stresses
+
+
 def _run_collision_response(
         model,
         load_case,
@@ -6240,6 +6291,7 @@ def _run_collision_response(
     erosion_summary = impact_diagnostics.get("erosion_summary", {}) or {}
     contact_failure_summary = impact_diagnostics.get("contact_failure_summary", {}) or {}
     nonlinear_failure_summary = impact_diagnostics.get("nonlinear_failure_summary", {}) or {}
+    state_vm_history = tuple(impact_diagnostics.get("state_von_mises_history", ()) or ())
     records = tuple(damage_summary.get("records", ()) or ())
     times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
     displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
@@ -6254,13 +6306,18 @@ def _run_collision_response(
         for field_name, by_element in plastic_element_fields.items():
             if by_element:
                 element_fields[field_name] = by_element
+        snapshot_stresses = _collision_snapshot_stresses(
+            model,
+            displacements[index],
+            state_vm_history[index] if index < len(state_vm_history) else None,
+        )
         snapshot = _visualization_from_full_result(
             generated_geometry,
             model,
             displacements[index],
             scalar_by_node={},
             scalar_label="dynamic displacement [m]",
-            stresses_by_element={},
+            stresses_by_element=snapshot_stresses,
             element_scalar_fields=element_fields,
         )
         if not snapshot:

@@ -573,46 +573,163 @@ def _max_plastic_strain(states: Dict[int, Any]) -> float:
     return float(_nonlinear_state_summary(states)["max_equivalent_plastic_strain"])
 
 
+def state_von_mises_envelope(state: Any, E: float, nu: float) -> Optional[float]:
+    """Max von Mises stress reconstructed from a committed layered shell state.
+
+    ``sigma = C_el (eps_layer - eps_p)`` reproduces the return-mapped stress
+    at the last commit exactly, so the value respects the material hardening
+    curve -- unlike an elastic recovery from total displacements, which keeps
+    growing with plastic strain.  Returns ``None`` for states without layered
+    strain data (e.g. beam fiber states) so callers can fall back to elastic
+    recovery.
+    """
+    if not isinstance(state, Mapping):
+        return None
+    fiber_stress = np.asarray(state.get("fiber_stress", ()), dtype=float).reshape(-1)
+    if fiber_stress.size:
+        # Beam fiber sections store the return-mapped uniaxial stress
+        # directly; its magnitude is the von Mises equivalent.
+        return float(np.max(np.abs(fiber_stress)))
+    layer = np.asarray(state.get("layer_strain", ()), dtype=float)
+    plastic = np.asarray(state.get("plastic_strain", ()), dtype=float)
+    if layer.size == 0 or layer.shape != plastic.shape:
+        return None
+    layer = layer.reshape(-1, layer.shape[-1]) if layer.ndim > 1 else layer.reshape(-1, 1)
+    if layer.shape[-1] != 3:
+        return None
+    plastic = plastic.reshape(layer.shape)
+    elastic = layer - plastic
+    factor = float(E) / (1.0 - float(nu) ** 2)
+    sxx = factor * (elastic[:, 0] + float(nu) * elastic[:, 1])
+    syy = factor * (elastic[:, 1] + float(nu) * elastic[:, 0])
+    sxy = factor * (1.0 - float(nu)) / 2.0 * elastic[:, 2]
+    von_mises = np.sqrt(np.maximum(sxx * sxx - sxx * syy + syy * syy + 3.0 * sxy * sxy, 0.0))
+    return float(np.max(von_mises)) if von_mises.size else None
+
+
+def states_von_mises_map(model: Any, states: Mapping[int, Any]) -> Dict[int, float]:
+    """Per-element von Mises envelope from committed plastic states.
+
+    Layered shell states are batched per (material, layer-count) group and
+    reduced with one vectorized pass; this runs once per saved transient step
+    over every element state, so per-element numpy calls dominate on large
+    models.  Values match :func:`state_von_mises_envelope` exactly.
+    """
+    constants: Dict[str, Tuple[float, float]] = {}
+    values: Dict[int, float] = {}
+    layered_groups: Dict[Tuple[str, int], Tuple[List[int], List[np.ndarray], List[np.ndarray]]] = {}
+    for element_id, state in states.items():
+        element = model.mesh.elements.get(int(element_id))
+        if element is None or not isinstance(state, Mapping):
+            continue
+        fiber_stress = np.asarray(state.get("fiber_stress", ()), dtype=float).reshape(-1)
+        if fiber_stress.size:
+            values[int(element_id)] = float(np.max(np.abs(fiber_stress)))
+            continue
+        layer = np.asarray(state.get("layer_strain", ()), dtype=float)
+        plastic = np.asarray(state.get("plastic_strain", ()), dtype=float)
+        if layer.size == 0 or layer.shape != plastic.shape:
+            continue
+        layer = layer.reshape(-1, layer.shape[-1]) if layer.ndim > 1 else layer.reshape(-1, 1)
+        if layer.shape[-1] != 3:
+            continue
+        name = str(element.material_name)
+        ids, layers, plastics = layered_groups.setdefault((name, layer.shape[0]), ([], [], []))
+        ids.append(int(element_id))
+        layers.append(layer)
+        plastics.append(plastic.reshape(layer.shape))
+    for (name, rows), (ids, layers, plastics) in layered_groups.items():
+        if name not in constants:
+            material = model.get_material(name)
+            constants[name] = (float(material.elastic_modulus), float(material.poisson_ratio))
+        E, nu = constants[name]
+        elastic = np.concatenate(layers) - np.concatenate(plastics)
+        factor = E / (1.0 - nu**2)
+        sxx = factor * (elastic[:, 0] + nu * elastic[:, 1])
+        syy = factor * (elastic[:, 1] + nu * elastic[:, 0])
+        sxy = factor * (1.0 - nu) / 2.0 * elastic[:, 2]
+        von_mises = np.sqrt(np.maximum(sxx * sxx - sxx * syy + syy * syy + 3.0 * sxy * sxy, 0.0))
+        per_element = von_mises.reshape(len(ids), rows).max(axis=1)
+        for element_id, value in zip(ids, per_element):
+            values[element_id] = float(value)
+    return values
+
+
 def _nonlinear_state_summary(states: Dict[int, Any]) -> Dict[str, Any]:
-    """Summarize plastic strain and layer/fiber strain data from element states."""
-    max_alpha = 0.0
-    max_plastic_component = 0.0
-    max_compressed_alpha = 0.0
-    layer_min = float("inf")
-    layer_max = float("-inf")
-    fiber_min = float("inf")
-    fiber_max = float("-inf")
-    yielded = 0
+    """Summarize plastic strain and layer/fiber strain data from element states.
+
+    Vectorized: the per-state arrays are gathered once and reduced with a
+    handful of concatenated numpy calls.  The previous per-element reductions
+    ran once per element per saved transient step and rivalled the cost of
+    the Newton solves on large impact models.
+    """
+    alpha_parts: List[np.ndarray] = []
+    plastic_parts: List[np.ndarray] = []
+    layer_parts: List[np.ndarray] = []
+    fiber_parts: List[np.ndarray] = []
+    # (alpha, compression-measure) pairs with row alignment, grouped by the
+    # number of in-plane strain columns participating in the compression test.
+    comp_layer_pairs: Dict[int, Tuple[List[np.ndarray], List[np.ndarray]]] = {}
+    comp_fiber_alpha: List[np.ndarray] = []
+    comp_fiber_measure: List[np.ndarray] = []
 
     for state in states.values():
         if not isinstance(state, dict):
             continue
-        alpha = np.asarray(state.get("alpha", []), dtype=float).reshape(-1)
+        alpha = np.asarray(state.get("alpha", ()), dtype=float).reshape(-1)
         if alpha.size:
-            local_max = float(np.max(alpha))
-            max_alpha = max(max_alpha, local_max)
-            if local_max > 0.0:
-                yielded += 1
-        plastic = np.asarray(state.get("plastic_strain", []), dtype=float)
+            alpha_parts.append(alpha)
+        plastic = np.asarray(state.get("plastic_strain", ()), dtype=float)
         if plastic.size:
-            max_plastic_component = max(max_plastic_component, float(np.max(np.abs(plastic))))
-        layer = np.asarray(state.get("layer_strain", []), dtype=float)
+            plastic_parts.append(plastic.reshape(-1))
+        layer = np.asarray(state.get("layer_strain", ()), dtype=float)
         if layer.size:
             layer_2d = layer.reshape((-1, layer.shape[-1] if layer.ndim > 1 else 1))
-            layer_min = min(layer_min, float(np.min(layer_2d)))
-            layer_max = max(layer_max, float(np.max(layer_2d)))
+            layer_parts.append(layer_2d.reshape(-1))
             if alpha.size == layer_2d.shape[0]:
-                compression = np.min(layer_2d[:, : min(2, layer_2d.shape[1])], axis=1) < 0.0
-                if np.any(compression):
-                    max_compressed_alpha = max(max_compressed_alpha, float(np.max(alpha[compression])))
-        fiber = np.asarray(state.get("fiber_strain", []), dtype=float)
+                width = min(2, layer_2d.shape[1])
+                alphas, measures = comp_layer_pairs.setdefault(width, ([], []))
+                alphas.append(alpha)
+                measures.append(layer_2d[:, :width])
+        fiber = np.asarray(state.get("fiber_strain", ()), dtype=float).reshape(-1)
         if fiber.size:
-            fiber_min = min(fiber_min, float(np.min(fiber)))
-            fiber_max = max(fiber_max, float(np.max(fiber)))
+            fiber_parts.append(fiber)
             if alpha.size == fiber.size:
-                compression = fiber < 0.0
-                if np.any(compression):
-                    max_compressed_alpha = max(max_compressed_alpha, float(np.max(alpha[compression])))
+                comp_fiber_alpha.append(alpha)
+                comp_fiber_measure.append(fiber)
+
+    max_alpha = 0.0
+    yielded = 0
+    if alpha_parts:
+        alpha_all = np.concatenate(alpha_parts)
+        max_alpha = float(np.max(alpha_all))
+        sizes = np.asarray([part.size for part in alpha_parts], dtype=np.intp)
+        offsets = np.concatenate(([0], np.cumsum(sizes[:-1])))
+        yielded = int(np.count_nonzero(np.maximum.reduceat(alpha_all, offsets) > 0.0))
+    max_plastic_component = float(np.max(np.abs(np.concatenate(plastic_parts)))) if plastic_parts else 0.0
+    layer_min = float("inf")
+    layer_max = float("-inf")
+    if layer_parts:
+        layer_all = np.concatenate(layer_parts)
+        layer_min = float(np.min(layer_all))
+        layer_max = float(np.max(layer_all))
+    fiber_min = float("inf")
+    fiber_max = float("-inf")
+    if fiber_parts:
+        fiber_all = np.concatenate(fiber_parts)
+        fiber_min = float(np.min(fiber_all))
+        fiber_max = float(np.max(fiber_all))
+    max_compressed_alpha = 0.0
+    for _width, (alphas, measures) in comp_layer_pairs.items():
+        alpha_all = np.concatenate(alphas)
+        compression = np.min(np.concatenate(measures), axis=1) < 0.0
+        if np.any(compression):
+            max_compressed_alpha = max(max_compressed_alpha, float(np.max(alpha_all[compression])))
+    if comp_fiber_alpha:
+        alpha_all = np.concatenate(comp_fiber_alpha)
+        compression = np.concatenate(comp_fiber_measure) < 0.0
+        if np.any(compression):
+            max_compressed_alpha = max(max_compressed_alpha, float(np.max(alpha_all[compression])))
 
     return {
         "max_equivalent_plastic_strain": max_alpha,
