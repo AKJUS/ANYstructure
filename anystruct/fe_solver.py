@@ -232,6 +232,8 @@ class LightweightFEMConfig:
     collision_adaptive_growth_factor: float = 1.35
     collision_adaptive_zone_factor: float = 2.5
     detail_transition_style: str = "graded grid"
+    custom_bc_segments_json: str = "[]"
+    thickness_regions_json: str = "[]"
     collision_time_mode: str = "auto"
     collision_auto_steps_per_radius: float = 20.0
     collision_auto_post_contact_radii: float = 6.0
@@ -2656,8 +2658,8 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     )
     div_x = _line_divisions(length, config, base_div, member_spacing_cap)
     div_y = _line_divisions(width, config, base_div, member_spacing_cap)
-    custom_x_breaks = _custom_patch_axis_breaks(config, "a", length)
-    custom_y_breaks = _custom_patch_axis_breaks(config, "b", width)
+    custom_x_breaks = _custom_patch_axis_breaks(config, "a", length) + _thickness_region_axis_breaks(config, "a", length)
+    custom_y_breaks = _custom_patch_axis_breaks(config, "b", width) + _thickness_region_axis_breaks(config, "b", width)
     mandatory_x = tuple(girder_positions) + custom_x_breaks
     mandatory_y = tuple(stiffener_positions) + custom_y_breaks
     x_breaks = _axis_breaks(length, div_x, mandatory_x, member_spacing_cap)
@@ -2769,7 +2771,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     if config.custom_load_bc_enabled:
         if custom_x_breaks or custom_y_breaks:
             mesh_generation["pressure_patch_boundary_breaks"] = "flat_exact"
-        for segment in _custom_edge_segments(config):
+        for segment in list(_custom_edge_segments(config)) + list(_custom_bc_segments(config)):
             if str(segment.get("varying_axis", "a")).lower() == "a":
                 y_breaks = add_breakpoint(y_breaks, segment.get("fixed_coordinate"), width)
                 x_breaks = add_breakpoint(x_breaks, segment.get("start_coordinate"), length)
@@ -2817,6 +2819,12 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 }
             )
             element_id += 1
+    thickness_region_info = _apply_thickness_regions(
+        shells,
+        nodes,
+        config,
+        lambda coords: (float(coords[0]), float(coords[1])),
+    )
 
     beams = []
     beam_id = 20_001
@@ -2977,12 +2985,14 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     boundary_nodes = sorted({node for values in edge_nodes.values() for node in values})
     if config.custom_load_bc_enabled:
         supports = _custom_flat_supports(node_id, rows, cols, config, edge_nodes=edge_nodes)
+        supports.extend(_custom_bc_segment_supports(nodes, config, length, width))
     else:
         supports = _flat_supports(boundary_nodes, node_id, rows, cols, config, geometry, edge_nodes=edge_nodes)
         supports.extend(_symmetry_supports(nodes, config))
         supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
         "name": "ANYstructureFlatPanelFullMesh",
+        "thickness_regions": thickness_region_info,
         "nodes": nodes,
         "shells": shells,
         "beams": beams,
@@ -3160,13 +3170,17 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             girder_positions = list(_centered_member_positions(length, girder_spacing, fallback_midpoint=True))
         else:
             girder_positions = [length / 2.0]
-    axial_mandatory_breaks = tuple(girder_positions) + _custom_patch_axis_breaks(config, "a", length)
+    axial_mandatory_breaks = (
+        tuple(girder_positions)
+        + _custom_patch_axis_breaks(config, "a", length)
+        + _thickness_region_axis_breaks(config, "a", length)
+    )
     z_breaks = _axis_breaks(length, axial_div, axial_mandatory_breaks)
     if _custom_patch_axis_breaks(config, "a", length) or patch_width_b > 0.0:
         mesh_generation["pressure_patch_boundary_breaks"] = "cylinder_axial_exact_circumferential_refined"
     if _wants_b3(config) and config.include_stiffeners and geometry.get("has_stiffener"):
         z_breaks = _refined_midpoint_breaks(z_breaks)
-    arc_breaks = _axis_breaks(circumference, circumferential_div, ())
+    arc_breaks = _axis_breaks(circumference, circumferential_div, _thickness_region_axis_breaks(config, "b", circumference))
     z_breaks, arc_breaks, adaptive_mesh_info = _apply_cylinder_detail_refinement(
         config,
         length,
@@ -3210,6 +3224,15 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 }
             )
             element_id += 1
+    thickness_region_info = _apply_thickness_regions(
+        shells,
+        nodes,
+        config,
+        lambda coords: (
+            float(coords[2]),
+            (math.atan2(float(coords[1]), float(coords[0])) % (2.0 * math.pi)) * radius,
+        ),
+    )
 
     beams = []
     beam_id = 20_001
@@ -3461,6 +3484,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
     return {
         "name": "ANYstructureCylinderFullMesh",
+        "thickness_regions": thickness_region_info,
         "nodes": nodes,
         "shells": shells,
         "beams": beams,
@@ -5153,6 +5177,190 @@ def _custom_patch_axis_breaks(config: LightweightFEMConfig, axis: str, limit: fl
             if tol < value < float(limit) - tol:
                 values.append(value)
     return tuple(sorted(set(round(value, 12) for value in values)))
+
+
+def _thickness_regions(config: LightweightFEMConfig) -> list[dict[str, object]]:
+    """Parse per-region plate-thickness overrides from the geometry panel.
+
+    Each region is ``{"thickness_m": t, "patches": [{min_a, max_a, min_b,
+    max_b}, ...]}`` in the local generated-geometry (a, b) coordinates: flat
+    (x, y), cylinder (axial z, circumferential arc).  Regions apply
+    independently of the custom load/BC mode.
+    """
+    try:
+        raw = json.loads(config.thickness_regions_json) if config.thickness_regions_json else []
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    regions: list[dict[str, object]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        thickness = _optional_positive_float(entry.get("thickness_m"))
+        patches = entry.get("patches", [])
+        if thickness is None or not isinstance(patches, list):
+            continue
+        clean = [dict(patch) for patch in patches if isinstance(patch, dict)]
+        if clean:
+            regions.append({"thickness_m": float(thickness), "patches": clean})
+    return regions
+
+
+def _optional_positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        return None
+    return parsed
+
+
+def _thickness_region_axis_breaks(config: LightweightFEMConfig, axis: str, limit: float) -> tuple[float, ...]:
+    """Region boundary coordinates so elements never straddle a thickness step."""
+    values: list[float] = []
+    tol = max(float(limit) * 1.0e-9, 1.0e-9)
+    for region in _thickness_regions(config):
+        for patch in region.get("patches", ()) or ():
+            try:
+                lower, upper = _custom_patch_axis_interval(patch, axis, limit)
+            except (TypeError, ValueError):
+                continue
+            for value in (lower, upper):
+                if tol < value < float(limit) - tol:
+                    values.append(value)
+    return tuple(sorted(set(round(value, 12) for value in values)))
+
+
+def _apply_thickness_regions(
+    shells: list[dict[str, object]],
+    nodes: list[dict[str, object]],
+    config: LightweightFEMConfig,
+    param_of_coords,
+) -> dict[str, object] | None:
+    """Assign per-region plate thickness to skin shells by centroid location."""
+    regions = _thickness_regions(config)
+    if not regions:
+        return None
+    coords_by_id = {int(n["id"]): [float(c) for c in n["coords"]] for n in nodes if "id" in n}
+    assigned = 0
+    thicknesses: set[float] = set()
+    for shell in shells:
+        if "role" in shell:
+            continue  # member shells keep their section thickness
+        ids = [int(i) for i in shell.get("node_ids", ()) or () if int(i) in coords_by_id]
+        if len(ids) < 3:
+            continue
+        params = [param_of_coords(coords_by_id[i]) for i in ids]
+        centroid_a = sum(p[0] for p in params) / len(params)
+        centroid_b = sum(p[1] for p in params) / len(params)
+        for region in regions:
+            hit = False
+            for patch in region.get("patches", ()) or ():
+                try:
+                    min_a = float(patch.get("min_a", 0.0))
+                    max_a = float(patch.get("max_a", 0.0))
+                    min_b = float(patch.get("min_b", 0.0))
+                    max_b = float(patch.get("max_b", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if min_a <= centroid_a <= max_a and min_b <= centroid_b <= max_b:
+                    hit = True
+                    break
+            if hit:
+                shell["thickness"] = float(region["thickness_m"])
+                assigned += 1
+                thicknesses.add(float(region["thickness_m"]))
+                # regions are applied in order; the last matching region wins
+    if assigned == 0:
+        return None
+    return {
+        "regions": len(regions),
+        "shells_assigned": int(assigned),
+        "thicknesses_m": sorted(thicknesses),
+    }
+
+
+def _custom_bc_segments(config: LightweightFEMConfig) -> list[dict[str, float | str]]:
+    """Per-edge-segment boundary conditions from the GUI edge selection."""
+    try:
+        raw = json.loads(config.custom_bc_segments_json) if config.custom_bc_segments_json else []
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    segments: list[dict[str, float | str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        support = _normalized_choice(entry.get("support"), "free")
+        if support in {"", "free", "none"}:
+            continue
+        try:
+            start = float(entry.get("start_coordinate", 0.0))
+            end = float(entry.get("end_coordinate", 0.0))
+            fixed = float(entry.get("fixed_coordinate", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if abs(end - start) <= 1.0e-12:
+            continue
+        segments.append(
+            {
+                "varying_axis": str(entry.get("varying_axis", "a")).lower(),
+                "fixed_coordinate": fixed,
+                "start_coordinate": min(start, end),
+                "end_coordinate": max(start, end),
+                "support": support,
+            }
+        )
+    return segments
+
+
+def _custom_bc_segment_supports(
+    nodes: list[dict[str, object]],
+    config: LightweightFEMConfig,
+    length: float,
+    width: float,
+) -> list[dict[str, object]]:
+    """Support groups for selected-edge boundary conditions (flat panels)."""
+    segments = _custom_bc_segments(config)
+    if not segments:
+        return []
+    tol = max((float(length) + float(width)) * 1.0e-9, 1.0e-9)
+    supports: list[dict[str, object]] = []
+    for index, segment in enumerate(segments):
+        constraints = _support_constraints(segment.get("support"), "flat")
+        if not constraints:
+            continue
+        varying = str(segment.get("varying_axis", "a"))
+        fixed = float(segment.get("fixed_coordinate", 0.0))
+        start = float(segment.get("start_coordinate", 0.0))
+        end = float(segment.get("end_coordinate", 0.0))
+        node_ids: list[int] = []
+        for node in nodes:
+            coords = node.get("coords", (0.0, 0.0, 0.0))
+            x, y = float(coords[0]), float(coords[1])
+            if abs(float(coords[2])) > tol:
+                continue
+            if varying == "a":
+                on_line = abs(y - fixed) <= tol and (start - tol) <= x <= (end + tol)
+            else:
+                on_line = abs(x - fixed) <= tol and (start - tol) <= y <= (end + tol)
+            if on_line:
+                node_ids.append(int(node["id"]))
+        if node_ids:
+            supports.append(
+                {
+                    "name": "custom_edge_bc_{index}_{support}".format(
+                        index=index,
+                        support=str(segment.get("support", "")).replace(" ", "_"),
+                    ),
+                    "node_ids": sorted(set(node_ids)),
+                    "constraints": constraints,
+                }
+            )
+    return supports
 
 
 def _custom_patch_min_width(config: LightweightFEMConfig, axis: str, fallback: float = 0.0) -> float:
@@ -7162,6 +7370,21 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         t=float(_source.get("plate_thickness_m", 0.0)) * 1000.0,
                     )
                 )
+    _thickness_info = generated_geometry.get("thickness_regions")
+    if _thickness_info:
+        diagnostics.append(
+            "Plate thickness regions: {regions} region(s), {count} shells assigned, thicknesses {values} mm.".format(
+                regions=int(_thickness_info.get("regions", 0)),
+                count=int(_thickness_info.get("shells_assigned", 0)),
+                values=", ".join(f"{t * 1000.0:.1f}" for t in _thickness_info.get("thicknesses_m", ())),
+            )
+        )
+    if config.custom_load_bc_enabled and _custom_bc_segments(config):
+        diagnostics.append(
+            "Applied {count} selected-edge boundary condition segment(s).".format(
+                count=len(_custom_bc_segments(config))
+            )
+        )
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if (not config.custom_load_bc_enabled) and geometry.get("geometry") != "cylinder":

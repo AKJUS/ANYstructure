@@ -249,6 +249,8 @@ class RuntimeFEMOptions:
     collision_adaptive_growth_factor: float = 1.35
     collision_adaptive_zone_factor: float = 2.5
     detail_transition_style: str = "graded grid"
+    custom_bc_segments_json: str = "[]"
+    thickness_regions_json: str = "[]"
     collision_nonlinear_max_iterations: int = 20
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
@@ -1037,6 +1039,8 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         collision_adaptive_growth_factor=float(options.collision_adaptive_growth_factor),
         collision_adaptive_zone_factor=float(options.collision_adaptive_zone_factor),
         detail_transition_style=str(options.detail_transition_style),
+        custom_bc_segments_json=str(options.custom_bc_segments_json),
+        thickness_regions_json=str(options.thickness_regions_json),
         collision_nonlinear_max_iterations=options.collision_nonlinear_max_iterations,
         collision_nonlinear_tolerance=options.collision_nonlinear_tolerance,
         collision_nonlinear_cutbacks=options.collision_nonlinear_cutbacks,
@@ -1265,6 +1269,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "collision_adaptive_growth_factor": float(options.collision_adaptive_growth_factor),
         "collision_adaptive_zone_factor": float(options.collision_adaptive_zone_factor),
         "detail_transition_style": str(options.detail_transition_style),
+        "custom_bc_segments_json": str(options.custom_bc_segments_json),
+        "thickness_regions_json": str(options.thickness_regions_json),
         "collision_nonlinear_max_iterations": int(options.collision_nonlinear_max_iterations),
         "collision_nonlinear_tolerance": float(options.collision_nonlinear_tolerance),
         "collision_nonlinear_cutbacks": int(options.collision_nonlinear_cutbacks),
@@ -3713,6 +3719,33 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Controls the impact-detail circle only when Impact extent is zero.",
         "caution": "Prefer explicit Impact extent for final studies.",
     },
+    "custom_bc_segments": {
+        "title": "Edge Boundary Conditions",
+        "purpose": "Apply a support condition to edges selected in the 3D view, same workflow as edge loads.",
+        "use": "Start selection, right-click edges in the 3D view, choose 'simply supported' or 'fixed' and press "
+               "'Set BC on selected edges'. The BC appears in the applied list below and can be deleted there.",
+        "output": "Creates support constraints for the mesh nodes along the selected edge segments.",
+        "caution": "Available for flat panels in custom load/BC mode; segments also become mesh break lines.",
+    },
+    "thickness_regions": {
+        "title": "Plate Thickness Regions",
+        "purpose": "Assign a plate thickness to whole panels or divided panel regions.",
+        "use": "Select panels in the 3D view (optionally divide them first), enter a thickness and press "
+               "'Set on selected panels'; 'Set on whole plate' assigns every panel. Regions apply in order - "
+               "the last matching region wins.",
+        "output": "Skin shell elements inside each region get the region thickness; region boundaries become "
+                  "mesh break lines so elements never straddle a thickness step. Affects stiffness, stress and mass.",
+        "caution": "Member (stiffener/girder) shells keep their section thickness. Check the thickness plot before running.",
+    },
+    "division_plane": {
+        "title": "Divide Panels By Plane",
+        "purpose": "Cut the selectable panels with a global x, y or z plane so sub-regions can get their own thickness.",
+        "use": "Choose the plane normal and coordinate, then press 'Add division plane'. All panels crossing the "
+               "plane are split. On a cylinder an x or y plane cuts at the two matching circumferential positions; "
+               "a z plane cuts at the axial height. On a flat panel use x or y.",
+        "output": "More, smaller selectable panels; the cut lines also act as mesh break lines once used by a region.",
+        "caution": "Divisions only affect the selection grid until a thickness (or load) is assigned to the parts.",
+    },
     "detail_transition_style": {
         "title": "Detail Mesh Transition",
         "purpose": "How local detail meshes (panel, point, impact) blend into the global mesh.",
@@ -4667,6 +4700,16 @@ class RuntimeFEMWindow:
         self.collision_adaptive_extent_m = tk.DoubleVar(value=0.0)
         self.collision_adaptive_growth_factor = tk.DoubleVar(value=1.35)
         self.detail_transition_style = tk.StringVar(value="graded grid")
+        self.custom_bc_segments_json = tk.StringVar(value="[]")
+        self.custom_bc_support_choice = tk.StringVar(value="fixed")
+        self._custom_bc_entries: list[dict[str, Any]] = []
+        self.thickness_regions_json = tk.StringVar(value="[]")
+        self.geometry_thickness_m = tk.DoubleVar(value=0.0)
+        self.division_plane_axis = tk.StringVar(value="x")
+        self.division_plane_coord_m = tk.DoubleVar(value=0.0)
+        self._thickness_region_entries: list[dict[str, Any]] = []
+        self.geometry_preview_canvas = None
+        self.geometry_preview_parent = None
         self.collision_adaptive_zone_factor = tk.DoubleVar(value=2.5)
         self.collision_nonlinear_max_iterations = tk.IntVar(value=20)
         self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
@@ -5259,6 +5302,9 @@ class RuntimeFEMWindow:
         tab_mesh = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_mesh, text="Mesh")
 
+        tab_geometry = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_geometry, text="Geometry")
+
         tab_properties = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_properties, text="Properties")
 
@@ -5363,6 +5409,66 @@ class RuntimeFEMWindow:
         self.mesh_preview_parent = ttk.Frame(mesh_preview)
         self.mesh_preview_parent.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.mesh_preview_canvas = None
+
+        # --- Geometry tab: plate thickness regions, plane division, thickness plot ---
+        thickness_group = ttk.LabelFrame(tab_geometry, text="Plate thickness regions")
+        thickness_group.pack(fill=tk.X, padx=8, pady=(8, 6))
+        self._configure_compact_option_grid(thickness_group)
+        self._add_compact_entry(thickness_group, 0, 0, "thickness_regions", "Thickness [m]",
+                                self.geometry_thickness_m)
+        thickness_actions = ttk.Frame(thickness_group)
+        thickness_actions.grid(row=1, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=3)
+        ttk.Button(thickness_actions, text="Set on selected panels",
+                   command=lambda: self._set_thickness_region_from_selection(whole=False)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(thickness_actions, text="Set on whole plate",
+                   command=lambda: self._set_thickness_region_from_selection(whole=True)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(thickness_actions, text="Delete region",
+                   command=self._delete_selected_thickness_region).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(thickness_actions, text="Clear all",
+                   command=self._clear_thickness_regions).pack(side=tk.LEFT)
+        selection_geometry = ttk.Frame(thickness_group)
+        selection_geometry.grid(row=2, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=3)
+        ttk.Button(selection_geometry, text="Start selection",
+                   command=self._toggle_custom_load_selection).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(selection_geometry, text="Select All",
+                   command=self._custom_load_select_all).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(selection_geometry, text="Clear selection",
+                   command=self._custom_load_clear_all).pack(side=tk.LEFT)
+        self._thickness_region_tree = ttk.Treeview(
+            thickness_group, columns=("thickness", "panels", "area"), show="headings", height=4, selectmode="browse")
+        self._thickness_region_tree.heading("thickness", text="Thickness [mm]")
+        self._thickness_region_tree.heading("panels", text="Panels")
+        self._thickness_region_tree.heading("area", text="Area [m2]")
+        self._thickness_region_tree.column("thickness", width=110, stretch=False, anchor=tk.W)
+        self._thickness_region_tree.column("panels", width=80, stretch=False, anchor=tk.W)
+        self._thickness_region_tree.column("area", width=100, stretch=True, anchor=tk.W)
+        self._thickness_region_tree.grid(row=3, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=(3, 8))
+
+        division_group = ttk.LabelFrame(tab_geometry, text="Divide panels by plane")
+        division_group.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_compact_option_grid(division_group)
+        self._add_compact_option(division_group, 0, 0, "division_plane", "Plane normal",
+                                 self.division_plane_axis, ("x", "y", "z"))
+        self._add_compact_entry(division_group, 0, 1, "division_plane", "Coordinate [m]",
+                                self.division_plane_coord_m)
+        division_actions = ttk.Frame(division_group)
+        division_actions.grid(row=1, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=(3, 6))
+        ttk.Button(division_actions, text="Add division plane",
+                   command=self._add_division_plane).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(division_actions,
+                  text="Cuts all panels crossing the plane so parts can be selected separately.",
+                  foreground="#475569").pack(side=tk.LEFT)
+
+        thickness_plot = ttk.LabelFrame(tab_geometry, text="Thickness plot")
+        thickness_plot.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        plot_actions = ttk.Frame(thickness_plot)
+        plot_actions.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Button(plot_actions, text="Show thickness plot",
+                   command=self._show_thickness_plot).pack(side=tk.LEFT)
+        ttk.Label(plot_actions, text="Draws the model coloured by plate thickness.",
+                  foreground="#475569").pack(side=tk.LEFT, padx=(8, 0))
+        self.geometry_preview_parent = ttk.Frame(thickness_plot)
+        self.geometry_preview_parent.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
         # --- General tab: model contents + solver + buckling resources ---
         contents = ttk.LabelFrame(tab_general, text="Model contents")
@@ -5630,6 +5736,11 @@ class RuntimeFEMWindow:
         self._custom_bc_selection_button.grid(row=0, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
         ttk.Button(selection_bc, text="Select All", command=self._custom_load_select_all).grid(row=0, column=2, sticky=tk.EW, padx=(0, 4), pady=4)
         ttk.Button(selection_bc, text="Clear", command=self._custom_load_clear_all).grid(row=0, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._info_button(selection_bc, "custom_bc_segments").grid(row=1, column=0, sticky=tk.W, padx=(8, 4), pady=4)
+        ttk.OptionMenu(selection_bc, self.custom_bc_support_choice, self.custom_bc_support_choice.get(),
+                       "simply supported", "fixed").grid(row=1, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection_bc, text="Set BC on selected edges", command=self._add_custom_bc_from_selection).grid(
+            row=1, column=2, columnspan=2, sticky=tk.EW, padx=(0, 8), pady=4)
         selection_bc.columnconfigure(3, weight=1)
 
         self._add_option_row(custom_bc, 2, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
@@ -5642,6 +5753,9 @@ class RuntimeFEMWindow:
         
         bc_list = ttk.LabelFrame(tab_bc, text="Applied boundary conditions")
         bc_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        actions_bc = ttk.Frame(bc_list)
+        actions_bc.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Button(actions_bc, text="Delete BC", command=self._delete_selected_custom_bc).pack(side=tk.LEFT)
         self._custom_bc_tree = ttk.Treeview(bc_list, columns=columns, show="headings", height=4, selectmode="browse")
         self._custom_bc_tree.heading("type", text="Type")
         self._custom_bc_tree.heading("value", text="Value")
@@ -8165,6 +8279,8 @@ class RuntimeFEMWindow:
             cylinder_lower_edge_load_n_per_m=_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0),
             cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0),
             custom_loads_json=str(self.custom_loads_json.get()),
+            custom_bc_segments_json=str(self.custom_bc_segments_json.get()),
+            thickness_regions_json=str(self.thickness_regions_json.get()),
             custom_pressure_patches_json=str(self.custom_pressure_patches_json.get()),
             custom_edge_segments_json=str(self.custom_edge_segments_json.get()),
             custom_selected_edge_load_n_per_m=_safe_float(self.custom_selected_edge_load_n_per_m.get(), 0.0),
@@ -8413,6 +8529,11 @@ class RuntimeFEMWindow:
                 bc_tree.delete(item)
             boundary_selection, boundary_notes = self._custom_boundary_summary()
             bc_tree.insert("", tk.END, iid="boundary", values=("Boundary", "", boundary_selection, boundary_notes))
+            for index, entry in enumerate(getattr(self, "_custom_bc_entries", [])):
+                edges = entry.get("edges", [])
+                count = len(edges) if isinstance(edges, list) else 0
+                bc_tree.insert("", tk.END, iid=f"bc:{index}", values=(
+                    "Edge BC", str(entry.get("support", "")), f"{count} edge segment(s)", "selected edges"))
 
     def _local_refinement_patch_summary(self) -> tuple[int, float]:
         patches = _runtime_local_refinement_patches(
@@ -8559,6 +8680,278 @@ class RuntimeFEMWindow:
         self.custom_load_bc_enabled.set(True)
         self._sync_custom_load_payloads()
         self._write_status(f"Added {added} custom load item(s) to the run list.", keep_run_results=True)
+
+    def _sync_custom_bc_payloads(self) -> None:
+        segments: list[dict[str, Any]] = []
+        for entry in self._custom_bc_entries:
+            support = str(entry.get("support", "fixed"))
+            for edge in entry.get("edges", []) or []:
+                if isinstance(edge, dict):
+                    segment = dict(edge)
+                    segment["support"] = support
+                    segments.append(segment)
+        self.custom_bc_segments_json.set(json.dumps(segments))
+        self._refresh_custom_load_list()
+
+    def _add_custom_bc_from_selection(self) -> None:
+        """Apply the chosen boundary condition to the selected edges (mirrors Add load)."""
+        selected_edges = self._selected_custom_load_edges()
+        if not selected_edges:
+            self._write_status(
+                "Right-click at least one edge in the 3D selection view before setting a boundary condition.",
+                keep_run_results=True,
+            )
+            return
+        support = str(self.custom_bc_support_choice.get() or "fixed")
+        self._custom_bc_entries.append({"support": support, "edges": selected_edges})
+        self.custom_load_bc_enabled.set(True)
+        self._sync_custom_bc_payloads()
+        self._write_status(
+            f"Set '{support}' boundary condition on {len(selected_edges)} selected edge segment(s).",
+            keep_run_results=True,
+        )
+
+    def _delete_selected_custom_bc(self) -> None:
+        tree = getattr(self, "_custom_bc_tree", None)
+        if tree is None:
+            return
+        selected = tree.selection()
+        if not selected or not selected[0].startswith("bc:"):
+            self._write_status("Select an edge boundary condition in the list before deleting.",
+                               keep_run_results=True)
+            return
+        try:
+            index = int(selected[0].split(":", 1)[1])
+        except (IndexError, ValueError):
+            return
+        if 0 <= index < len(self._custom_bc_entries):
+            del self._custom_bc_entries[index]
+            self._sync_custom_bc_payloads()
+            self._write_status("Deleted selected edge boundary condition.", keep_run_results=True)
+
+    # ------------------------------------------------------------------
+    # Geometry tab: plate thickness regions and plane division
+    # ------------------------------------------------------------------
+
+    def _sync_thickness_regions(self) -> None:
+        self.thickness_regions_json.set(json.dumps([dict(entry) for entry in self._thickness_region_entries]))
+        self._refresh_thickness_region_list()
+
+    def _refresh_thickness_region_list(self) -> None:
+        tree = getattr(self, "_thickness_region_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        for index, entry in enumerate(self._thickness_region_entries):
+            patches = entry.get("patches", []) or []
+            area = 0.0
+            for patch in patches:
+                min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(patch)
+                area += max(0.0, max_a - min_a) * max(0.0, max_b - min_b)
+            tree.insert("", tk.END, iid=f"thick:{index}", values=(
+                f"{_safe_float(entry.get('thickness_m'), 0.0) * 1000.0:.1f}",
+                len(patches),
+                f"{area:.3f}",
+            ))
+
+    def _set_thickness_region_from_selection(self, whole: bool = False) -> None:
+        thickness = _safe_float(self.geometry_thickness_m.get(), 0.0)
+        if thickness <= 0.0:
+            self._write_status("Enter a positive plate thickness [m] before assigning it.", keep_run_results=True)
+            return
+        patches = [
+            dict(patch)
+            for patch in getattr(self, "_custom_load_patches", ())
+            if whole or bool(patch.get("selected", False))
+        ]
+        if not patches:
+            self._write_status(
+                "Select one or more panels in the 3D selection view first (or use 'Set on whole plate').",
+                keep_run_results=True,
+            )
+            return
+        self._thickness_region_entries.append({"thickness_m": float(thickness), "patches": patches})
+        self._sync_thickness_regions()
+        scope = "whole plate" if whole else f"{len(patches)} selected panel(s)"
+        self._write_status(
+            f"Set plate thickness {thickness * 1000.0:.1f} mm on {scope}.",
+            keep_run_results=True,
+        )
+
+    def _delete_selected_thickness_region(self) -> None:
+        tree = getattr(self, "_thickness_region_tree", None)
+        if tree is None:
+            return
+        selected = tree.selection()
+        if not selected or not selected[0].startswith("thick:"):
+            self._write_status("Select a thickness region in the list before deleting.", keep_run_results=True)
+            return
+        try:
+            index = int(selected[0].split(":", 1)[1])
+        except (IndexError, ValueError):
+            return
+        if 0 <= index < len(self._thickness_region_entries):
+            del self._thickness_region_entries[index]
+            self._sync_thickness_regions()
+            self._write_status("Deleted thickness region.", keep_run_results=True)
+
+    def _clear_thickness_regions(self) -> None:
+        self._thickness_region_entries.clear()
+        self._sync_thickness_regions()
+        self._write_status("Cleared all plate thickness regions.", keep_run_results=True)
+
+    def _division_plane_param_cuts(self, axis: str, coordinate: float) -> tuple[list[tuple[str, float]], str]:
+        """World plane -> parametric cut coordinates ((param_axis, value), ...)."""
+        geometry = runtime_geometry_summary(self.snapshot)
+        axis = str(axis).lower()
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+            circumference = 2.0 * math.pi * radius
+            if axis == "z":
+                if not 0.0 < coordinate < length:
+                    return [], f"Plane z={coordinate:g} m does not cut the cylinder (0..{length:g} m)."
+                return [("a", coordinate)], ""
+            if abs(coordinate) >= radius:
+                return [], f"Plane {axis}={coordinate:g} m misses the cylinder (radius {radius:g} m)."
+            if axis == "x":
+                theta = math.acos(coordinate / radius)
+                thetas = [theta, 2.0 * math.pi - theta]
+            else:  # y plane
+                theta = math.asin(coordinate / radius)
+                thetas = [theta % (2.0 * math.pi), (math.pi - theta) % (2.0 * math.pi)]
+            return [("b", value * radius) for value in sorted(set(round(t, 12) for t in thetas))
+                    if 1.0e-9 < value * radius < circumference - 1.0e-9], ""
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+        width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-9)
+        if axis == "x":
+            if not 0.0 < coordinate < length:
+                return [], f"Plane x={coordinate:g} m does not cut the panel (0..{length:g} m)."
+            return [("a", coordinate)], ""
+        if axis == "y":
+            if not 0.0 < coordinate < width:
+                return [], f"Plane y={coordinate:g} m does not cut the panel (0..{width:g} m)."
+            return [("b", coordinate)], ""
+        return [], "A z-plane does not divide a flat panel; use x or y."
+
+    def _split_all_patches_at(self, param_axis: str, coordinate: float) -> int:
+        """Split every selection patch crossing the parametric coordinate."""
+        patches = getattr(self, "_custom_load_patches", None)
+        if not patches:
+            return 0
+        tol = 1.0e-9
+        new_patches: list[dict[str, Any]] = []
+        splits = 0
+        for patch in patches:
+            min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(patch)
+            if param_axis == "a" and min_a + tol < coordinate < max_a - tol:
+                first = dict(patch)
+                first["max_a"] = coordinate
+                second = dict(patch)
+                second["min_a"] = coordinate
+                new_patches.extend([first, second])
+                cut = {"varying_axis": "b", "fixed_coordinate": coordinate,
+                       "start_coordinate": min_b, "end_coordinate": max_b}
+                self._custom_load_manual_cuts.append(cut)
+                splits += 1
+            elif param_axis == "b" and min_b + tol < coordinate < max_b - tol:
+                first = dict(patch)
+                first["max_b"] = coordinate
+                second = dict(patch)
+                second["min_b"] = coordinate
+                new_patches.extend([first, second])
+                cut = {"varying_axis": "a", "fixed_coordinate": coordinate,
+                       "start_coordinate": min_a, "end_coordinate": max_a}
+                self._custom_load_manual_cuts.append(cut)
+                splits += 1
+            else:
+                new_patches.append(patch)
+        self._custom_load_patches = new_patches
+        return splits
+
+    def _add_division_plane(self) -> None:
+        axis = str(self.division_plane_axis.get() or "x")
+        coordinate = _safe_float(self.division_plane_coord_m.get(), 0.0)
+        cuts, error = self._division_plane_param_cuts(axis, coordinate)
+        if error:
+            self._write_status(error, keep_run_results=True)
+            return
+        if not getattr(self, "_custom_load_patches", None):
+            self._custom_load_select_all()
+        total = 0
+        for param_axis, value in cuts:
+            total += self._split_all_patches_at(param_axis, value)
+        if total == 0:
+            self._write_status("The plane does not cross any panel; nothing was divided.", keep_run_results=True)
+            return
+        self._display_base_geometry = True
+        self._refresh_figure(preserve_view=True)
+        self._write_status(
+            f"Division plane {axis}={coordinate:g} m split {total} panel(s).",
+            keep_run_results=True,
+        )
+
+    def _show_thickness_plot(self) -> None:
+        """Draw the generated model coloured by plate thickness (geometry tab)."""
+        try:
+            options = self._options()
+            config = _solver_config_from_options(options)
+            geometry = runtime_geometry_summary(self.snapshot)
+            generated = fe_solver.build_generated_geometry(geometry, config)
+        except Exception as error:
+            messagebox.showwarning("Thickness plot", "Could not build the geometry:\n" + str(error))
+            return
+        parent = getattr(self, "geometry_preview_parent", None)
+        if parent is None:
+            return
+        if self.geometry_preview_canvas is None:
+            self.geometry_preview_canvas = Tkinter3DCanvas(parent, bg="white")
+            self.geometry_preview_canvas.pack(fill=tk.BOTH, expand=True)
+        canvas = self.geometry_preview_canvas
+        canvas.clear()
+        self._populate_canvas_with_thickness(canvas, generated)
+        canvas.fit_to_scene()
+        canvas.redraw()
+        info = generated.get("thickness_regions") or {}
+        if info:
+            self._write_status(
+                "Thickness plot: {count} shells in {regions} region(s), thicknesses {values} mm.".format(
+                    count=int(info.get("shells_assigned", 0)),
+                    regions=int(info.get("regions", 0)),
+                    values=", ".join(f"{t * 1000.0:.1f}" for t in info.get("thicknesses_m", ())),
+                ),
+                keep_run_results=True,
+            )
+        else:
+            self._write_status("Thickness plot: uniform plate thickness (no regions set).", keep_run_results=True)
+
+    def _populate_canvas_with_thickness(self, canvas: "Tkinter3DCanvas", generated: dict) -> None:
+        """Render all shells coloured by their plate thickness with a legend."""
+        nodes = {int(n["id"]): n["coords"] for n in generated.get("nodes", ()) or () if "id" in n}
+        thicknesses = [
+            _safe_float(shell.get("thickness"), 0.0) * 1000.0
+            for shell in generated.get("shells", ()) or ()
+        ]
+        values = sorted({round(t, 3) for t in thicknesses if t > 0.0})
+        if values:
+            canvas.set_thickness_legend(values, unit="mm", title="Plate thickness")
+        for shell in generated.get("shells", ()) or ():
+            ids = [int(i) for i in shell.get("node_ids", ()) or () if int(i) in nodes]
+            corners = ids[:3] if len(ids) in (3, 6) else ids[:4]
+            if len(corners) < 3:
+                continue
+            pts = [Point3D(*[float(c) for c in nodes[i]]) for i in corners]
+            thickness_mm = _safe_float(shell.get("thickness"), 0.0) * 1000.0
+            color = canvas.thickness_color(thickness_mm) if values else "#dbe4f0"
+            canvas.add_polygon(pts, color=color, back_color=color, outline="#334155", width=1)
+        for beam in generated.get("beams", ()) or ():
+            ids = [int(i) for i in beam.get("node_ids", ()) or () if int(i) in nodes]
+            if len(ids) < 2:
+                continue
+            pts = [Point3D(*[float(c) for c in nodes[i]]) for i in ids]
+            for k in range(len(pts) - 1):
+                canvas.add_line(pts[k], pts[k + 1], color="#1d4ed8", width=2)
 
     def _delete_selected_custom_load(self) -> None:
         tree = getattr(self, "_custom_load_tree", None)
