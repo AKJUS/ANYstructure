@@ -1381,8 +1381,8 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.plate_alpha_vis = tk.StringVar(value=\"1.0\")" in source
     assert "self.plate_front_color_vis = tk.StringVar(value=\"#d1d5db\")" in source
     assert "self.plate_back_color_vis = tk.StringVar(value=\"#8b5e3c\")" in source
-    assert "self._add_entry_row(vis_group, 5, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
-    assert "self._add_entry_row(vis_group, 6, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
+    assert "self._add_entry_row(vis_group, 7, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
+    assert "self._add_entry_row(vis_group, 8, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "member_model=str(self.member_model.get())" in source

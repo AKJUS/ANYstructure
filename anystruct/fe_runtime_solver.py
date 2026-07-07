@@ -1111,6 +1111,9 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
             fallback = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
             diagnostics.extend(solver_result.diagnostics)
             diagnostics.append("Production FE mesh failed; using compact fallback result.")
+            if solver_result.visualization:
+                # Preserve the fine mesh visualization even though we use the fallback result values
+                fallback = fallback._replace(visualization=solver_result.visualization)
             solver_result = fallback
     else:
         solver_result = fe_solver.run_lightweight_fem(geometry, solver_config, status_callback=status_callback)
@@ -1640,8 +1643,8 @@ def _plot_rigid_sphere(axis: Any, visualization: dict[str, Any], deformation_sca
     x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
     y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
     z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
-    axis.plot_surface(x, y, z, color="#9ca3af", alpha=0.32, linewidth=0.0, shade=True)
-    axis.scatter([center[0]], [center[1]], [center[2]], color="#4b5563", s=14, alpha=0.55)
+    axis.plot_surface(x, y, z, color="#9ca3af", alpha=0.32, linewidth=0.0, shade=True, zorder=10)
+    axis.scatter([center[0]], [center[1]], [center[2]], color="#4b5563", s=14, alpha=0.55, zorder=10)
 
 
 def _format_dimension(value: float) -> str:
@@ -4802,6 +4805,8 @@ class RuntimeFEMWindow:
         self.show_stiffener_vis = tk.BooleanVar(value=True)
         self.show_girder_vis = tk.BooleanVar(value=True)
         self.show_collision_sphere_vis = tk.BooleanVar(value=True)
+        self.show_mesh_lines_vis = tk.BooleanVar(value=True)
+        self.show_axis_ruler_vis = tk.BooleanVar(value=False)
         self.animation_fast_mode = tk.BooleanVar(value=False)
         self.animation_interval_ms = tk.IntVar(value=80)
         self.animation_speed_multiplier = tk.DoubleVar(value=1.0)
@@ -5430,6 +5435,8 @@ class RuntimeFEMWindow:
         selection_geometry.grid(row=2, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=3)
         ttk.Button(selection_geometry, text="Start selection",
                    command=self._toggle_custom_load_selection).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(selection_geometry, text="Stop selection",
+                   command=lambda: self._set_custom_load_selection_active(False)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(selection_geometry, text="Select All",
                    command=self._custom_load_select_all).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(selection_geometry, text="Clear selection",
@@ -5958,15 +5965,25 @@ class RuntimeFEMWindow:
         self._add_check_row(vis_group, 1, "show_stiffeners", "Show stiffeners", self.show_stiffener_vis)
         self._add_check_row(vis_group, 2, "show_girders", "Show girders/frames", self.show_girder_vis)
         self._add_check_row(vis_group, 3, "show_collision_sphere", "Show rigid sphere", self.show_collision_sphere_vis)
-        self._add_entry_row(vis_group, 4, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
-        self._add_entry_row(vis_group, 5, "plate_front_color", "Plate front", self.plate_front_color_vis, width=10)
-        self._add_entry_row(vis_group, 6, "plate_back_color", "Plate back", self.plate_back_color_vis, width=10)
-        self._add_entry_row(vis_group, 7, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
-        self._add_entry_row(vis_group, 8, "deformation_scale", "Deformation scale", self.deformation_scale, width=8)
-        self._add_option_row(vis_group, 9, "colormap", "Colormap", self.colormap_vis,
+        
+        def update_canvas_options():
+            for canvas_ref in [self.result_canvas, self.geometry_preview_canvas, self.mesh_preview_canvas]:
+                if canvas_ref:
+                    canvas_ref.set_mesh_lines(self.show_mesh_lines_vis.get())
+                    canvas_ref.set_axis_ruler(self.show_axis_ruler_vis.get())
+                    
+        self._add_check_row(vis_group, 4, "show_mesh_lines", "Show mesh lines", self.show_mesh_lines_vis).configure(command=update_canvas_options)
+        self._add_check_row(vis_group, 5, "show_axis_ruler", "Show axis ruler", self.show_axis_ruler_vis).configure(command=update_canvas_options)
+        
+        self._add_entry_row(vis_group, 6, "plate_alpha", "Plate alpha [0-1]", self.plate_alpha_vis, width=8)
+        self._add_entry_row(vis_group, 7, "plate_front_color", "Plate front", self.plate_front_color_vis, width=10)
+        self._add_entry_row(vis_group, 8, "plate_back_color", "Plate back", self.plate_back_color_vis, width=10)
+        self._add_entry_row(vis_group, 9, "member_alpha", "Member alpha [0-1]", self.member_alpha_vis, width=8)
+        self._add_entry_row(vis_group, 10, "deformation_scale", "Deformation scale", self.deformation_scale, width=8)
+        self._add_option_row(vis_group, 11, "colormap", "Colormap", self.colormap_vis,
                              ("jet", "viridis", "plasma", "inferno", "coolwarm", "greys"))
         vis_actions = ttk.Frame(vis_group)
-        vis_actions.grid(row=10, column=0, columnspan=4, sticky=tk.W, padx=8, pady=4)
+        vis_actions.grid(row=12, column=0, columnspan=4, sticky=tk.W, padx=8, pady=4)
         ttk.Button(vis_actions, text="Redraw base 3D", command=self._redraw_base_3d).pack(side=tk.LEFT)
         ttk.Button(vis_actions, text="Show results", command=self._show_results).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(vis_actions, text="Previous step", command=self._previous_time_step).pack(side=tk.LEFT, padx=(10, 0))
@@ -5981,7 +5998,7 @@ class RuntimeFEMWindow:
         ttk.Label(vis_actions, text="ms").pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Entry(vis_actions, textvariable=self.animation_interval_ms, width=5).pack(side=tk.RIGHT)
         replay_slider = ttk.Frame(vis_group)
-        replay_slider.grid(row=11, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(0, 4))
+        replay_slider.grid(row=13, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(0, 4))
         replay_slider.columnconfigure(1, weight=1)
         self.time_step_label = ttk.Label(replay_slider, text="Time step")
         self.time_step_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
@@ -5995,7 +6012,7 @@ class RuntimeFEMWindow:
         )
         self.time_step_slider.grid(row=0, column=1, sticky=tk.EW)
         view_actions = ttk.Frame(vis_group)
-        view_actions.grid(row=12, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
+        view_actions.grid(row=14, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 4))
         ttk.Button(view_actions, text="Fit", command=lambda: self._set_runtime_3d_view("fit")).pack(side=tk.LEFT,
                                                                                                     padx=(0, 4))
         ttk.Button(view_actions, text="Reset", command=lambda: self._set_runtime_3d_view("reset")).pack(side=tk.LEFT,
@@ -8648,11 +8665,18 @@ class RuntimeFEMWindow:
         self._refresh_custom_load_list()
 
     def _add_custom_load_from_selection(self) -> None:
-        selected_patches = [
-            dict(patch)
-            for patch in getattr(self, "_custom_load_patches", ())
-            if bool(patch.get("selected", False))
-        ]
+        selected_patches = []
+        for patch in getattr(self, "_custom_load_patches", ()):
+            if bool(patch.get("selected", False)):
+                p = dict(patch)
+                min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(p)
+                p["min_a"] = min_a
+                p["max_a"] = max_a
+                p["min_b"] = min_b
+                p["max_b"] = max_b
+                if "axis_a_origin" in p:
+                    del p["axis_a_origin"]
+                selected_patches.append(p)
         selected_edges = self._selected_custom_load_edges()
         pressure = _safe_float(self.custom_pressure_pa.get(), 0.0)
         line_load = _safe_float(self.custom_selected_edge_load_n_per_m.get(), 0.0)
@@ -8760,11 +8784,18 @@ class RuntimeFEMWindow:
         if thickness <= 0.0:
             self._write_status("Enter a positive plate thickness [m] before assigning it.", keep_run_results=True)
             return
-        patches = [
-            dict(patch)
-            for patch in getattr(self, "_custom_load_patches", ())
-            if whole or bool(patch.get("selected", False))
-        ]
+        patches = []
+        for patch in getattr(self, "_custom_load_patches", ()):
+            if whole or bool(patch.get("selected", False)):
+                p = dict(patch)
+                min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(p)
+                p["min_a"] = min_a
+                p["max_a"] = max_a
+                p["min_b"] = min_b
+                p["max_b"] = max_b
+                if "axis_a_origin" in p:
+                    del p["axis_a_origin"]
+                patches.append(p)
         if not patches:
             self._write_status(
                 "Select one or more panels in the 3D selection view first (or use 'Set on whole plate').",
@@ -9063,7 +9094,9 @@ class RuntimeFEMWindow:
                 self.solver_queue.put(msg)
 
             try:
-                precomputed = getattr(self, "_imperfection_mesh", None)
+                precomputed = None
+                if getattr(options, "imperfection_enabled", False):
+                    precomputed = getattr(self, "_imperfection_mesh", None)
                 self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb,
                                                        imported_fem_model=self.imported_fem_model,
                                                        precomputed_generated_geometry=precomputed), None))
@@ -10162,12 +10195,10 @@ class RuntimeFEMWindow:
             if geometry.get("has_girder"):
                 girder_spacing = float(geometry.get("girder_spacing_m") or 0.0)
                 if girder_spacing > 0.0:
-                    axial_bays = max(1, int(round((max_a - min_a) / girder_spacing)))
-                    a_breaks = [
-                        min_a + (max_a - min_a) * index / axial_bays
-                        for index in range(axial_bays + 1)
-                    ]
-
+                    for pos in representation_geometry.centered_member_positions(
+                            max_a - min_a, girder_spacing, fallback_midpoint=True
+                    ):
+                        a_breaks.append(min_a + pos)
             stiffener_spacing = float(geometry.get("stiffener_spacing_m") or 0.0)
             if geometry.get("has_stiffener") and stiffener_spacing > 0.0:
                 circumferential_bays = max(1, int((max_b - min_b) / stiffener_spacing))

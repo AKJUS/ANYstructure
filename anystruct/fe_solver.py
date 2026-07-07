@@ -3228,10 +3228,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         shells,
         nodes,
         config,
-        lambda coords: (
+        param_of_coords=lambda coords: (
             float(coords[2]),
             (math.atan2(float(coords[1]), float(coords[0])) % (2.0 * math.pi)) * radius,
         ),
+        periodic_b=circumference,
     )
 
     beams = []
@@ -4645,6 +4646,10 @@ def _constraint_mode(config: LightweightFEMConfig, geometry: dict | None = None)
     is_flat = (geometry or {}).get("geometry") != "cylinder"
     if is_flat and _normalized_choice(config.boundary_condition) in {"auto", "simply supported", "simple", "ss", "pinned", "pinned edges", "fixed", "clamped"}:
         return "transformation"
+    if not is_flat and _normalized_choice(config.boundary_condition) in {"clamped", "fixed", "fixed ends"}:
+        return "transformation"
+    if not is_flat and _normalized_choice(config.boundary_condition) in {"auto", "free", "none"}:
+        return "nullspace"
     return "auto"
 
 
@@ -5238,6 +5243,7 @@ def _apply_thickness_regions(
     nodes: list[dict[str, object]],
     config: LightweightFEMConfig,
     param_of_coords,
+    periodic_b: float = 0.0,
 ) -> dict[str, object] | None:
     """Assign per-region plate thickness to skin shells by centroid location."""
     regions = _thickness_regions(config)
@@ -5254,7 +5260,13 @@ def _apply_thickness_regions(
             continue
         params = [param_of_coords(coords_by_id[i]) for i in ids]
         centroid_a = sum(p[0] for p in params) / len(params)
-        centroid_b = sum(p[1] for p in params) / len(params)
+        if periodic_b > 0.0:
+            bs = [p[1] for p in params]
+            if max(bs) - min(bs) > 0.5 * periodic_b:
+                bs = [b if b >= 0.5 * periodic_b else b + periodic_b for b in bs]
+            centroid_b = (sum(bs) / len(bs)) % periodic_b
+        else:
+            centroid_b = sum(p[1] for p in params) / len(params)
         for region in regions:
             hit = False
             for patch in region.get("patches", ()) or ():
@@ -6028,6 +6040,7 @@ def _run_collision_response(
             diagnostics=tuple(diagnostics + ["Rigid-sphere collision backend is not available."]),
             mesh_info={"nodes": int(model.mesh.num_nodes), "shells": len(generated_geometry.get("shells", [])), "beams": len(generated_geometry.get("beams", []))},
             solver_name="ANYstructure production FE mesh",
+            visualization=_visualization_from_full_result(generated_geometry, model, None),
         )
     if not _runtime_collision_has_fixed_support(config, geometry):
         return LightweightFEMResult(
@@ -7571,6 +7584,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             displacement_max_m=0.0,
             diagnostics=tuple(diagnostics + ["Backend status: " + str(exc)]),
             solver_name="ANYstructure production FE mesh",
+            visualization=_visualization_from_full_result(generated_geometry, model, None),
         )
 
     static_status = str((solver_info.get("convergence_info") or {}).get("status", "unknown"))

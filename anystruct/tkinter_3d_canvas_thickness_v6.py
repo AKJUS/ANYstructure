@@ -335,6 +335,8 @@ class Tkinter3DCanvas(tk.Frame):
         # so the legend never covers the model.
         self._thickness_legend: Optional[Dict[str, Any]] = None
         self._show_axis_indicator = True
+        self.show_mesh_lines = True
+        self.show_axis_ruler = False
 
         canvas_kwargs.setdefault("highlightthickness", 0)
         canvas_kwargs.setdefault("borderwidth", 0)
@@ -440,7 +442,17 @@ class Tkinter3DCanvas(tk.Frame):
 
     def set_axis_indicator(self, visible: bool = True) -> None:
         self._show_axis_indicator = bool(visible)
-        self._request_redraw()
+
+    def set_mesh_lines(self, visible: bool = True) -> None:
+        self.show_mesh_lines = bool(visible)
+
+    def set_axis_ruler(self, visible: bool = True) -> None:
+        new_val = bool(visible)
+        if self.show_axis_ruler != new_val:
+            self.show_axis_ruler = new_val
+            self._world_primitive_cache.clear()
+            self._np_vertices_cache.clear()
+            self._request_redraw()
 
     def thickness_color(
         self,
@@ -850,6 +862,49 @@ class Tkinter3DCanvas(tk.Frame):
         if not keep_canvas:
             self._clear_canvas_only()
 
+    def _get_ruler_primitives(self) -> List[Dict[str, Any]]:
+        bounds = self._scene_bounds()
+        if bounds is None:
+            return []
+        min_p, max_p = bounds
+        # Extend bounds slightly so ruler sits outside geometry
+        span_x = max_p.x - min_p.x
+        span_y = max_p.y - min_p.y
+        span_z = max_p.z - min_p.z
+        padding = max(1.0, max(span_x, max(span_y, span_z))) * 0.05
+        min_p = Point3D(min_p.x - padding, min_p.y - padding, min_p.z - padding)
+        max_p = Point3D(max_p.x + padding, max_p.y + padding, max_p.z + padding)
+
+        primitives: List[Dict[str, Any]] = []
+        color = "#1f2937"
+        
+        # X-axis line
+        primitives.append({"kind": "line", "start": Point3D(min_p.x, min_p.y, min_p.z), "end": Point3D(max_p.x, min_p.y, min_p.z), "color": color, "width": 1.5, "dash": ()})
+        # Y-axis line
+        primitives.append({"kind": "line", "start": Point3D(min_p.x, min_p.y, min_p.z), "end": Point3D(min_p.x, max_p.y, min_p.z), "color": color, "width": 1.5, "dash": ()})
+        # Z-axis line
+        primitives.append({"kind": "line", "start": Point3D(min_p.x, max_p.y, min_p.z), "end": Point3D(min_p.x, max_p.y, max_p.z), "color": color, "width": 1.5, "dash": ()})
+
+        def get_ticks(start: float, end: float, count: int = 4) -> List[float]:
+            if start >= end: return [start]
+            return [start + i * (end - start) / count for i in range(count + 1)]
+
+        tick_size = padding * 0.3
+        
+        for val in get_ticks(min_p.x + padding, max_p.x - padding):
+            primitives.append({"kind": "line", "start": Point3D(val, min_p.y, min_p.z), "end": Point3D(val, min_p.y - tick_size, min_p.z), "color": color, "width": 1.0, "dash": ()})
+            primitives.append({"kind": "text", "point": Point3D(val, min_p.y - tick_size * 2.5, min_p.z), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
+            
+        for val in get_ticks(min_p.y + padding, max_p.y - padding):
+            primitives.append({"kind": "line", "start": Point3D(min_p.x, val, min_p.z), "end": Point3D(min_p.x - tick_size, val, min_p.z), "color": color, "width": 1.0, "dash": ()})
+            primitives.append({"kind": "text", "point": Point3D(min_p.x - tick_size * 2.5, val, min_p.z), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
+            
+        for val in get_ticks(min_p.z + padding, max_p.z - padding):
+            primitives.append({"kind": "line", "start": Point3D(min_p.x, max_p.y, val), "end": Point3D(min_p.x - tick_size, max_p.y, val), "color": color, "width": 1.0, "dash": ()})
+            primitives.append({"kind": "text", "point": Point3D(min_p.x - tick_size * 2.5, max_p.y, val), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
+
+        return primitives
+
     def redraw(self) -> None:
         """Render the scene; static world geometry is reused from cache."""
         if not self.winfo_exists() or not self.canvas.winfo_exists():
@@ -863,6 +918,7 @@ class Tkinter3DCanvas(tk.Frame):
         interactive = self._interactive_render
         quality = "fast" if interactive else "full"
         primitives = self._get_world_primitives(quality)
+
         # Hidden-member ray checks and stipple/legend drawing are restored on
         # mouse release.  Skipping them while dragging keeps orbiting responsive
         # on dense cylinder models without changing the final rendered view.
@@ -1028,7 +1084,7 @@ class Tkinter3DCanvas(tk.Frame):
                 else:
                     self.canvas.create_text(*coords, **kwargs)
             else:
-                outline = "" if interactive and primitive.get("fast_no_outline") else primitive["outline"]
+                outline = "" if (not self.show_mesh_lines) or (interactive and primitive.get("fast_no_outline")) else primitive["outline"]
                 fill_color = primitive["color"]
                 if not primitive.get("_front_facing", True):
                     fill_color = primitive.get("back_color") or fill_color
@@ -1098,6 +1154,8 @@ class Tkinter3DCanvas(tk.Frame):
                     continue
             primitives.extend(self._object_to_primitives(obj, quality))
 
+        if self.show_axis_ruler:
+            primitives.extend(self._get_ruler_primitives())
 
         np_vertices = []
         for p in primitives:
