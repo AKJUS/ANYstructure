@@ -255,7 +255,7 @@ class RuntimeFEMOptions:
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
     collision_plastic_damage_threshold: float = 0.01
-    collision_damage_criterion: str = "fixed"
+    collision_damage_criterion: str = "rtcl"
     collision_mass_kg: float = 1000.0
     collision_radius_m: float = 0.25
     collision_start_x_m: float = 0.0
@@ -4428,10 +4428,14 @@ FEM_OPTION_INFO.update({
     },
     "collision_damage_criterion": {
         "title": "Damage Criterion",
-        "purpose": "Select the evaluation method for the plastic damage strain limit.",
-        "use": "Fixed applies the manual threshold. Mesh-scaled (GL) calculates the limit automatically per element.",
-        "output": "Mesh-scaled (GL) reduces the limit for larger elements to prevent mesh sensitivity.",
-        "caution": "Mesh-scaled (GL) ignores the manual threshold for all elements.",
+        "purpose": "Select the evaluation method for plasticity-based impact damage.",
+        "use": "Fixed applies the manual strain threshold. Mesh-scaled (GL) computes the limit per element from "
+               "thickness/size (0.056 + 0.54 t/l). RTCL additionally weights damage by stress triaxiality "
+               "(Rice-Tracey/Cockcroft-Latham, the standard in ship-collision analysis): no damage in compression, "
+               "reduced in shear, accelerated in biaxial tension, on top of the mesh-scaled limit.",
+        "output": "RTCL gives the most stable erosion: compressed dent sides no longer erode spuriously and damage "
+                  "accumulates smoothly instead of jumping with the plastic-strain peak.",
+        "caution": "Mesh-scaled (GL) and RTCL ignore the manual threshold for shell elements (beams still use it).",
     },
     "collision_plastic_damage_threshold": {
         "title": "Plastic Damage Strain",
@@ -4718,7 +4722,7 @@ class RuntimeFEMWindow:
         self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.collision_nonlinear_cutbacks = tk.IntVar(value=8)
         self.collision_plastic_damage_threshold = tk.DoubleVar(value=0.05)
-        self.collision_damage_criterion = tk.StringVar(value="fixed")
+        self.collision_damage_criterion = tk.StringVar(value="rtcl")
         self.collision_mass_kg = tk.DoubleVar(value=1000.0)
         self.collision_radius_m = tk.DoubleVar(value=0.25)
         self.collision_start_x_m = tk.DoubleVar(value=0.0)
@@ -4946,7 +4950,7 @@ class RuntimeFEMWindow:
         except Exception:
             pass
 
-        criterion_fixed = (self.collision_damage_criterion.get() != "mesh_scaled_gl")
+        criterion_fixed = (self.collision_damage_criterion.get() not in ("mesh_scaled_gl", "rtcl"))
         if hasattr(self, "_collision_plastic_damage_threshold_control"):
             is_active = criterion_fixed and bool(self.collision_damage_enabled.get())
             self._set_control_state(self._collision_plastic_damage_threshold_control, is_active)
@@ -5375,10 +5379,12 @@ class RuntimeFEMWindow:
         point_actions.grid(row=3, column=3, columnspan=3, sticky=tk.EW, padx=8, pady=2)
         self._mesh_point_selection_button = ttk.Button(
             point_actions,
-            text="Pick point",
+            text="Start selection",
             command=self._toggle_mesh_point_selection,
         )
         self._mesh_point_selection_button.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(point_actions, text="Stop selection",
+                   command=lambda: self._set_mesh_point_selection_active(False)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(point_actions, text="Use selected panel center",
                    command=self._set_point_refinement_from_selected_panel).pack(side=tk.LEFT)
 
@@ -5921,7 +5927,7 @@ class RuntimeFEMWindow:
         self._add_compact_check(collision_damage, 1, 0, "collision_damage_smoothing", "Neighbor smoothing",
                                 self.collision_damage_neighbor_smoothing)
         self._add_compact_option(collision_damage, 1, 1, "collision_damage_criterion", "Damage Criterion",
-                                 self.collision_damage_criterion, ("fixed", "mesh_scaled_gl"))
+                                 self.collision_damage_criterion, ("fixed", "mesh_scaled_gl", "rtcl"))
         self._collision_plastic_damage_threshold_control = self._add_compact_entry(
             collision_damage, 2, 0, "collision_plastic_damage_threshold", "Plastic strain lim.",
             self.collision_plastic_damage_threshold)
@@ -6375,6 +6381,24 @@ class RuntimeFEMWindow:
         canvas.fit_to_scene()
         canvas.redraw()
 
+    def _refresh_mesh_preview_if_present(self) -> None:
+        """Rebuild and redraw the left mesh preview if it has already been shown.
+
+        Called after a point pick or panel-centre selection so the detail-mesh
+        marker appears immediately, without the user pressing Generate mesh
+        again.  No-op before the first preview build.
+        """
+        if getattr(self, "mesh_preview_canvas", None) is None:
+            return
+        try:
+            options = self._options()
+            config = _solver_config_from_options(options)
+            geometry = runtime_geometry_summary(self.snapshot)
+            generated = fe_solver.build_generated_geometry(geometry, config)
+        except Exception:
+            return
+        self._render_mesh_preview_canvas(generated)
+
     def _populate_canvas_with_mesh(self, canvas: "Tkinter3DCanvas", generated: dict) -> None:
         """Render shell elements as outlined faces and beams as lines (mesh only)."""
         nodes = {int(n["id"]): n["coords"] for n in generated.get("nodes", ()) or () if "id" in n}
@@ -6404,6 +6428,10 @@ class RuntimeFEMWindow:
             for k in range(len(pts) - 1):
                 canvas.add_line(pts[k], pts[k + 1], color="#1d4ed8", width=2)
         self._draw_mesh_detail_overlays(canvas, generated, nodes)
+        # Live point-refinement crosshair: the extent circle already comes from
+        # the adaptive overlay above, so only the centre marker is added here.
+        if hasattr(self, "point_refinement_enabled"):
+            self._draw_point_refinement_marker(canvas, runtime_geometry_summary(self.snapshot), draw_circle=False)
 
     def _draw_mesh_detail_overlays(self, canvas: "Tkinter3DCanvas", generated: dict, nodes: dict[int, Any]) -> None:
         adaptive = generated.get("adaptive_mesh", {}) or {}
@@ -7133,8 +7161,119 @@ class RuntimeFEMWindow:
             self._draw_collision_sphere_overlay(canvas, self._collision_sphere_preview_visualization())
         if hasattr(self, "_custom_load_patches"):
             self._draw_custom_load_patch_outlines(canvas)
+        if hasattr(self, "point_refinement_enabled"):
+            self._draw_point_refinement_marker(canvas, geometry, draw_circle=True)
         if fit_view:
             canvas.after_idle(canvas.fit_to_scene)
+
+    def _point_refinement_marker_xyz(self, geometry: dict[str, Any]) -> tuple[Point3D, float] | None:
+        """World position and extent radius of the current point-refinement centre.
+
+        Uses the live GUI values (not a rebuilt mesh) so the marker tracks the
+        Point X/Y fields immediately after a pick.  Returns ``None`` when point
+        refinement is off.  Cylinder mapping matches ``marker_xyz`` in
+        ``fe_solver`` (arc -> angle, axial -> z).
+        """
+        try:
+            if not bool(self.point_refinement_enabled.get()):
+                return None
+            point_x = float(self.point_refinement_x_m.get())
+            point_y = float(self.point_refinement_y_m.get())
+            extent = max(float(self.point_refinement_extent_m.get()), 0.0)
+        except Exception:
+            return None
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+            z = min(max(point_x, 0.0), length)
+            theta = point_y / radius
+            return Point3D(radius * math.cos(theta), radius * math.sin(theta), z), extent
+        length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+        width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-9)
+        x = min(max(point_x, 0.0), length)
+        y = min(max(point_y, 0.0), width)
+        return Point3D(x, y, 0.0), extent
+
+    def _point_refinement_report(self, point_x: float, point_y: float) -> str:
+        """Status text for a picked point: parametric input plus 3D world XYZ.
+
+        For a cylinder the input pair is (axial, arc-length); the world triple
+        adds the Cartesian x/y and the axial z so the picked height is explicit.
+        For a flat panel the plate sits at z = 0.
+        """
+        base = f"Point mesh refinement set at ({point_x:.3f}, {point_y:.3f}) m"
+        try:
+            marker = self._point_refinement_marker_xyz(runtime_geometry_summary(self.snapshot))
+        except Exception:
+            marker = None
+        if marker is None:
+            return base + "."
+        centre, _extent = marker
+        return base + f"; 3D point ({centre.x:.3f}, {centre.y:.3f}, {centre.z:.3f}) m."
+
+    def _draw_point_refinement_marker(
+            self,
+            canvas: "Tkinter3DCanvas",
+            geometry: dict[str, Any],
+            draw_circle: bool = True,
+    ) -> None:
+        """Bold crosshair (+ optional extent circle) at the point-refinement centre.
+
+        Drawn as an overlay from the live Point X/Y/extent inputs so the picked
+        location is visible in the geometry view and mesh preview without
+        rebuilding the mesh.
+        """
+        if not (callable(getattr(canvas, "add_line", None))):
+            return
+        marker = self._point_refinement_marker_xyz(geometry)
+        if marker is None:
+            return
+        centre, extent = marker
+        color = "#7c3aed"
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+            star = max(extent * 0.6, min(radius, length) * 0.03)
+        else:
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+            width = max(_safe_float(geometry.get("width_m"), 1.0), 1.0e-9)
+            star = max(extent * 0.6, min(length, width) * 0.03)
+        # Three-axis star: view-independent so the centre reads from any angle.
+        for axis in ((star, 0.0, 0.0), (0.0, star, 0.0), (0.0, 0.0, star)):
+            a = Point3D(centre.x - axis[0], centre.y - axis[1], centre.z - axis[2])
+            b = Point3D(centre.x + axis[0], centre.y + axis[1], centre.z + axis[2])
+            canvas.add_line(a, b, color=color, width=3, draw_overlay=True)
+        if draw_circle and extent > 0.0:
+            self._draw_point_refinement_circle(canvas, geometry, centre, extent, color)
+
+    def _draw_point_refinement_circle(
+            self,
+            canvas: "Tkinter3DCanvas",
+            geometry: dict[str, Any],
+            centre: Point3D,
+            extent: float,
+            color: str,
+    ) -> None:
+        angles = np.linspace(0.0, 2.0 * math.pi, 48)
+        if self.snapshot.is_cylinder:
+            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+            length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+            offset = max(radius * 0.006, 2.0e-4)
+            center_z = float(centre.z)
+            center_arc = math.atan2(float(centre.y), float(centre.x)) * radius
+            pts = []
+            for angle in angles:
+                z = min(max(center_z + extent * math.cos(angle), 0.0), length)
+                theta = (center_arc + extent * math.sin(angle)) / radius
+                draw_radius = radius + offset
+                pts.append(Point3D(draw_radius * math.cos(theta), draw_radius * math.sin(theta), z))
+        else:
+            z = float(centre.z) + max(extent * 0.02, 1.0e-3)
+            pts = [Point3D(float(centre.x) + extent * math.cos(a), float(centre.y) + extent * math.sin(a), z)
+                   for a in angles]
+        pts.append(pts[0])
+        for start, end in zip(pts, pts[1:]):
+            canvas.add_line(start, end, color=color, width=2, draw_overlay=True)
 
     def _draw_base_dimension_annotations(self, canvas: Tkinter3DCanvas, geometry: dict[str, Any]) -> None:
         color = "#6b7280"
@@ -8612,13 +8751,15 @@ class RuntimeFEMWindow:
         self.point_refinement_x_m.set(float(x))
         self.point_refinement_y_m.set(float(y))
         self.point_refinement_enabled.set(True)
-        self._write_status(f"Point mesh refinement set at ({x:.3f}, {y:.3f}) m.", keep_run_results=True)
+        self._write_status(self._point_refinement_report(float(x), float(y)), keep_run_results=True)
+        self._refresh_figure(preserve_view=True)
+        self._refresh_mesh_preview_if_present()
 
     def _set_mesh_point_selection_active(self, active: bool, refresh: bool = True) -> None:
         self._mesh_point_selection_active = bool(active)
         self._mesh_point_click_origin = None
         if self._mesh_point_selection_button is not None:
-            self._mesh_point_selection_button.configure(text="Cancel point" if active else "Pick point")
+            self._mesh_point_selection_button.configure(text="Selecting… (cancel)" if active else "Start selection")
         if self.result_canvas is not None:
             try:
                 self.result_canvas.canvas.configure(
@@ -9323,9 +9464,10 @@ class RuntimeFEMWindow:
             self.point_refinement_y_m.set(float(point[1]))
             self.point_refinement_enabled.set(True)
             self._set_mesh_point_selection_active(False, refresh=False)
-            self._write_status(f"Point mesh refinement set at ({point[0]:.3f}, {point[1]:.3f}) m.",
+            self._write_status(self._point_refinement_report(float(point[0]), float(point[1])),
                                keep_run_results=True)
             self._refresh_figure(preserve_view=True)
+            self._refresh_mesh_preview_if_present()
             return
 
         origin = self._custom_load_click_origin

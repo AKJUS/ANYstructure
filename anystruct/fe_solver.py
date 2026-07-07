@@ -215,7 +215,7 @@ class LightweightFEMConfig:
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
     collision_plastic_damage_threshold: float = 0.01
-    collision_damage_criterion: str = "fixed"
+    collision_damage_criterion: str = "rtcl"
     collision_mass_kg: float = 1000.0
     collision_radius_m: float = 0.25
     collision_start_x_m: float = 0.0
@@ -4278,8 +4278,12 @@ def _collision_plastic_damage_config(config: LightweightFEMConfig):
         or _backend_PlasticImpactDamageConfig is None
     ):
         return None
+    criterion = str(config.collision_damage_criterion or "fixed").strip().lower()
+    if criterion not in {"fixed", "mesh_scaled_gl", "rtcl"}:
+        criterion = "fixed"
     return _backend_PlasticImpactDamageConfig(
         threshold=max(float(config.collision_plastic_damage_threshold or 0.01), 1.0e-12),
+        criterion=criterion,
         softening_start=min(max(float(config.collision_damage_softening_start), 0.0), 0.999999),
         delete_at=max(float(config.collision_damage_delete_at), float(config.collision_damage_softening_start) + 1.0e-9),
         residual_stiffness_fraction=min(max(float(config.fracture_residual_stiffness_fraction), 0.0), 1.0),

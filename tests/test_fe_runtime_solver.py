@@ -1331,7 +1331,9 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "mesh_size = ttk.LabelFrame(tab_mesh, text=\"Mesh size\")" in source
     assert "local_mesh = ttk.LabelFrame(tab_mesh, text=\"Local mesh refinement (select panels under load and BCs)\")" in source
     assert "self._add_compact_check(local_mesh, 0, 0, \"local_refinement_enabled\", \"Refine selected panels\"" in source
-    assert "text=\"Pick point\"" in source
+    assert "self._mesh_point_selection_button = ttk.Button(" in source
+    assert "command=self._toggle_mesh_point_selection" in source
+    assert "command=lambda: self._set_mesh_point_selection_active(False)" in source
     assert "self._add_compact_check(impact_group, 0, 0, \"collision_adaptive_mesh\", \"Adopt impact point\"" in source
     assert "\"local_refinement_enabled\": {" in source
     assert "\"point_refinement_enabled\": {" in source
@@ -3189,6 +3191,56 @@ def test_populate_canvas_with_geometry_accepts_generated_cylinder_preview():
     assert len(canvas.ring_stiffeners) > 0
 
 
+def test_point_refinement_marker_drawn_on_cylinder_surface():
+    """The picked point-refinement centre is drawn as a bold overlay crosshair
+    (+ extent circle) sitting on the cylinder surface, from the live inputs."""
+    import types
+
+    class Var:
+        def __init__(self, v):
+            self._v = v
+
+        def get(self):
+            return self._v
+
+    class RecordingCanvas:
+        def __init__(self):
+            self.lines = []
+
+        def add_line(self, a, b, **kwargs):
+            self.lines.append((a, b, kwargs))
+
+    window = types.SimpleNamespace()
+    window.snapshot = types.SimpleNamespace(is_cylinder=True)
+    window.point_refinement_enabled = Var(True)
+    window.point_refinement_x_m = Var(6.0)
+    window.point_refinement_y_m = Var(10.3)
+    window.point_refinement_extent_m = Var(0.25)
+    for name in ("_point_refinement_marker_xyz", "_draw_point_refinement_marker", "_draw_point_refinement_circle"):
+        setattr(window, name, types.MethodType(getattr(fe_runtime_solver.RuntimeFEMWindow, name), window))
+
+    geometry = {"radius_m": 2.0, "length_m": 10.3}
+    centre, extent = window._point_refinement_marker_xyz(geometry)
+    assert extent == pytest.approx(0.25)
+    assert math.hypot(centre.x, centre.y) == pytest.approx(2.0, abs=1e-6)  # on surface
+    assert centre.z == pytest.approx(6.0)
+
+    canvas = RecordingCanvas()
+    window._draw_point_refinement_marker(canvas, geometry, draw_circle=True)
+    star = [ln for ln in canvas.lines if ln[2].get("width") == 3]
+    circle = [ln for ln in canvas.lines if ln[2].get("width") == 2]
+    assert len(star) == 3, "three-axis crosshair"
+    assert len(circle) >= 40, "extent circle sampled"
+    assert all(ln[2].get("draw_overlay") for ln in canvas.lines), "always-visible overlay"
+    assert all(math.hypot(ln[0].x, ln[0].y) == pytest.approx(2.0, abs=0.05) for ln in circle)
+
+    # Disabled point refinement draws nothing.
+    window.point_refinement_enabled = Var(False)
+    empty = RecordingCanvas()
+    window._draw_point_refinement_marker(empty, geometry, draw_circle=True)
+    assert empty.lines == []
+
+
 def test_crisp_canvas_alpha_snaps_near_opaque_values_to_solid():
     assert fe_runtime_solver._crisp_canvas_alpha("1.0") == 1.0
     assert fe_runtime_solver._crisp_canvas_alpha("0.99") == 1.0
@@ -3218,3 +3270,33 @@ def test_runtime_status_updates_do_not_replace_completed_run_results():
 
     assert "RESULTS\nStatus: ok\nBuckling LF: 1.23" in DummyWindow.result_text.value
     assert "Run status update:\n3D view set to fit." in DummyWindow.result_text.value
+
+
+def test_collision_damage_criterion_reaches_backend_config():
+    """The GUI damage-criterion selection must reach PlasticImpactDamageConfig.
+
+    Regression: the criterion was previously dropped in
+    _collision_plastic_damage_config, silently running 'fixed' regardless of
+    the dropdown."""
+    from anystruct import fe_solver
+
+    for criterion in ("fixed", "mesh_scaled_gl", "rtcl"):
+        config = fe_solver.LightweightFEMConfig(
+            collision_enabled=True,
+            collision_material_nonlinear_enabled=True,
+            collision_damage_enabled=True,
+            collision_damage_criterion=criterion,
+            collision_plastic_damage_threshold=0.05,
+        )
+        damage = fe_solver._collision_plastic_damage_config(config)
+        assert damage is not None
+        assert damage.criterion == criterion
+
+    # Unknown strings fall back to 'fixed' instead of raising.
+    config = fe_solver.LightweightFEMConfig(
+        collision_enabled=True,
+        collision_material_nonlinear_enabled=True,
+        collision_damage_enabled=True,
+        collision_damage_criterion="bogus",
+    )
+    assert fe_solver._collision_plastic_damage_config(config).criterion == "fixed"

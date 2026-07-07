@@ -38,6 +38,7 @@ from .fracture import (
     filtered_load_case_for_deleted_elements,
     fracture_summary,
     state_equivalent_plastic_strain,
+    state_rtcl_increment,
 )
 from .linalg import MatrixClass, factorize
 from .matrix_assembly import assemble_load_vector, assemble_mass_matrix, assemble_stiffness_matrix
@@ -1448,6 +1449,8 @@ def _plastic_impact_damage_update(
     changed = False
     new_records: List[DeletedElementRecord] = []
     max_utilization = 0.0
+    criterion = str(getattr(config, "criterion", "fixed"))
+    material_constants: Dict[str, Tuple[float, float]] = {}
     for element_id, state in committed_states.items():
         element = model.mesh.elements.get(int(element_id))
         if element is None:
@@ -1456,9 +1459,11 @@ def _plastic_impact_damage_update(
         if category not in set(config.element_scope):
             continue
         trigger_value, location = state_equivalent_plastic_strain(state)
-        
+
         threshold = float(config.threshold)
-        if getattr(config, "criterion", "fixed") == "mesh_scaled_gl":
+        if criterion in {"mesh_scaled_gl", "rtcl"}:
+            # GL/RP-C208 mesh scaling of the critical strain: coarse shells
+            # cannot resolve necking, so the limit shrinks with element size.
             if category == "shell":
                 thickness = float(getattr(element, "thickness", 0.0))
                 area = float(element_measure(model.mesh, element))
@@ -1471,10 +1476,35 @@ def _plastic_impact_damage_update(
                 if l_e > 1.0e-6 and thickness > 1.0e-6:
                     threshold = 0.056 + 0.54 * (thickness / l_e)
 
-        utilization = float(trigger_value) / max(threshold, 1.0e-30)
-        max_utilization = max(max_utilization, utilization)
         previous = damage_states.get(int(element_id), {})
         previous_damage = float(previous.get("damage", 0.0) or 0.0)
+        if criterion == "rtcl":
+            # RTCL: accumulate triaxiality-weighted plastic strain per
+            # integration point, D = sum(w(eta) d_alpha) / eps_cr.  Damage is
+            # zero in compression and reduced in shear, which keeps erosion
+            # away from the compressed side of a dent (the classic source of
+            # spurious deletions with plain plastic-strain thresholds).
+            name = str(element.material_name)
+            if name not in material_constants:
+                material = model.get_material(name)
+                material_constants[name] = (float(material.elastic_modulus), float(material.poisson_ratio))
+            E, nu = material_constants[name]
+            rtcl = state_rtcl_increment(state, previous.get("rtcl_alpha"), E, nu)
+            accumulated = np.asarray(previous.get("rtcl_damage", ()), dtype=float).reshape(-1)
+            if rtcl is None:
+                utilization = previous_damage
+                rtcl_alpha = previous.get("rtcl_alpha")
+            else:
+                alpha_now, weighted_delta = rtcl
+                if accumulated.size != alpha_now.size:
+                    accumulated = np.zeros_like(alpha_now)
+                accumulated = accumulated + weighted_delta / max(threshold, 1.0e-30)
+                utilization = float(np.max(accumulated)) if accumulated.size else previous_damage
+                rtcl_alpha = alpha_now
+                location = f"rtcl[{int(np.argmax(accumulated))}]" if accumulated.size else location
+        else:
+            utilization = float(trigger_value) / max(threshold, 1.0e-30)
+        max_utilization = max(max_utilization, utilization)
         damage = max(previous_damage, utilization)
         scale = _plastic_damage_scale(damage, config)
         history = list(previous.get("history", [])) if bool(config.record_history) else []
@@ -1492,7 +1522,7 @@ def _plastic_impact_damage_update(
             )
         if damage > previous_damage + 1.0e-15 or abs(scale - float(previous.get("scale", 1.0) or 1.0)) > 1.0e-15:
             changed = True
-        damage_states[int(element_id)] = {
+        entry = {
             "element_id": int(element_id),
             "damage": float(damage),
             "scale": float(scale),
@@ -1501,15 +1531,19 @@ def _plastic_impact_damage_update(
             "location": str(location),
             "history": history,
         }
+        if criterion == "rtcl":
+            entry["rtcl_damage"] = accumulated
+            entry["rtcl_alpha"] = rtcl_alpha
+        damage_states[int(element_id)] = entry
         if int(element_id) not in deleted_element_ids and damage >= float(config.delete_at) - 1.0e-15:
             record = DeletedElementRecord(
                 element_id=int(element_id),
                 element_type=type(element).__name__,
                 step_index=int(step_index),
                 load_factor=float(time_value),
-                trigger_name="max_equivalent_plastic_strain",
-                trigger_value=float(trigger_value),
-                threshold=float(config.threshold),
+                trigger_name="rtcl_damage" if criterion == "rtcl" else "max_equivalent_plastic_strain",
+                trigger_value=float(damage if criterion == "rtcl" else trigger_value),
+                threshold=float(threshold),
                 location=str(location),
                 measure=element_measure(model.mesh, element),
             )
