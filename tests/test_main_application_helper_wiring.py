@@ -92,7 +92,7 @@ def test_file_menu_exposes_export_options():
     assert "command=self.export_prop_3d_ifc_model" in file_menu_block
     assert "Selected structure IFC/CAD shell/surface model..." in file_menu_block
     assert "command=self.export_prop_3d_ifc_shell_model" in file_menu_block
-    assert "Open FEA result buckling files..." not in file_menu_block
+    assert "Open FEA result buckling files..." in file_menu_block
 
 
 def test_conical_shell_uses_single_domain_and_existing_force_stress_toggle():
@@ -183,12 +183,6 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
 
     assert "self._simplified_calculation_mode = False" in source
     assert "self._single_line_name = 'line1'" in source
-    assert "self._experimental_mode_enabled = False" in source
-    assert "self._sync_experimental_menu_entries()" in source
-    assert "def _sync_experimental_menu_entries(self):" in source
-    assert "Hide FEA/FRD import menu entries unless experimental mode is enabled." in source
-    assert "'_file_menu'" in source
-    assert "'_gui_menu'" in source
     assert "def _prompt_startup_calculation_mode(self):" in source
     assert "from importlib import metadata as importlib_metadata" in source
     assert "def _get_application_version_from_metadata():" in source
@@ -207,13 +201,6 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
     assert "Recommended default" not in source
     assert "Single panel/cylinder" in source
     assert "FEA result buckling" in source
-    assert "text='Experimental'" in source
-    assert "tk.BooleanVar(value=False)" in source
-    assert "def toggle_experimental():" in source
-    assert "self._experimental_mode_enabled = bool(experimental_var.get())" in source
-    assert "self._sync_experimental_menu_entries()" in source[source.index("def choose(mode):"):source.index("dialog.protocol")]
-    assert "fea_card.pack_forget()" in source
-    assert "if experimental_var.get():" in source
     assert "dialog.bind('<Return>', lambda _event: choose('multiple'))" in source
     assert "dialog.bind('<Escape>', lambda _event: choose('multiple'))" in source
     assert "self._parent.wait_window(dialog)" in source
@@ -224,12 +211,10 @@ def test_main_gui_prompts_for_simplified_single_line_mode_with_standard_default(
         source.index("menu.add_cascade(label='GUI', menu=sub_colors)"):
         source.index("# base_mult = 1.2")
     ]
-    assert "Mode - FEA result buckling" not in gui_menu_block
+    assert "Mode - FEA result buckling" in gui_menu_block
     assert "def switch_to_single_calculation_mode(self):" in source
     assert "def switch_to_multiple_calculation_mode(self):" in source
     assert "def switch_to_fea_result_buckling_mode(self):" in source
-    assert "Enable experimental mode at startup to use FEA result buckling." in source
-    assert "Enable experimental mode at startup to import FE model/result files." in source
     assert "self._single_line_name = selected_line" in source
     assert "self._activate_simplified_calculation_pipeline()" in source
     assert "def _ensure_single_dummy_line(self):" in source
@@ -340,7 +325,7 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "edgecolor='red' if selected else ('#333333' if self._fea_show_mesh.get() else 'none')" in source
     assert "linewidth=1.8 if selected else (0.25 if self._fea_show_mesh.get() else 0.0)" in source
     assert "collection.set_gid(field_id)" in source
-    assert "collection.set_picker(True)" in source
+    assert "collection.set_picker(5)" in source
     assert "self._fea_pick_cid = self._prop_3d_fig_canvas.mpl_connect(" in source
     assert "def _on_fea_buckling_panel_pick(self, event):" in source
     assert "def _select_fea_panel_after_matplotlib_event(self, field_id):" in source
@@ -625,7 +610,6 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "fe_plate_fields.create_runtime_fea_buckling_session(" in source
     assert "self._fea_last_runtime_result" in source
     assert "def _place_runtime_fem_button(self):" in source
-    assert "getattr(self, '_experimental_mode_enabled', False)" in source
     assert "run_prop_3d_opensees_buckling" not in source
     assert "ttk.Button(view_row, text='STL solid'" not in source
     assert "ttk.Button(view_row, text='Mesh solid'" not in source

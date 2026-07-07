@@ -116,7 +116,11 @@ class LightweightFEMConfig:
     buckling_analysis_type: str = "linear eigenvalue"
     pressure_direction: str = "front"
     axial_force_n: float = 0.0
-    enforced_displacement_m: float = 0.0
+    torsional_moment_nm: float = 0.0
+    shear_force_n: float = 0.0
+    enforced_displacement_x_m: float = 0.0
+    enforced_displacement_y_m: float = 0.0
+    enforced_displacement_z_m: float = 0.0
     stiffener_eccentricity_m: float = 0.0
     girder_eccentricity_m: float = 0.0
     member_orientation: str = "auto"
@@ -1316,16 +1320,26 @@ def _enforced_displacement_supports(
     plot_type: str,
     exclude_node_ids: set[int] | None = None,
 ) -> list[dict[str, object]]:
-    try:
-        displacement = float(config.enforced_displacement_m)
-    except (TypeError, ValueError):
+    dx = float(getattr(config, "enforced_displacement_x_m", 0.0))
+    dy = float(getattr(config, "enforced_displacement_y_m", 0.0))
+    dz = float(getattr(config, "enforced_displacement_z_m", 0.0))
+    
+    if abs(dx) <= 0.0 and abs(dy) <= 0.0 and abs(dz) <= 0.0:
         return []
-    if abs(displacement) <= 0.0:
-        return []
+    
+    constraints = {}
+    if abs(dx) > 0.0:
+        constraints["ux"] = dx
+    if abs(dy) > 0.0:
+        constraints["uy"] = dy
+    if abs(dz) > 0.0:
+        constraints["uz"] = dz
+
     exclude_node_ids = set(exclude_node_ids or set())
     coords = _node_lookup(nodes)
     if not coords:
         return []
+    
     if plot_type == "cylinder":
         z_values = np.asarray([coord[2] for coord in coords.values()], dtype=float)
         target_z = 0.5 * (float(np.min(z_values)) + float(np.max(z_values)))
@@ -1335,25 +1349,21 @@ def _enforced_displacement_supports(
         for node_id, coord in coords.items():
             if abs(float(coord[2]) - closest_z) > tol:
                 continue
-            radial = np.asarray([coord[0], coord[1]], dtype=float)
-            norm = float(np.linalg.norm(radial))
-            if norm <= 1.0e-12:
-                continue
-            unit = radial / norm
             supports.append(
                 {
-                    "name": f"enforced_radial_displacement_{node_id}",
+                    "name": f"enforced_displacement_{node_id}",
                     "node_ids": [node_id],
-                    "constraints": {"ux": displacement * float(unit[0]), "uy": displacement * float(unit[1])},
+                    "constraints": constraints,
                 }
             )
         return supports
+    
     xs = np.asarray([coord[0] for coord in coords.values()], dtype=float)
     ys = np.asarray([coord[1] for coord in coords.values()], dtype=float)
     centre = np.asarray([0.5 * (float(np.min(xs)) + float(np.max(xs))), 0.5 * (float(np.min(ys)) + float(np.max(ys)))])
     candidates = [node_id for node_id in coords if node_id not in exclude_node_ids] or list(coords)
     node_id = min(candidates, key=lambda nid: float(np.linalg.norm(coords[nid][:2] - centre)))
-    return [{"name": "enforced_panel_displacement", "node_ids": [node_id], "constraints": {"uz": displacement}}]
+    return [{"name": "enforced_panel_displacement", "node_ids": [node_id], "constraints": constraints}]
 
 
 def _offset_beam_nodes_and_couplings(
@@ -2043,7 +2053,6 @@ def _add_cylinder_member_shell_model(
     flange_thickness = _member_section_dimension(section, "flange_thickness")
     if web_height <= 0.0 or web_thickness <= 0.0:
         return element_id, beam_id
-    inner_radius = max(radius - web_height, 1.0e-6)
     flange_section = _flange_beam_section(section, web_thickness)
 
     def theta_at_col(col_index: int) -> float:
@@ -6135,6 +6144,85 @@ def _add_generated_end_moments(model, load_case, generated_geometry: dict, momen
     add_ring_moment(top_ring, 1.0)
 
 
+def _add_generated_shear_force(model, load_case, generated_geometry: dict, shear_force_n: float) -> None:
+    shear = float(shear_force_n or 0.0)
+    if abs(shear) <= 0.0:
+        return
+    if generated_geometry.get("plot_type") == "flat":
+        shell_node_ids = sorted({node_id for shell in generated_geometry.get("shells", []) for node_id in shell.get("node_ids", [])})
+        nodes = [model.mesh.get_node(int(node_id)) for node_id in shell_node_ids]
+        nodes = [node for node in nodes if node is not None]
+        if not nodes:
+            return
+        xs = [float(node.x) for node in nodes]
+        xmin = min(xs)
+        xmax = max(xs)
+        tol = max((xmax - xmin) * 1.0e-9, 1.0e-9)
+        left = [node for node in nodes if abs(float(node.x) - xmin) <= tol]
+        right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
+        if not left or not right:
+            return
+        for node in left:
+            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, -shear / len(left), 0.0], dtype=float))
+        for node in right:
+            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, shear / len(right), 0.0], dtype=float))
+        return
+
+    bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
+    top_ring = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
+    if not bottom_ring or not top_ring:
+        return
+    for node_id in bottom_ring:
+        load_case.add_nodal_load(node_id, forces=np.array([0.0, -shear / len(bottom_ring), 0.0], dtype=float))
+    for node_id in top_ring:
+        load_case.add_nodal_load(node_id, forces=np.array([0.0, shear / len(top_ring), 0.0], dtype=float))
+
+
+def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
+    moment = float(moment_nm or 0.0)
+    if abs(moment) <= 0.0:
+        return
+    if generated_geometry.get("plot_type") == "flat":
+        shell_node_ids = sorted({node_id for shell in generated_geometry.get("shells", []) for node_id in shell.get("node_ids", [])})
+        nodes = [model.mesh.get_node(int(node_id)) for node_id in shell_node_ids]
+        nodes = [node for node in nodes if node is not None]
+        if not nodes:
+            return
+        xs = [float(node.x) for node in nodes]
+        xmin = min(xs)
+        xmax = max(xs)
+        tol = max((xmax - xmin) * 1.0e-9, 1.0e-9)
+        left = [node for node in nodes if abs(float(node.x) - xmin) <= tol]
+        right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
+        if not left or not right:
+            return
+        for node in left:
+            load_case.add_nodal_load(int(node.id), moments=np.array([moment / len(left), 0.0, 0.0], dtype=float))
+        for node in right:
+            load_case.add_nodal_load(int(node.id), moments=np.array([-moment / len(right), 0.0, 0.0], dtype=float))
+        return
+
+    bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
+    top_ring = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
+    if not bottom_ring or not top_ring:
+        return
+
+    def add_ring_torsion(node_ids: list[int], sign: float) -> None:
+        nodes = [model.mesh.get_node(node_id) for node_id in node_ids]
+        nodes = [node for node in nodes if node is not None]
+        denominator = sum(float(node.x)**2 + float(node.y)**2 for node in nodes)
+        if denominator <= 1.0e-12:
+            return
+        for node in nodes:
+            fx = sign * moment * float(node.y) / denominator
+            fy = -sign * moment * float(node.x) / denominator
+            load_case.add_nodal_load(int(node.id), forces=np.array([fx, fy, 0.0], dtype=float))
+
+    add_ring_torsion(bottom_ring, -1.0)
+    add_ring_torsion(top_ring, 1.0)
+
+
+
 def _stress_statistics_from_model(model, displacements: np.ndarray, percentile: float = 95.0) -> dict[str, float]:
     if _backend_compute_stresses is None:
         return {"max": 0.0, "percentile": 0.0}
@@ -6489,7 +6577,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
     if include_imported_loads and abs(float(config.axial_force_n or 0.0)) > 0.0:
         diagnostics.append("Applied balanced axial force: " + str(round(float(config.axial_force_n), 3)) + " N.")
-    if (not config.custom_load_bc_enabled) and abs(float(config.enforced_displacement_m or 0.0)) > 0.0:
+    if (not config.custom_load_bc_enabled) and (abs(float(getattr(config, "enforced_displacement_x_m", 0.0))) > 0.0 or abs(float(getattr(config, "enforced_displacement_y_m", 0.0))) > 0.0 or abs(float(getattr(config, "enforced_displacement_z_m", 0.0))) > 0.0):
         diagnostics.append("Applied prescribed displacement constraints from the enforced displacement input.")
     if _wants_s6(config):
         diagnostics.append("Generated S6 triangular shell elements with shared midside nodes.")

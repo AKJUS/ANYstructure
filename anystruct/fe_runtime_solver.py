@@ -112,6 +112,8 @@ class RuntimeFEMLineSnapshot:
     pressure_pa: float = 0.0
     axial_force_n: float = 0.0
     top_bottom_moment_nm: float = 0.0
+    torsional_moment_nm: float = 0.0
+    shear_force_n: float = 0.0
     domain: str = ""
     is_cylinder: bool = False
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
@@ -130,6 +132,8 @@ class RuntimeFEMOptions:
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
     top_bottom_moment_nm: float = 0.0
+    torsional_moment_nm: float = 0.0
+    shear_force_n: float = 0.0
     acceleration_x_m_s2: float = 0.0
     acceleration_y_m_s2: float = 0.0
     acceleration_z_m_s2: float = 0.0
@@ -144,7 +148,9 @@ class RuntimeFEMOptions:
     buckling_analysis_type: str = "linear eigenvalue"
     pressure_direction: str = "front"
     axial_force_n: float = 0.0
-    enforced_displacement_m: float = 0.0
+    enforced_displacement_x_m: float = 0.0
+    enforced_displacement_y_m: float = 0.0
+    enforced_displacement_z_m: float = 0.0
     stiffener_eccentricity_m: float = 0.0
     girder_eccentricity_m: float = 0.0
     member_orientation: str = "auto"
@@ -629,9 +635,9 @@ def _cylinder_pressure_pa_from_app(app: Any) -> float:
     return abs(pressure_n_per_mm2) * 1.0e6
 
 
-def _cylinder_force_defaults_from_properties(cylinder_obj: Any | None) -> tuple[float, float]:
+def _cylinder_force_defaults_from_properties(cylinder_obj: Any | None) -> tuple[float, float, float, float]:
     if cylinder_obj is None:
-        return (0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0)
     main_properties: dict[str, Any] = {}
     try:
         main_properties = cylinder_obj.get_main_properties()
@@ -648,23 +654,25 @@ def _cylinder_force_defaults_from_properties(cylinder_obj: Any | None) -> tuple[
         _dict_value(main_properties, "cone M1sd", _read_attr_or_call(cylinder_obj, "_cone_M1sd", default=0.0)),
         0.0,
     )
-    return (axial_kn * 1000.0, moment_knm * 1000.0)
+    return (axial_kn * 1000.0, moment_knm * 1000.0, 0.0, 0.0)
 
 
-def _cylinder_force_defaults_from_app(app: Any) -> tuple[float, float]:
+def _cylinder_force_defaults_from_app(app: Any) -> tuple[float, float, float, float]:
     axial = _safe_float(_read_tk_var_or_value(app, "_new_shell_Nsd", None), 0.0) * 1000.0
     moment = _safe_float(_read_tk_var_or_value(app, "_new_shell_Msd", None), 0.0) * 1000.0
-    return (axial, moment)
+    return (axial, moment, 0.0, 0.0)
 
 
-def _runtime_line_load_defaults(app: Any, cylinder_obj: Any | None) -> tuple[float, float]:
+def _runtime_line_load_defaults(app: Any, cylinder_obj: Any | None) -> tuple[float, float, float, float]:
     if cylinder_obj is None:
-        return (0.0, 0.0)
-    property_axial, property_moment = _cylinder_force_defaults_from_properties(cylinder_obj)
-    app_axial, app_moment = _cylinder_force_defaults_from_app(app)
+        return (0.0, 0.0, 0.0, 0.0)
+    property_axial, property_moment, property_torsional, property_shear = _cylinder_force_defaults_from_properties(cylinder_obj)
+    app_axial, app_moment, app_torsional, app_shear = _cylinder_force_defaults_from_app(app)
     return (
         app_axial if abs(app_axial) > 0.0 else property_axial,
         app_moment if abs(app_moment) > 0.0 else property_moment,
+        app_torsional if abs(app_torsional) > 0.0 else property_torsional,
+        app_shear if abs(app_shear) > 0.0 else property_shear,
     )
 
 
@@ -713,7 +721,7 @@ def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
         pressure = structure_pressure
     elif abs(pressure) <= 1.0e-12 and structure_pressure > 0.0:
         pressure = structure_pressure
-    axial_force_n, top_bottom_moment_nm = _runtime_line_load_defaults(app, cylinder_obj)
+    axial_force_n, top_bottom_moment_nm, torsional_moment_nm, shear_force_n = _runtime_line_load_defaults(app, cylinder_obj)
 
     return RuntimeFEMLineSnapshot(
         line_name=active_line,
@@ -722,6 +730,8 @@ def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
         pressure_pa=pressure,
         axial_force_n=axial_force_n,
         top_bottom_moment_nm=top_bottom_moment_nm,
+        torsional_moment_nm=torsional_moment_nm,
+        shear_force_n=shear_force_n,
         domain=domain,
         is_cylinder=cylinder_obj is not None,
         diagnostics=tuple(diagnostics),
@@ -926,7 +936,9 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         buckling_analysis_type=options.buckling_analysis_type,
         pressure_direction=pressure_side,
         axial_force_n=options.axial_force_n,
-        enforced_displacement_m=options.enforced_displacement_m,
+        enforced_displacement_x_m=options.enforced_displacement_x_m,
+        enforced_displacement_y_m=options.enforced_displacement_y_m,
+        enforced_displacement_z_m=options.enforced_displacement_z_m,
         stiffener_eccentricity_m=options.stiffener_eccentricity_m,
         girder_eccentricity_m=options.girder_eccentricity_m,
         member_orientation=options.member_orientation,
@@ -1116,6 +1128,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "num_buckling_modes": int(options.num_buckling_modes),
         "mesh_size_m": float(options.mesh_size_m),
         "top_bottom_moment_nm": float(options.top_bottom_moment_nm),
+        "torsional_moment_nm": float(options.torsional_moment_nm),
+        "shear_force_n": float(options.shear_force_n),
         "boundary_condition": str(options.boundary_condition),
         "symmetry_mode": str(options.symmetry_mode),
         "shell_element_order": str(options.shell_element_order),
@@ -1130,7 +1144,9 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
                               float(options.acceleration_z_m_s2)],
         "added_mass_kg": float(options.added_mass_kg),
         "added_mass_location": str(options.added_mass_location),
-        "enforced_displacement_m": float(options.enforced_displacement_m),
+        "enforced_displacement_x_m": float(options.enforced_displacement_x_m),
+        "enforced_displacement_y_m": float(options.enforced_displacement_y_m),
+        "enforced_displacement_z_m": float(options.enforced_displacement_z_m),
         "stiffener_eccentricity_m": float(options.stiffener_eccentricity_m),
         "girder_eccentricity_m": float(options.girder_eccentricity_m),
         "member_orientation": str(options.member_orientation),
@@ -2689,7 +2705,9 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Pressure [Pa]: " + str(round(_safe_float(summary.get("pressure_pa")), 3)),
         "Pressure side: " + str(summary.get("pressure_side", summary.get("pressure_direction", ""))),
         "Axial force [N]: " + str(round(_safe_float(summary.get("axial_force_n")), 3)),
-        "Enforced displacement [m]: " + str(round(_safe_float(summary.get("enforced_displacement_m")), 6)),
+        "Enforced disp X [m]: " + str(round(_safe_float(summary.get("enforced_displacement_x_m")), 6)),
+        "Enforced disp Y [m]: " + str(round(_safe_float(summary.get("enforced_displacement_y_m")), 6)),
+        "Enforced disp Z [m]: " + str(round(_safe_float(summary.get("enforced_displacement_z_m")), 6)),
         "Mesh size override [m]: " + str(round(_safe_float(summary.get("mesh_size_m")), 4)),
         "Panel detail mesh: "
         + (
@@ -2714,6 +2732,8 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
             else "off"
         ),
         "Top/bottom moment [Nm]: " + str(round(_safe_float(summary.get("top_bottom_moment_nm")), 3)),
+        "Torsional moment [Nm]: " + str(round(_safe_float(summary.get("torsional_moment_nm")), 3)),
+        "Shear force [N]: " + str(round(_safe_float(summary.get("shear_force_n")), 3)),
         "Acceleration [m/s2]: " + _format_acceleration_summary(summary.get("acceleration_m_s2")),
         "Added mass [kg]: " + _format_added_mass_summary(summary),
         "Include stiffener beams: " + str(bool(summary.get("include_stiffeners"))),
@@ -3872,7 +3892,7 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Shown in diagnostics and included in load resultant/prestress recovery.",
         "caution": "Positive sign follows the current runtime convention; verify whether it produces tension or compression for the case.",
     },
-    "enforced_displacement_m": {
+    "enforced_displacement_x_m": {
         "title": "Enforced Displacement",
         "purpose": "Adds a prescribed displacement constraint to study displacement-controlled response.",
         "use": "Flat panels prescribe out-of-plane displacement near the panel centre. Cylinders prescribe radial displacement on a representative ring.",
@@ -4485,6 +4505,12 @@ class RuntimeFEMWindow:
         self.top_bottom_moment_nm = tk.DoubleVar(
             value=snapshot_moment_nm if abs(snapshot_moment_nm) > 0.0 else fallback_moment_nm
         )
+        self.torsional_moment_nm = tk.DoubleVar(
+            value=_safe_float(self.snapshot.torsional_moment_nm, 0.0)
+        )
+        self.shear_force_n = tk.DoubleVar(
+            value=_safe_float(self.snapshot.shear_force_n, 0.0)
+        )
         self.include_stiffeners = tk.BooleanVar(value=True)
         self.include_girders = tk.BooleanVar(value=True)
         self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
@@ -4503,7 +4529,9 @@ class RuntimeFEMWindow:
         self.acceleration_z_m_s2 = tk.DoubleVar(value=0.0)
         self.added_mass_kg = tk.DoubleVar(value=0.0)
         self.added_mass_location = tk.StringVar(value="none")
-        self.enforced_displacement_m = tk.DoubleVar(value=0.0)
+        self.enforced_displacement_x_m = tk.DoubleVar(value=_safe_float(getattr(self.snapshot, 'enforced_displacement_x_m', 0.0), 0.0))
+        self.enforced_displacement_y_m = tk.DoubleVar(value=_safe_float(getattr(self.snapshot, 'enforced_displacement_y_m', 0.0), 0.0))
+        self.enforced_displacement_z_m = tk.DoubleVar(value=_safe_float(getattr(self.snapshot, 'enforced_displacement_z_m', 0.0), 0.0))
         self.stiffener_eccentricity_m = tk.DoubleVar(value=0.0)
         self.girder_eccentricity_m = tk.DoubleVar(value=0.0)
         self.member_orientation = tk.StringVar(value="auto")
@@ -4712,7 +4740,7 @@ class RuntimeFEMWindow:
         self.show_stiffener_vis = tk.BooleanVar(value=True)
         self.show_girder_vis = tk.BooleanVar(value=True)
         self.show_collision_sphere_vis = tk.BooleanVar(value=True)
-        self.animation_fast_mode = tk.BooleanVar(value=True)
+        self.animation_fast_mode = tk.BooleanVar(value=False)
         self.animation_interval_ms = tk.IntVar(value=80)
         self.animation_speed_multiplier = tk.DoubleVar(value=1.0)
         self.time_step_slider_value = tk.DoubleVar(value=0.0)
@@ -5216,7 +5244,9 @@ class RuntimeFEMWindow:
         self.options_notebook.add(tab_properties, text="Properties")
 
         tab_loads = ttk.Frame(self.options_notebook)
-        self.options_notebook.add(tab_loads, text="Loads and boundary conditions")
+        self.options_notebook.add(tab_loads, text="Loads")
+        tab_bc = ttk.Frame(self.options_notebook)
+        self.options_notebook.add(tab_bc, text="Boundary conditions")
 
         tab_transient = ttk.Frame(self.options_notebook)
         self.options_notebook.add(tab_transient, text="Transient runs")
@@ -5475,28 +5505,32 @@ class RuntimeFEMWindow:
         self._add_entry_row(fracture, 4, "fracture_min_load_factor", "Min LF before erosion",
                             self.fracture_min_load_factor)
 
-        # --- Loads and boundary conditions tab ---
-        general_loads = ttk.LabelFrame(tab_loads, text="General loads")
+        # --- Loads tab ---
+        general_loads = ttk.LabelFrame(tab_loads, text="Imported loads")
         general_loads.pack(fill=tk.X, padx=8, pady=(8, 6))
         self._configure_option_grid(general_loads)
         self._add_entry_row(general_loads, 0, "pressure_pa", "Pressure [Pa]", self.pressure_pa)
         self._add_entry_row(general_loads, 1, "load_scale", "Load scale", self.load_scale)
-        self._add_entry_row(general_loads, 2, "top_bottom_moment_nm", "Top/bottom moment [Nm]",
-                            self.top_bottom_moment_nm)
+        self._add_entry_row(general_loads, 2, "axial_force_n", "Axial force [N]", self.axial_force_n)
+        self._add_entry_row(general_loads, 3, "top_bottom_moment_nm", "Bending moment [Nm]", self.top_bottom_moment_nm)
+        self._add_entry_row(general_loads, 4, "torsional_moment_nm", "Torsional moment [Nm]", self.torsional_moment_nm)
+        self._add_entry_row(general_loads, 5, "shear_force_n", "Shear force [N]", self.shear_force_n)
+        
+        self._add_option_row(general_loads, 6, "pressure_direction", "Pressure side", self.pressure_direction,
+                             ("front", "back"))
 
-        constraints = ttk.LabelFrame(tab_loads, text="Supports and load path")
-        constraints.pack(fill=tk.X, padx=8, pady=(0, 6))
+        # --- Boundary conditions tab ---
+        constraints = ttk.LabelFrame(tab_bc, text="Supports and constraints")
+        constraints.pack(fill=tk.X, padx=8, pady=(8, 6))
         self._configure_option_grid(constraints)
 
         self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition,
                              ("auto", "free", "simply supported", "pinned", "clamped"))
         self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode,
                              ("none", "x", "y", "z", "cyclic"))
-        self._add_option_row(constraints, 2, "pressure_direction", "Pressure side", self.pressure_direction,
-                             ("front", "back"))
-        self._add_entry_row(constraints, 3, "axial_force_n", "Axial force [N]", self.axial_force_n)
-        self._add_entry_row(constraints, 4, "enforced_displacement_m", "Enforced disp. [m]",
-                            self.enforced_displacement_m)
+        self._add_entry_row(constraints, 2, "enforced_displacement_x_m", "Enforced disp. X [m]", self.enforced_displacement_x_m)
+        self._add_entry_row(constraints, 3, "enforced_displacement_y_m", "Enforced disp. Y [m]", self.enforced_displacement_y_m)
+        self._add_entry_row(constraints, 4, "enforced_displacement_z_m", "Enforced disp. Z [m]", self.enforced_displacement_z_m)
 
         accel = ttk.LabelFrame(tab_loads, text="Acceleration and added mass")
         accel.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -5508,91 +5542,46 @@ class RuntimeFEMWindow:
         self._add_option_row(accel, 4, "added_mass_location", "Mass location", self.added_mass_location,
                              ("none", "plate edge x0", "plate edge x1", "plate edge y0", "plate edge y1",
                               "plate all edges", "cylinder bottom", "cylinder top"))
-        custom = ttk.LabelFrame(tab_loads, text="Custom loads and boundary conditions")
-        custom.pack(fill=tk.X, padx=8, pady=(0, 8))
-        self._configure_option_grid(custom)
-        self._add_check_row(custom, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
-        self._add_check_row(custom, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads",
-                            self.custom_loads_add_to_imported)
-        self._add_check_row(custom, 2, "custom_use_nullspace_projection", "Use nullspace projection as boundary",
-                            self.custom_use_nullspace_projection)
-        self._add_check_row(custom, 3, "allow_unbalanced_free_free", "Allow unbalanced free-free loads",
-                            self.allow_unbalanced_free_free)
-        selection = ttk.LabelFrame(custom, text="Panel and edge selection")
-        selection.grid(row=4, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 8))
-        self._configure_option_grid(selection)
-        self._add_entry_row(selection, 0, "custom_pressure_pa", "Pressure [Pa]", self.custom_pressure_pa)
-        self._add_entry_row(selection, 1, "custom_selected_edge_load", "Selected edges [N/m]",
-                            self.custom_selected_edge_load_n_per_m)
+        custom_loads = ttk.LabelFrame(tab_loads, text="Custom loads")
+        custom_loads.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(custom_loads)
+        self._add_check_row(custom_loads, 0, "custom_load_bc_enabled", "Use custom load/BC mode", self.custom_load_bc_enabled)
+        self._add_check_row(custom_loads, 1, "custom_loads_add_to_imported", "Add custom loads to imported/generated loads", self.custom_loads_add_to_imported)
+        self._add_check_row(custom_loads, 2, "allow_unbalanced_free_free", "Allow unbalanced free-free loads", self.allow_unbalanced_free_free)
+        
+        selection_loads = ttk.LabelFrame(custom_loads, text="Panel and edge selection")
+        selection_loads.grid(row=3, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 8))
+        self._configure_option_grid(selection_loads)
+        self._add_entry_row(selection_loads, 0, "custom_pressure_pa", "Pressure [Pa]", self.custom_pressure_pa)
+        self._add_entry_row(selection_loads, 1, "custom_selected_edge_load", "Selected edges [N/m]", self.custom_selected_edge_load_n_per_m)
         self.custom_load_area_var = tk.StringVar(value="Selected Area: 0.000 m2")
-        ttk.Label(selection, textvariable=self.custom_load_area_var).grid(row=2, column=0, sticky=tk.W, padx=8, pady=4)
-        self._custom_load_selection_button = ttk.Button(
-            selection,
-            text="Start selection",
-            command=self._toggle_custom_load_selection,
-        )
+        ttk.Label(selection_loads, textvariable=self.custom_load_area_var).grid(row=2, column=0, sticky=tk.W, padx=8, pady=4)
+        self._custom_load_selection_button = ttk.Button(selection_loads, text="Start selection", command=self._toggle_custom_load_selection)
         self._custom_load_selection_button.grid(row=2, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(selection, text="Select All", command=self._custom_load_select_all).grid(
-            row=2, column=2, sticky=tk.EW, padx=(0, 4), pady=4
-        )
-        ttk.Button(selection, text="Clear", command=self._custom_load_clear_all).grid(
-            row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4
-        )
-        split_actions = ttk.Frame(selection)
-        split_actions.grid(row=3, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=4)
-        ttk.Button(
-            split_actions,
-            text="Split A (Z/X)",
-            command=lambda: self._custom_load_split_field("a"),
-        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(
-            split_actions,
-            text="Split B (Arc/Y)",
-            command=lambda: self._custom_load_split_field("b"),
-        ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
-        selection.columnconfigure(3, weight=1)
-        self._add_option_row(custom, 5, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support,
-                             ("free", "simply supported", "fixed"))
-        self._add_option_row(custom, 6, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support,
-                             ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported",
-                       "fixed").grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.OptionMenu(custom, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported",
-                       "fixed").grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_option_row(custom, 7, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support,
-                             ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free",
-                       "simply supported", "fixed").grid(row=7, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 8, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=8, column=3, sticky=tk.EW,
-                                                                                       padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 9, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=9, column=3, sticky=tk.EW,
-                                                                                       padx=(0, 8), pady=4)
-        self._add_entry_row(custom, 10, "cylinder_edge_loads", "Cyl. lower / upper [N/m]",
-                            self.cylinder_lower_edge_load_n_per_m)
-        ttk.Entry(custom, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=10, column=3,
-                                                                                             sticky=tk.EW, padx=(0, 8),
-                                                                                             pady=4)
-        custom.columnconfigure(3, weight=1)
+        ttk.Button(selection_loads, text="Select All", command=self._custom_load_select_all).grid(row=2, column=2, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection_loads, text="Clear", command=self._custom_load_clear_all).grid(row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        split_actions_loads = ttk.Frame(selection_loads)
+        split_actions_loads.grid(row=3, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=4)
+        ttk.Button(split_actions_loads, text="Split A (Z/X)", command=lambda: self._custom_load_split_field("a")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        ttk.Button(split_actions_loads, text="Split B (Arc/Y)", command=lambda: self._custom_load_split_field("b")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        selection_loads.columnconfigure(3, weight=1)
+        
+        self._add_entry_row(custom_loads, 4, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
+        ttk.Entry(custom_loads, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom_loads, 5, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
+        ttk.Entry(custom_loads, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_entry_row(custom_loads, 6, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
+        ttk.Entry(custom_loads, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        custom_loads.columnconfigure(3, weight=1)
 
         load_list = ttk.LabelFrame(tab_loads, text="Loads to run")
         load_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        actions = ttk.Frame(load_list)
-        actions.pack(fill=tk.X, padx=8, pady=(8, 4))
-        ttk.Button(actions, text="Add load", command=self._add_custom_load_from_selection).pack(
-            side=tk.LEFT,
-            padx=(0, 4),
-        )
-        ttk.Button(actions, text="Delete load", command=self._delete_selected_custom_load).pack(side=tk.LEFT)
+        actions_loads = ttk.Frame(load_list)
+        actions_loads.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Button(actions_loads, text="Add load", command=self._add_custom_load_from_selection).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(actions_loads, text="Delete load", command=self._delete_selected_custom_load).pack(side=tk.LEFT)
         columns = ("type", "value", "selection", "notes")
-        self._custom_load_tree = ttk.Treeview(
-            load_list,
-            columns=columns,
-            show="headings",
-            height=9,
-            selectmode="browse",
-        )
+        self._custom_load_tree = ttk.Treeview(load_list, columns=columns, show="headings", height=9, selectmode="browse")
         self._custom_load_tree.heading("type", text="Type")
         self._custom_load_tree.heading("value", text="Value")
         self._custom_load_tree.heading("selection", text="Selection")
@@ -5602,13 +5591,49 @@ class RuntimeFEMWindow:
         self._custom_load_tree.column("selection", width=180, stretch=True, anchor=tk.W)
         self._custom_load_tree.column("notes", width=240, stretch=True, anchor=tk.W)
         self._custom_load_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=(0, 8))
-        self._custom_load_tree_scrollbar = ttk.Scrollbar(
-            load_list,
-            orient=tk.VERTICAL,
-            command=self._custom_load_tree.yview,
-        )
+        self._custom_load_tree_scrollbar = ttk.Scrollbar(load_list, orient=tk.VERTICAL, command=self._custom_load_tree.yview)
         self._custom_load_tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=(0, 8))
         self._custom_load_tree.configure(yscrollcommand=self._custom_load_tree_scrollbar.set)
+        
+        custom_bc = ttk.LabelFrame(tab_bc, text="Custom boundary conditions")
+        custom_bc.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._configure_option_grid(custom_bc)
+        self._add_check_row(custom_bc, 0, "custom_use_nullspace_projection", "Use nullspace projection as boundary", self.custom_use_nullspace_projection)
+        
+        selection_bc = ttk.LabelFrame(custom_bc, text="Edge selection")
+        selection_bc.grid(row=1, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 8))
+        self._configure_option_grid(selection_bc)
+        self.custom_bc_area_var = tk.StringVar(value="Selected Area: 0.000 m2")
+        ttk.Label(selection_bc, textvariable=self.custom_bc_area_var).grid(row=0, column=0, sticky=tk.W, padx=8, pady=4)
+        self._custom_bc_selection_button = ttk.Button(selection_bc, text="Start selection", command=self._toggle_custom_load_selection)
+        self._custom_bc_selection_button.grid(row=0, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection_bc, text="Select All", command=self._custom_load_select_all).grid(row=0, column=2, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection_bc, text="Clear", command=self._custom_load_clear_all).grid(row=0, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        selection_bc.columnconfigure(3, weight=1)
+
+        self._add_option_row(custom_bc, 2, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
+        self._add_option_row(custom_bc, 3, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom_bc, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        ttk.OptionMenu(custom_bc, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._add_option_row(custom_bc, 4, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
+        ttk.OptionMenu(custom_bc, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        custom_bc.columnconfigure(3, weight=1)
+        
+        bc_list = ttk.LabelFrame(tab_bc, text="Applied boundary conditions")
+        bc_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._custom_bc_tree = ttk.Treeview(bc_list, columns=columns, show="headings", height=4, selectmode="browse")
+        self._custom_bc_tree.heading("type", text="Type")
+        self._custom_bc_tree.heading("value", text="Value")
+        self._custom_bc_tree.heading("selection", text="Selection")
+        self._custom_bc_tree.heading("notes", text="Boundary / notes")
+        self._custom_bc_tree.column("type", width=88, stretch=False, anchor=tk.W)
+        self._custom_bc_tree.column("value", width=110, stretch=False, anchor=tk.W)
+        self._custom_bc_tree.column("selection", width=180, stretch=True, anchor=tk.W)
+        self._custom_bc_tree.column("notes", width=240, stretch=True, anchor=tk.W)
+        self._custom_bc_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=(0, 8))
+        self._custom_bc_tree_scrollbar = ttk.Scrollbar(bc_list, orient=tk.VERTICAL, command=self._custom_bc_tree.yview)
+        self._custom_bc_tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=(0, 8))
+        self._custom_bc_tree.configure(yscrollcommand=self._custom_bc_tree_scrollbar.set)
         self._bind_custom_load_list_traces()
         self._refresh_custom_load_list()
 
@@ -6280,15 +6305,22 @@ class RuntimeFEMWindow:
                 canvas.add_line(start, end, color=color, width=3, draw_overlay=True)
 
     def _draw_cylinder_mesh_detail_overlays(self, canvas: "Tkinter3DCanvas", generated: dict, adaptive: dict) -> None:
-        radius = max(_safe_float(generated.get("radius_m"), 1.0), 1.0e-9)
+        if generated.get("is_cone"):
+            base_radius = max(_safe_float(generated.get("cone_r1_m"), 1.0), 1.0e-9)
+            base_radius_top = max(_safe_float(generated.get("cone_r2_m"), 1.0), 1.0e-9)
+        else:
+            base_radius = max(_safe_float(generated.get("radius_m"), 1.0), 1.0e-9)
+            base_radius_top = base_radius
         length = max(_safe_float(generated.get("length_m"), 1.0), 1.0e-9)
-        offset = max(radius * 0.006, 2.0e-4)
-        draw_radius = radius + offset
+        offset = max(base_radius * 0.006, 2.0e-4)
 
         def surface_point(z: float, arc: float) -> Point3D:
             z_clamped = min(max(float(z), 0.0), length)
-            arc_wrapped = float(arc) % max(2.0 * math.pi * radius, 1.0e-9)
-            theta = arc_wrapped / radius
+            arc_wrapped = float(arc) % max(2.0 * math.pi * base_radius, 1.0e-9)
+            theta = arc_wrapped / base_radius
+            t = z_clamped / length if length > 0 else 0.0
+            r_local = base_radius + t * (base_radius_top - base_radius)
+            draw_radius = r_local + offset
             return Point3D(draw_radius * math.cos(theta), draw_radius * math.sin(theta), z_clamped)
 
         def draw_polyline(points: list[Point3D], color: str, width: int = 3) -> None:
@@ -6807,11 +6839,17 @@ class RuntimeFEMWindow:
             return
 
         if self.snapshot.is_cylinder:
-            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+            if geometry.get("is_cone"):
+                radius = max(_safe_float(geometry.get("cone_r1_m"), 1.0), 1.0e-6)
+                radius_top = max(_safe_float(geometry.get("cone_r2_m"), 1.0), 1.0e-6)
+            else:
+                radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+                radius_top = radius
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             if show_plate and plate_alpha > 0.0:
                 canvas.add_cylinder(
                     radius=radius,
+                    radius_top=radius_top,
                     height=length,
                     center=Point3D(0.0, 0.0, 0.5 * length),
                     color=plate_front_color,
@@ -6840,6 +6878,7 @@ class RuntimeFEMWindow:
                         angle = 2.0 * math.pi * i / num_longs
                         canvas.add_longitudinal_stiffener(
                             radius=radius,
+                            radius_top=radius_top,
                             height=length,
                             angle=angle,
                             web_height=hw,
@@ -6867,8 +6906,10 @@ class RuntimeFEMWindow:
                             fallback_midpoint=True,
                     ):
                         z_pos = station
+                        t = z_pos / length if length > 0 else 0.0
+                        r_z = radius + t * (radius_top - radius)
                         canvas.add_ring_stiffener(
-                            radius=radius,
+                            radius=r_z,
                             z_position=z_pos,
                             web_height=ghw,
                             web_thickness=gtw,
@@ -6946,16 +6987,29 @@ class RuntimeFEMWindow:
     def _draw_base_dimension_annotations(self, canvas: Tkinter3DCanvas, geometry: dict[str, Any]) -> None:
         color = "#6b7280"
         if self.snapshot.is_cylinder:
-            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+            if geometry.get("is_cone"):
+                radius = max(_safe_float(geometry.get("cone_r1_m"), 1.0), 1.0e-6)
+                radius_top = max(_safe_float(geometry.get("cone_r2_m"), 1.0), 1.0e-6)
+            else:
+                radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-6)
+                radius_top = radius
             length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-6)
             y = -1.18 * radius
             z = -0.18 * radius
             canvas.add_line(Point3D(-radius, y, z), Point3D(radius, y, z), color=color, width=1, layer=2,
                             draw_overlay=False)
-            canvas.add_text(Point3D(0.0, y, z), "D " + _format_dimension(2.0 * radius), color=color,
+            canvas.add_text(Point3D(0.0, y, z), "D1 " + _format_dimension(2.0 * radius), color=color,
                             font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
-            x = 1.18 * radius
-            y2 = 1.18 * radius
+            
+            y_top = -1.18 * radius_top
+            z_top = length + 0.18 * radius_top
+            canvas.add_line(Point3D(-radius_top, y_top, z_top), Point3D(radius_top, y_top, z_top), color=color, width=1, layer=2,
+                            draw_overlay=False)
+            canvas.add_text(Point3D(0.0, y_top, z_top), "D2 " + _format_dimension(2.0 * radius_top), color=color,
+                            font=("Segoe UI", 8, "normal"), layer=42, draw_overlay=False)
+            
+            x = 1.18 * max(radius, radius_top)
+            y2 = 1.18 * max(radius, radius_top)
             canvas.add_line(Point3D(x, y2, 0.0), Point3D(x, y2, length), color=color, width=1, layer=2,
                             draw_overlay=False)
             canvas.add_text(Point3D(x, y2, 0.5 * length), "L " + _format_dimension(length), color=color,
@@ -7013,11 +7067,9 @@ class RuntimeFEMWindow:
         if self.snapshot.is_cylinder and plate_alpha >= 0.94 and not has_explicit_shell_surfaces:
             set_occluder = getattr(canvas, "set_opaque_cylinder_occluder", None)
             if callable(set_occluder):
+                radius = max(_safe_float(geometry.get("cone_r1_m") if geometry.get("is_cone") else geometry.get("radius_m"), 1.0), 1.0e-9)
                 set_occluder(
-                    radius=max(
-                        _safe_float(geometry.get("radius_m"), 1.0),
-                        1.0e-9,
-                    ),
+                    radius=radius,
                     height=max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9),
                     center=Point3D(0.0, 0.0, 0.5 * max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)),
                 )
@@ -7044,7 +7096,18 @@ class RuntimeFEMWindow:
         if visualization.get("type") == "cylinder":
             axial = _plot_grid_values(visualization.get("axial_m"))
             theta = _plot_grid_values(visualization.get("theta_rad"))
-            radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
+            if geometry.get("is_cone"):
+                base_radius = max(_safe_float(geometry.get("cone_r1_m"), 1.0), 1.0e-9)
+                base_radius_top = max(_safe_float(geometry.get("cone_r2_m"), 1.0), 1.0e-9)
+            else:
+                base_radius = max(_safe_float(visualization.get("radius_m"), _safe_float(geometry.get("radius_m"), 1.0)), 1.0e-9)
+                base_radius_top = base_radius
+            
+            cyl_len = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+
+            def get_r(z_val):
+                t = z_val / cyl_len if cyl_len > 0 else 0.0
+                return base_radius + t * (base_radius_top - base_radius)
 
             disps = visualization.get("displacements", {})
             dx_grid = _plot_grid_values(disps.get("disp_x", []))
@@ -7054,13 +7117,13 @@ class RuntimeFEMWindow:
             if not dx_grid or not dy_grid or not dz_grid:
                 radial_displacement = _plot_grid_values(visualization.get("radial_displacement_m"))
                 x = [
-                    [(radius + radial_displacement[row_index][col_index] * scale) * math.cos(
+                    [(get_r(axial[row_index][col_index]) + radial_displacement[row_index][col_index] * scale) * math.cos(
                         theta[row_index][col_index])
                      for col_index in range(len(theta[row_index]))]
                     for row_index in range(len(theta))
                 ]
                 y = [
-                    [(radius + radial_displacement[row_index][col_index] * scale) * math.sin(
+                    [(get_r(axial[row_index][col_index]) + radial_displacement[row_index][col_index] * scale) * math.sin(
                         theta[row_index][col_index])
                      for col_index in range(len(theta[row_index]))]
                     for row_index in range(len(theta))
@@ -7068,12 +7131,12 @@ class RuntimeFEMWindow:
                 z = axial
             else:
                 x = [
-                    [(radius * math.cos(theta[row_index][col_index]) + dx_grid[row_index][col_index] * scale)
+                    [(get_r(axial[row_index][col_index]) * math.cos(theta[row_index][col_index]) + dx_grid[row_index][col_index] * scale)
                      for col_index in range(len(theta[row_index]))]
                     for row_index in range(len(theta))
                 ]
                 y = [
-                    [(radius * math.sin(theta[row_index][col_index]) + dy_grid[row_index][col_index] * scale)
+                    [(get_r(axial[row_index][col_index]) * math.sin(theta[row_index][col_index]) + dy_grid[row_index][col_index] * scale)
                      for col_index in range(len(theta[row_index]))]
                     for row_index in range(len(theta))
                 ]
@@ -8022,6 +8085,8 @@ class RuntimeFEMWindow:
             num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
             mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
             top_bottom_moment_nm=_safe_float(self.top_bottom_moment_nm.get(), 0.0),
+            torsional_moment_nm=_safe_float(self.torsional_moment_nm.get(), 0.0),
+            shear_force_n=_safe_float(self.shear_force_n.get(), 0.0),
             acceleration_x_m_s2=_safe_float(self.acceleration_x_m_s2.get(), 0.0),
             acceleration_y_m_s2=_safe_float(self.acceleration_y_m_s2.get(), 0.0),
             acceleration_z_m_s2=_safe_float(self.acceleration_z_m_s2.get(), 0.0),
@@ -8036,7 +8101,9 @@ class RuntimeFEMWindow:
             buckling_analysis_type=str(self.buckling_analysis_type.get()),
             pressure_direction=_normalise_pressure_side(self.pressure_direction.get()),
             axial_force_n=_safe_float(self.axial_force_n.get(), 0.0),
-            enforced_displacement_m=_safe_float(self.enforced_displacement_m.get(), 0.0),
+            enforced_displacement_x_m=_safe_float(self.enforced_displacement_x_m.get(), 0.0),
+            enforced_displacement_y_m=_safe_float(self.enforced_displacement_y_m.get(), 0.0),
+            enforced_displacement_z_m=_safe_float(self.enforced_displacement_z_m.get(), 0.0),
             stiffener_eccentricity_m=_safe_float(self.stiffener_eccentricity_m.get(), 0.0),
             girder_eccentricity_m=_safe_float(self.girder_eccentricity_m.get(), 0.0),
             member_orientation=str(self.member_orientation.get()),
@@ -8299,33 +8366,31 @@ class RuntimeFEMWindow:
         return f"{_safe_float(entry.get('line_load_n_per_m'), 0.0):g} N/m"
 
     def _refresh_custom_load_list(self) -> None:
+        # Update Load tree
         tree = getattr(self, "_custom_load_tree", None)
-        if tree is None:
-            return
-        selected = tree.selection()
-        selected_iid = selected[0] if selected else ""
-        for item in tree.get_children():
-            tree.delete(item)
-        boundary_selection, boundary_notes = self._custom_boundary_summary()
-        tree.insert("", tk.END, iid="boundary", values=("Boundary", "", boundary_selection, boundary_notes))
-        for index, entry in enumerate(self._custom_load_entries):
-            entry_type = str(entry.get("type", "")).lower()
-            type_text = "Pressure" if entry_type in {"pressure", "panel_pressure"} else "Edge load"
-            notes = "time-domain capable" if type_text == "Pressure" and bool(
-                self.custom_time_domain_enabled.get()) else ""
-            tree.insert(
-                "",
-                tk.END,
-                iid=f"load:{index}",
-                values=(
-                    type_text,
-                    self._custom_load_entry_value_text(entry),
-                    self._custom_load_entry_selection_text(entry),
-                    notes,
-                ),
-            )
-        if selected_iid and tree.exists(selected_iid):
-            tree.selection_set(selected_iid)
+        if tree is not None:
+            selected = tree.selection()
+            selected_iid = selected[0] if selected else ""
+            for item in tree.get_children():
+                tree.delete(item)
+            for index, entry in enumerate(self._custom_load_entries):
+                entry_type = str(entry.get("type", "")).lower()
+                type_text = "Pressure" if entry_type in {"pressure", "panel_pressure"} else "Edge load"
+                notes = "time-domain capable" if type_text == "Pressure" and bool(
+                    self.custom_time_domain_enabled.get()) else ""
+                tree.insert("", tk.END, iid=f"load:{index}", values=(
+                    type_text, self._custom_load_entry_value_text(entry),
+                    self._custom_load_entry_selection_text(entry), notes))
+            if selected_iid and tree.exists(selected_iid):
+                tree.selection_set(selected_iid)
+        
+        # Update BC tree
+        bc_tree = getattr(self, "_custom_bc_tree", None)
+        if bc_tree is not None:
+            for item in bc_tree.get_children():
+                bc_tree.delete(item)
+            boundary_selection, boundary_notes = self._custom_boundary_summary()
+            bc_tree.insert("", tk.END, iid="boundary", values=("Boundary", "", boundary_selection, boundary_notes))
 
     def _local_refinement_patch_summary(self) -> tuple[int, float]:
         patches = _runtime_local_refinement_patches(
@@ -9045,16 +9110,32 @@ class RuntimeFEMWindow:
         min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(patch)
 
         if self.snapshot.is_cylinder:
-            radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
-            draw_radius = max(radius + surface_offset, 1.0e-9)
-            theta_0 = min_b / radius
-            theta_1 = max_b / radius
+            if geometry.get("is_cone"):
+                base_radius = max(_safe_float(geometry.get("cone_r1_m"), 1.0), 1.0e-9)
+                base_radius_top = max(_safe_float(geometry.get("cone_r2_m"), 1.0), 1.0e-9)
+            else:
+                base_radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
+                base_radius_top = base_radius
+            
+            cyl_len = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
+            
+            def get_r(z_val):
+                t = z_val / cyl_len if cyl_len > 0 else 0.0
+                return base_radius + t * (base_radius_top - base_radius)
+
+            theta_0 = min_b / base_radius
+            theta_1 = max_b / base_radius
             arc_steps = max(2, int(math.ceil(abs(theta_1 - theta_0) / (math.pi / 24.0))))
             angles = [theta_0 + (theta_1 - theta_0) * index / arc_steps for index in range(arc_steps + 1)]
-            lower = [Point3D(draw_radius * math.cos(theta), draw_radius * math.sin(theta), min_a)
+            
+            r_lower = get_r(min_a) + surface_offset
+            lower = [Point3D(r_lower * math.cos(theta), r_lower * math.sin(theta), min_a)
                      for theta in angles]
-            upper = [Point3D(draw_radius * math.cos(theta), draw_radius * math.sin(theta), max_a)
+                     
+            r_upper = get_r(max_a) + surface_offset
+            upper = [Point3D(r_upper * math.cos(theta), r_upper * math.sin(theta), max_a)
                      for theta in reversed(angles)]
+                     
             return lower + upper
 
         return [

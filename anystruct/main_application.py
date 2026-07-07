@@ -195,6 +195,7 @@ class Application():
         sub_menu.add_command(label='Open excel input', command=self.open_excel_file)
         sub_menu.add_separator()
         self._file_menu = sub_menu
+        sub_menu.add_command(label='Open FEA result buckling files...', command=self.open_fea_buckling_files)
         sub_menu.add_command(label='Import FEM and run in fe-solver', command=self.on_import_fem_and_run_solver)
         file_export_menu = tk.Menu(sub_menu)
         sub_menu.add_cascade(label='Export', menu=file_export_menu)
@@ -276,6 +277,7 @@ class Application():
         sub_colors.add_separator()
         sub_colors.add_command(label='Mode - Single panel/cylinder', command=self.switch_to_single_calculation_mode)
         sub_colors.add_command(label='Mode - Multiple panels', command=self.switch_to_multiple_calculation_mode)
+        sub_colors.add_command(label='Mode - FEA result buckling', command=self.switch_to_fea_result_buckling_mode)
         self._gui_menu = sub_colors
 
         # base_mult = 1.2
@@ -337,8 +339,6 @@ class Application():
 
         self._simplified_calculation_mode = False
         self._single_line_name = 'line1'
-        self._experimental_mode_enabled = False
-        self._sync_experimental_menu_entries()
         self._fea_buckling_mode = False
         self._fea_buckling_session = None
         self._fea_selected_panel_id = None
@@ -2012,60 +2012,15 @@ class Application():
             pass
 
     def _place_runtime_fem_button(self):
-        """Show the runtime FEM entry point only for experimental single/multi modes."""
+        """Show the runtime FEM entry point only for single/multi modes."""
         try:
-            if (
-                    getattr(self, '_experimental_mode_enabled', False)
-                    and not getattr(self, '_fea_buckling_mode', False)
-            ):
+            if not getattr(self, '_fea_buckling_mode', False):
                 self._runtime_fem_button.place(relx=0.89, rely=0.69, relwidth=0.095)
                 self._runtime_fem_button.lift()
             else:
                 self._runtime_fem_button.place_forget()
         except Exception:
             pass
-
-    @staticmethod
-    def _menu_index_by_label(menu, label):
-        try:
-            end_index = menu.index('end')
-        except Exception:
-            return None
-        if end_index is None:
-            return None
-        for index in range(end_index + 1):
-            try:
-                if menu.entrycget(index, 'label') == label:
-                    return index
-            except Exception:
-                continue
-        return None
-
-    def _sync_experimental_menu_command(self, menu_name, label, command, visible):
-        menu = getattr(self, menu_name, None)
-        if menu is None:
-            return
-        index = self._menu_index_by_label(menu, label)
-        if visible and index is None:
-            menu.add_command(label=label, command=command)
-        elif not visible and index is not None:
-            menu.delete(index)
-
-    def _sync_experimental_menu_entries(self):
-        """Hide FEA/FRD import menu entries unless experimental mode is enabled."""
-        visible = bool(getattr(self, '_experimental_mode_enabled', False))
-        self._sync_experimental_menu_command(
-            '_file_menu',
-            'Open FEA result buckling files...',
-            self.open_fea_buckling_files,
-            visible,
-        )
-        self._sync_experimental_menu_command(
-            '_gui_menu',
-            'Mode - FEA result buckling',
-            self.switch_to_fea_result_buckling_mode,
-            visible,
-        )
 
     def _prompt_startup_calculation_mode(self):
         """Let the user choose standard, simplified, or FEA-result buckling workflow."""
@@ -2111,11 +2066,6 @@ class Application():
 
         def choose(mode):
             result['mode'] = mode
-            try:
-                self._experimental_mode_enabled = bool(experimental_var.get())
-            except Exception:
-                self._experimental_mode_enabled = mode == 'fea'
-            self._sync_experimental_menu_entries()
             try:
                 dialog.grab_release()
             except Exception:
@@ -2207,30 +2157,8 @@ class Application():
             primary=False,
         )
         standard_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
-        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
-        fea_card.pack_forget()
-
-        experimental_var = tk.BooleanVar(value=False)
-
-        def toggle_experimental():
-            self._experimental_mode_enabled = bool(experimental_var.get())
-            if experimental_var.get():
-                single_card.pack_configure(padx=(8, 8))
-                fea_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
-            else:
-                fea_card.pack_forget()
-                single_card.pack_configure(padx=(8, 0))
-
-        tk.Checkbutton(
-            content,
-            text='Experimental',
-            variable=experimental_var,
-            command=toggle_experimental,
-            background='#f5f7fb',
-            activebackground='#f5f7fb',
-            foreground='#334155',
-            font=('Segoe UI', 9),
-        ).pack(anchor=tk.W, pady=(10, 0))
+        single_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 8))
+        fea_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
         try:
             dialog.grab_set()
@@ -2285,15 +2213,6 @@ class Application():
 
     def switch_to_fea_result_buckling_mode(self):
         """Switch to FE-result buckling where clickable panels replace ship lines."""
-        if not getattr(self, '_experimental_mode_enabled', False):
-            try:
-                messagebox.showinfo(
-                    title='Experimental FEA result buckling',
-                    message='Enable experimental mode at startup to use FEA result buckling.',
-                )
-            except Exception:
-                pass
-            return
         self._fea_buckling_mode = True
         self._simplified_calculation_mode = False
         self._new_show_prop_3d.set(False)
@@ -2413,15 +2332,6 @@ class Application():
 
     def open_fea_buckling_files(self):
         """Ask for FE model/result files and import them into FEA-result buckling mode."""
-        if not getattr(self, '_experimental_mode_enabled', False):
-            try:
-                messagebox.showinfo(
-                    title='Experimental FEA result buckling',
-                    message='Enable experimental mode at startup to import FE model/result files.',
-                )
-            except Exception:
-                pass
-            return
         inp_path = filedialog.askopenfilename(
             title='Open FE model/input deck',
             filetypes=(
@@ -2449,8 +2359,6 @@ class Application():
 
     def reimport_fea_buckling_files(self):
         """Re-read the last FEA files using current buckling options."""
-        if not getattr(self, '_experimental_mode_enabled', False):
-            return
         if getattr(self, '_fea_last_runtime_result', None) is not None:
             self.import_runtime_fem_buckling_result(self._fea_last_runtime_result)
             return
@@ -2598,8 +2506,6 @@ class Application():
 
     def import_fea_buckling_files(self, inp_path, frd_path=None):
         """Load FEA files and prepare clickable buckling panels."""
-        if not getattr(self, '_experimental_mode_enabled', False):
-            return
         input_text = str(inp_path)
         input_lower = input_text.lower()
         paired_sif_exists = False
@@ -2644,8 +2550,6 @@ class Application():
 
     def import_runtime_fem_buckling_result(self, runtime_result):
         """Load an in-memory runtime FEM result into FEA-result buckling mode."""
-        if not getattr(self, '_experimental_mode_enabled', False):
-            return False
         try:
             self._fea_buckling_session = fe_plate_fields.create_runtime_fea_buckling_session(
                 runtime_result,
@@ -13070,10 +12974,7 @@ class Application():
         load_window.CreateLoadWindow(top, self)
 
     def on_open_runtime_fem_solver(self):
-        """Open the experimental runtime FEM solver for the current active line."""
-        if not getattr(self, '_experimental_mode_enabled', False):
-            messagebox.showinfo(title='Experimental FEM solver', message='Enable experimental mode to use FEM run.')
-            return
+        """Open the runtime FEM solver for the current active line."""
         if getattr(self, '_fea_buckling_mode', False):
             messagebox.showinfo(
                 title='Experimental FEM solver',

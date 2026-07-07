@@ -28,6 +28,7 @@ The cylinder axis is the global Z axis.
 
 from __future__ import annotations
 
+import numpy as np
 import math
 import tkinter as tk
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -360,6 +361,7 @@ class Tkinter3DCanvas(tk.Frame):
         self._finish_interaction_after_id: Optional[str] = None
 
         # World-space primitive caches. Camera movement does not invalidate them.
+        self._np_vertices_cache: Dict[str, np.ndarray] = {}
         self._world_primitive_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         # Animation Cache Fields
@@ -835,6 +837,7 @@ class Tkinter3DCanvas(tk.Frame):
         self._animation_after_id = self.after(delay_ms, self._animation_tick)
 
     def _invalidate_geometry_cache(self) -> None:
+        self._np_vertices_cache.clear()
         self._world_primitive_cache.clear()
 
     def _clear_canvas_only(self) -> None:
@@ -877,30 +880,32 @@ class Tkinter3DCanvas(tk.Frame):
         far = self.camera.far
 
         # Point object IDs are stable because world primitives are cached.
-        projected_points: Dict[int, Optional[Tuple[float, float, float]]] = {}
 
-        def project(point: Point3D) -> Optional[Tuple[float, float, float]]:
-            key = id(point)
-            if key in projected_points:
-                return projected_points[key]
-
-            rx = point.x - position.x
-            ry = point.y - position.y
-            rz = point.z - position.z
-
-            camera_x = rx * right.x + ry * right.y + rz * right.z
-            camera_y = rx * camera_up.x + ry * camera_up.y + rz * camera_up.z
-            depth = rx * forward.x + ry * forward.y + rz * forward.z
-
-            if depth <= near or depth >= far:
-                projected_points[key] = None
-                return None
-
-            screen_x = (camera_x * x_scale / depth + 1.0) * half_width
-            screen_y = (1.0 - camera_y * scale / depth) * half_height
-            result = (screen_x, screen_y, depth)
-            projected_points[key] = result
-            return result
+        pts = self._np_vertices_cache.get(quality)
+        if pts is not None and len(pts) > 0:
+            P = np.array([position.x, position.y, position.z], dtype=np.float32)
+            M = np.array([
+                [right.x, camera_up.x, forward.x],
+                [right.y, camera_up.y, forward.y],
+                [right.z, camera_up.z, forward.z]
+            ], dtype=np.float32)
+            
+            translated = pts - P
+            camera_space = np.dot(translated, M)
+            
+            depths = camera_space[:, 2]
+            valid_depth = (depths > near) & (depths < far)
+            
+            # Avoid division by zero
+            safe_depths = np.where(depths == 0, 1e-10, depths)
+            
+            screen_x = (camera_space[:, 0] * x_scale / safe_depths + 1.0) * half_width
+            screen_y = (1.0 - camera_space[:, 1] * scale / safe_depths) * half_height
+            
+            np_projected = np.column_stack((screen_x, screen_y, depths))
+        else:
+            np_projected = np.empty((0, 3), dtype=np.float32)
+            valid_depth = np.empty((0,), dtype=bool)
 
         render_items: List[Tuple[int, float, int, Dict[str, Any], Tuple[float, ...]]] = []
         overlay_items: List[Tuple[int, float, int, Dict[str, Any], Tuple[float, ...]]] = []
@@ -940,67 +945,39 @@ class Tkinter3DCanvas(tk.Frame):
                 if facing <= 0.0:
                     continue
 
+            idx_start = primitive["np_start"]
+            idx_end = primitive["np_end"]
+            
+            p_proj = np_projected[idx_start:idx_end]
+            p_valid = valid_depth[idx_start:idx_end]
+            
+            if not p_valid.all():
+                continue
+                
             if primitive["kind"] == "line":
-                start = project(primitive["start"])
-                end = project(primitive["end"])
-                if start is None or end is None:
+                if (max(p_proj[0,0], p_proj[1,0]) < min_screen_x or
+                    min(p_proj[0,0], p_proj[1,0]) > max_screen_x or
+                    max(p_proj[0,1], p_proj[1,1]) < min_screen_y or
+                    min(p_proj[0,1], p_proj[1,1]) > max_screen_y):
                     continue
-                if (
-                        max(start[0], end[0]) < min_screen_x
-                        or min(start[0], end[0]) > max_screen_x
-                        or max(start[1], end[1]) < min_screen_y
-                        or min(start[1], end[1]) > max_screen_y
-                ):
-                    continue
-                depth = 0.5 * (start[2] + end[2])
-                coords = (start[0], start[1], end[0], end[1])
+                depth = 0.5 * (p_proj[0,2] + p_proj[1,2])
+                coords = (p_proj[0,0], p_proj[0,1], p_proj[1,0], p_proj[1,1])
             elif primitive["kind"] == "text":
-                point = project(primitive["point"])
-                if point is None:
+                if (p_proj[0,0] < min_screen_x or p_proj[0,0] > max_screen_x or
+                    p_proj[0,1] < min_screen_y or p_proj[0,1] > max_screen_y):
                     continue
-                if (
-                        point[0] < min_screen_x
-                        or point[0] > max_screen_x
-                        or point[1] < min_screen_y
-                        or point[1] > max_screen_y
-                ):
-                    continue
-                depth = point[2]
-                coords = (point[0], point[1])
+                depth = p_proj[0,2]
+                coords = (p_proj[0,0], p_proj[0,1])
             else:
-                projected: List[Tuple[float, float, float]] = []
-                clipped = False
-                for vertex in primitive["vertices"]:
-                    point_2d = project(vertex)
-                    if point_2d is None:
-                        clipped = True
-                        break
-                    projected.append(point_2d)
-                if clipped or len(projected) < 3:
+                if len(p_proj) < 3:
                     continue
-                depth_total = 0.0
-                min_x = float("inf")
-                max_x = float("-inf")
-                min_y = float("inf")
-                max_y = float("-inf")
-                flat: List[float] = []
-                for screen_x, screen_y, point_depth in projected:
-                    depth_total += point_depth
-                    min_x = min(min_x, screen_x)
-                    max_x = max(max_x, screen_x)
-                    min_y = min(min_y, screen_y)
-                    max_y = max(max_y, screen_y)
-                    flat.extend((screen_x, screen_y))
-                if (
-                        max_x < min_screen_x
-                        or min_x > max_screen_x
-                        or max_y < min_screen_y
-                        or min_y > max_screen_y
-                ):
+                min_x, max_x = np.min(p_proj[:,0]), np.max(p_proj[:,0])
+                min_y, max_y = np.min(p_proj[:,1]), np.max(p_proj[:,1])
+                if (max_x < min_screen_x or min_x > max_screen_x or
+                    max_y < min_screen_y or min_y > max_screen_y):
                     continue
-
-                depth = depth_total / len(projected)
-                coords = tuple(flat)
+                depth = np.mean(p_proj[:,2])
+                coords = tuple(p_proj[:,:2].flatten())
 
             render_phase = 1
             if primitive.get("two_sided_shell", False):
@@ -1121,6 +1098,26 @@ class Tkinter3DCanvas(tk.Frame):
                     continue
             primitives.extend(self._object_to_primitives(obj, quality))
 
+
+        np_vertices = []
+        for p in primitives:
+            start_idx = len(np_vertices)
+            kind = p.get('kind')
+            if kind == 'polygon':
+                for v in p['vertices']:
+                    np_vertices.append((v.x, v.y, v.z))
+            elif kind == 'line':
+                np_vertices.append((p['start'].x, p['start'].y, p['start'].z))
+                np_vertices.append((p['end'].x, p['end'].y, p['end'].z))
+            elif kind == 'text':
+                np_vertices.append((p['point'].x, p['point'].y, p['point'].z))
+            p['np_start'] = start_idx
+            p['np_end'] = len(np_vertices)
+        
+        if np_vertices:
+            self._np_vertices_cache[quality] = np.array(np_vertices, dtype=np.float32)
+        else:
+            self._np_vertices_cache[quality] = np.empty((0, 3), dtype=np.float32)
         self._world_primitive_cache[quality] = primitives
         return primitives
 
@@ -1380,6 +1377,8 @@ class Tkinter3DCanvas(tk.Frame):
         quality: str,
     ) -> List[Dict[str, Any]]:
         radius = max(0.0, float(obj.get("radius", 1.0)))
+        rt = obj.get("radius_top")
+        radius_top = max(0.0, float(rt if rt is not None else radius))
         height = max(0.0, float(obj.get("height", 1.0)))
         center = obj.get("center", Point3D(0.0, 0.0, 0.0))
         color = obj.get("color", "lightgray")
@@ -1427,11 +1426,13 @@ class Tkinter3DCanvas(tk.Frame):
 
         rings: List[List[Point3D]] = []
         for z_coord in z_breaks:
+            t = (z_coord - z_bottom) / height if height > 0 else 0.0
+            r_z = radius + t * (radius_top - radius)
             rings.append(
                 [
                     Point3D(
-                        center.x + radius * cosines[index],
-                        center.y + radius * sines[index],
+                        center.x + r_z * cosines[index],
+                        center.y + r_z * sines[index],
                         z_coord,
                     )
                     for index in range(segments)
@@ -1515,6 +1516,8 @@ class Tkinter3DCanvas(tk.Frame):
         quality: str,
     ) -> List[Dict[str, Any]]:
         radius = float(obj.get("radius", 1.0))
+        rt = obj.get("radius_top")
+        radius_top = float(rt if rt is not None else radius)
         height = float(obj.get("height", 1.0))
         angle = float(obj.get("angle", 0.0))
         web_height = max(0.0, float(obj.get("web_height", 0.1)))
@@ -1561,14 +1564,15 @@ class Tkinter3DCanvas(tk.Frame):
         sine = math.sin(angle)
         attachment_radius = max(_EPS, radius)
         web_tip_radius = max(_EPS, radius + radial_direction * web_height)
-        attachment_points = [
-            Point3D(attachment_radius * cosine, attachment_radius * sine, z)
-            for z in z_breaks
-        ]
-        tip_points = [
-            Point3D(web_tip_radius * cosine, web_tip_radius * sine, z)
-            for z in z_breaks
-        ]
+        attachment_points = []
+        tip_points = []
+        for z in z_breaks:
+            t = (z - z_bottom) / height if height > 0 else 0.0
+            r_z = radius + t * (radius_top - radius)
+            att_r = max(_EPS, r_z)
+            tip_r = max(_EPS, r_z + radial_direction * web_height)
+            attachment_points.append(Point3D(att_r * cosine, att_r * sine, z))
+            tip_points.append(Point3D(tip_r * cosine, tip_r * sine, z))
 
         primitives: List[Dict[str, Any]] = []
         for z_index in range(len(z_breaks) - 1):
@@ -1599,15 +1603,20 @@ class Tkinter3DCanvas(tk.Frame):
                 for index in range(width_segments)
             ]
             flange_grid: List[List[Point3D]] = []
-            for z_coord in z_breaks:
+            for z in z_breaks:
+                t = (z - z_bottom) / height if height > 0 else 0.0
+                r_z = radius + t * (radius_top - radius)
+                tip_r = max(_EPS, r_z + radial_direction * web_height)
+                f_r = max(_EPS, tip_r + radial_direction * 0.5 * flange_thickness)
+                half_angle = 0.5 * flange_width / f_r
+                flange_angles = [
+                    angle - half_angle + 2.0 * half_angle * index / (width_segments - 1)
+                    for index in range(width_segments)
+                ]
                 flange_grid.append(
                     [
-                        Point3D(
-                            flange_radius * math.cos(flange_angle),
-                            flange_radius * math.sin(flange_angle),
-                            z_coord,
-                        )
-                        for flange_angle in flange_angles
+                        Point3D(f_r * math.cos(fa), f_r * math.sin(fa), z)
+                        for fa in flange_angles
                     ]
                 )
 
@@ -2007,6 +2016,7 @@ class Tkinter3DCanvas(tk.Frame):
         self,
         radius: float,
         height: float,
+        radius_top: Optional[float] = None,
         center: Optional[Point3D] = None,
         color: str = "lightgray",
         back_color: str = "",
@@ -2025,6 +2035,7 @@ class Tkinter3DCanvas(tk.Frame):
         self.objects.append(
             {
                 "type": "cylinder",
+                "radius_top": radius_top,
                 "radius": radius,
                 "height": height,
                 "center": center if center is not None else Point3D(0.0, 0.0, 0.0),
@@ -2060,6 +2071,7 @@ class Tkinter3DCanvas(tk.Frame):
         radius: float,
         height: float,
         angle: float,
+        radius_top: Optional[float] = None,
         web_height: float = 0.1,
         web_thickness: float = 0.01,
         flange_width: float = 0.05,
@@ -2075,6 +2087,7 @@ class Tkinter3DCanvas(tk.Frame):
             {
                 "type": "stiffener",
                 "stiffener_type": "longitudinal",
+                "radius_top": radius_top,
                 "radius": radius,
                 "height": height,
                 "angle": angle,
