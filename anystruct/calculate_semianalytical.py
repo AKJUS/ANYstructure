@@ -887,6 +887,37 @@ def _anystructure_corrosion_addition_mm(
     return max(float(default_mm), 0.0)
 
 
+def _csr_dimension_mm(value: float | None) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return None
+    if abs(parsed) < EPS:
+        return 0.0
+    return parsed * 1000.0 if abs(parsed) < 10.0 else parsed
+
+
+def _anystructure_csr_panel_input(panel: S3PanelInput | U3PanelInput) -> S3PanelInput | U3PanelInput:
+    """Return a CSR-check panel with ANYstructure metre-like dimensions in mm."""
+
+    if isinstance(panel, S3PanelInput):
+        return replace(
+            panel,
+            length=_csr_dimension_mm(panel.length),
+            stiffener_spacing=_csr_dimension_mm(panel.stiffener_spacing),
+            plate_thickness=_csr_dimension_mm(panel.plate_thickness),
+            stiffener_height=_csr_dimension_mm(panel.stiffener_height),
+            web_thickness=_csr_dimension_mm(panel.web_thickness),
+            flange_width=_csr_dimension_mm(panel.flange_width),
+            flange_thickness=_csr_dimension_mm(panel.flange_thickness),
+        )
+    return replace(
+        panel,
+        length=_csr_dimension_mm(panel.length),
+        width=_csr_dimension_mm(panel.width),
+        plate_thickness=_csr_dimension_mm(panel.plate_thickness),
+    )
+
+
 def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
     if sigma_x1 * sigma_x2 >= 0:
         return sigma_x1 if abs(sigma_x1) > abs(sigma_x2) else sigma_x2
@@ -998,7 +1029,7 @@ def solve_anystructure_panel(
 
     panel_family = "S3" if isinstance(panel, S3PanelInput) else "U3"
     solved = solve_s3_panel(panel, config) if panel_family == "S3" else solve_u3_panel(panel, config)
-    csr_requirement = calculate_csr_requirement(panel)
+    csr_requirement = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
     valid_prediction = (
         solved.valid
         and solved.buckling_usage_factor is not None
@@ -1046,7 +1077,7 @@ def predict_anystructure_csr_requirement(
             "unknown": [],
         }
         return [0, 0, 0, 0], "red", diagnostics
-    diagnostics = calculate_csr_requirement(panel)
+    diagnostics = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
     color = "green" if diagnostics["within_csr_proportions"] else "red"
     return list(diagnostics["csr_vector"]), color, diagnostics
 

@@ -473,6 +473,9 @@ class CylinderStructurePropertyService:
             total_length = distance_between_rings
         else:
             alpha = None
+            cone_r1 = None
+            cone_r2 = None
+            cone_length = None
             radius = values['radius']
             distance_between_rings = values['distance_between_rings']
             length = values['length']

@@ -208,6 +208,7 @@ class PlasticImpactDamageConfig:
     """
 
     threshold: float = 0.01
+    criterion: str = "fixed"
     softening_start: float = 0.6
     delete_at: float = 1.0
     residual_stiffness_fraction: float = 1.0e-6
@@ -218,6 +219,8 @@ class PlasticImpactDamageConfig:
     def __post_init__(self) -> None:
         if not np.isfinite(self.threshold) or self.threshold <= 0.0:
             raise ValueError("PlasticImpactDamageConfig.threshold must be positive")
+        if self.criterion not in {"fixed", "mesh_scaled_gl", "rtcl"}:
+            raise ValueError("PlasticImpactDamageConfig.criterion must be 'fixed', 'mesh_scaled_gl' or 'rtcl'")
         if not np.isfinite(self.softening_start) or not (0.0 <= self.softening_start < 1.0):
             raise ValueError("PlasticImpactDamageConfig.softening_start must be in [0, 1)")
         if not np.isfinite(self.delete_at) or self.delete_at <= self.softening_start:
@@ -240,6 +243,7 @@ class PlasticImpactDamageConfig:
         return {
             "trigger": "equivalent_plastic_strain",
             "threshold": float(self.threshold),
+            "criterion": str(self.criterion),
             "softening_start": float(self.softening_start),
             "delete_at": float(self.delete_at),
             "residual_stiffness_fraction": float(self.residual_stiffness_fraction),
@@ -311,6 +315,84 @@ def element_measure(mesh: Any, element: Any) -> float:
         except Exception:
             return 0.0
     return 0.0
+
+
+def rtcl_triaxiality_weight(triaxiality: np.ndarray) -> np.ndarray:
+    """RTCL damage weight versus stress triaxiality (Tornqvist 2003).
+
+    Combines Cockcroft-Latham for shear-dominated states with Rice-Tracey
+    void growth for tension-dominated states, normalised so uniaxial tension
+    (eta = 1/3) weighs 1:
+
+        eta <= -1/3           : 0 (no ductile damage in compression)
+        -1/3 < eta < 1/3      : (2 + 2 eta sqrt(12 - 27 eta^2))
+                                / (3 eta + sqrt(12 - 27 eta^2))
+        eta >= 1/3            : exp(1.5 eta - 0.5)
+
+    Pure shear (eta = 0) weighs ~0.577 and equibiaxial tension (eta = 2/3,
+    the plane-stress maximum) ~1.65, matching the published RTCL curve used
+    in ship-collision studies.
+    """
+    eta = np.asarray(triaxiality, dtype=float)
+    eta_mid = np.clip(eta, -1.0 / 3.0, 1.0 / 3.0)
+    root = np.sqrt(np.maximum(12.0 - 27.0 * eta_mid**2, 0.0))
+    cockcroft_latham = np.where(
+        3.0 * eta_mid + root > 1.0e-12,
+        (2.0 + 2.0 * eta_mid * root) / np.maximum(3.0 * eta_mid + root, 1.0e-12),
+        0.0,
+    )
+    rice_tracey = np.exp(1.5 * eta - 0.5)
+    return np.where(eta <= -1.0 / 3.0, 0.0, np.where(eta < 1.0 / 3.0, cockcroft_latham, rice_tracey))
+
+
+def state_rtcl_increment(
+    state: Any,
+    previous_alpha: Optional[np.ndarray],
+    elastic_modulus: float,
+    poisson_ratio: float,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """RTCL-weighted plastic strain increments for one committed element state.
+
+    Returns ``(alpha, weighted_increment)`` per integration point, where the
+    increment is ``rtcl_weight(eta) * max(alpha - previous_alpha, 0)`` with the
+    triaxiality ``eta`` evaluated from the return-mapped plane-stress state
+    (``sigma = C_el (eps - eps_p)``).  Beam fiber states use the uniaxial
+    limits: weight 1 for fibers in tension, 0 in compression.  Returns ``None``
+    when the state carries no usable plastic data.
+    """
+    if not isinstance(state, Mapping):
+        return None
+    alpha = np.asarray(state.get("alpha", ()), dtype=float).reshape(-1)
+    if alpha.size == 0:
+        return None
+    if previous_alpha is None or np.asarray(previous_alpha).size != alpha.size:
+        previous = np.zeros_like(alpha)
+    else:
+        previous = np.asarray(previous_alpha, dtype=float).reshape(-1)
+    delta = np.maximum(alpha - previous, 0.0)
+
+    fiber_stress = np.asarray(state.get("fiber_stress", ()), dtype=float).reshape(-1)
+    if fiber_stress.size == alpha.size:
+        # Uniaxial fiber section: eta = +-1/3 exactly.
+        weight = np.where(fiber_stress > 0.0, 1.0, 0.0)
+        return alpha, weight * delta
+
+    layer = np.asarray(state.get("layer_strain", ()), dtype=float)
+    plastic = np.asarray(state.get("plastic_strain", ()), dtype=float)
+    if layer.size == 0 or layer.shape != plastic.shape:
+        return None
+    layer = layer.reshape(-1, layer.shape[-1]) if layer.ndim > 1 else layer.reshape(-1, 1)
+    if layer.shape[-1] != 3 or layer.shape[0] != alpha.size:
+        return None
+    elastic = layer - plastic.reshape(layer.shape)
+    factor = float(elastic_modulus) / (1.0 - float(poisson_ratio) ** 2)
+    sxx = factor * (elastic[:, 0] + float(poisson_ratio) * elastic[:, 1])
+    syy = factor * (elastic[:, 1] + float(poisson_ratio) * elastic[:, 0])
+    sxy = factor * (1.0 - float(poisson_ratio)) / 2.0 * elastic[:, 2]
+    von_mises = np.sqrt(np.maximum(sxx * sxx - sxx * syy + syy * syy + 3.0 * sxy * sxy, 0.0))
+    mean_stress = (sxx + syy) / 3.0
+    triaxiality = np.where(von_mises > 1.0e-9 * max(float(elastic_modulus), 1.0), mean_stress / np.maximum(von_mises, 1.0e-30), 0.0)
+    return alpha, rtcl_triaxiality_weight(triaxiality) * delta
 
 
 def state_equivalent_plastic_strain(state: Any) -> Tuple[float, str]:

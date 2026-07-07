@@ -28,6 +28,7 @@ The cylinder axis is the global Z axis.
 
 from __future__ import annotations
 
+import numpy as np
 import math
 import tkinter as tk
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -334,6 +335,8 @@ class Tkinter3DCanvas(tk.Frame):
         # so the legend never covers the model.
         self._thickness_legend: Optional[Dict[str, Any]] = None
         self._show_axis_indicator = True
+        self.show_mesh_lines = True
+        self.show_axis_ruler = False
 
         canvas_kwargs.setdefault("highlightthickness", 0)
         canvas_kwargs.setdefault("borderwidth", 0)
@@ -360,7 +363,17 @@ class Tkinter3DCanvas(tk.Frame):
         self._finish_interaction_after_id: Optional[str] = None
 
         # World-space primitive caches. Camera movement does not invalidate them.
+        self._np_vertices_cache: Dict[str, np.ndarray] = {}
         self._world_primitive_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+        # Animation Cache Fields
+        self._animation_cache: List[List[Tuple[str, Tuple[float, ...], Dict[str, Any]]]] = []
+        self._is_capturing_animation = False
+        self._current_animation_frame: List[Tuple[str, Tuple[float, ...], Dict[str, Any]]] = []
+        self._is_playing_animation = False
+        self._animation_frame_index = 0
+        self._animation_after_id: Optional[str] = None
+        self._animation_fps = 30
 
         self.canvas.bind("<Configure>", self._on_resize, add="+")
         self.canvas.bind("<ButtonPress-1>", lambda event: self._on_mouse_down(event, "pan"), add="+")
@@ -429,7 +442,17 @@ class Tkinter3DCanvas(tk.Frame):
 
     def set_axis_indicator(self, visible: bool = True) -> None:
         self._show_axis_indicator = bool(visible)
-        self._request_redraw()
+
+    def set_mesh_lines(self, visible: bool = True) -> None:
+        self.show_mesh_lines = bool(visible)
+
+    def set_axis_ruler(self, visible: bool = True) -> None:
+        new_val = bool(visible)
+        if self.show_axis_ruler != new_val:
+            self.show_axis_ruler = new_val
+            self._world_primitive_cache.clear()
+            self._np_vertices_cache.clear()
+            self._request_redraw()
 
     def thickness_color(
         self,
@@ -691,6 +714,9 @@ class Tkinter3DCanvas(tk.Frame):
         self._request_redraw()
 
     def _on_mouse_drag(self, event: tk.Event) -> None:
+        if self._is_playing_animation:
+            self.stop_animation()
+            
         if not self._is_dragging:
             return
 
@@ -710,6 +736,9 @@ class Tkinter3DCanvas(tk.Frame):
         self._request_redraw(interactive=True)
 
     def _on_mouse_wheel(self, event: tk.Event) -> str:
+        if self._is_playing_animation:
+            self.stop_animation()
+            
         event_num = getattr(event, "num", None)
         event_delta = getattr(event, "delta", 0)
 
@@ -769,7 +798,58 @@ class Tkinter3DCanvas(tk.Frame):
     # Scene lifecycle and cache management
     # ------------------------------------------------------------------
 
+    def begin_animation_cache(self) -> None:
+        self.stop_animation()
+        self._animation_cache.clear()
+
+    def capture_animation_frame(self) -> None:
+        self._is_capturing_animation = True
+        self._current_animation_frame = []
+        self.redraw()
+        self._animation_cache.append(self._current_animation_frame)
+        self._current_animation_frame = []
+        self._is_capturing_animation = False
+
+    def play_animation(self, fps: int = 30) -> None:
+        if not self._animation_cache:
+            return
+        self.stop_animation()
+        self._animation_fps = max(1, fps)
+        self._is_playing_animation = True
+        self._animation_frame_index = 0
+        self._animation_tick()
+
+    def stop_animation(self) -> None:
+        self._is_playing_animation = False
+        if self._animation_after_id is not None:
+            self.after_cancel(self._animation_after_id)
+            self._animation_after_id = None
+        # Restore normal view
+        self._request_redraw(interactive=False)
+
+    def _animation_tick(self) -> None:
+        if not self._is_playing_animation or not self._animation_cache:
+            return
+        
+        frame = self._animation_cache[self._animation_frame_index]
+        self._clear_canvas_only()
+        for kind, coords, kwargs in frame:
+            if kind == "polygon":
+                self.canvas.create_polygon(*coords, **kwargs)
+            elif kind == "line":
+                self.canvas.create_line(*coords, **kwargs)
+            elif kind == "text":
+                self.canvas.create_text(*coords, **kwargs)
+
+        self._draw_thickness_legend()
+        self._draw_axis_indicator()
+
+        self._animation_frame_index = (self._animation_frame_index + 1) % len(self._animation_cache)
+        delay_ms = max(1, int(1000.0 / self._animation_fps))
+        self._animation_after_id = self.after(delay_ms, self._animation_tick)
+
     def _invalidate_geometry_cache(self) -> None:
+        self._np_vertices_cache.clear()
         self._world_primitive_cache.clear()
 
     def _clear_canvas_only(self) -> None:
@@ -782,6 +862,49 @@ class Tkinter3DCanvas(tk.Frame):
         if not keep_canvas:
             self._clear_canvas_only()
 
+    def _get_ruler_primitives(self) -> List[Dict[str, Any]]:
+        bounds = self._scene_bounds()
+        if bounds is None:
+            return []
+        min_p, max_p = bounds
+        # Extend bounds slightly so ruler sits outside geometry
+        span_x = max_p.x - min_p.x
+        span_y = max_p.y - min_p.y
+        span_z = max_p.z - min_p.z
+        padding = max(1.0, max(span_x, max(span_y, span_z))) * 0.05
+        min_p = Point3D(min_p.x - padding, min_p.y - padding, min_p.z - padding)
+        max_p = Point3D(max_p.x + padding, max_p.y + padding, max_p.z + padding)
+
+        primitives: List[Dict[str, Any]] = []
+        color = "#1f2937"
+        
+        # X-axis line
+        primitives.append({"kind": "line", "start": Point3D(min_p.x, min_p.y, min_p.z), "end": Point3D(max_p.x, min_p.y, min_p.z), "color": color, "width": 1.5, "dash": ()})
+        # Y-axis line
+        primitives.append({"kind": "line", "start": Point3D(min_p.x, min_p.y, min_p.z), "end": Point3D(min_p.x, max_p.y, min_p.z), "color": color, "width": 1.5, "dash": ()})
+        # Z-axis line
+        primitives.append({"kind": "line", "start": Point3D(min_p.x, max_p.y, min_p.z), "end": Point3D(min_p.x, max_p.y, max_p.z), "color": color, "width": 1.5, "dash": ()})
+
+        def get_ticks(start: float, end: float, count: int = 4) -> List[float]:
+            if start >= end: return [start]
+            return [start + i * (end - start) / count for i in range(count + 1)]
+
+        tick_size = padding * 0.3
+        
+        for val in get_ticks(min_p.x + padding, max_p.x - padding):
+            primitives.append({"kind": "line", "start": Point3D(val, min_p.y, min_p.z), "end": Point3D(val, min_p.y - tick_size, min_p.z), "color": color, "width": 1.0, "dash": ()})
+            primitives.append({"kind": "text", "point": Point3D(val, min_p.y - tick_size * 2.5, min_p.z), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
+            
+        for val in get_ticks(min_p.y + padding, max_p.y - padding):
+            primitives.append({"kind": "line", "start": Point3D(min_p.x, val, min_p.z), "end": Point3D(min_p.x - tick_size, val, min_p.z), "color": color, "width": 1.0, "dash": ()})
+            primitives.append({"kind": "text", "point": Point3D(min_p.x - tick_size * 2.5, val, min_p.z), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
+            
+        for val in get_ticks(min_p.z + padding, max_p.z - padding):
+            primitives.append({"kind": "line", "start": Point3D(min_p.x, max_p.y, val), "end": Point3D(min_p.x - tick_size, max_p.y, val), "color": color, "width": 1.0, "dash": ()})
+            primitives.append({"kind": "text", "point": Point3D(min_p.x - tick_size * 2.5, max_p.y, val), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
+
+        return primitives
+
     def redraw(self) -> None:
         """Render the scene; static world geometry is reused from cache."""
         if not self.winfo_exists() or not self.canvas.winfo_exists():
@@ -789,11 +912,13 @@ class Tkinter3DCanvas(tk.Frame):
 
         self.width = max(1, self.canvas.winfo_width())
         self.height = max(1, self.canvas.winfo_height())
-        self._clear_canvas_only()
+        if not self._is_capturing_animation:
+            self._clear_canvas_only()
 
         interactive = self._interactive_render
         quality = "fast" if interactive else "full"
         primitives = self._get_world_primitives(quality)
+
         # Hidden-member ray checks and stipple/legend drawing are restored on
         # mouse release.  Skipping them while dragging keeps orbiting responsive
         # on dense cylinder models without changing the final rendered view.
@@ -811,30 +936,32 @@ class Tkinter3DCanvas(tk.Frame):
         far = self.camera.far
 
         # Point object IDs are stable because world primitives are cached.
-        projected_points: Dict[int, Optional[Tuple[float, float, float]]] = {}
 
-        def project(point: Point3D) -> Optional[Tuple[float, float, float]]:
-            key = id(point)
-            if key in projected_points:
-                return projected_points[key]
-
-            rx = point.x - position.x
-            ry = point.y - position.y
-            rz = point.z - position.z
-
-            camera_x = rx * right.x + ry * right.y + rz * right.z
-            camera_y = rx * camera_up.x + ry * camera_up.y + rz * camera_up.z
-            depth = rx * forward.x + ry * forward.y + rz * forward.z
-
-            if depth <= near or depth >= far:
-                projected_points[key] = None
-                return None
-
-            screen_x = (camera_x * x_scale / depth + 1.0) * half_width
-            screen_y = (1.0 - camera_y * scale / depth) * half_height
-            result = (screen_x, screen_y, depth)
-            projected_points[key] = result
-            return result
+        pts = self._np_vertices_cache.get(quality)
+        if pts is not None and len(pts) > 0:
+            P = np.array([position.x, position.y, position.z], dtype=np.float32)
+            M = np.array([
+                [right.x, camera_up.x, forward.x],
+                [right.y, camera_up.y, forward.y],
+                [right.z, camera_up.z, forward.z]
+            ], dtype=np.float32)
+            
+            translated = pts - P
+            camera_space = np.dot(translated, M)
+            
+            depths = camera_space[:, 2]
+            valid_depth = (depths > near) & (depths < far)
+            
+            # Avoid division by zero
+            safe_depths = np.where(depths == 0, 1e-10, depths)
+            
+            screen_x = (camera_space[:, 0] * x_scale / safe_depths + 1.0) * half_width
+            screen_y = (1.0 - camera_space[:, 1] * scale / safe_depths) * half_height
+            
+            np_projected = np.column_stack((screen_x, screen_y, depths))
+        else:
+            np_projected = np.empty((0, 3), dtype=np.float32)
+            valid_depth = np.empty((0,), dtype=bool)
 
         render_items: List[Tuple[int, float, int, Dict[str, Any], Tuple[float, ...]]] = []
         overlay_items: List[Tuple[int, float, int, Dict[str, Any], Tuple[float, ...]]] = []
@@ -874,67 +1001,39 @@ class Tkinter3DCanvas(tk.Frame):
                 if facing <= 0.0:
                     continue
 
+            idx_start = primitive["np_start"]
+            idx_end = primitive["np_end"]
+            
+            p_proj = np_projected[idx_start:idx_end]
+            p_valid = valid_depth[idx_start:idx_end]
+            
+            if not p_valid.all():
+                continue
+                
             if primitive["kind"] == "line":
-                start = project(primitive["start"])
-                end = project(primitive["end"])
-                if start is None or end is None:
+                if (max(p_proj[0,0], p_proj[1,0]) < min_screen_x or
+                    min(p_proj[0,0], p_proj[1,0]) > max_screen_x or
+                    max(p_proj[0,1], p_proj[1,1]) < min_screen_y or
+                    min(p_proj[0,1], p_proj[1,1]) > max_screen_y):
                     continue
-                if (
-                        max(start[0], end[0]) < min_screen_x
-                        or min(start[0], end[0]) > max_screen_x
-                        or max(start[1], end[1]) < min_screen_y
-                        or min(start[1], end[1]) > max_screen_y
-                ):
-                    continue
-                depth = 0.5 * (start[2] + end[2])
-                coords = (start[0], start[1], end[0], end[1])
+                depth = 0.5 * (p_proj[0,2] + p_proj[1,2])
+                coords = (p_proj[0,0], p_proj[0,1], p_proj[1,0], p_proj[1,1])
             elif primitive["kind"] == "text":
-                point = project(primitive["point"])
-                if point is None:
+                if (p_proj[0,0] < min_screen_x or p_proj[0,0] > max_screen_x or
+                    p_proj[0,1] < min_screen_y or p_proj[0,1] > max_screen_y):
                     continue
-                if (
-                        point[0] < min_screen_x
-                        or point[0] > max_screen_x
-                        or point[1] < min_screen_y
-                        or point[1] > max_screen_y
-                ):
-                    continue
-                depth = point[2]
-                coords = (point[0], point[1])
+                depth = p_proj[0,2]
+                coords = (p_proj[0,0], p_proj[0,1])
             else:
-                projected: List[Tuple[float, float, float]] = []
-                clipped = False
-                for vertex in primitive["vertices"]:
-                    point_2d = project(vertex)
-                    if point_2d is None:
-                        clipped = True
-                        break
-                    projected.append(point_2d)
-                if clipped or len(projected) < 3:
+                if len(p_proj) < 3:
                     continue
-                depth_total = 0.0
-                min_x = float("inf")
-                max_x = float("-inf")
-                min_y = float("inf")
-                max_y = float("-inf")
-                flat: List[float] = []
-                for screen_x, screen_y, point_depth in projected:
-                    depth_total += point_depth
-                    min_x = min(min_x, screen_x)
-                    max_x = max(max_x, screen_x)
-                    min_y = min(min_y, screen_y)
-                    max_y = max(max_y, screen_y)
-                    flat.extend((screen_x, screen_y))
-                if (
-                        max_x < min_screen_x
-                        or min_x > max_screen_x
-                        or max_y < min_screen_y
-                        or min_y > max_screen_y
-                ):
+                min_x, max_x = np.min(p_proj[:,0]), np.max(p_proj[:,0])
+                min_y, max_y = np.min(p_proj[:,1]), np.max(p_proj[:,1])
+                if (max_x < min_screen_x or min_x > max_screen_x or
+                    max_y < min_screen_y or min_y > max_screen_y):
                     continue
-
-                depth = depth_total / len(projected)
-                coords = tuple(flat)
+                depth = np.mean(p_proj[:,2])
+                coords = tuple(p_proj[:,:2].flatten())
 
             render_phase = 1
             if primitive.get("two_sided_shell", False):
@@ -954,54 +1053,55 @@ class Tkinter3DCanvas(tk.Frame):
         # Layer is only a near-coplanar tie-breaker.  The old far/near-based
         # bias was large enough to draw internal members through an opaque shell.
         scene_scale = max(float(self.camera.distance), 1.0)
-        layer_epsilon = max(1.0e-9, scene_scale * 1.0e-7)
+        layer_epsilon = max(1.0e-9, scene_scale * 1.0e-6)
         render_items.sort(key=lambda item: (
             item[0],
             -(item[1] - item[2] * layer_epsilon),
             item[2],
         ))
 
+        target_list = self._current_animation_frame if self._is_capturing_animation else None
+
         for _phase, _depth, _layer, primitive, coords in render_items:
             if primitive["kind"] == "line":
-                self.canvas.create_line(
-                    *coords,
-                    fill=primitive["color"],
-                    width=primitive["width"],
-                )
+                kwargs = {
+                    "fill": primitive["color"],
+                    "width": primitive["width"],
+                }
+                if target_list is not None:
+                    target_list.append(("line", coords, kwargs))
+                else:
+                    self.canvas.create_line(*coords, **kwargs)
             elif primitive["kind"] == "text":
-                self.canvas.create_text(
-                    *coords,
-                    text=primitive["text"],
-                    fill=primitive["color"],
-                    font=primitive["font"],
-                    anchor=primitive["anchor"],
-                )
+                kwargs = {
+                    "text": primitive["text"],
+                    "fill": primitive["color"],
+                    "font": primitive["font"],
+                    "anchor": primitive["anchor"],
+                }
+                if target_list is not None:
+                    target_list.append(("text", coords, kwargs))
+                else:
+                    self.canvas.create_text(*coords, **kwargs)
             else:
-                outline = "" if interactive and primitive.get("fast_no_outline") else primitive["outline"]
+                outline = "" if (not self.show_mesh_lines) or (interactive and primitive.get("fast_no_outline")) else primitive["outline"]
                 fill_color = primitive["color"]
                 if not primitive.get("_front_facing", True):
                     fill_color = primitive.get("back_color") or fill_color
                 stipple = "" if interactive else primitive.get("stipple", "")
+                kwargs = {
+                    "fill": fill_color,
+                    "outline": outline,
+                    "width": primitive["width"],
+                    "stipple": stipple,
+                }
                 if primitive.get("tags"):
-                    kwargs = {
-                        "fill": fill_color,
-                        "outline": outline,
-                        "width": primitive["width"],
-                        "stipple": stipple,
-                        "tags": primitive.get("tags"),
-                    }
-                    self.canvas.create_polygon(
-                        *coords,
-                        **kwargs
-                    )
+                    kwargs["tags"] = primitive.get("tags")
+                
+                if target_list is not None:
+                    target_list.append(("polygon", coords, kwargs))
                 else:
-                    self.canvas.create_polygon(
-                        *coords,
-                        fill=fill_color,
-                        outline=outline,
-                        width=primitive["width"],
-                        stipple=stipple,
-                    )
+                    self.canvas.create_polygon(*coords, **kwargs)
 
         overlay_items.sort(key=lambda item: (
             item[0],
@@ -1010,23 +1110,30 @@ class Tkinter3DCanvas(tk.Frame):
         ))
         for _phase, _depth, _layer, primitive, coords in overlay_items:
             if primitive["kind"] == "line":
-                self.canvas.create_line(
-                    *coords,
-                    fill=primitive["color"],
-                    width=primitive["width"],
-                )
+                kwargs = {
+                    "fill": primitive["color"],
+                    "width": primitive["width"],
+                }
+                if target_list is not None:
+                    target_list.append(("line", coords, kwargs))
+                else:
+                    self.canvas.create_line(*coords, **kwargs)
             elif primitive["kind"] == "text":
-                self.canvas.create_text(
-                    *coords,
-                    text=primitive["text"],
-                    fill=primitive["color"],
-                    font=primitive["font"],
-                    anchor=primitive["anchor"],
-                )
+                kwargs = {
+                    "text": primitive["text"],
+                    "fill": primitive["color"],
+                    "font": primitive["font"],
+                    "anchor": primitive["anchor"],
+                }
+                if target_list is not None:
+                    target_list.append(("text", coords, kwargs))
+                else:
+                    self.canvas.create_text(*coords, **kwargs)
 
-        if not interactive:
+        if not interactive and not self._is_capturing_animation:
             self._draw_thickness_legend()
-        self._draw_axis_indicator()
+        if not self._is_capturing_animation:
+            self._draw_axis_indicator()
 
     def _get_world_primitives(self, quality: str) -> List[Dict[str, Any]]:
         cached = self._world_primitive_cache.get(quality)
@@ -1047,6 +1154,28 @@ class Tkinter3DCanvas(tk.Frame):
                     continue
             primitives.extend(self._object_to_primitives(obj, quality))
 
+        if self.show_axis_ruler:
+            primitives.extend(self._get_ruler_primitives())
+
+        np_vertices = []
+        for p in primitives:
+            start_idx = len(np_vertices)
+            kind = p.get('kind')
+            if kind == 'polygon':
+                for v in p['vertices']:
+                    np_vertices.append((v.x, v.y, v.z))
+            elif kind == 'line':
+                np_vertices.append((p['start'].x, p['start'].y, p['start'].z))
+                np_vertices.append((p['end'].x, p['end'].y, p['end'].z))
+            elif kind == 'text':
+                np_vertices.append((p['point'].x, p['point'].y, p['point'].z))
+            p['np_start'] = start_idx
+            p['np_end'] = len(np_vertices)
+        
+        if np_vertices:
+            self._np_vertices_cache[quality] = np.array(np_vertices, dtype=np.float32)
+        else:
+            self._np_vertices_cache[quality] = np.empty((0, 3), dtype=np.float32)
         self._world_primitive_cache[quality] = primitives
         return primitives
 
@@ -1306,6 +1435,8 @@ class Tkinter3DCanvas(tk.Frame):
         quality: str,
     ) -> List[Dict[str, Any]]:
         radius = max(0.0, float(obj.get("radius", 1.0)))
+        rt = obj.get("radius_top")
+        radius_top = max(0.0, float(rt if rt is not None else radius))
         height = max(0.0, float(obj.get("height", 1.0)))
         center = obj.get("center", Point3D(0.0, 0.0, 0.0))
         color = obj.get("color", "lightgray")
@@ -1353,11 +1484,13 @@ class Tkinter3DCanvas(tk.Frame):
 
         rings: List[List[Point3D]] = []
         for z_coord in z_breaks:
+            t = (z_coord - z_bottom) / height if height > 0 else 0.0
+            r_z = radius + t * (radius_top - radius)
             rings.append(
                 [
                     Point3D(
-                        center.x + radius * cosines[index],
-                        center.y + radius * sines[index],
+                        center.x + r_z * cosines[index],
+                        center.y + r_z * sines[index],
                         z_coord,
                     )
                     for index in range(segments)
@@ -1441,6 +1574,8 @@ class Tkinter3DCanvas(tk.Frame):
         quality: str,
     ) -> List[Dict[str, Any]]:
         radius = float(obj.get("radius", 1.0))
+        rt = obj.get("radius_top")
+        radius_top = float(rt if rt is not None else radius)
         height = float(obj.get("height", 1.0))
         angle = float(obj.get("angle", 0.0))
         web_height = max(0.0, float(obj.get("web_height", 0.1)))
@@ -1487,14 +1622,15 @@ class Tkinter3DCanvas(tk.Frame):
         sine = math.sin(angle)
         attachment_radius = max(_EPS, radius)
         web_tip_radius = max(_EPS, radius + radial_direction * web_height)
-        attachment_points = [
-            Point3D(attachment_radius * cosine, attachment_radius * sine, z)
-            for z in z_breaks
-        ]
-        tip_points = [
-            Point3D(web_tip_radius * cosine, web_tip_radius * sine, z)
-            for z in z_breaks
-        ]
+        attachment_points = []
+        tip_points = []
+        for z in z_breaks:
+            t = (z - z_bottom) / height if height > 0 else 0.0
+            r_z = radius + t * (radius_top - radius)
+            att_r = max(_EPS, r_z)
+            tip_r = max(_EPS, r_z + radial_direction * web_height)
+            attachment_points.append(Point3D(att_r * cosine, att_r * sine, z))
+            tip_points.append(Point3D(tip_r * cosine, tip_r * sine, z))
 
         primitives: List[Dict[str, Any]] = []
         for z_index in range(len(z_breaks) - 1):
@@ -1525,15 +1661,20 @@ class Tkinter3DCanvas(tk.Frame):
                 for index in range(width_segments)
             ]
             flange_grid: List[List[Point3D]] = []
-            for z_coord in z_breaks:
+            for z in z_breaks:
+                t = (z - z_bottom) / height if height > 0 else 0.0
+                r_z = radius + t * (radius_top - radius)
+                tip_r = max(_EPS, r_z + radial_direction * web_height)
+                f_r = max(_EPS, tip_r + radial_direction * 0.5 * flange_thickness)
+                half_angle = 0.5 * flange_width / f_r
+                flange_angles = [
+                    angle - half_angle + 2.0 * half_angle * index / (width_segments - 1)
+                    for index in range(width_segments)
+                ]
                 flange_grid.append(
                     [
-                        Point3D(
-                            flange_radius * math.cos(flange_angle),
-                            flange_radius * math.sin(flange_angle),
-                            z_coord,
-                        )
-                        for flange_angle in flange_angles
+                        Point3D(f_r * math.cos(fa), f_r * math.sin(fa), z)
+                        for fa in flange_angles
                     ]
                 )
 
@@ -1933,6 +2074,7 @@ class Tkinter3DCanvas(tk.Frame):
         self,
         radius: float,
         height: float,
+        radius_top: Optional[float] = None,
         center: Optional[Point3D] = None,
         color: str = "lightgray",
         back_color: str = "",
@@ -1951,6 +2093,7 @@ class Tkinter3DCanvas(tk.Frame):
         self.objects.append(
             {
                 "type": "cylinder",
+                "radius_top": radius_top,
                 "radius": radius,
                 "height": height,
                 "center": center if center is not None else Point3D(0.0, 0.0, 0.0),
@@ -1986,6 +2129,7 @@ class Tkinter3DCanvas(tk.Frame):
         radius: float,
         height: float,
         angle: float,
+        radius_top: Optional[float] = None,
         web_height: float = 0.1,
         web_thickness: float = 0.01,
         flange_width: float = 0.05,
@@ -2001,6 +2145,7 @@ class Tkinter3DCanvas(tk.Frame):
             {
                 "type": "stiffener",
                 "stiffener_type": "longitudinal",
+                "radius_top": radius_top,
                 "radius": radius,
                 "height": height,
                 "angle": angle,
@@ -2073,6 +2218,137 @@ class Tkinter3DCanvas(tk.Frame):
 
     def set_iso_view(self) -> None:
         self.set_view(-45.0, 25.0)
+
+    def add_rectangular_plate(
+        self,
+        x_start: float,
+        x_end: float,
+        y_start: float,
+        y_end: float,
+        z: float = 0.0,
+        color: str = "gray",
+        outline: str = "black",
+        stipple: str = "",
+        layer: int = 5,
+        back_color: str = "",
+        nx: int = 24,
+        ny: int = 24,
+    ) -> None:
+        dx = (x_end - x_start) / nx
+        dy = (y_end - y_start) / ny
+        for i in range(nx):
+            for j in range(ny):
+                x0 = x_start + i * dx
+                x1 = x0 + dx
+                y0 = y_start + j * dy
+                y1 = y0 + dy
+                self.add_polygon(
+                    vertices=[
+                        Point3D(x0, y0, z),
+                        Point3D(x1, y0, z),
+                        Point3D(x1, y1, z),
+                        Point3D(x0, y1, z),
+                    ],
+                    color=color,
+                    outline=outline,
+                    stipple=stipple,
+                    layer=layer,
+                    back_color=back_color,
+                )
+
+    def add_flat_stiffener(
+        self,
+        x_start: float,
+        x_end: float,
+        y: float,
+        z_base: float,
+        hw: float,
+        b: float,
+        color: str = "gray",
+        outline: str = "black",
+        stipple: str = "",
+        layer_web: int = 12,
+        layer_flange: int = 13,
+        nx: int = 24,
+    ) -> None:
+        dx = (x_end - x_start) / nx
+        for i in range(nx):
+            x0 = x_start + i * dx
+            x1 = x0 + dx
+            # Web
+            self.add_polygon(
+                vertices=[
+                    Point3D(x0, y, z_base),
+                    Point3D(x1, y, z_base),
+                    Point3D(x1, y, z_base + hw),
+                    Point3D(x0, y, z_base + hw),
+                ],
+                color=color,
+                outline=outline,
+                stipple=stipple,
+                layer=layer_web,
+            )
+            # Flange
+            if b > 0.0:
+                self.add_polygon(
+                    vertices=[
+                        Point3D(x0, y - 0.5 * b, z_base + hw),
+                        Point3D(x1, y - 0.5 * b, z_base + hw),
+                        Point3D(x1, y + 0.5 * b, z_base + hw),
+                        Point3D(x0, y + 0.5 * b, z_base + hw),
+                    ],
+                    color=color,
+                    outline=outline,
+                    stipple=stipple,
+                    layer=layer_flange,
+                )
+
+    def add_flat_girder(
+        self,
+        x: float,
+        y_start: float,
+        y_end: float,
+        z_base: float,
+        ghw: float,
+        gb: float,
+        color: str = "gray",
+        outline: str = "black",
+        stipple: str = "",
+        layer_web: int = 14,
+        layer_flange: int = 15,
+        ny: int = 24,
+    ) -> None:
+        dy = (y_end - y_start) / ny
+        for j in range(ny):
+            y0 = y_start + j * dy
+            y1 = y0 + dy
+            # Web
+            self.add_polygon(
+                vertices=[
+                    Point3D(x, y0, z_base),
+                    Point3D(x, y1, z_base),
+                    Point3D(x, y1, z_base + ghw),
+                    Point3D(x, y0, z_base + ghw),
+                ],
+                color=color,
+                outline=outline,
+                stipple=stipple,
+                layer=layer_web,
+            )
+            # Flange
+            if gb > 0.0:
+                self.add_polygon(
+                    vertices=[
+                        Point3D(x - 0.5 * gb, y0, z_base + ghw),
+                        Point3D(x - 0.5 * gb, y1, z_base + ghw),
+                        Point3D(x + 0.5 * gb, y1, z_base + ghw),
+                        Point3D(x + 0.5 * gb, y0, z_base + ghw),
+                    ],
+                    color=color,
+                    outline=outline,
+                    stipple=stipple,
+                    layer=layer_flange,
+                )
 
     def set_top_view(self) -> None:
         self.set_view(-90.0, 89.0)
@@ -2257,6 +2533,150 @@ def populate_stiffened_cylinder(canvas_3d: Tkinter3DCanvas) -> None:
     canvas_3d.after_idle(canvas_3d.fit_to_scene)
 
 
+def populate_stiffened_plate(canvas_3d: Tkinter3DCanvas) -> None:
+    length = 4.0
+    width = 4.0
+
+    # Base plate
+    canvas_3d.add_rectangular_plate(
+        x_start=-length/2, x_end=length/2,
+        y_start=-width/2, y_end=width/2,
+        z=0.0,
+        color="#d8e2ea",
+        outline="#708090",
+        stipple="gray50",
+    )
+
+    # Stiffeners along X
+    num_stiffeners = 5
+    for k in range(num_stiffeners):
+        y = -width/2 + (k + 1) * width / (num_stiffeners + 1)
+        canvas_3d.add_flat_stiffener(
+            x_start=-length/2, x_end=length/2,
+            y=y,
+            z_base=0.0,
+            hw=0.15,
+            b=0.10,
+            color="#a0a0ff",
+            outline="#404080",
+        )
+
+    # Girders along Y
+    num_girders = 1
+    for k in range(num_girders):
+        x = 0.0
+        canvas_3d.add_flat_girder(
+            x=x,
+            y_start=-width/2, y_end=width/2,
+            z_base=0.0,
+            ghw=0.3,
+            gb=0.2,
+            color="#ffa0a0",
+            outline="#804040",
+        )
+    canvas_3d.after_idle(canvas_3d.fit_to_scene)
+
+
+def populate_fe_gui_cylinder(canvas_3d: Tkinter3DCanvas) -> None:
+    cylinder_radius = 2.0
+    cylinder_height = 4.0
+
+    canvas_3d.add_cylinder(
+        radius=cylinder_radius,
+        height=cylinder_height,
+        center=Point3D(0.0, 0.0, 0.0),
+        color="#1f77b4",
+        outline="black",
+        segments=48,
+        height_segments=24,
+        capped=False,
+        opacity=0.78,
+        show_backfaces=True,
+    )
+
+    number_of_longitudinals = 8
+    for index in range(number_of_longitudinals):
+        angle = 2.0 * math.pi * index / number_of_longitudinals
+        canvas_3d.add_longitudinal_stiffener(
+            radius=cylinder_radius,
+            height=cylinder_height,
+            angle=angle,
+            web_height=0.15,
+            web_thickness=0.01,
+            flange_width=0.10,
+            flange_thickness=0.02,
+            color="#2ca02c",
+            outline="black",
+            segments=4,
+            height_segments=16,
+            inside=True,
+        )
+
+    number_of_rings = 4
+    for index in range(number_of_rings):
+        z_position = (
+            -cylinder_height / 2.0
+            + (index + 1) * cylinder_height / (number_of_rings + 1)
+        )
+        canvas_3d.add_ring_stiffener(
+            radius=cylinder_radius,
+            z_position=z_position,
+            web_height=0.12,
+            web_thickness=0.02,
+            flange_width=0.08,
+            flange_thickness=0.015,
+            color="#d62728",
+            outline="black",
+            segments=48,
+            inside=True,
+        )
+    canvas_3d.after_idle(canvas_3d.fit_to_scene)
+
+
+def populate_fe_gui_plate(canvas_3d: Tkinter3DCanvas) -> None:
+    length = 4.0
+    width = 4.0
+
+    # Base plate
+    canvas_3d.add_rectangular_plate(
+        x_start=-length/2, x_end=length/2,
+        y_start=-width/2, y_end=width/2,
+        z=0.0,
+        color="#1f77b4",
+        outline="black",
+        stipple="gray75",
+    )
+
+    # Stiffeners along X
+    num_stiffeners = 5
+    for k in range(num_stiffeners):
+        y = -width/2 + (k + 1) * width / (num_stiffeners + 1)
+        canvas_3d.add_flat_stiffener(
+            x_start=-length/2, x_end=length/2,
+            y=y,
+            z_base=0.0,
+            hw=0.15,
+            b=0.10,
+            color="#2ca02c",
+            outline="black",
+        )
+
+    # Girders along Y
+    num_girders = 1
+    for k in range(num_girders):
+        x = 0.0
+        canvas_3d.add_flat_girder(
+            x=x,
+            y_start=-width/2, y_end=width/2,
+            z_base=0.0,
+            ghw=0.3,
+            gb=0.2,
+            color="#d62728",
+            outline="black",
+        )
+    canvas_3d.after_idle(canvas_3d.fit_to_scene)
+
+
 def _add_controls(parent: tk.Misc, canvas_3d: Tkinter3DCanvas) -> tk.Frame:
     controls = tk.Frame(parent)
     controls.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 4))
@@ -2270,34 +2690,73 @@ def _add_controls(parent: tk.Misc, canvas_3d: Tkinter3DCanvas) -> tk.Frame:
 
     tk.Label(
         controls,
-        text="Right-drag to rotate; left-drag to move; use the wheel to zoom.",
+        text="Right-drag: rotate | Left-drag: move | Wheel: zoom",
     ).pack(side=tk.RIGHT, padx=6)
     return controls
+
+
+def _create_viewport(parent: tk.Misc, title: str, populate_func: Any) -> tk.Frame:
+    frame = tk.Frame(parent, bd=2, relief=tk.GROOVE)
+    
+    lbl = tk.Label(frame, text=title, font=("TkDefaultFont", 10, "bold"))
+    lbl.pack(side=tk.TOP, fill=tk.X, pady=2)
+    
+    canvas_3d = Tkinter3DCanvas(frame, width=400, height=300, bg="white")
+    _add_controls(frame, canvas_3d)
+    canvas_3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+    
+    populate_func(canvas_3d)
+    return frame
 
 
 def create_stiffened_cylinder_demo(root: tk.Misc) -> tk.Toplevel:
     """Open the demonstration in a child window."""
     demo_window = tk.Toplevel(root)
-    demo_window.title("Tkinter 3D - Stiffened Cylinder Demo")
-    demo_window.geometry("1120x800")
-    demo_window.minsize(500, 400)
+    demo_window.title("Tkinter 3D - Four Viewports Demo")
+    demo_window.geometry("1400x1000")
+    demo_window.minsize(800, 600)
 
-    canvas_3d = Tkinter3DCanvas(demo_window, width=1120, height=720, bg="white")
-    _add_controls(demo_window, canvas_3d)
-    canvas_3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
-    populate_stiffened_cylinder(canvas_3d)
+    demo_window.rowconfigure(0, weight=1)
+    demo_window.rowconfigure(1, weight=1)
+    demo_window.columnconfigure(0, weight=1)
+    demo_window.columnconfigure(1, weight=1)
+
+    v1 = _create_viewport(demo_window, "Present cylinder", populate_stiffened_cylinder)
+    v1.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    v2 = _create_viewport(demo_window, "Stiffened plate (same style)", populate_stiffened_plate)
+    v2.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+
+    v3 = _create_viewport(demo_window, "Cylinder (fe-gui style)", populate_fe_gui_cylinder)
+    v3.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+
+    v4 = _create_viewport(demo_window, "Stiffened plate (fe-gui style)", populate_fe_gui_plate)
+    v4.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
+
     return demo_window
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("Tkinter 3D - Stiffened Cylinder Demo")
-    root.geometry("1120x800")
-    root.minsize(500, 400)
+    root.title("Tkinter 3D - Four Viewports Demo")
+    root.geometry("1400x1000")
+    root.minsize(800, 600)
 
-    canvas_3d = Tkinter3DCanvas(root, width=1120, height=720, bg="white")
-    _add_controls(root, canvas_3d)
-    canvas_3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
-    populate_stiffened_cylinder(canvas_3d)
+    root.rowconfigure(0, weight=1)
+    root.rowconfigure(1, weight=1)
+    root.columnconfigure(0, weight=1)
+    root.columnconfigure(1, weight=1)
+
+    v1 = _create_viewport(root, "Present cylinder", populate_stiffened_cylinder)
+    v1.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    v2 = _create_viewport(root, "Stiffened plate (same style)", populate_stiffened_plate)
+    v2.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+
+    v3 = _create_viewport(root, "Cylinder (fe-gui style)", populate_fe_gui_cylinder)
+    v3.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+
+    v4 = _create_viewport(root, "Stiffened plate (fe-gui style)", populate_fe_gui_plate)
+    v4.grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
 
     root.mainloop()

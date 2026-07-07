@@ -38,6 +38,7 @@ from .fracture import (
     filtered_load_case_for_deleted_elements,
     fracture_summary,
     state_equivalent_plastic_strain,
+    state_rtcl_increment,
 )
 from .linalg import MatrixClass, factorize
 from .matrix_assembly import assemble_load_vector, assemble_mass_matrix, assemble_stiffness_matrix
@@ -1448,6 +1449,8 @@ def _plastic_impact_damage_update(
     changed = False
     new_records: List[DeletedElementRecord] = []
     max_utilization = 0.0
+    criterion = str(getattr(config, "criterion", "fixed"))
+    material_constants: Dict[str, Tuple[float, float]] = {}
     for element_id, state in committed_states.items():
         element = model.mesh.elements.get(int(element_id))
         if element is None:
@@ -1456,10 +1459,52 @@ def _plastic_impact_damage_update(
         if category not in set(config.element_scope):
             continue
         trigger_value, location = state_equivalent_plastic_strain(state)
-        utilization = float(trigger_value) / max(float(config.threshold), 1.0e-30)
-        max_utilization = max(max_utilization, utilization)
+
+        threshold = float(config.threshold)
+        if criterion in {"mesh_scaled_gl", "rtcl"}:
+            # GL/RP-C208 mesh scaling of the critical strain: coarse shells
+            # cannot resolve necking, so the limit shrinks with element size.
+            if category == "shell":
+                thickness = float(getattr(element, "thickness", 0.0))
+                area = float(element_measure(model.mesh, element))
+                l_e = float(np.sqrt(area)) if area > 0.0 else 0.0
+                if l_e > 1.0e-6 and thickness > 1.0e-6:
+                    threshold = 0.056 + 0.54 * (thickness / l_e)
+            elif category == "beam":
+                thickness = float(getattr(element, "cross_section", {}).get("web_thickness", 0.0))
+                l_e = float(element_measure(model.mesh, element))
+                if l_e > 1.0e-6 and thickness > 1.0e-6:
+                    threshold = 0.056 + 0.54 * (thickness / l_e)
+
         previous = damage_states.get(int(element_id), {})
         previous_damage = float(previous.get("damage", 0.0) or 0.0)
+        if criterion == "rtcl":
+            # RTCL: accumulate triaxiality-weighted plastic strain per
+            # integration point, D = sum(w(eta) d_alpha) / eps_cr.  Damage is
+            # zero in compression and reduced in shear, which keeps erosion
+            # away from the compressed side of a dent (the classic source of
+            # spurious deletions with plain plastic-strain thresholds).
+            name = str(element.material_name)
+            if name not in material_constants:
+                material = model.get_material(name)
+                material_constants[name] = (float(material.elastic_modulus), float(material.poisson_ratio))
+            E, nu = material_constants[name]
+            rtcl = state_rtcl_increment(state, previous.get("rtcl_alpha"), E, nu)
+            accumulated = np.asarray(previous.get("rtcl_damage", ()), dtype=float).reshape(-1)
+            if rtcl is None:
+                utilization = previous_damage
+                rtcl_alpha = previous.get("rtcl_alpha")
+            else:
+                alpha_now, weighted_delta = rtcl
+                if accumulated.size != alpha_now.size:
+                    accumulated = np.zeros_like(alpha_now)
+                accumulated = accumulated + weighted_delta / max(threshold, 1.0e-30)
+                utilization = float(np.max(accumulated)) if accumulated.size else previous_damage
+                rtcl_alpha = alpha_now
+                location = f"rtcl[{int(np.argmax(accumulated))}]" if accumulated.size else location
+        else:
+            utilization = float(trigger_value) / max(threshold, 1.0e-30)
+        max_utilization = max(max_utilization, utilization)
         damage = max(previous_damage, utilization)
         scale = _plastic_damage_scale(damage, config)
         history = list(previous.get("history", [])) if bool(config.record_history) else []
@@ -1477,7 +1522,7 @@ def _plastic_impact_damage_update(
             )
         if damage > previous_damage + 1.0e-15 or abs(scale - float(previous.get("scale", 1.0) or 1.0)) > 1.0e-15:
             changed = True
-        damage_states[int(element_id)] = {
+        entry = {
             "element_id": int(element_id),
             "damage": float(damage),
             "scale": float(scale),
@@ -1486,15 +1531,19 @@ def _plastic_impact_damage_update(
             "location": str(location),
             "history": history,
         }
+        if criterion == "rtcl":
+            entry["rtcl_damage"] = accumulated
+            entry["rtcl_alpha"] = rtcl_alpha
+        damage_states[int(element_id)] = entry
         if int(element_id) not in deleted_element_ids and damage >= float(config.delete_at) - 1.0e-15:
             record = DeletedElementRecord(
                 element_id=int(element_id),
                 element_type=type(element).__name__,
                 step_index=int(step_index),
                 load_factor=float(time_value),
-                trigger_name="max_equivalent_plastic_strain",
-                trigger_value=float(trigger_value),
-                threshold=float(config.threshold),
+                trigger_name="rtcl_damage" if criterion == "rtcl" else "max_equivalent_plastic_strain",
+                trigger_value=float(damage if criterion == "rtcl" else trigger_value),
+                threshold=float(threshold),
                 location=str(location),
                 measure=element_measure(model.mesh, element),
             )
@@ -1570,9 +1619,10 @@ def _solve_transient_sphere_impact_nonlinear(
     nonlinear_config: Optional[NonlinearTransientConfig] = None,
     plastic_damage_config: Optional[PlasticImpactDamageConfig] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
 ) -> SphereImpactResult:
     """Implicit Newmark nonlinear impact with material/geometric element response."""
-    from .nonlinear_static import _assemble_nonlinear_system, _nonlinear_state_summary
+    from .nonlinear_static import _assemble_nonlinear_system, _nonlinear_state_summary, states_von_mises_map
 
     def assemble_nonlinear(
         displacements: np.ndarray,
@@ -1692,6 +1742,7 @@ def _solve_transient_sphere_impact_nonlinear(
     saved_contacts: List[Tuple[Dict[str, Any], ...]] = []
     node_history_values: Dict[int, list[np.ndarray]] = {int(node_id): [] for node_id in output_node_ids}
     element_state_history: List[Dict[str, Any]] = []
+    state_von_mises_history: List[Dict[int, float]] = []
     peak_displacement = 0.0
     peak_displacement_node = None
     max_penetration = 0.0
@@ -1714,6 +1765,7 @@ def _solve_transient_sphere_impact_nonlinear(
         sphere_a: np.ndarray,
         sphere_force: np.ndarray,
         records: Tuple[SphereContactRecord, ...],
+        state_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
         nonlocal peak_displacement, peak_displacement_node, max_penetration, peak_contact_force
         full_u = reconstruct_full_solution(T, q_state, u0)
@@ -1755,10 +1807,19 @@ def _solve_transient_sphere_impact_nonlinear(
             # internal-work proxy (elastic + dissipated) once plasticity is
             # active.
             energy_strain.append(0.5 * float(full_u @ F_int_prev))
-        plastic_work_history.append(float(_nonlinear_state_summary(committed_states).get("max_equivalent_plastic_strain", 0.0) or 0.0))
+        # One summary pass per saved step: it walks every element state, so
+        # repeating it for the plastic-work history, the state history and
+        # the progress payload triples a cost that rivals the Newton solves.
+        # The stepping loop passes its own summary in to avoid recomputing.
+        summary = state_summary if state_summary is not None else _nonlinear_state_summary(committed_states)
+        max_alpha = float(summary.get("max_equivalent_plastic_strain", 0.0) or 0.0)
+        plastic_work_history.append(max_alpha)
         if bool(nl.record_element_state_history):
-            summary = _nonlinear_state_summary(committed_states)
             element_state_history.append({"time": float(time), **summary})
+            # True (return-mapped) stress envelope per element at this saved
+            # step: an elastic recovery from the saved displacements ignores
+            # the plastic strain and overshoots the material curve.
+            state_von_mises_history.append(states_von_mises_map(model, committed_states))
         if progress_callback is not None and history_storage_mode == "full":
             try:
                 progress_callback(
@@ -1772,7 +1833,7 @@ def _solve_transient_sphere_impact_nonlinear(
                         "contact_force": np.asarray(sphere_force, dtype=float).copy(),
                         "active_contacts": tuple(record.to_dict() for record in records) if config.save_contact_history else tuple(),
                         "nonlinear": True,
-                        "max_equivalent_plastic_strain": float(_nonlinear_state_summary(committed_states).get("max_equivalent_plastic_strain", 0.0) or 0.0),
+                        "max_equivalent_plastic_strain": max_alpha,
                     }
                 )
             except Exception:
@@ -1883,6 +1944,8 @@ def _solve_transient_sphere_impact_nonlinear(
         factor_diagnostics: Dict[str, Any] = {}
         convergence_reason = "standard"
         for iteration in range(1, int(nl.max_iterations) + 1):
+            if status_callback:
+                status_callback(f"\r  Time {sub_time:.4f} s, Iteration {iteration}: Res {residual_norm:.2e}")
             full_u = reconstruct_full_solution(T, q_trial, u0)
             F_int, K_T, trial_states = assemble_nonlinear(
                 full_u,
@@ -2118,7 +2181,7 @@ def _solve_transient_sphere_impact_nonlinear(
         )
         step_complete = float(sub_time) >= float(times[step_index]) - 1.0e-12 * max(abs(float(times[step_index])), 1.0)
         if step_complete and (step_index % int(transient_config.save_every) == 0 or step_index == len(times) - 1):
-            save_state(sub_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, sphere_force, records)
+            save_state(sub_time, q_red, v_red, a_red, sphere_position, sphere_velocity, sphere_acceleration, sphere_force, records, state_summary=state_summary)
             pending_save = None
         else:
             pending_save = (float(sub_time), sphere_force.copy(), records)
@@ -2270,6 +2333,7 @@ def _solve_transient_sphere_impact_nonlinear(
         "strain_summary": _nonlinear_state_summary(committed_states),
         "element_states": committed_states,
         "element_state_history": element_state_history,
+        "state_von_mises_history": tuple(state_von_mises_history),
         "plastic_impact_damage_summary": plastic_damage_summary,
         "impact_damage_summary": plastic_damage_summary,
         "erosion_summary": erosion_summary,
@@ -2321,6 +2385,7 @@ def solve_transient_sphere_impact(
     nonlinear_config: Optional[NonlinearTransientConfig] = None,
     plastic_damage_config: Optional[PlasticImpactDamageConfig] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
 ) -> SphereImpactResult:
     """Solve a limited rigid-sphere-to-shell impact transient."""
 
@@ -2348,6 +2413,7 @@ def solve_transient_sphere_impact(
             nonlinear_config=nonlinear_config,
             plastic_damage_config=plastic_damage_config,
             progress_callback=progress_callback,
+            status_callback=status_callback,
         )
     model.apply_boundary_conditions()
     K, stiffness_info = assemble_stiffness_matrix(model)

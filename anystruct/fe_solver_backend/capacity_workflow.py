@@ -237,6 +237,7 @@ def run_nonlinear_capacity_workflow(
     nonlinear_load_program: Optional[NonlinearLoadProgram] = None,
     imperfection: Optional[Any] = None,
     config: Optional[CapacityWorkflowConfig] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
 ) -> CapacityWorkflowResult:
     """Run linear static -> buckling -> imperfection -> nonlinear capacity."""
     config = config or CapacityWorkflowConfig()
@@ -274,6 +275,7 @@ def run_nonlinear_capacity_workflow(
             num_layers=config.nonlinear_num_layers,
             convergence_settings=config.nonlinear_convergence_settings,
             resource_config=config.nonlinear_resource_config,
+            status_callback=status_callback,
         )
     else:
         nonlinear_result = solve_static_nonlinear(
@@ -286,6 +288,7 @@ def run_nonlinear_capacity_workflow(
             num_layers=config.nonlinear_num_layers,
             convergence_settings=config.nonlinear_convergence_settings,
             resource_config=config.nonlinear_resource_config,
+            status_callback=status_callback,
         )
 
     status = "completed" if nonlinear_result.converged else "nonlinear_not_converged"

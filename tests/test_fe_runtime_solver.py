@@ -232,7 +232,8 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
 def test_run_runtime_fem_passes_phase_five_options_to_solver(monkeypatch):
     captured = {}
 
-    def fake_run_production(geometry, config, status_callback=None, imported_fem_model=None):
+    def fake_run_production(geometry, config, status_callback=None, imported_fem_model=None,
+                            precomputed_generated_geometry=None):
         captured["geometry"] = geometry
         captured["config"] = config
         return fe_solver.LightweightFEMResult(
@@ -1324,21 +1325,24 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "ttk.Button(parent, text=\"i\", width=2" in source
     assert "self.options_notebook = ttk.Notebook(mid_panel)" in source
     assert "self.options_notebook.add(tab_mesh, text=\"Mesh\")" in source
-    assert "self.options_notebook.add(tab_loads, text=\"Loads and boundary conditions\")" in source
+    assert "self.options_notebook.add(tab_loads, text=\"Loads\")" in source
+    assert "self.options_notebook.add(tab_bc, text=\"Boundary conditions\")" in source
     assert "self.options_notebook.add(tab_transient, text=\"Transient runs\")" in source
     assert "mesh_size = ttk.LabelFrame(tab_mesh, text=\"Mesh size\")" in source
     assert "local_mesh = ttk.LabelFrame(tab_mesh, text=\"Local mesh refinement (select panels under load and BCs)\")" in source
     assert "self._add_compact_check(local_mesh, 0, 0, \"local_refinement_enabled\", \"Refine selected panels\"" in source
-    assert "text=\"Pick point\"" in source
+    assert "self._mesh_point_selection_button = ttk.Button(" in source
+    assert "command=self._toggle_mesh_point_selection" in source
+    assert "command=lambda: self._set_mesh_point_selection_active(False)" in source
     assert "self._add_compact_check(impact_group, 0, 0, \"collision_adaptive_mesh\", \"Adopt impact point\"" in source
     assert "\"local_refinement_enabled\": {" in source
     assert "\"point_refinement_enabled\": {" in source
     assert "\"collision_adaptive_growth_factor\": {" in source
     assert "def _format_run_status_text(" in source
     assert "mesh_preview = ttk.LabelFrame(tab_mesh, text=\"Mesh preview and statistics\")" in source
-    assert "self._mesh_preview_button = ttk.Button(preview_actions, text=\"Preview mesh\", command=self._preview_mesh)" in source
+    assert "self._mesh_preview_button = ttk.Button(preview_actions, text=\"Generate mesh\", command=self._generate_mesh)" in source
     assert "self.mesh_statistics_text = tk.Text(mesh_preview" in source
-    assert "constraints = ttk.LabelFrame(tab_loads, text=\"Supports and load path\")" in source
+    assert "constraints = ttk.LabelFrame(tab_bc, text=\"Supports and constraints\")" in source
     assert "accel = ttk.LabelFrame(tab_loads, text=\"Acceleration and added mass\")" in source
     assert "time_domain = ttk.LabelFrame(collision_body, text=\"Custom time-domain load\")" in source
     assert "solver_options = ttk.LabelFrame(tab_general, text=\"Solver\")" in source
@@ -1366,11 +1370,11 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.member_model = tk.StringVar(value=\"plates as shell, girders as beams\")" in source
     assert "self.analysis_type = tk.StringVar(value=\"linear eigenvalue\")" in source
     assert "self.nonlinear_static_kinematics = tk.StringVar(value=\"Von Karman\")" in source
-    assert "self.beam_consistent_mass_enabled = tk.BooleanVar(value=False)" in source
+    assert "self.beam_consistent_mass_enabled = tk.BooleanVar(value=True)" in source
     assert "self.collision_nonlinear_kinematics = tk.StringVar(value=\"Von Karman\")" in source
     assert "self.collision_beam_contact_enabled = tk.BooleanVar(value=False)" in source
     assert "self.pressure_direction = tk.StringVar(value=\"front\")" in source
-    assert "self._add_option_row(constraints, 2, \"pressure_direction\", \"Pressure side\", self.pressure_direction" in source
+    assert "self._add_option_row(general_loads, 6, \"pressure_direction\", \"Pressure side\", self.pressure_direction" in source
     assert "(\"front\", \"back\")" in source
     assert "def _draw_pressure_side_indicators(" in source
     assert "RuntimeFEMWindow._draw_pressure_side_indicators(self, canvas, geometry)" in source
@@ -1379,8 +1383,8 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.plate_alpha_vis = tk.StringVar(value=\"1.0\")" in source
     assert "self.plate_front_color_vis = tk.StringVar(value=\"#d1d5db\")" in source
     assert "self.plate_back_color_vis = tk.StringVar(value=\"#8b5e3c\")" in source
-    assert "self._add_entry_row(vis_group, 5, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
-    assert "self._add_entry_row(vis_group, 6, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
+    assert "self._add_entry_row(vis_group, 7, \"plate_front_color\", \"Plate front\", self.plate_front_color_vis" in source
+    assert "self._add_entry_row(vis_group, 8, \"plate_back_color\", \"Plate back\", self.plate_back_color_vis" in source
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "member_model=str(self.member_model.get())" in source
@@ -1403,17 +1407,18 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()" in source
 
     assert "self.deformation_scale = tk.StringVar(value=\"0.0\")" in source
-    assert "custom = ttk.LabelFrame(tab_loads, text=\"Custom loads and boundary conditions\")" in source
-    assert "selection = ttk.LabelFrame(custom, text=\"Panel and edge selection\")" in source
+    assert "custom_loads = ttk.LabelFrame(tab_loads, text=\"Custom loads\")" in source
+    assert "custom_bc = ttk.LabelFrame(tab_bc, text=\"Custom boundary conditions\")" in source
+    assert "selection_loads = ttk.LabelFrame(custom_loads, text=\"Panel and edge selection\")" in source
     assert "load_list = ttk.LabelFrame(tab_loads, text=\"Loads to run\")" in source
-    assert "ttk.Button(actions, text=\"Add load\", command=self._add_custom_load_from_selection)" in source
-    assert "ttk.Button(actions, text=\"Delete load\", command=self._delete_selected_custom_load)" in source
+    assert "ttk.Button(actions_loads, text=\"Add load\", command=self._add_custom_load_from_selection)" in source
+    assert "ttk.Button(actions_loads, text=\"Delete load\", command=self._delete_selected_custom_load)" in source
     assert "self._custom_load_tree = ttk.Treeview(" in source
     assert "canvas.canvas.bind(\"<ButtonRelease-3>\", self._on_custom_load_edge_canvas_release, add=\"+\")" in source
     assert "def _custom_load_selection_visual_offset(self) -> float:" in source
     assert "draw_overlay=True" in source
     assert "custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get())" in source
-    assert "custom_use_nullspace_projection=(bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get()))" in source
+    assert "bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get())" in source
     assert "custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0)" in source
     assert "custom_loads_json=str(self.custom_loads_json.get())" in source
     assert "self._add_entry_row(time_domain, 2, \"custom_pressure_pa\"" not in source
@@ -1729,7 +1734,7 @@ def test_runtime_generated_mesh_supports_s8_shells_and_enforced_displacement():
             shell_element_order="S8",
             boundary_condition="simply supported",
             symmetry_mode="x",
-            enforced_displacement_m=0.003,
+            enforced_displacement_z_m=0.003,
         ),
     )
 
@@ -3095,9 +3100,20 @@ def test_populate_canvas_with_geometry_outer_vs_intermediate_stiffeners():
     class DummyCanvas:
         def __init__(self):
             self.polygons = []
+            self.flat_stiffeners = []
+            self.flat_girders = []
 
         def add_polygon(self, points, color=None, outline=None, **kwargs):
             self.polygons.append((points, color, outline))
+
+        def add_rectangular_plate(self, *args, **kwargs):
+            pass
+
+        def add_flat_stiffener(self, *args, **kwargs):
+            self.flat_stiffeners.append(kwargs)
+
+        def add_flat_girder(self, *args, **kwargs):
+            self.flat_girders.append(kwargs)
 
         def add_cylinder(self, *args, **kwargs):
             pass
@@ -3125,24 +3141,13 @@ def test_populate_canvas_with_geometry_outer_vs_intermediate_stiffeners():
     canvas = DummyCanvas()
     window._populate_canvas_with_geometry(canvas)
 
-    stiffeners = [
-        poly for poly in canvas.polygons
-        if poly[1] == "#94a3b8"  # Web color
-    ]
-    
-    assert len(stiffeners) > 2
-    from collections import defaultdict
-    stf_by_y = defaultdict(list)
-    for stf in stiffeners:
-        points = stf[0]
-        y_val = round(points[0].y, 4)
-        stf_by_y[y_val].append(points)
-
-    assert len(stf_by_y) > 2
-    for y_val, segments in stf_by_y.items():
-        assert len(segments) == 2
-        spans = sorted([(round(min(p.x for p in seg), 2), round(max(p.x for p in seg), 2)) for seg in segments])
-        assert spans == [(0.0, 5.0), (5.0, 10.0)]
+    # One add_flat_stiffener call per stiffener line, web colour #94a3b8.
+    assert len(canvas.flat_stiffeners) > 2
+    assert all(call.get("color") == "#94a3b8" for call in canvas.flat_stiffeners)
+    y_positions = {round(float(call.get("y", 0.0)), 4) for call in canvas.flat_stiffeners}
+    # Distinct y per stiffener: outer and intermediate stiffeners all drawn.
+    assert len(y_positions) == len(canvas.flat_stiffeners)
+    assert len(y_positions) > 2
 
 
 def test_populate_canvas_with_geometry_accepts_generated_cylinder_preview():
@@ -3186,6 +3191,56 @@ def test_populate_canvas_with_geometry_accepts_generated_cylinder_preview():
     assert len(canvas.ring_stiffeners) > 0
 
 
+def test_point_refinement_marker_drawn_on_cylinder_surface():
+    """The picked point-refinement centre is drawn as a bold overlay crosshair
+    (+ extent circle) sitting on the cylinder surface, from the live inputs."""
+    import types
+
+    class Var:
+        def __init__(self, v):
+            self._v = v
+
+        def get(self):
+            return self._v
+
+    class RecordingCanvas:
+        def __init__(self):
+            self.lines = []
+
+        def add_line(self, a, b, **kwargs):
+            self.lines.append((a, b, kwargs))
+
+    window = types.SimpleNamespace()
+    window.snapshot = types.SimpleNamespace(is_cylinder=True)
+    window.point_refinement_enabled = Var(True)
+    window.point_refinement_x_m = Var(6.0)
+    window.point_refinement_y_m = Var(10.3)
+    window.point_refinement_extent_m = Var(0.25)
+    for name in ("_point_refinement_marker_xyz", "_draw_point_refinement_marker", "_draw_point_refinement_circle"):
+        setattr(window, name, types.MethodType(getattr(fe_runtime_solver.RuntimeFEMWindow, name), window))
+
+    geometry = {"radius_m": 2.0, "length_m": 10.3}
+    centre, extent = window._point_refinement_marker_xyz(geometry)
+    assert extent == pytest.approx(0.25)
+    assert math.hypot(centre.x, centre.y) == pytest.approx(2.0, abs=1e-6)  # on surface
+    assert centre.z == pytest.approx(6.0)
+
+    canvas = RecordingCanvas()
+    window._draw_point_refinement_marker(canvas, geometry, draw_circle=True)
+    star = [ln for ln in canvas.lines if ln[2].get("width") == 3]
+    circle = [ln for ln in canvas.lines if ln[2].get("width") == 2]
+    assert len(star) == 3, "three-axis crosshair"
+    assert len(circle) >= 40, "extent circle sampled"
+    assert all(ln[2].get("draw_overlay") for ln in canvas.lines), "always-visible overlay"
+    assert all(math.hypot(ln[0].x, ln[0].y) == pytest.approx(2.0, abs=0.05) for ln in circle)
+
+    # Disabled point refinement draws nothing.
+    window.point_refinement_enabled = Var(False)
+    empty = RecordingCanvas()
+    window._draw_point_refinement_marker(empty, geometry, draw_circle=True)
+    assert empty.lines == []
+
+
 def test_crisp_canvas_alpha_snaps_near_opaque_values_to_solid():
     assert fe_runtime_solver._crisp_canvas_alpha("1.0") == 1.0
     assert fe_runtime_solver._crisp_canvas_alpha("0.99") == 1.0
@@ -3215,3 +3270,33 @@ def test_runtime_status_updates_do_not_replace_completed_run_results():
 
     assert "RESULTS\nStatus: ok\nBuckling LF: 1.23" in DummyWindow.result_text.value
     assert "Run status update:\n3D view set to fit." in DummyWindow.result_text.value
+
+
+def test_collision_damage_criterion_reaches_backend_config():
+    """The GUI damage-criterion selection must reach PlasticImpactDamageConfig.
+
+    Regression: the criterion was previously dropped in
+    _collision_plastic_damage_config, silently running 'fixed' regardless of
+    the dropdown."""
+    from anystruct import fe_solver
+
+    for criterion in ("fixed", "mesh_scaled_gl", "rtcl"):
+        config = fe_solver.LightweightFEMConfig(
+            collision_enabled=True,
+            collision_material_nonlinear_enabled=True,
+            collision_damage_enabled=True,
+            collision_damage_criterion=criterion,
+            collision_plastic_damage_threshold=0.05,
+        )
+        damage = fe_solver._collision_plastic_damage_config(config)
+        assert damage is not None
+        assert damage.criterion == criterion
+
+    # Unknown strings fall back to 'fixed' instead of raising.
+    config = fe_solver.LightweightFEMConfig(
+        collision_enabled=True,
+        collision_material_nonlinear_enabled=True,
+        collision_damage_enabled=True,
+        collision_damage_criterion="bogus",
+    )
+    assert fe_solver._collision_plastic_damage_config(config).criterion == "fixed"
