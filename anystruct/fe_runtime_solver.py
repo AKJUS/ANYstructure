@@ -248,6 +248,7 @@ class RuntimeFEMOptions:
     collision_adaptive_extent_m: float = 0.0
     collision_adaptive_growth_factor: float = 1.35
     collision_adaptive_zone_factor: float = 2.5
+    detail_transition_style: str = "graded grid"
     collision_nonlinear_max_iterations: int = 20
     collision_nonlinear_tolerance: float = 1.0e-6
     collision_nonlinear_cutbacks: int = 8
@@ -1035,6 +1036,7 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         collision_adaptive_extent_m=float(options.collision_adaptive_extent_m),
         collision_adaptive_growth_factor=float(options.collision_adaptive_growth_factor),
         collision_adaptive_zone_factor=float(options.collision_adaptive_zone_factor),
+        detail_transition_style=str(options.detail_transition_style),
         collision_nonlinear_max_iterations=options.collision_nonlinear_max_iterations,
         collision_nonlinear_tolerance=options.collision_nonlinear_tolerance,
         collision_nonlinear_cutbacks=options.collision_nonlinear_cutbacks,
@@ -1262,6 +1264,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         ),
         "collision_adaptive_growth_factor": float(options.collision_adaptive_growth_factor),
         "collision_adaptive_zone_factor": float(options.collision_adaptive_zone_factor),
+        "detail_transition_style": str(options.detail_transition_style),
         "collision_nonlinear_max_iterations": int(options.collision_nonlinear_max_iterations),
         "collision_nonlinear_tolerance": float(options.collision_nonlinear_tolerance),
         "collision_nonlinear_cutbacks": int(options.collision_nonlinear_cutbacks),
@@ -3710,6 +3713,21 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Controls the impact-detail circle only when Impact extent is zero.",
         "caution": "Prefer explicit Impact extent for final studies.",
     },
+    "detail_transition_style": {
+        "title": "Detail Mesh Transition",
+        "purpose": "How local detail meshes (panel, point, impact) blend into the global mesh.",
+        "use": "'graded grid' grades the structured grid lines from fine to coarse; the refinement "
+               "bands extend across the full model in both directions. 'local patch (quad+tri)' "
+               "subdivides only the cells inside the detail window (2:1 per level, up to 3 levels) "
+               "and closes the transition with conforming quad templates plus a small number of "
+               "triangles, leaving the rest of the structure completely untouched.",
+        "output": "Local patch keeps element aspect ratios near 1 and removes the fine bands seen "
+                  "far from the detail zone; a few S3 triangles appear in the one-element transition ring. "
+                  "Beam members crossing the patch are split to stay connected.",
+        "caution": "Local patch requires linear shells (S4/S3), B2 beams and beam-type members; with "
+                   "shell-web members, B3 beams, S6/S8 shells or conical geometry it falls back to the graded grid. "
+                   "Fine size snaps to the nearest 2:1 subdivision of the base mesh (max 3 levels = 1/8).",
+    },
     "include_stiffeners": {
         "title": "Include Stiffener Beams",
         "purpose": "Controls whether generated stiffener beam members are included in the FE model.",
@@ -4648,6 +4666,7 @@ class RuntimeFEMWindow:
         self.collision_adaptive_fine_size_m = tk.DoubleVar(value=0.0)
         self.collision_adaptive_extent_m = tk.DoubleVar(value=0.0)
         self.collision_adaptive_growth_factor = tk.DoubleVar(value=1.35)
+        self.detail_transition_style = tk.StringVar(value="graded grid")
         self.collision_adaptive_zone_factor = tk.DoubleVar(value=2.5)
         self.collision_nonlinear_max_iterations = tk.IntVar(value=20)
         self.collision_nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
@@ -5267,6 +5286,8 @@ class RuntimeFEMWindow:
         self._configure_compact_option_grid(local_mesh)
         self._add_compact_check(local_mesh, 0, 0, "local_refinement_enabled", "Refine selected panels",
                                 self.local_refinement_enabled)
+        self._add_compact_option(local_mesh, 0, 1, "detail_transition_style", "Transition",
+                                 self.detail_transition_style, ("graded grid", "local patch (quad+tri)"))
         self._add_compact_entry(local_mesh, 1, 0, "local_refinement_fine_size_m", "Panel fine [m]",
                                 self.local_refinement_fine_size_m)
         self._add_compact_entry(local_mesh, 1, 1, "local_refinement_fine_factor", "Panel factor",
@@ -8205,6 +8226,7 @@ class RuntimeFEMWindow:
             collision_adaptive_fine_size_m=_safe_float(self.collision_adaptive_fine_size_m.get(), 0.0),
             collision_adaptive_extent_m=max(_safe_float(self.collision_adaptive_extent_m.get(), 0.0), 0.0),
             collision_adaptive_growth_factor=max(_safe_float(self.collision_adaptive_growth_factor.get(), 1.35), 1.01),
+            detail_transition_style=str(self.detail_transition_style.get() or "graded grid"),
             collision_adaptive_zone_factor=_safe_float(self.collision_adaptive_zone_factor.get(), 2.5),
             collision_nonlinear_max_iterations=max(_safe_int(self.collision_nonlinear_max_iterations.get(), 20), 1),
             collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),

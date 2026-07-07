@@ -231,6 +231,7 @@ class LightweightFEMConfig:
     collision_adaptive_extent_m: float = 0.0
     collision_adaptive_growth_factor: float = 1.35
     collision_adaptive_zone_factor: float = 2.5
+    detail_transition_style: str = "graded grid"
     collision_time_mode: str = "auto"
     collision_auto_steps_per_radius: float = 20.0
     collision_auto_post_contact_radii: float = 6.0
@@ -698,6 +699,466 @@ def _is_number(value: object) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+_LOCAL_PATCH_TRANSITION = "local patch (quad+tri)"
+_GRADED_TRANSITION = "graded grid"
+
+
+def _wants_local_patch_transition(config: "LightweightFEMConfig") -> bool:
+    style = str(getattr(config, "detail_transition_style", _GRADED_TRANSITION) or "").strip().lower()
+    return style.startswith("local")
+
+
+def _local_patch_detail_windows(
+    config: "LightweightFEMConfig",
+    u_span: float,
+    v_span: float,
+    base_size: float,
+    thickness: float,
+    radius: float = 0.0,
+) -> list[dict[str, float]]:
+    """Detail windows (u0,u1,v0,v1,fine) in parametric space for all detail sources.
+
+    ``u`` is the flat x / cylinder axial coordinate, ``v`` the flat y /
+    circumferential arc.  Windows drive the local-patch transition mesher and
+    replace the graded tensor-grid breaks when that style is selected.
+    """
+    windows: list[dict[str, float]] = []
+
+    def add_point_window(center_u: float, center_v: float, extent: float, fine_requested: float, fine_factor: float, source: str) -> None:
+        fine, requested, floored = _refinement_fine_size(base_size, thickness, fine_requested, fine_factor)
+        extent = max(float(extent), fine)
+        windows.append(
+            {
+                "u0": float(center_u) - extent,
+                "u1": float(center_u) + extent,
+                "v0": float(center_v) - extent,
+                "v1": float(center_v) + extent,
+                "fine": float(fine),
+                "requested_fine": float(requested),
+                "floored": bool(floored),
+                "source": source,
+                "center_u": float(center_u),
+                "center_v": float(center_v),
+                "extent": float(extent),
+            }
+        )
+
+    if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled):
+        if radius > 0.0:
+            impact = _collision_impact_point_cylinder(config, radius, u_span, v_span)
+        else:
+            impact = _collision_impact_point(config, u_span, v_span)
+        if impact is not None:
+            zone_factor = max(float(config.collision_adaptive_zone_factor), 0.5)
+            sphere_radius = max(float(config.collision_radius_m), 1.0e-6)
+            extent = float(config.collision_adaptive_extent_m or 0.0)
+            if extent <= 0.0:
+                extent = sphere_radius * zone_factor
+            add_point_window(
+                impact[0],
+                impact[1],
+                extent,
+                float(config.collision_adaptive_fine_size_m),
+                float(config.collision_adaptive_fine_factor),
+                "impact",
+            )
+
+    if bool(config.point_refinement_enabled):
+        add_point_window(
+            float(config.point_refinement_x_m),
+            float(config.point_refinement_y_m),
+            max(float(config.point_refinement_extent_m or 0.0), 0.0),
+            float(config.point_refinement_fine_size_m),
+            float(config.point_refinement_fine_factor),
+            "selected_point",
+        )
+
+    patches = _local_refinement_patches(config)
+    if patches:
+        extent_pad = max(float(config.local_refinement_extent_m or 0.0), 0.0)
+        for patch in patches:
+            min_u, max_u = _custom_patch_axis_interval(patch, "a", u_span)
+            min_v = max(0.0, min(float(patch.get("min_b", 0.0)), v_span))
+            max_v = max(0.0, min(float(patch.get("max_b", 0.0)), v_span))
+            if max_u <= min_u or max_v <= min_v:
+                continue
+            fine, requested, floored = _refinement_fine_size(
+                base_size,
+                thickness,
+                float(config.local_refinement_fine_size_m),
+                float(config.local_refinement_fine_factor),
+            )
+            windows.append(
+                {
+                    "u0": min_u - extent_pad,
+                    "u1": max_u + extent_pad,
+                    "v0": min_v - extent_pad,
+                    "v1": max_v + extent_pad,
+                    "fine": float(fine),
+                    "requested_fine": float(requested),
+                    "floored": bool(floored),
+                    "source": "selected_panels",
+                    "center_u": 0.5 * (min_u + max_u),
+                    "center_v": 0.5 * (min_v + max_v),
+                    "extent": float(extent_pad),
+                }
+            )
+    return windows
+
+
+def _apply_local_patch_transition(
+    nodes: list[dict[str, object]],
+    shells: list[dict[str, object]],
+    beams: list[dict[str, object]],
+    windows: list[dict[str, float]],
+    u_span: float,
+    v_span: float,
+    point_of_param,
+    param_of_coords,
+    periodic_v: bool = False,
+) -> dict[str, object] | None:
+    """Conformally refine skin cells inside detail windows with 2:1 transitions.
+
+    The skin is treated as a structured grid of parametric rectangles.  Cells
+    intersecting a window are red-subdivided (2:1 per level, up to 3 levels)
+    with a balanced level field; hanging nodes on level boundaries are closed
+    with conforming templates: two-opposite -> 2 quads, corner -> 3 quads
+    (all-quad), single edge -> 2 quads + 1 tri, three edges -> 3 quads + 1 tri,
+    four -> 4 quads.  A single hanging node has an odd cell-boundary edge count
+    so at least one triangle is unavoidable there (quad parity).
+
+    Returns an info dict, or ``None`` when the skin is not a clean structured
+    quad grid (caller falls back to the graded style).
+    """
+    if not windows:
+        return None
+    coords_by_id = {int(n["id"]): [float(c) for c in n["coords"]] for n in nodes if "id" in n}
+    skin: list[dict[str, object]] = []
+    for shell in shells:
+        if "role" in shell:
+            continue
+        ids = [int(i) for i in shell.get("node_ids", ()) or ()]
+        if len(ids) != 4 or any(i not in coords_by_id for i in ids):
+            return None
+        skin.append(shell)
+    if not skin:
+        return None
+
+    tol = 1.0e-7 * max(u_span, v_span)
+
+    def wrap_v(v: float) -> float:
+        if not periodic_v:
+            return v
+        wrapped = v % v_span
+        return v_span if abs(wrapped) < tol and v > 0.5 * v_span else wrapped
+
+    # Map each skin quad to an axis-aligned parametric rectangle.
+    cells: list[dict[str, object]] = []
+    for shell in skin:
+        ids = [int(i) for i in shell["node_ids"]]
+        params = [param_of_coords(coords_by_id[i]) for i in ids]
+        us = sorted({round(p[0], 9) for p in params})
+        vs_raw = [p[1] for p in params]
+        if periodic_v and (max(vs_raw) - min(vs_raw)) > 0.5 * v_span:
+            vs_raw = [v if v > 0.25 * v_span else v + v_span for v in vs_raw]
+        vs = sorted({round(v, 9) for v in vs_raw})
+        if len(us) != 2 or len(vs) != 2:
+            return None
+        cells.append({"shell": shell, "u0": us[0], "u1": us[1], "v0": vs[0], "v1": vs[1]})
+
+    cell_sizes = [min(c["u1"] - c["u0"], c["v1"] - c["v0"]) for c in cells]
+    base_size = float(np.median(cell_sizes)) if cell_sizes else 0.0
+    if base_size <= 0.0:
+        return None
+    fine = min(float(w["fine"]) for w in windows)
+    levels_needed = int(math.ceil(math.log2(max(base_size / max(fine, 1.0e-9), 1.0))))
+    max_level = max(1, min(levels_needed, 3))
+
+    def window_hits(cell: dict[str, object]) -> bool:
+        for w in windows:
+            offsets = (0.0, -v_span, v_span) if periodic_v else (0.0,)
+            for off in offsets:
+                if cell["u0"] < w["u1"] - tol and cell["u1"] > w["u0"] + tol and \
+                        cell["v0"] + off < w["v1"] - tol and cell["v1"] + off > w["v0"] + tol:
+                    return True
+        return False
+
+    level = [max_level if window_hits(c) else 0 for c in cells]
+    if not any(level):
+        return None
+
+    # Edge-neighbour lookup keyed by shared-edge signature.
+    def edge_keys(c: dict[str, object]) -> dict[str, tuple]:
+        return {
+            "u0": ("u", round(c["u0"], 9), round(c["v0"], 9), round(c["v1"], 9)),
+            "u1": ("u", round(c["u1"], 9), round(c["v0"], 9), round(c["v1"], 9)),
+            "v0": ("v", round(wrap_v(c["v0"]), 9), round(c["u0"], 9), round(c["u1"], 9)),
+            "v1": ("v", round(wrap_v(c["v1"]), 9), round(c["u0"], 9), round(c["u1"], 9)),
+        }
+
+    edge_map: dict[tuple, list[int]] = {}
+    for index, c in enumerate(cells):
+        for key in edge_keys(c).values():
+            edge_map.setdefault(key, []).append(index)
+    neighbours: dict[int, list[int]] = {}
+    for members in edge_map.values():
+        if len(members) == 2:
+            a, b = members
+            neighbours.setdefault(a, []).append(b)
+            neighbours.setdefault(b, []).append(a)
+        elif len(members) > 2:
+            return None  # non-manifold skin grid: bail out
+
+    changed = True
+    while changed:
+        changed = False
+        for index in range(len(cells)):
+            required = max((level[n] for n in neighbours.get(index, ())), default=0) - 1
+            if level[index] < required:
+                level[index] = required
+                changed = True
+
+    # Node factory in parametric space (exact surface positions via mapping).
+    # Seed ONLY from skin corner nodes: member web/flange nodes sit off the
+    # skin surface but can map to the same (u, v) (e.g. inner radius on a
+    # cylinder), which would alias skin nodes to member nodes.
+    max_node_id = max(coords_by_id.keys(), default=0)
+    skin_node_ids = {int(i) for shell in skin for i in shell["node_ids"]}
+    param_nodes: dict[tuple[float, float], int] = {}
+    for node_id_value in skin_node_ids:
+        p = param_of_coords(coords_by_id[node_id_value])
+        param_nodes[(round(p[0], 9), round(wrap_v(p[1]), 9))] = node_id_value
+    new_edge_parents: dict[int, tuple[int, int]] = {}
+
+    def node_at(u: float, v: float, parents: tuple[int, int] | None = None) -> int:
+        nonlocal max_node_id
+        key = (round(u, 9), round(wrap_v(v), 9))
+        existing = param_nodes.get(key)
+        if existing is not None:
+            return existing
+        max_node_id += 1
+        coords = point_of_param(u, wrap_v(v))
+        nodes.append({"id": max_node_id, "coords": [float(coords[0]), float(coords[1]), float(coords[2])]})
+        coords_by_id[max_node_id] = [float(coords[0]), float(coords[1]), float(coords[2])]
+        param_nodes[key] = max_node_id
+        if parents is not None:
+            new_edge_parents[max_node_id] = parents
+        return max_node_id
+
+    max_shell_id = max((int(s.get("id", 0)) for s in shells), default=0)
+    new_shells: list[dict[str, object]] = []
+    replaced_ids: set[int] = set()
+    tri_count = 0
+    quad_count = 0
+
+    def emit(shell_template: dict[str, object], node_ids: list[int]) -> None:
+        nonlocal max_shell_id, tri_count, quad_count
+        max_shell_id += 1
+        entry = {key: value for key, value in shell_template.items() if key not in ("id", "node_ids")}
+        entry["id"] = max_shell_id
+        entry["node_ids"] = [int(i) for i in node_ids]
+        new_shells.append(entry)
+        if len(node_ids) == 3:
+            tri_count += 1
+        else:
+            quad_count += 1
+
+    for index, cell in enumerate(cells):
+        ell = level[index]
+        keys = edge_keys(cell)
+        hang_side = {}
+        for side, key in keys.items():
+            members = edge_map.get(key, [])
+            other = [m for m in members if m != index]
+            hang_side[side] = bool(other) and level[other[0]] == ell + 1
+        if ell == 0 and not any(hang_side.values()):
+            continue  # untouched coarse cell
+        replaced_ids.add(int(cell["shell"]["id"]))
+        n = 2 ** ell
+        u0, u1, v0, v1 = cell["u0"], cell["u1"], cell["v0"], cell["v1"]
+        du = (u1 - u0) / n
+        dv = (v1 - v0) / n
+        corner_ids = {  # original cell corners for support inheritance
+            (0, 0): node_at(u0, v0), (n, 0): node_at(u1, v0),
+            (0, n): node_at(u0, v1), (n, n): node_at(u1, v1),
+        }
+
+        def lattice(i: int, j: int) -> int:
+            u = u0 + du * i
+            v = v0 + dv * j
+            parents = None
+            if i in (0, n) and 0 < j < n:
+                parents = (corner_ids[(i, 0)], corner_ids[(i, n)])
+            elif j in (0, n) and 0 < i < n:
+                parents = (corner_ids[(0, j)], corner_ids[(n, j)])
+            return node_at(u, v, parents)
+
+        for i in range(n):
+            for j in range(n):
+                a = lattice(i, j)
+                b = lattice(i + 1, j)
+                c = lattice(i + 1, j + 1)
+                d = lattice(i, j + 1)
+                hang = {
+                    "b": hang_side["v0"] and j == 0,      # bottom edge of subcell on cell v0 side
+                    "r": hang_side["u1"] and i == n - 1,  # right on cell u1 side
+                    "t": hang_side["v1"] and j == n - 1,  # top on cell v1 side
+                    "l": hang_side["u0"] and i == 0,      # left on cell u0 side
+                }
+                # In (u,v): a=(i,j) b=(i+1,j) c=(i+1,j+1) d=(i,j+1); bottom edge = a-b
+                # runs in u at constant v; here 'bottom/top' are v0/v1 sides and
+                # 'left/right' are u0/u1 sides of the SUBCELL a-b-c-d.
+                um = u0 + du * (i + 0.5)
+                vm = v0 + dv * (j + 0.5)
+                mid = {
+                    "b": (lambda: node_at(um, v0 + dv * j, (a, b))),
+                    "r": (lambda: node_at(u0 + du * (i + 1), vm, (b, c))),
+                    "t": (lambda: node_at(um, v0 + dv * (j + 1), (d, c))),
+                    "l": (lambda: node_at(u0 + du * i, vm, (a, d))),
+                }
+                flags = tuple(side for side in ("b", "r", "t", "l") if hang[side])
+                template = cell["shell"]
+                if not flags:
+                    emit(template, [a, b, c, d])
+                    continue
+                center = node_at(um, vm)
+                mids = {side: mid[side]() for side in flags}
+                if len(flags) == 4:
+                    emit(template, [a, mids["b"], center, mids["l"]])
+                    emit(template, [mids["b"], b, mids["r"], center])
+                    emit(template, [center, mids["r"], c, mids["t"]])
+                    emit(template, [mids["l"], center, mids["t"], d])
+                elif len(flags) == 1:
+                    side = flags[0]
+                    m = mids[side]
+                    ring = {"b": (a, b, c, d), "r": (b, c, d, a), "t": (c, d, a, b), "l": (d, a, b, c)}[side]
+                    p0, p1, p2, p3 = ring  # hanging edge is p0-p1
+                    emit(template, [p0, m, center, p3])
+                    emit(template, [m, p1, p2, center])
+                    emit(template, [center, p2, p3])
+                elif flags in (("b", "t"),):
+                    emit(template, [a, mids["b"], mids["t"], d])
+                    emit(template, [mids["b"], b, c, mids["t"]])
+                elif flags in (("r", "l"),):
+                    emit(template, [a, b, mids["r"], mids["l"]])
+                    emit(template, [mids["l"], mids["r"], c, d])
+                elif len(flags) == 2:
+                    # adjacent corner: all-quad 3-element template
+                    pair = set(flags)
+                    if pair == {"b", "r"}:
+                        p, q, r_, s = a, b, c, d
+                        m1, m2 = mids["b"], mids["r"]
+                    elif pair == {"r", "t"}:
+                        p, q, r_, s = b, c, d, a
+                        m1, m2 = mids["r"], mids["t"]
+                    elif pair == {"t", "l"}:
+                        p, q, r_, s = c, d, a, b
+                        m1, m2 = mids["t"], mids["l"]
+                    else:  # {"l", "b"}
+                        p, q, r_, s = d, a, b, c
+                        m1, m2 = mids["l"], mids["b"]
+                    emit(template, [p, m1, center, s])
+                    emit(template, [m1, q, m2, center])
+                    emit(template, [center, m2, r_, s])
+                else:  # three hanging edges: 3 quads + 1 tri
+                    # Rotate the ring so the intact edge is p2-p3; then p0-p1 is
+                    # split at m_bottom, p1-p2 at m_right, p3-p0 at m_left.
+                    missing = next(side for side in ("b", "r", "t", "l") if side not in flags)
+                    rotation = {
+                        "t": ((a, b, c, d), "b", "r", "l"),
+                        "l": ((b, c, d, a), "r", "t", "b"),
+                        "b": ((c, d, a, b), "t", "l", "r"),
+                        "r": ((d, a, b, c), "l", "b", "t"),
+                    }[missing]
+                    (p0, p1, p2, p3), bottom_side, right_side, left_side = rotation
+                    m_bottom = mids[bottom_side]
+                    m_right = mids[right_side]
+                    m_left = mids[left_side]
+                    emit(template, [p0, m_bottom, center, m_left])
+                    emit(template, [m_bottom, p1, m_right, center])
+                    emit(template, [center, m_right, p2, p3])
+                    emit(template, [m_left, center, p3])
+
+    shells[:] = [s for s in shells if int(s.get("id", 0)) not in replaced_ids] + new_shells
+
+    # Split 2-node beams whose span now contains new lattice nodes on the same line.
+    beam_splits = 0
+    new_beams: list[dict[str, object]] = []
+    max_beam_id = max((int(b.get("id", 0)) for b in beams), default=0)
+    param_of_id = {}
+    for key, node_id_value in param_nodes.items():
+        param_of_id[node_id_value] = key
+    for beam in beams:
+        ids = [int(i) for i in beam.get("node_ids", ()) or ()]
+        if len(ids) != 2 or any(i not in param_of_id for i in ids):
+            new_beams.append(beam)
+            continue
+        (ua, va), (ub, vb) = param_of_id[ids[0]], param_of_id[ids[1]]
+        inner: list[tuple[float, int]] = []
+        if abs(ua - ub) < 1.0e-9:  # constant-u line, varying v
+            lo, hi = sorted((va, vb))
+            if periodic_v and hi - lo > 0.5 * v_span:
+                new_beams.append(beam)
+                continue
+            for (u_key, v_key), nid in param_nodes.items():
+                if nid in ids or abs(u_key - ua) > 1.0e-9:
+                    continue
+                if lo + 1.0e-9 < v_key < hi - 1.0e-9:
+                    inner.append((v_key, nid))
+        elif abs(va - vb) < 1.0e-9:
+            lo, hi = sorted((ua, ub))
+            for (u_key, v_key), nid in param_nodes.items():
+                if nid in ids or abs(v_key - va) > 1.0e-9:
+                    continue
+                if lo + 1.0e-9 < u_key < hi - 1.0e-9:
+                    inner.append((u_key, nid))
+        if not inner:
+            new_beams.append(beam)
+            continue
+        inner.sort()
+        forward = (va < vb) if abs(ua - ub) < 1.0e-9 else (ua < ub)
+        chain = [ids[0]] + [nid for _pos, nid in (inner if forward else reversed(inner))] + [ids[1]]
+        for start, end in zip(chain, chain[1:]):
+            max_beam_id += 1
+            segment = {key: value for key, value in beam.items() if key not in ("id", "node_ids")}
+            segment["id"] = max_beam_id
+            segment["node_ids"] = [int(start), int(end)]
+            new_beams.append(segment)
+        beam_splits += 1
+    beams[:] = new_beams
+
+    return {
+        "enabled": True,
+        "transition": _LOCAL_PATCH_TRANSITION,
+        "max_level": int(max_level),
+        "fine_element_size_m": float(base_size / (2 ** max_level)),
+        "coarse_element_size_m": float(base_size),
+        "refined_cells": int(sum(1 for value in level if value > 0)),
+        "quad_count": int(quad_count),
+        "tri_count": int(tri_count),
+        "beam_splits": int(beam_splits),
+        "new_edge_parents": {int(k): (int(v[0]), int(v[1])) for k, v in new_edge_parents.items()},
+        "windows": [
+            {k: w[k] for k in ("u0", "u1", "v0", "v1", "fine", "source", "center_u", "center_v", "extent")}
+            for w in windows
+        ],
+        "sources": [
+            {
+                "enabled": True,
+                "source": str(w["source"]),
+                "point_m": [float(w["center_u"]), float(w["center_v"])],
+                "impact_point_m": [float(w["center_u"]), float(w["center_v"])] if w["source"] == "impact" else None,
+                "fine_radius_m": float(w["extent"]),
+                "extent_m": float(w["extent"]),
+                "fine_element_size_m": float(base_size / (2 ** max_level)),
+                "requested_fine_size_m": float(w.get("requested_fine", 0.0)),
+                "floored_at_thickness": bool(w.get("floored", False)),
+            }
+            for w in windows
+        ],
+    }
 
 
 def _collision_impact_point(
@@ -2207,7 +2668,16 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
 
     adaptive_sources: list[dict[str, object]] = []
     adaptive_mesh_info: dict[str, object] = {"enabled": False, "sources": adaptive_sources}
-    if bool(config.point_refinement_enabled):
+    # The local-patch transition keeps the base grid uniform and refines
+    # conformally afterwards; it needs plain linear quads and beam members.
+    use_local_patch = (
+        _wants_local_patch_transition(config)
+        and not _member_webs_as_shells(config)
+        and not _wants_b3(config)
+        and not _wants_s6(config)
+        and not _wants_s8(config)
+    )
+    if bool(config.point_refinement_enabled) and not use_local_patch:
         x_breaks, y_breaks, point_refinement_info = _apply_detail_point_refinement(
             length,
             width,
@@ -2233,25 +2703,26 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             "sources": adaptive_sources,
         }
 
-    x_breaks, y_breaks, panel_refinement_info = _apply_local_patch_refinement(
-        config,
-        length,
-        width,
-        thickness,
-        x_breaks,
-        y_breaks,
-        mandatory_x,
-        mandatory_y,
-    )
-    if panel_refinement_info.get("enabled"):
-        adaptive_sources.append(panel_refinement_info)
-        adaptive_mesh_info = {
-            **panel_refinement_info,
-            "enabled": True,
-            "sources": adaptive_sources,
-        }
+    if not use_local_patch:
+        x_breaks, y_breaks, panel_refinement_info = _apply_local_patch_refinement(
+            config,
+            length,
+            width,
+            thickness,
+            x_breaks,
+            y_breaks,
+            mandatory_x,
+            mandatory_y,
+        )
+        if panel_refinement_info.get("enabled"):
+            adaptive_sources.append(panel_refinement_info)
+            adaptive_mesh_info = {
+                **panel_refinement_info,
+                "enabled": True,
+                "sources": adaptive_sources,
+            }
 
-    if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled):
+    if bool(config.collision_adaptive_mesh_enabled) and bool(config.collision_enabled) and not use_local_patch:
         impact = _collision_impact_point(config, length, width)
         if impact is not None:
             zone_factor = max(float(config.collision_adaptive_zone_factor), 0.5)
@@ -2459,6 +2930,35 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             )
             beam_id += 1
 
+    local_patch_info: dict[str, object] | None = None
+    if use_local_patch:
+        patch_windows = _local_patch_detail_windows(
+            config,
+            length,
+            width,
+            min(global_base_x, global_base_y),
+            thickness,
+        )
+        if patch_windows:
+            local_patch_info = _apply_local_patch_transition(
+                nodes,
+                shells,
+                beams,
+                patch_windows,
+                length,
+                width,
+                point_of_param=lambda u, v: (u, v, 0.0),
+                param_of_coords=lambda coords: (float(coords[0]), float(coords[1])),
+                periodic_v=False,
+            )
+            if local_patch_info:
+                adaptive_sources.extend(local_patch_info["sources"])
+                adaptive_mesh_info = {
+                    **{k: v for k, v in local_patch_info.items() if k not in ("sources", "new_edge_parents")},
+                    "enabled": True,
+                    "sources": adaptive_sources,
+                }
+
     if _wants_s6(config):
         _split_shells_to_triangles(nodes, shells, quadratic=True, element_type="S6")
     elif _wants_s3(config):
@@ -2500,9 +3000,35 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         "plot_grid": [[node_id(row, col) for col in range(cols)] for row in range(rows)],
         "plot_type": "flat",
         "mesh_generation": mesh_generation,
-        "mesh_metrics": _mesh_metrics_from_breaks(x_breaks, y_breaks, len(shells), len(nodes)),
+        "mesh_metrics": _patched_mesh_metrics(
+            _mesh_metrics_from_breaks(x_breaks, y_breaks, len(shells), len(nodes)),
+            local_patch_info,
+            len(shells),
+            len(nodes),
+        ),
         "adaptive_mesh": adaptive_mesh_info,
     }
+
+
+def _patched_mesh_metrics(
+    metrics: dict[str, float | int],
+    local_patch_info: dict[str, object] | None,
+    shell_count: int,
+    node_count: int,
+) -> dict[str, float | int]:
+    """Adjust break-based mesh metrics for a local-patch refined mesh."""
+    if not local_patch_info:
+        return metrics
+    fine = float(local_patch_info.get("fine_element_size_m", 0.0) or 0.0)
+    adjusted = dict(metrics)
+    adjusted["shell_element_count"] = int(shell_count)
+    adjusted["node_count"] = int(node_count)
+    if fine > 0.0:
+        adjusted["min_element_size_m"] = fine
+        max_size = float(adjusted.get("max_element_size_m", 0.0) or 0.0)
+        if max_size > 0.0:
+            adjusted["min_edge_over_max_edge"] = fine / max_size
+    return adjusted
 
 
 def _mesh_metrics_from_breaks(
@@ -2823,6 +3349,47 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                 )
                 beam_id += 1
 
+    local_patch_info: dict[str, object] | None = None
+    use_local_patch = (
+        _wants_local_patch_transition(config)
+        and not is_cone
+        and not _member_webs_as_shells(config)
+        and not _wants_b3(config)
+        and not _wants_s6(config)
+        and not _wants_s8(config)
+    )
+    if use_local_patch:
+        base_z_size = length / max(len(z_breaks) - 1, 1)
+        base_arc_size = circumference / max(len(arc_breaks) - 1, 1)
+        patch_windows = _local_patch_detail_windows(
+            config,
+            length,
+            circumference,
+            min(base_z_size, base_arc_size),
+            thickness,
+            radius=radius,
+        )
+        if patch_windows:
+            local_patch_info = _apply_local_patch_transition(
+                nodes,
+                shells,
+                beams,
+                patch_windows,
+                length,
+                circumference,
+                point_of_param=lambda u, v: _cylinder_point(radius, v / max(radius, 1.0e-9), u),
+                param_of_coords=lambda coords: (
+                    float(coords[2]),
+                    (math.atan2(float(coords[1]), float(coords[0])) % (2.0 * math.pi)) * radius,
+                ),
+                periodic_v=True,
+            )
+            if local_patch_info:
+                adaptive_mesh_info = {
+                    **{k: v for k, v in local_patch_info.items() if k not in ("new_edge_parents",)},
+                    "enabled": True,
+                }
+
     if _wants_s6(config):
         _split_shells_to_triangles(nodes, shells, radius=radius, quadratic=True, element_type="S6")
     elif _wants_s3(config):
@@ -2916,7 +3483,12 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         "bottom_ring_node_ids": start_ring,
         "top_ring_node_ids": end_ring,
         "mesh_generation": mesh_generation,
-        "mesh_metrics": _mesh_metrics_from_cylinder_breaks(z_breaks, arc_breaks, len(shells), len(nodes)),
+        "mesh_metrics": _patched_mesh_metrics(
+            _mesh_metrics_from_cylinder_breaks(z_breaks, arc_breaks, len(shells), len(nodes)),
+            local_patch_info,
+            len(shells),
+            len(nodes),
+        ),
         "adaptive_mesh": adaptive_mesh_info,
     }
 
@@ -4792,6 +5364,10 @@ def _apply_cylinder_detail_refinement(
     mandatory_z: tuple[float, ...],
     mandatory_arc: tuple[float, ...] = (),
 ) -> tuple[list[float], list[float], dict[str, object]]:
+    if _wants_local_patch_transition(config):
+        # Local-patch transition refines conformally after the base grid is
+        # built; leave the tensor-grid breaks untouched here.
+        return z_breaks, arc_breaks, {"enabled": False, "sources": []}
     base_z = float(length) / max(len(z_breaks) - 1, 1)
     base_arc = float(circumference) / max(len(arc_breaks) - 1, 1)
     radius = float(circumference) / (2.0 * math.pi) if circumference > 0.0 else 0.0
@@ -6533,6 +7109,23 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             )
         )
     if _adaptive_mesh.get("enabled"):
+        if str(_adaptive_mesh.get("transition", "")) == _LOCAL_PATCH_TRANSITION:
+            diagnostics.append(
+                "Local patch transition: {cells} base cells subdivided (max level {lvl}, 2:1 per level), "
+                "{quads} quads + {tris} transition triangles, {splits} beam segment(s) split; "
+                "mesh outside the detail windows is untouched.".format(
+                    cells=int(_adaptive_mesh.get("refined_cells", 0)),
+                    lvl=int(_adaptive_mesh.get("max_level", 0)),
+                    quads=int(_adaptive_mesh.get("quad_count", 0)),
+                    tris=int(_adaptive_mesh.get("tri_count", 0)),
+                    splits=int(_adaptive_mesh.get("beam_splits", 0)),
+                )
+            )
+        elif _wants_local_patch_transition(config):
+            diagnostics.append(
+                "Local patch transition was requested but is unavailable for this model "
+                "(needs linear S4/S3 shells, B2 beam members, non-conical geometry); using the graded grid."
+            )
         _sources = _adaptive_mesh.get("sources") or [_adaptive_mesh]
         for _source in _sources:
             if not isinstance(_source, dict):
