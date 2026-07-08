@@ -912,6 +912,31 @@ def _apply_local_patch_transition(
     if not any(level):
         return None
 
+    def surface_blend(u: float, v: float) -> float:
+        """Blend factor between chordal (0) and true-surface (1) placement.
+
+        Purely chordal refinement keeps the patch geometrically identical to
+        the faceted base mesh, but a subdivided FLAT facet then buckles like a
+        plate strip -- far softer than the real curved shell (spurious local
+        modes at a fraction of the true load factor).  Purely true-surface
+        placement restores curvature but steps the patch proud of the
+        neighbouring facets by the chord sagitta (a static stress dimple).
+        The blend ramps from chordal at the window boundary (where emitted
+        cells meet untouched facets) to the true surface deep inside, so the
+        geometry is smooth AND the fine region carries real shell curvature.
+        """
+        best = 0.0
+        offsets = (0.0, -v_span, v_span) if periodic_v else (0.0,)
+        for w in windows:
+            for off in offsets:
+                margin_u = min(u - float(w["u0"]), float(w["u1"]) - u)
+                margin_v = min(v + off - float(w["v0"]), float(w["v1"]) - (v + off))
+                depth = min(margin_u, margin_v)
+                if depth <= 0.0:
+                    continue
+                best = max(best, min(1.0, depth / max(base_size, 1.0e-9)))
+        return best
+
     # Edge-neighbour lookup keyed by shared-edge signature.
     def edge_keys(c: dict[str, object]) -> dict[str, tuple]:
         return {
@@ -967,15 +992,19 @@ def _apply_local_patch_transition(
         if existing is not None:
             return existing
         max_node_id += 1
-        # New nodes are placed on the PARENT CELL's bilinear (chordal) surface
-        # when a locator is supplied, not on the exact mapped surface: on a
-        # coarsely faceted cylinder the true-surface points sit up to the
-        # chord sagitta proud of the neighbouring untouched facets, and the
-        # bulged patch then behaves like a soft geometric imperfection (low
-        # membrane stress inside, a concentration ring outside).  Chordal
-        # placement keeps the refined patch geometrically identical to the
-        # base mesh it replaces.
-        coords = locator(u, v) if locator is not None else point_of_param(u, wrap_v(v))
+        # New nodes blend between the parent cell's bilinear (chordal) surface
+        # and the exact mapped surface via ``surface_blend`` -- see its
+        # docstring for why neither extreme works on a coarsely faceted base.
+        if locator is not None:
+            blend = surface_blend(u, v)
+            chord = np.asarray(locator(u, v), dtype=float)
+            if blend <= 0.0:
+                coords = chord
+            else:
+                exact = np.asarray(point_of_param(u, wrap_v(v)), dtype=float)
+                coords = (1.0 - blend) * chord + blend * exact
+        else:
+            coords = point_of_param(u, wrap_v(v))
         nodes.append({"id": max_node_id, "coords": [float(coords[0]), float(coords[1]), float(coords[2])]})
         coords_by_id[max_node_id] = [float(coords[0]), float(coords[1]), float(coords[2])]
         param_nodes[key] = max_node_id
@@ -3215,6 +3244,21 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             target_size = mesh_size_cap / max(_fidelity_refinement(config.mesh_fidelity), 1)
             circumferential_div = max(circumferential_div, int(math.ceil(circumference / target_size)))
             axial_div = max(axial_div, int(math.ceil(length / target_size)))
+    if _wants_local_patch_transition(config) and not is_cone and radius > 0.0 and thickness > 0.0:
+        # Curvature-adequate base ring for the local-patch transition: the
+        # patch subdivides base facets, and if the facet chord sagitta is
+        # comparable to the plate thickness the subdivided facet behaves as a
+        # FLAT PLATE -- spuriously soft in buckling (plate-strip modes at a
+        # fraction of the true shell load factor) or, placed on the true
+        # surface, bulged proud of its neighbours (membrane stress dimple).
+        # Cap the sagitta at t/4 so both artifacts stay negligible.
+        sagitta_limit = 0.25 * thickness
+        cos_ratio = min(max(1.0 - sagitta_limit / radius, -1.0), 1.0)
+        curvature_div = int(math.ceil(math.pi / max(math.acos(cos_ratio), 1.0e-6)))
+        curvature_div = min(max(curvature_div, 8), 96)
+        if curvature_div > circumferential_div:
+            circumferential_div = curvature_div
+            mesh_generation["local_patch_curvature_min_circumferential_div"] = int(curvature_div)
     if stiffener_count > 0:
         circumferential_div = _multiple_at_least(circumferential_div, stiffener_count)
     if _wants_b3(config) and config.include_girders and geometry.get("has_girder"):

@@ -359,3 +359,120 @@ def test_axial_cylinder_stress_is_mesh_style_invariant() -> None:
             assert uz_peak == pytest.approx(analytical_uz, rel=0.10), (label, uz_peak)
     finally:
         fs._backend_solve_linear = original
+
+
+def test_local_patch_buckling_has_no_spurious_flat_facet_modes() -> None:
+    """Release-blocker follow-up: subdividing a coarsely faceted cylinder
+    chordally made the patch buckle as a FLAT PLATE at a fraction of the true
+    shell load factor (spiky single-element modes, LF ~3 vs classical ~7).
+    With the curvature-adequate base ring + blended node placement the first
+    buckling factor must stay at shell level, above the classical value."""
+    from anystruct import fe_solver as fs
+
+    cylinder = {
+        "geometry": "cylinder",
+        "radius_m": 2.0,
+        "length_m": 30.0,
+        "thickness_m": 0.030,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fs.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        boundary_condition="auto",
+        include_end_lids=True,
+        axial_force_n=50.0e6,
+        pressure_pa=0.0,
+        num_buckling_modes=3,
+        detail_transition_style="local patch (quad+tri)",
+        point_refinement_enabled=True,
+        point_refinement_x_m=10.0,
+        point_refinement_y_m=5.0,
+        point_refinement_extent_m=1.0,
+        point_refinement_growth_factor=1.35,
+    )
+    result = fs.run_production_fem(cylinder, config)
+    assert result.status == "ok"
+    factors = tuple(float(value) for value in result.buckling_factors)
+    assert factors, "buckling factors expected"
+    # Classical axisymmetric axial buckling: sigma_cr = E t / (r sqrt(3(1-nu^2)))
+    # = 1.91 GPa -> LF = 7.2 at 265 MPa membrane stress.  Flat-facet plate
+    # modes sat at ~3; anything below ~6 signals the spurious softness.
+    assert min(factors) > 6.0, factors
+    # And the refined model must not report the coarse-mesh over-prediction
+    # unchallenged either (coarse gave 33; adequate resolution sits below 20).
+    assert min(factors) < 20.0, factors
+
+
+def test_axial_flat_plate_stress_is_mesh_style_invariant() -> None:
+    """Flat-plate counterpart of the cylinder verification case: the curved-
+    shell fixes (tributary end loads, surface blend, curvature base floor)
+    must leave flat panels exact.  Unstiffened plate L=4 m, W=3 m, t=12 mm
+    under 10 MN balanced axial force: sigma = F/(W t) = 277.8 MPa uniform and
+    the plate stays exactly planar for every mesh style."""
+    from anystruct import fe_solver as fs
+
+    captured = {}
+    original = fs._backend_solve_linear
+
+    def wrapper(model, load_case, **kwargs):
+        displacements, info = original(model, load_case, **kwargs)
+        captured["model"] = model
+        captured["disp"] = displacements
+        return displacements, info
+
+    flat = {
+        "geometry": "flat panel",
+        "length_m": 4.0,
+        "width_m": 3.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    refine = dict(
+        point_refinement_enabled=True,
+        point_refinement_x_m=2.0,
+        point_refinement_y_m=1.5,
+        point_refinement_extent_m=0.5,
+        point_refinement_growth_factor=1.35,
+    )
+    styles = {
+        "uniform": {},
+        "graded grid": dict(detail_transition_style="graded grid", **refine),
+        "local patch (quad+tri)": dict(detail_transition_style="local patch (quad+tri)", **refine),
+    }
+    analytical_vm = 10.0e6 / (3.0 * 0.012)
+
+    fs._backend_solve_linear = wrapper
+    try:
+        for label, overrides in styles.items():
+            config = fs.LightweightFEMConfig(
+                mesh_fidelity="coarse",
+                boundary_condition="auto",
+                axial_force_n=10.0e6,
+                pressure_pa=0.0,
+                **overrides,
+            )
+            generated = build_generated_geometry(flat, config)
+            planarity = max(abs(float(node["coords"][2])) for node in generated["nodes"])
+            assert planarity == 0.0, (label, "flat panel must stay exactly planar")
+
+            result = fs.run_production_fem(flat, config)
+            assert result.status == "ok", (label, result.status)
+            model, disp = captured["model"], captured["disp"]
+            stresses = fs._backend_compute_stresses(model, disp)
+            vm_values = []
+            for element_id, stress in stresses.items():
+                element = model.mesh.elements.get(element_id)
+                if element is None or not hasattr(element, "thickness"):
+                    continue
+                values = np.asarray(stress.get("von_mises", ()), dtype=float).reshape(-1)
+                if values.size:
+                    vm_values.append(float(np.max(values)))
+            vm_values = np.asarray(vm_values)
+            # Uniform membrane state: consistent tributary loading keeps the
+            # field exact to solver precision for every mesh style.
+            assert vm_values.min() == pytest.approx(analytical_vm, rel=1.0e-3), (label, vm_values.min())
+            assert vm_values.max() == pytest.approx(analytical_vm, rel=1.0e-3), (label, vm_values.max())
+    finally:
+        fs._backend_solve_linear = original
