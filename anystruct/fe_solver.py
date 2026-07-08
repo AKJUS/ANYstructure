@@ -955,14 +955,27 @@ def _apply_local_patch_transition(
         param_nodes[(round(p[0], 9), round(wrap_v(p[1]), 9))] = node_id_value
     new_edge_parents: dict[int, tuple[int, int]] = {}
 
-    def node_at(u: float, v: float, parents: tuple[int, int] | None = None) -> int:
+    def node_at(
+        u: float,
+        v: float,
+        parents: tuple[int, int] | None = None,
+        locator=None,
+    ) -> int:
         nonlocal max_node_id
         key = (round(u, 9), round(wrap_v(v), 9))
         existing = param_nodes.get(key)
         if existing is not None:
             return existing
         max_node_id += 1
-        coords = point_of_param(u, wrap_v(v))
+        # New nodes are placed on the PARENT CELL's bilinear (chordal) surface
+        # when a locator is supplied, not on the exact mapped surface: on a
+        # coarsely faceted cylinder the true-surface points sit up to the
+        # chord sagitta proud of the neighbouring untouched facets, and the
+        # bulged patch then behaves like a soft geometric imperfection (low
+        # membrane stress inside, a concentration ring outside).  Chordal
+        # placement keeps the refined patch geometrically identical to the
+        # base mesh it replaces.
+        coords = locator(u, v) if locator is not None else point_of_param(u, wrap_v(v))
         nodes.append({"id": max_node_id, "coords": [float(coords[0]), float(coords[1]), float(coords[2])]})
         coords_by_id[max_node_id] = [float(coords[0]), float(coords[1]), float(coords[2])]
         param_nodes[key] = max_node_id
@@ -1011,6 +1024,23 @@ def _apply_local_patch_transition(
             (0, 0): node_at(u0, v0), (n, 0): node_at(u1, v0),
             (0, n): node_at(u0, v1), (n, n): node_at(u1, v1),
         }
+        corner_xyz = {
+            key: np.asarray(coords_by_id[node_id], dtype=float)
+            for key, node_id in corner_ids.items()
+        }
+
+        def cell_point(u: float, v: float) -> np.ndarray:
+            # Bilinear (chordal) interpolation of the parent cell corners:
+            # shared edges are linear between the shared corner nodes, so
+            # adjacent refined cells and unrefined neighbours stay conforming.
+            fu = (u - u0) / max(u1 - u0, 1.0e-30)
+            fv = (v - v0) / max(v1 - v0, 1.0e-30)
+            return (
+                (1.0 - fu) * (1.0 - fv) * corner_xyz[(0, 0)]
+                + fu * (1.0 - fv) * corner_xyz[(n, 0)]
+                + fu * fv * corner_xyz[(n, n)]
+                + (1.0 - fu) * fv * corner_xyz[(0, n)]
+            )
 
         def lattice(i: int, j: int) -> int:
             u = u0 + du * i
@@ -1020,7 +1050,7 @@ def _apply_local_patch_transition(
                 parents = (corner_ids[(i, 0)], corner_ids[(i, n)])
             elif j in (0, n) and 0 < i < n:
                 parents = (corner_ids[(0, j)], corner_ids[(n, j)])
-            return node_at(u, v, parents)
+            return node_at(u, v, parents, locator=cell_point)
 
         for i in range(n):
             for j in range(n):
@@ -1040,17 +1070,17 @@ def _apply_local_patch_transition(
                 um = u0 + du * (i + 0.5)
                 vm = v0 + dv * (j + 0.5)
                 mid = {
-                    "b": (lambda: node_at(um, v0 + dv * j, (a, b))),
-                    "r": (lambda: node_at(u0 + du * (i + 1), vm, (b, c))),
-                    "t": (lambda: node_at(um, v0 + dv * (j + 1), (d, c))),
-                    "l": (lambda: node_at(u0 + du * i, vm, (a, d))),
+                    "b": (lambda: node_at(um, v0 + dv * j, (a, b), locator=cell_point)),
+                    "r": (lambda: node_at(u0 + du * (i + 1), vm, (b, c), locator=cell_point)),
+                    "t": (lambda: node_at(um, v0 + dv * (j + 1), (d, c), locator=cell_point)),
+                    "l": (lambda: node_at(u0 + du * i, vm, (a, d), locator=cell_point)),
                 }
                 flags = tuple(side for side in ("b", "r", "t", "l") if hang[side])
                 template = cell["shell"]
                 if not flags:
                     emit(template, [a, b, c, d])
                     continue
-                center = node_at(um, vm)
+                center = node_at(um, vm, locator=cell_point)
                 mids = {side: mid[side]() for side in flags}
                 if len(flags) == 4:
                     emit(template, [a, mids["b"], center, mids["l"]])
@@ -6325,7 +6355,17 @@ def _run_collision_response(
     contact_failure_summary = impact_diagnostics.get("contact_failure_summary", {}) or {}
     nonlinear_failure_summary = impact_diagnostics.get("nonlinear_failure_summary", {}) or {}
     state_vm_history = tuple(impact_diagnostics.get("state_von_mises_history", ()) or ())
-    records = tuple(damage_summary.get("records", ()) or ())
+    # Snapshot hiding must use the DELETION events, not the per-element damage
+    # state records: state records exist for every element with plastic state
+    # and carry no time stamp, so feeding them to the per-time deletion filter
+    # hid the entire skin from every snapshot on nonlinear runs.
+    records = tuple(damage_summary.get("deletion_records", ()) or ())
+    if not records:
+        records = tuple(
+            record
+            for record in damage_summary.get("records", ()) or ()
+            if isinstance(record, dict) and "trigger_name" in record
+        )
     times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
     displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
     sphere_positions = np.asarray(getattr(impact, "sphere_positions", np.zeros((0, 3))), dtype=float)
@@ -6758,6 +6798,46 @@ def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | 
     return diagnostics
 
 
+def _ring_tributary_fractions(model, node_ids: list[int]) -> dict[int, float]:
+    """Tributary circumference fraction per node of a closed end ring.
+
+    End loads must be distributed proportionally to the arc each node
+    represents: refined meshes cluster ring nodes locally, and an equal
+    per-node split then concentrates the resultant on the refined side,
+    turning a pure axial force into a spurious global bending moment.
+    """
+    entries: list[tuple[float, int]] = []
+    for node_id in node_ids:
+        node = model.mesh.get_node(int(node_id))
+        if node is None:
+            continue
+        coords = node.coords()
+        theta = math.atan2(float(coords[1]), float(coords[0])) % (2.0 * math.pi)
+        entries.append((theta, int(node.id)))
+    if not entries:
+        return {}
+    if len(entries) == 1:
+        return {entries[0][1]: 1.0}
+    entries.sort()
+    full = 2.0 * math.pi
+    count = len(entries)
+    fractions: dict[int, float] = {}
+    for index, (theta, node_id) in enumerate(entries):
+        gap_prev = (theta - entries[index - 1][0]) % full
+        gap_next = (entries[(index + 1) % count][0] - theta) % full
+        fractions[node_id] = 0.5 * (gap_prev + gap_next) / full
+    return fractions
+
+
+def _edge_tributary_fractions(nodes: list[object], axis: int = 1) -> dict[int, float]:
+    """Tributary length fraction per node of an open panel edge."""
+    weights = _line_node_weights(list(nodes), axis)
+    total = sum(weights.values())
+    if total <= 0.0:
+        return {node_id: 1.0 / max(len(weights), 1) for node_id in weights}
+    return {node_id: weight / total for node_id, weight in weights.items()}
+
+
 def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial_force_n: float) -> None:
     try:
         axial_force = float(axial_force_n)
@@ -6770,10 +6850,12 @@ def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial
         top = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
         if not bottom or not top:
             return
-        for node_id in bottom:
-            load_case.add_nodal_load(node_id, forces=np.array([0.0, 0.0, axial_force / len(bottom)], dtype=float))
-        for node_id in top:
-            load_case.add_nodal_load(node_id, forces=np.array([0.0, 0.0, -axial_force / len(top)], dtype=float))
+        for ring, sign in ((bottom, 1.0), (top, -1.0)):
+            fractions = _ring_tributary_fractions(model, ring)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    node_id, forces=np.array([0.0, 0.0, sign * axial_force * fraction], dtype=float)
+                )
         return
     shell_node_ids = sorted({node_id for shell in generated_geometry.get("shells", []) for node_id in shell.get("node_ids", [])})
     nodes = [model.mesh.get_node(int(node_id)) for node_id in shell_node_ids]
@@ -6788,10 +6870,12 @@ def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial
     right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
     if not left or not right:
         return
-    for node in left:
-        load_case.add_nodal_load(int(node.id), forces=np.array([axial_force / len(left), 0.0, 0.0], dtype=float))
-    for node in right:
-        load_case.add_nodal_load(int(node.id), forces=np.array([-axial_force / len(right), 0.0, 0.0], dtype=float))
+    for edge, sign in ((left, 1.0), (right, -1.0)):
+        fractions = _edge_tributary_fractions(edge, axis=1)
+        for node_id, fraction in fractions.items():
+            load_case.add_nodal_load(
+                int(node_id), forces=np.array([sign * axial_force * fraction, 0.0, 0.0], dtype=float)
+            )
 
 
 def _line_node_weights(nodes: list[object], axis: int, closed_length: float = 0.0) -> dict[int, float]:
@@ -7006,10 +7090,12 @@ def _add_generated_end_moments(model, load_case, generated_geometry: dict, momen
         right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
         if not left or not right:
             return
-        for node in left:
-            load_case.add_nodal_load(int(node.id), moments=np.array([0.0, moment / len(left), 0.0], dtype=float))
-        for node in right:
-            load_case.add_nodal_load(int(node.id), moments=np.array([0.0, -moment / len(right), 0.0], dtype=float))
+        for edge, sign in ((left, 1.0), (right, -1.0)):
+            fractions = _edge_tributary_fractions(edge, axis=1)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    int(node_id), moments=np.array([0.0, sign * moment * fraction, 0.0], dtype=float)
+                )
         return
 
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
@@ -7018,14 +7104,23 @@ def _add_generated_end_moments(model, load_case, generated_geometry: dict, momen
         return
 
     def add_ring_moment(node_ids: list[int], sign: float) -> None:
-        nodes = [model.mesh.get_node(node_id) for node_id in node_ids]
-        nodes = [node for node in nodes if node is not None]
-        denominator = sum(float(node.x) ** 2 for node in nodes)
+        # Tributary-weighted linear axial distribution p_i = w_i (a + b x_i)
+        # with the two constraints sum(p) = 0 (no spurious net axial force on
+        # clustered rings) and sum(p x) = M (exact bending moment).
+        fractions = _ring_tributary_fractions(model, node_ids)
+        if not fractions:
+            return
+        coords = {node_id: model.mesh.get_node(node_id).coords() for node_id in fractions}
+        s_x = sum(w * float(coords[nid][0]) for nid, w in fractions.items())
+        s_xx = sum(w * float(coords[nid][0]) ** 2 for nid, w in fractions.items())
+        denominator = s_xx - s_x * s_x
         if denominator <= 1.0e-12:
             return
-        for node in nodes:
-            axial_force = -sign * moment * float(node.x) / denominator
-            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, 0.0, axial_force], dtype=float))
+        b = moment / denominator
+        a = -b * s_x
+        for node_id, w in fractions.items():
+            axial_force = -sign * w * (a + b * float(coords[node_id][0]))
+            load_case.add_nodal_load(int(node_id), forces=np.array([0.0, 0.0, axial_force], dtype=float))
 
     add_ring_moment(bottom_ring, -1.0)
     add_ring_moment(top_ring, 1.0)
@@ -7049,20 +7144,24 @@ def _add_generated_shear_force(model, load_case, generated_geometry: dict, shear
         right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
         if not left or not right:
             return
-        for node in left:
-            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, -shear / len(left), 0.0], dtype=float))
-        for node in right:
-            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, shear / len(right), 0.0], dtype=float))
+        for edge, sign in ((left, -1.0), (right, 1.0)):
+            fractions = _edge_tributary_fractions(edge, axis=1)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    int(node_id), forces=np.array([0.0, sign * shear * fraction, 0.0], dtype=float)
+                )
         return
 
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
     top_ring = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
     if not bottom_ring or not top_ring:
         return
-    for node_id in bottom_ring:
-        load_case.add_nodal_load(node_id, forces=np.array([0.0, -shear / len(bottom_ring), 0.0], dtype=float))
-    for node_id in top_ring:
-        load_case.add_nodal_load(node_id, forces=np.array([0.0, shear / len(top_ring), 0.0], dtype=float))
+    for ring, sign in ((bottom_ring, -1.0), (top_ring, 1.0)):
+        fractions = _ring_tributary_fractions(model, ring)
+        for node_id, fraction in fractions.items():
+            load_case.add_nodal_load(
+                node_id, forces=np.array([0.0, sign * shear * fraction, 0.0], dtype=float)
+            )
 
 
 def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
@@ -7083,10 +7182,12 @@ def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, 
         right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
         if not left or not right:
             return
-        for node in left:
-            load_case.add_nodal_load(int(node.id), moments=np.array([moment / len(left), 0.0, 0.0], dtype=float))
-        for node in right:
-            load_case.add_nodal_load(int(node.id), moments=np.array([-moment / len(right), 0.0, 0.0], dtype=float))
+        for edge, sign in ((left, 1.0), (right, -1.0)):
+            fractions = _edge_tributary_fractions(edge, axis=1)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    int(node_id), moments=np.array([sign * moment * fraction, 0.0, 0.0], dtype=float)
+                )
         return
 
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
@@ -7095,15 +7196,22 @@ def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, 
         return
 
     def add_ring_torsion(node_ids: list[int], sign: float) -> None:
-        nodes = [model.mesh.get_node(node_id) for node_id in node_ids]
-        nodes = [node for node in nodes if node is not None]
-        denominator = sum(float(node.x)**2 + float(node.y)**2 for node in nodes)
+        # Tributary-weighted tangential traction: exact torque on clustered
+        # rings without a spurious net in-plane force.
+        fractions = _ring_tributary_fractions(model, node_ids)
+        if not fractions:
+            return
+        coords = {node_id: model.mesh.get_node(node_id).coords() for node_id in fractions}
+        denominator = sum(
+            w * (float(coords[nid][0]) ** 2 + float(coords[nid][1]) ** 2)
+            for nid, w in fractions.items()
+        )
         if denominator <= 1.0e-12:
             return
-        for node in nodes:
-            fx = sign * moment * float(node.y) / denominator
-            fy = -sign * moment * float(node.x) / denominator
-            load_case.add_nodal_load(int(node.id), forces=np.array([fx, fy, 0.0], dtype=float))
+        for node_id, w in fractions.items():
+            fx = sign * moment * w * float(coords[node_id][1]) / denominator
+            fy = -sign * moment * w * float(coords[node_id][0]) / denominator
+            load_case.add_nodal_load(int(node_id), forces=np.array([fx, fy, 0.0], dtype=float))
 
     add_ring_torsion(bottom_ring, -1.0)
     add_ring_torsion(top_ring, 1.0)

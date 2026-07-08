@@ -4715,6 +4715,7 @@ class RuntimeFEMWindow:
         self._bind_point_refinement_z_sync()
         self._live_graph_figure = None
         self._live_graph_axis = None
+        self._live_graph_axis2 = None
         self._live_graph_canvas = None
         self._live_graph_state: dict[str, Any] = {"kind": "idle", "series": {}, "last_draw": 0.0}
         self._custom_load_entries: list[dict[str, Any]] = []
@@ -9560,6 +9561,32 @@ class RuntimeFEMWindow:
         ys.append(y_value)
         self._live_graph_redraw()
 
+    @staticmethod
+    def _live_graph_axis_split(series: dict[str, tuple[list, list]]) -> set[str]:
+        """Series names that belong on a secondary y-axis.
+
+        When magnitudes are mixed (contact force in kN next to displacement
+        in mm), the large series flattens the small ones to the x-axis.  The
+        populated series are split at the widest log-scale gap when the
+        overall spread exceeds one order of magnitude; the large group moves
+        to the right-hand axis.
+        """
+        scales = {
+            name: max((abs(float(value)) for value in ys), default=0.0)
+            for name, (xs, ys) in series.items()
+            if xs
+        }
+        positive = {name: scale for name, scale in scales.items() if scale > 0.0}
+        if len(positive) < 2:
+            return set()
+        ordered = sorted(positive.items(), key=lambda item: item[1])
+        if ordered[-1][1] / ordered[0][1] < 10.0:
+            return set()
+        log_scales = [math.log10(scale) for _name, scale in ordered]
+        gaps = [log_scales[index + 1] - log_scales[index] for index in range(len(log_scales) - 1)]
+        split_index = gaps.index(max(gaps)) + 1
+        return {name for name, _scale in ordered[split_index:]}
+
     def _live_graph_redraw(self, force: bool = False) -> None:
         axis = self._live_graph_axis
         canvas = self._live_graph_canvas
@@ -9571,19 +9598,40 @@ class RuntimeFEMWindow:
         self._live_graph_state["last_draw"] = now
         kind = str(self._live_graph_state.get("kind", "idle"))
         xlabel, title = self._LIVE_GRAPH_LABELS.get(kind, self._LIVE_GRAPH_LABELS["generic"])
+        secondary = getattr(self, "_live_graph_axis2", None)
+        if secondary is not None:
+            try:
+                secondary.remove()
+            except Exception:
+                pass
+            self._live_graph_axis2 = None
         axis.clear()
         series = self._live_graph_state.get("series", {}) or {}
-        drew_any = False
-        for name, (xs, ys) in series.items():
+        right_names = self._live_graph_axis_split(series)
+        right_axis = None
+        if right_names:
+            right_axis = axis.twinx()
+            self._live_graph_axis2 = right_axis
+        handles = []
+        labels = []
+        color_cycle = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b")
+        for color_index, (name, (xs, ys)) in enumerate(series.items()):
             if not xs:
                 continue
+            target = right_axis if (right_axis is not None and name in right_names) else axis
+            label = name + (" (right)" if target is right_axis else "")
+            color = color_cycle[color_index % len(color_cycle)]
             if kind == "buckling":
-                axis.plot(xs, ys, marker="o", linestyle="", markersize=4, label=name)
+                line, = target.plot(xs, ys, marker="o", linestyle="", markersize=4, label=label, color=color)
             else:
-                axis.plot(xs, ys, linewidth=1.2, label=name)
-            drew_any = True
-        if drew_any:
-            axis.legend(fontsize=6, loc="best")
+                line, = target.plot(
+                    xs, ys, linewidth=1.2, label=label, color=color,
+                    linestyle="--" if target is right_axis else "-",
+                )
+            handles.append(line)
+            labels.append(label)
+        if handles:
+            axis.legend(handles, labels, fontsize=6, loc="best")
         else:
             axis.text(0.5, 0.5, "waiting for data" if kind != "idle" else title,
                       ha="center", va="center", fontsize=7, color="#6b7280",
@@ -9591,6 +9639,8 @@ class RuntimeFEMWindow:
         axis.set_xlabel(xlabel, fontsize=6)
         axis.set_title(title, fontsize=7)
         axis.tick_params(labelsize=6)
+        if right_axis is not None:
+            right_axis.tick_params(labelsize=6)
         axis.grid(True, linewidth=0.3, alpha=0.5)
         try:
             self._live_graph_figure.tight_layout(pad=0.4)

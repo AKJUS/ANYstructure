@@ -3456,3 +3456,76 @@ def test_post_buckling_field_sync_sets_dependent_inputs():
     window.analysis_type = Var("linear eigenvalue")
     window._apply_post_buckling_field_sync()
     assert window.analysis_type.get() == "linear eigenvalue"
+
+
+def test_live_graph_axis_split_moves_large_series_to_secondary_axis():
+    """Mixed magnitudes: the large series (contact force) moves to the right
+    axis so small ones (displacement, strain) stay readable, while similar
+    magnitudes keep a single axis."""
+    split = fe_runtime_solver.RuntimeFEMWindow._live_graph_axis_split
+
+    mixed = {
+        "max displacement [mm]": ([0.0, 1.0], [2.0, 8.0]),
+        "contact force [kN]": ([0.0, 1.0], [400.0, 980.0]),
+        "plastic strain [%]": ([0.0, 1.0], [0.1, 1.5]),
+    }
+    assert split(mixed) == {"contact force [kN]"}
+
+    similar = {
+        "load factor": ([0.0, 1.0], [0.5, 1.6]),
+        "plastic strain [%]": ([0.0, 1.0], [0.2, 0.9]),
+    }
+    assert split(similar) == set()
+
+    assert split({"only": ([0.0], [5.0])}) == set()
+    assert split({}) == set()
+
+
+def test_nonlinear_collision_snapshots_keep_refined_skin_surfaces():
+    """Regression: nonlinear collision snapshots hid the entire refined skin
+    because per-element damage-state records (no timestamp) were fed to the
+    per-time deletion filter -- the GUI then fell back to the coarse plot
+    grid, which only looked right for graded/uniform meshes."""
+    from anystruct import fe_solver
+
+    flat = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.5,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": False,
+        "stiffener_spacing_m": 0.75,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        boundary_condition="clamped",
+        collision_enabled=True,
+        collision_adaptive_mesh_enabled=True,
+        collision_adaptive_fine_size_m=0.06,
+        collision_adaptive_extent_m=0.3,
+        collision_radius_m=0.15,
+        collision_start_x_m=1.0,
+        collision_start_y_m=0.75,
+        collision_start_z_m=0.3,
+        collision_vector_x=0.0,
+        collision_vector_y=0.0,
+        collision_vector_z=-1.0,
+        collision_mass_kg=200.0,
+        collision_speed_mps=3.0,
+        collision_material_nonlinear_enabled=True,
+        detail_transition_style="local patch (quad+tri)",
+    )
+    generated = fe_solver.build_generated_geometry(flat, config)
+    skin_count = sum(1 for shell in generated.get("shells", []) if "role" not in shell)
+    assert (generated.get("adaptive_mesh") or {}).get("transition") == "local patch (quad+tri)"
+
+    result = fe_solver.run_production_fem(flat, config)
+    visualization = result.visualization or {}
+    snapshots = tuple((visualization.get("time_domain") or {}).get("snapshots") or ())
+    assert snapshots, result.status
+    for snapshot in (snapshots[0], snapshots[-1]):
+        surfaces = tuple((snapshot or {}).get("skin_shell_surfaces") or ())
+        deleted = len(tuple((snapshot or {}).get("hidden_deleted_element_ids", ()) or ()))
+        assert len(surfaces) + deleted == skin_count, (len(surfaces), deleted, skin_count)
+        assert len(surfaces) > 0.9 * skin_count, "refined skin must stay visible in snapshots"
