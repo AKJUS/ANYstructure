@@ -202,6 +202,17 @@ class NonlinearTransientConfig:
     tangent_reuse_iterations: int = 0
     record_element_state_history: bool = True
     kinematics: str = "von_karman"
+    # Energy-based stagnation acceptance: when the Newton iterate is a fixed
+    # point (displacement increment and contact change below their limits)
+    # and the residual's energy content |delta . r| is a negligible fraction
+    # of the impact energy, the step is accepted instead of burning cutbacks
+    # on a residual criterion that cannot be met (e.g. force/tangent noise
+    # floors on rotational equations).  Set to 0 to disable.
+    stagnation_energy_tolerance: float = 1.0e-8
+    # Start the transient from the static equilibrium of the base load case
+    # instead of applying it as a sudden step (which rings the structure at
+    # its axial period through the whole impact).
+    equilibrate_base_load: bool = True
 
     def __post_init__(self) -> None:
         if str(self.kinematics).lower() not in {"von_karman", "corotational"}:
@@ -225,6 +236,8 @@ class NonlinearTransientConfig:
             raise ValueError("NonlinearTransientConfig.min_dt must be positive")
         if self.tangent_reuse_iterations < 0:
             raise ValueError("NonlinearTransientConfig.tangent_reuse_iterations must be non-negative")
+        if self.stagnation_energy_tolerance < 0.0:
+            raise ValueError("NonlinearTransientConfig.stagnation_energy_tolerance must be non-negative")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -241,6 +254,8 @@ class NonlinearTransientConfig:
             "tangent_reuse_iterations": int(self.tangent_reuse_iterations),
             "record_element_state_history": bool(self.record_element_state_history),
             "kinematics": self.kinematics,
+            "stagnation_energy_tolerance": float(self.stagnation_energy_tolerance),
+            "equilibrate_base_load": bool(self.equilibrate_base_load),
         }
 
 
@@ -1717,6 +1732,8 @@ def _solve_transient_sphere_impact_nonlinear(
     v_full = _full_initial_vector(transient_config.initial_velocity, total_dofs)
     q_red = np.asarray((q - u0)[np.asarray(independent_dofs, dtype=int)], dtype=float).reshape(-1)
     v_red = np.asarray(v_full[np.asarray(independent_dofs, dtype=int)], dtype=float).reshape(-1)
+    impact_energy_reference = max(0.5 * float(sphere.mass) * float(sphere.speed) ** 2, 1.0)
+    base_load_equilibrated = False
     committed_states: Dict[int, Any] = {}
     deleted_element_ids: set[int] = set()
     damage_deleted_element_ids: set[int] = set()
@@ -1724,6 +1741,60 @@ def _solve_transient_sphere_impact_nonlinear(
     plastic_damage_states: Dict[int, Dict[str, Any]] = {}
     damage_scale_by_element: Dict[int, float] = {}
     linear_matrix_terms: Optional[Tuple[int, Tuple[LinearElementMatrixTerms, ...]]] = None
+    if (
+        bool(nl.equilibrate_base_load)
+        and transient_config.initial_displacement is None
+        and float(np.linalg.norm(base_load)) > 0.0
+    ):
+        # Start from the NONLINEAR static equilibrium of the base load
+        # instead of applying it as a step at t = 0: a stepped preload rings
+        # the structure at its axial period through the whole impact,
+        # distorting stresses and degrading Newton convergence.  A short
+        # Newton solve with residual backtracking finds the equilibrium; if
+        # it cannot converge (e.g. the preload alone is beyond a limit
+        # point), the solver falls back to the stepped start.
+        base_reference = max(float(np.linalg.norm(np.asarray(T.T @ base_load, dtype=float))), 1.0e-30)
+        q_static = np.zeros_like(q_red)
+        try:
+            for static_iteration in range(25):
+                F_int_static, K_static, _trial_unused = assemble_nonlinear(
+                    reconstruct_full_solution(T, q_static, u0), {}, tangent=True
+                )
+                residual_static = np.asarray(T.T @ (base_load - F_int_static), dtype=float).reshape(-1)
+                residual_static_norm = float(np.linalg.norm(residual_static))
+                if residual_static_norm <= 1.0e-3 * base_reference:
+                    base_load_equilibrated = True
+                    break
+                K_static_red = (T.T @ K_static @ T).tocsr()
+                static_handle = factorize(
+                    K_static_red,
+                    MatrixClass.SYMMETRIC_INDEFINITE,
+                    signature=f"sphere_impact.nl.base_equilibrium:{static_iteration}",
+                )
+                dq_static = np.asarray(static_handle.solve(residual_static), dtype=float).reshape(-1)
+                if not np.all(np.isfinite(dq_static)):
+                    break
+                accepted_q = None
+                step_factor = 1.0
+                for _backtrack in range(8):
+                    q_candidate = q_static + step_factor * dq_static
+                    F_candidate, _K_unused, _states_unused = assemble_nonlinear(
+                        reconstruct_full_solution(T, q_candidate, u0), {}, tangent=False
+                    )
+                    candidate_norm = float(
+                        np.linalg.norm(np.asarray(T.T @ (base_load - F_candidate), dtype=float))
+                    )
+                    if candidate_norm < residual_static_norm:
+                        accepted_q = q_candidate
+                        break
+                    step_factor *= 0.5
+                if accepted_q is None:
+                    break
+                q_static = accepted_q
+        except Exception:
+            base_load_equilibrated = False
+        if base_load_equilibrated:
+            q_red = q_static
     F_int0, _K_dummy, trial0 = assemble_nonlinear(
         reconstruct_full_solution(T, q_red, u0),
         committed_states,
@@ -1939,6 +2010,7 @@ def _solve_transient_sphere_impact_nonlinear(
         converged = False
         residual_norm = float("inf")
         displacement_increment = float("inf")
+        residual_energy_increment = float("inf")
         contact_change = float("inf")
         reference = 1.0
         contact_scale = 1.0
@@ -1997,6 +2069,7 @@ def _solve_transient_sphere_impact_nonlinear(
                     factor *= 0.5
             q_next = q_trial + factor * delta
             displacement_increment = float(np.linalg.norm(factor * delta))
+            residual_energy_increment = abs(float(np.dot(factor * delta, residual)))
             a_next = a0 * (q_next - q_red) - a2 * v_red - a3 * a_red
             v_next = v_red + dt * ((1.0 - gamma) * a_red + gamma * a_next)
             sphere_x_pred = sphere_position + dt * sphere_velocity + dt**2 * (0.5 - beta) * sphere_acceleration
@@ -2038,9 +2111,27 @@ def _solve_transient_sphere_impact_nonlinear(
                 and displacement_increment <= max(10.0 * displacement_limit, 1.0e-6)
                 and contact_change <= max(5.0e-3 * contact_scale, 10.0 * float(config.force_tolerance))
             )
-            if standard_converged or contact_stall_converged:
+            # Stagnation acceptance: the iterate is a fixed point (nanometre
+            # displacement increments, settled contact) and the residual's
+            # energy content is a negligible fraction of the impact energy.
+            # Cutting dt cannot reduce such a residual (it is a force/tangent
+            # noise floor, typically on rotational equations), so the step is
+            # accepted rather than exhausting the cutback budget.
+            stagnation_converged = (
+                float(nl.stagnation_energy_tolerance) > 0.0
+                and iteration >= 5
+                and displacement_increment <= displacement_limit
+                and contact_change <= force_limit
+                and residual_energy_increment <= float(nl.stagnation_energy_tolerance) * impact_energy_reference
+            )
+            if standard_converged or contact_stall_converged or stagnation_converged:
                 converged = True
-                convergence_reason = "standard" if standard_converged else "contact_stall"
+                if standard_converged:
+                    convergence_reason = "standard"
+                elif contact_stall_converged:
+                    convergence_reason = "contact_stall"
+                else:
+                    convergence_reason = "stagnation_energy"
                 iteration_counts.append(iteration)
                 break
         if not converged:
@@ -2090,6 +2181,27 @@ def _solve_transient_sphere_impact_nonlinear(
                 status = "nonlinear_iteration_failed"
                 stop_reason = "maximum_iterations_or_cutbacks_reached"
                 active_ids = [int(record.element_id) for record in records]
+                # Residual decomposition at the failed iterate: which physics
+                # carries the unconverged force imbalance.  Essential for
+                # diagnosing stagnation (tiny displacement increments with a
+                # stuck residual) versus genuine divergence.
+                decomposition: Dict[str, float] = {}
+                try:
+                    full_u_fail = reconstruct_full_solution(T, q_trial, u0)
+                    F_int_fail, _K_unused, _states_unused = assemble_nonlinear(
+                        full_u_fail, committed_states, tangent=False, scales=damage_scale_by_element
+                    )
+                    a_fail = a0 * (q_trial - q_red) - a2 * v_red - a3 * a_red
+                    v_fail = v_red + dt * ((1.0 - gamma) * a_red + gamma * a_fail)
+                    decomposition = {
+                        "residual_contact_norm": float(np.linalg.norm(np.asarray(T.T @ contact_load, dtype=float))),
+                        "residual_base_load_norm": float(np.linalg.norm(np.asarray(T.T @ base_load, dtype=float))),
+                        "residual_internal_norm": float(np.linalg.norm(np.asarray(T.T @ F_int_fail, dtype=float))),
+                        "residual_damping_norm": float(np.linalg.norm(C_red @ v_fail)),
+                        "residual_inertia_norm": float(np.linalg.norm(M_red @ a_fail)),
+                    }
+                except Exception:
+                    decomposition = {}
                 nonlinear_failure_summary = {
                     "step_index": int(step_index),
                     "time": float(sub_time),
@@ -2101,10 +2213,13 @@ def _solve_transient_sphere_impact_nonlinear(
                     "residual_norm": float(residual_norm),
                     "effective_residual_tolerance": float(nl.residual_tolerance) * float(reference),
                     "displacement_increment": float(displacement_increment),
+                    "residual_energy_increment": float(residual_energy_increment),
+                    "impact_energy_reference": float(impact_energy_reference),
                     "contact_force_change": float(contact_change),
                     "effective_force_tolerance": max(float(nl.contact_force_tolerance) * float(contact_scale), float(config.force_tolerance)),
                     "active_element_ids": active_ids,
                     "max_penetration": float(max((record.penetration for record in records), default=0.0)),
+                    **decomposition,
                     "suggestion": (
                         "The nonlinear impact solve exhausted its time-step cutbacks. "
                         "Use a smaller manual dt, increase NL cutbacks, reduce contact penalty/target penetration stiffness, "
@@ -2338,6 +2453,7 @@ def _solve_transient_sphere_impact_nonlinear(
         "base_load": base_load_info,
         "contact_config": config.to_dict(),
         "nonlinear_config": nl.to_dict(),
+        "base_load_equilibrated": bool(base_load_equilibrated),
         "strain_summary": _nonlinear_state_summary(committed_states),
         "element_states": committed_states,
         "element_state_history": element_state_history,

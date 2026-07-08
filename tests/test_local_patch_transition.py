@@ -476,3 +476,95 @@ def test_axial_flat_plate_stress_is_mesh_style_invariant() -> None:
             assert vm_values.max() == pytest.approx(analytical_vm, rel=1.0e-3), (label, vm_values.max())
     finally:
         fs._backend_solve_linear = original
+
+
+def test_stiffened_cylinder_keeps_mesh_style_invariance_with_beams() -> None:
+    """Beams must not reintroduce the release-blocker artifacts: stiffener-
+    forced ring breaks interact with the tributary end-load weighting, beam
+    segments are split inside blended patches, and the curvature floor is
+    raised to a stiffener-count multiple.  Statics and buckling must stay
+    mesh-style invariant on the stiffened cylinder."""
+    from anystruct import fe_solver as fs
+
+    captured = {}
+    original = fs._backend_solve_linear
+
+    def wrapper(model, load_case, **kwargs):
+        displacements, info = original(model, load_case, **kwargs)
+        captured["model"] = model
+        captured["disp"] = displacements
+        return displacements, info
+
+    cylinder = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 10.0,
+        "thickness_m": 0.030,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": 0.785,
+        "girder_spacing_m": 3.0,
+    }
+    refine = dict(
+        point_refinement_enabled=True,
+        point_refinement_x_m=5.0,
+        point_refinement_y_m=5.694,
+        point_refinement_extent_m=1.0,
+        point_refinement_growth_factor=1.35,
+    )
+    styles = {
+        "uniform": {},
+        "graded grid": dict(detail_transition_style="graded grid", **refine),
+        "local patch (quad+tri)": dict(detail_transition_style="local patch (quad+tri)", **refine),
+    }
+
+    outcomes = {}
+    fs._backend_solve_linear = wrapper
+    try:
+        for label, overrides in styles.items():
+            config = fs.LightweightFEMConfig(
+                mesh_fidelity="coarse",
+                boundary_condition="auto",
+                include_end_lids=True,
+                axial_force_n=50.0e6,
+                pressure_pa=0.0,
+                num_buckling_modes=2,
+                **overrides,
+            )
+            result = fs.run_production_fem(cylinder, config)
+            assert result.status == "ok", (label, result.status)
+            model, disp = captured["model"], captured["disp"]
+            stresses = fs._backend_compute_stresses(model, disp)
+            vm_values = []
+            for element_id, stress in stresses.items():
+                element = model.mesh.elements.get(element_id)
+                if element is None or not hasattr(element, "thickness"):
+                    continue
+                values = np.asarray(stress.get("von_mises", ()), dtype=float).reshape(-1)
+                if values.size:
+                    vm_values.append(float(np.max(values)))
+            uz_peak = 0.0
+            for node in model.mesh.nodes.values():
+                dofs = np.asarray(node.dofs[:3], dtype=np.intp)
+                if dofs.size == 3 and int(dofs.max()) < disp.size:
+                    uz_peak = max(uz_peak, abs(float(disp[dofs[2]])))
+            outcomes[label] = {
+                "vm_p50": float(np.percentile(np.asarray(vm_values), 50)),
+                "uz": uz_peak,
+                "lf": min((float(v) for v in result.buckling_factors), default=0.0),
+            }
+    finally:
+        fs._backend_solve_linear = original
+
+    baseline = outcomes["uniform"]
+    for label in ("graded grid", "local patch (quad+tri)"):
+        other = outcomes[label]
+        # Membrane state invariance: median stress and axial shortening agree.
+        assert other["vm_p50"] == pytest.approx(baseline["vm_p50"], rel=0.05), (label, outcomes)
+        assert other["uz"] == pytest.approx(baseline["uz"], rel=0.03), (label, outcomes)
+    # Buckling: refined styles agree with each other and stay at shell level
+    # (spurious flat-facet plate modes sat at ~3 vs the correct ~21-27 band).
+    graded_lf = outcomes["graded grid"]["lf"]
+    patch_lf = outcomes["local patch (quad+tri)"]["lf"]
+    assert patch_lf == pytest.approx(graded_lf, rel=0.25), outcomes
+    assert patch_lf > 0.5 * baseline["lf"], outcomes
