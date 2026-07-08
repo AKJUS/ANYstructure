@@ -1009,8 +1009,11 @@ class Tkinter3DCanvas(tk.Frame):
             
             if not p_valid.all():
                 continue
+            kind = primitive.get("kind")
+            if not kind:
+                continue
                 
-            if primitive["kind"] == "line":
+            if kind == "line":
                 if (max(p_proj[0,0], p_proj[1,0]) < min_screen_x or
                     min(p_proj[0,0], p_proj[1,0]) > max_screen_x or
                     max(p_proj[0,1], p_proj[1,1]) < min_screen_y or
@@ -1018,7 +1021,7 @@ class Tkinter3DCanvas(tk.Frame):
                     continue
                 depth = 0.5 * (p_proj[0,2] + p_proj[1,2])
                 coords = (p_proj[0,0], p_proj[0,1], p_proj[1,0], p_proj[1,1])
-            elif primitive["kind"] == "text":
+            elif kind == "text":
                 if (p_proj[0,0] < min_screen_x or p_proj[0,0] > max_screen_x or
                     p_proj[0,1] < min_screen_y or p_proj[0,1] > max_screen_y):
                     continue
@@ -1063,7 +1066,10 @@ class Tkinter3DCanvas(tk.Frame):
         target_list = self._current_animation_frame if self._is_capturing_animation else None
 
         for _phase, _depth, _layer, primitive, coords in render_items:
-            if primitive["kind"] == "line":
+            kind = primitive.get("kind")
+            if not kind:
+                continue
+            if kind == "line":
                 kwargs = {
                     "fill": primitive["color"],
                     "width": primitive["width"],
@@ -1072,7 +1078,7 @@ class Tkinter3DCanvas(tk.Frame):
                     target_list.append(("line", coords, kwargs))
                 else:
                     self.canvas.create_line(*coords, **kwargs)
-            elif primitive["kind"] == "text":
+            elif kind == "text":
                 kwargs = {
                     "text": primitive["text"],
                     "fill": primitive["color"],

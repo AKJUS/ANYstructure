@@ -958,6 +958,7 @@ def solve_static_nonlinear(
     fracture_config: Optional[FractureConfig] = None,
     kinematics: str = "von_karman",
     status_callback: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> NonlinearStaticResult:
     """Incremental nonlinear static solve with adaptive load stepping.
 
@@ -1342,6 +1343,33 @@ def solve_static_nonlinear(
                         "deleted_pressure_force_resultant": removed_load.tolist(),
                     }
                 )
+                if progress_callback is not None:
+                    # Live equilibrium-path point for GUI plotting: one dict
+                    # per converged increment, same numbers as the history.
+                    try:
+                        max_translation = 0.0
+                        size = int(u.size)
+                        for node in model.mesh.nodes.values():
+                            dofs = np.asarray(node.dofs[:3], dtype=np.intp)
+                            if dofs.size == 0 or int(dofs.max()) >= size:
+                                continue
+                            value = float(np.linalg.norm(u[dofs]))
+                            if value > max_translation:
+                                max_translation = value
+                        progress_callback(
+                            {
+                                "type": "nonlinear_static_step",
+                                "control": "force",
+                                "step_index": int(step_index),
+                                "load_factor": float(lam),
+                                "displacement_norm": float(np.linalg.norm(u)),
+                                "max_translation": float(max_translation),
+                                "iterations": int(iterations_used),
+                                "max_equivalent_plastic_strain": float(_max_plastic_strain(committed_states)),
+                            }
+                        )
+                    except Exception:
+                        pass
                 if fracture_config is not None and deleted_element_ids:
                     scoped_total = sum(
                         1

@@ -1461,7 +1461,7 @@ def _plastic_impact_damage_update(
         trigger_value, location = state_equivalent_plastic_strain(state)
 
         threshold = float(config.threshold)
-        if criterion in {"mesh_scaled_gl", "rtcl"}:
+        if criterion in {"mesh_scaled_gl", "rtcl", "rtcl_modified"}:
             # GL/RP-C208 mesh scaling of the critical strain: coarse shells
             # cannot resolve necking, so the limit shrinks with element size.
             if category == "shell":
@@ -1475,10 +1475,18 @@ def _plastic_impact_damage_update(
                 l_e = float(element_measure(model.mesh, element))
                 if l_e > 1.0e-6 and thickness > 1.0e-6:
                     threshold = 0.056 + 0.54 * (thickness / l_e)
+            if criterion == "rtcl_modified":
+                # Calibrate the critical strain so plane-strain tension
+                # (eta = 1/sqrt(3), the governing state for plate necking and
+                # the state the GL curve was derived from) reaches utilization
+                # 1 exactly at the mesh-scaled limit: eps_cr is scaled by the
+                # RTCL weight at plane strain, w_ps = exp(sqrt(3)/2 - 1/2).
+                weight_ps = float(np.exp(0.5 * np.sqrt(3.0) - 0.5))
+                threshold = threshold * weight_ps
 
         previous = damage_states.get(int(element_id), {})
         previous_damage = float(previous.get("damage", 0.0) or 0.0)
-        if criterion == "rtcl":
+        if criterion in {"rtcl", "rtcl_modified"}:
             # RTCL: accumulate triaxiality-weighted plastic strain per
             # integration point, D = sum(w(eta) d_alpha) / eps_cr.  Damage is
             # zero in compression and reduced in shear, which keeps erosion
@@ -1531,7 +1539,7 @@ def _plastic_impact_damage_update(
             "location": str(location),
             "history": history,
         }
-        if criterion == "rtcl":
+        if criterion in {"rtcl", "rtcl_modified"}:
             entry["rtcl_damage"] = accumulated
             entry["rtcl_alpha"] = rtcl_alpha
         damage_states[int(element_id)] = entry
@@ -1541,8 +1549,8 @@ def _plastic_impact_damage_update(
                 element_type=type(element).__name__,
                 step_index=int(step_index),
                 load_factor=float(time_value),
-                trigger_name="rtcl_damage" if criterion == "rtcl" else "max_equivalent_plastic_strain",
-                trigger_value=float(damage if criterion == "rtcl" else trigger_value),
+                trigger_name="rtcl_damage" if criterion in {"rtcl", "rtcl_modified"} else "max_equivalent_plastic_strain",
+                trigger_value=float(damage if criterion in {"rtcl", "rtcl_modified"} else trigger_value),
                 threshold=float(threshold),
                 location=str(location),
                 measure=element_measure(model.mesh, element),

@@ -141,6 +141,9 @@ class LightweightFEMConfig:
     nonlinear_convergence_profile: str = "auto"
     nonlinear_assembly_threads: int = 0
     nonlinear_static_kinematics: str = "von_karman"
+    post_buckling_enabled: bool = False
+    post_buckling_stop_load_fraction: float = 0.5
+    post_buckling_max_displacement_m: float = 0.0
     beam_consistent_mass_enabled: bool = False
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
@@ -4279,7 +4282,7 @@ def _collision_plastic_damage_config(config: LightweightFEMConfig):
     ):
         return None
     criterion = str(config.collision_damage_criterion or "fixed").strip().lower()
-    if criterion not in {"fixed", "mesh_scaled_gl", "rtcl"}:
+    if criterion not in {"fixed", "mesh_scaled_gl", "rtcl", "rtcl_modified"}:
         criterion = "fixed"
     return _backend_PlasticImpactDamageConfig(
         threshold=max(float(config.collision_plastic_damage_threshold or 0.01), 1.0e-12),
@@ -4861,6 +4864,9 @@ def _wants_eigenvalue_buckling(config: LightweightFEMConfig) -> bool:
 
 
 def _wants_static_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    if bool(config.post_buckling_enabled):
+        # Post-buckling tracing is an arc-length nonlinear static solve.
+        return True
     choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
     runtime = _normalized_choice(config.runtime_solver, "stepwise")
     if runtime == "nonlinear static":
@@ -4895,6 +4901,10 @@ def _invalid_corotational_static_fracture(config: LightweightFEMConfig) -> bool:
 
 
 def _nonlinear_solution_control(config: LightweightFEMConfig) -> str:
+    if bool(config.post_buckling_enabled):
+        # Post-buckling continuation requires arc-length control: Newton
+        # force control cannot pass the limit point.
+        return "arc length"
     choice = _normalized_choice(config.nonlinear_solution_control, "newton force control")
     if choice in {"arc", "arc length", "arc-length", "arc length continuation", "crisfield arc length"}:
         return "arc length"
@@ -4909,18 +4919,34 @@ def _arc_length_control(config: LightweightFEMConfig):
     initial_increment = max(max_load / float(steps), 1.0e-6)
     minimum_increment = max(initial_increment / 64.0, 1.0e-8)
     maximum_increment = max(initial_increment * 4.0, initial_increment)
+    post_buckling = bool(config.post_buckling_enabled)
+    stop_fraction = min(max(float(config.post_buckling_stop_load_fraction or 0.5), 0.01), 0.99)
+    max_translation = float(config.post_buckling_max_displacement_m or 0.0)
     return _backend_arc_length_control(
         initial_load_increment=initial_increment,
         minimum_load_increment=minimum_increment,
         maximum_load_increment=maximum_increment,
         maximum_absolute_load_factor=max_load,
-        max_steps=max(steps * 4, steps + 4),
+        # Post-buckling: allow a long descending branch and stop automatically
+        # when the load has shed to the configured fraction of the peak (or
+        # when the optional displacement guard trips).  The plain arc-length
+        # mode keeps the short limit-point confirmation behaviour.
+        max_steps=max(steps * (12 if post_buckling else 4), steps + 4),
+        stop_after_peak_steps=(10_000 if post_buckling else 4),
+        post_peak_load_fraction=(stop_fraction if post_buckling else None),
+        max_translation=(max_translation if post_buckling and max_translation > 0.0 else None),
         target_iterations=max(3, min(_positive_int(config.nonlinear_max_iterations, 25) // 3, 10)),
         preload_steps=max(steps, 1),
     )
 
 
 def _wants_material_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    if bool(config.post_buckling_enabled):
+        # Post-buckling capacity of steel structures is plasticity-governed:
+        # an elastic descending branch is non-physical for design work, so
+        # the trace always runs geometric + material nonlinear (DNV curve
+        # from the steel grade) regardless of the material-model dropdown.
+        return True
     choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
     model = _normalized_choice(config.material_model, "linear elastic")
     return "material" in choice or model in {
@@ -6265,6 +6291,7 @@ def _run_collision_response(
             live_visualization["active_contacts"] = active_contacts
         live_visualization["time_s"] = float(payload.get("time_s", 0.0) or 0.0)
         last_live_update[0] = now
+        contact_force = np.asarray(payload.get("contact_force", ()), dtype=float).reshape(-1)
         status_callback(
             {
                 "type": "live_visualization",
@@ -6273,6 +6300,8 @@ def _run_collision_response(
                 "step_index": int(payload.get("step_index", 0) or 0),
                 "visualization": live_visualization,
                 "displacement_max_m": _max_translation(model, np.asarray(displacement, dtype=float)),
+                "contact_force_n": float(np.linalg.norm(contact_force)) if contact_force.size else 0.0,
+                "max_equivalent_plastic_strain": float(payload.get("max_equivalent_plastic_strain", 0.0) or 0.0),
             }
         )
 
@@ -7666,6 +7695,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             mesh_info={"nodes": model.mesh.num_nodes, "shells": len(generated_geometry.get("shells", [])), "beams": len(generated_geometry.get("beams", []))},
             load_resultant=_resultant_dict(load_resultant),
             solver_name="ANYstructure production FE mesh",
+            visualization=_visualization_from_full_result(generated_geometry, model, None),
         )
 
     prestress_states, prestress_summary = _full_backend.recover_prestress_from_static_result(model, displacements)
@@ -7824,7 +7854,26 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         else:
             try:
                 nonlinear_resource_config = None
+                # Structured per-increment progress for the GUI live graph:
+                # the runtime status callback already carries dict payloads
+                # for collision runs, so equilibrium-path points reuse it.
+                nonlinear_progress = status_callback if callable(status_callback) else None
                 if nonlinear_control == "arc length":
+                    if bool(config.post_buckling_enabled):
+                        diagnostics.append(
+                            "Post-buckling continuation is enabled: arc-length tracing continues past the limit "
+                            "point and stops automatically when the load factor falls to "
+                            + str(round(min(max(float(config.post_buckling_stop_load_fraction or 0.5), 0.01), 0.99), 3))
+                            + " of the recorded peak"
+                            + (
+                                " or the max displacement guard of "
+                                + str(round(float(config.post_buckling_max_displacement_m), 4))
+                                + " m trips"
+                                if float(config.post_buckling_max_displacement_m or 0.0) > 0.0
+                                else ""
+                            )
+                            + "."
+                        )
                     nonlinear_static_result = _backend_solve_static_arc_length(
                         model,
                         load_case,
@@ -7833,7 +7882,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         arc_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         num_layers=_nonlinear_layer_count(config.nonlinear_layers),
-                        status_callback=status_callback,
+                        progress_callback=nonlinear_progress,
                     )
                 else:
                     nonlinear_resource_config = _resource_config(config, generated_geometry, auto_assembly=True)
@@ -7850,6 +7899,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         fracture_config=_runtime_fracture_config(config),
                         kinematics=static_kinematics,
                         status_callback=status_callback,
+                        progress_callback=nonlinear_progress,
                     )
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
                 _nl_info = nonlinear_static_result.info or {}

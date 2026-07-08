@@ -1352,6 +1352,12 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
     assert "self.upper_result_text = tk.Text(" in source
     assert "self.result_canvas = Tkinter3DCanvas(" in source
+    # Left-panel live run graph below the status text.
+    assert "self._live_graph_canvas = FigureCanvasTkAgg(self._live_graph_figure, master=status_frame)" in source
+    assert "self._live_graph_reset(\"idle\")" in source
+    # Post-buckling continuation inputs on the General tab.
+    assert "post_buckling = ttk.LabelFrame(tab_general, text=\"Post-buckling continuation\")" in source
+    assert "\"post_buckling_enabled\", \"Trace post-buckling response\"" in source
     assert "self.interactive_3d_checkbox = ttk.Checkbutton(" in source
     assert "def _populate_canvas_with_geometry(" in source
     assert "def _populate_canvas_with_results(" in source
@@ -3300,3 +3306,153 @@ def test_collision_damage_criterion_reaches_backend_config():
         collision_damage_criterion="bogus",
     )
     assert fe_solver._collision_plastic_damage_config(config).criterion == "fixed"
+
+    # RTCL is the app default: stress-state aware and the most stable erosion.
+    assert fe_solver.LightweightFEMConfig().collision_damage_criterion == "rtcl"
+    assert fe_runtime_solver.RuntimeFEMOptions().collision_damage_criterion == "rtcl"
+
+
+def test_post_buckling_options_force_arc_length_with_automatic_stop():
+    """Post-buckling enable forces arc-length control, activates the nonlinear
+    static path, and configures the automatic stopping criteria."""
+    from anystruct import fe_solver
+
+    config = fe_solver.LightweightFEMConfig(
+        post_buckling_enabled=True,
+        post_buckling_stop_load_fraction=0.4,
+        post_buckling_max_displacement_m=0.08,
+        nonlinear_solution_control="newton force control",  # overridden
+        analysis_type="linear eigenvalue",                   # overridden
+        nonlinear_steps=10,
+        nonlinear_max_load_factor=2.0,
+    )
+    assert fe_solver._nonlinear_solution_control(config) == "arc length"
+    assert fe_solver._wants_static_nonlinear_analysis(config) is True
+    control = fe_solver._arc_length_control(config)
+    assert control is not None
+    assert control.post_peak_load_fraction == pytest.approx(0.4)
+    assert control.max_translation == pytest.approx(0.08)
+    assert control.stop_after_peak_steps >= 10_000
+    assert control.max_steps >= 100
+
+    # Disabled: plain arc-length keeps the short limit-point confirmation.
+    off = fe_solver.LightweightFEMConfig(nonlinear_solution_control="arc length")
+    plain = fe_solver._arc_length_control(off)
+    assert plain.post_peak_load_fraction is None
+    assert plain.max_translation is None
+    assert plain.stop_after_peak_steps == 4
+    assert fe_solver.LightweightFEMConfig().post_buckling_enabled is False
+
+
+def test_live_graph_routing_and_series_accumulation():
+    """Headless checks of the live-graph state machine: run-kind selection,
+    collision/equilibrium feeds, and the buckling fallback finalize."""
+    import types
+
+    window = types.SimpleNamespace()
+    window._live_graph_axis = None
+    window._live_graph_canvas = None
+    window._live_graph_figure = None
+    window._live_graph_state = {"kind": "idle", "series": {}, "last_draw": 0.0}
+    window._run_status_history = []
+    for name in ("_live_graph_kind_for_options", "_live_graph_reset", "_live_graph_append",
+                 "_live_graph_redraw", "_live_graph_finalize", "_apply_nonlinear_static_step"):
+        setattr(window, name, types.MethodType(getattr(fe_runtime_solver.RuntimeFEMWindow, name), window))
+
+    # Run-kind selection.
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(collision_enabled=True))
+    assert kind == "collision"
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(
+        collision_enabled=False, post_buckling_enabled=True))
+    assert kind == "equilibrium"
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(
+        collision_enabled=False, post_buckling_enabled=False,
+        analysis_type="geom. + material nonlinear static", runtime_solver="stepwise",
+        nonlinear_solution_control="newton force control"))
+    assert kind == "equilibrium"
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(
+        collision_enabled=False, post_buckling_enabled=False,
+        analysis_type="linear eigenvalue", runtime_solver="stepwise",
+        nonlinear_solution_control="newton force control", custom_time_domain_enabled=False))
+    assert kind == "generic"
+
+    # Equilibrium feed from the structured solver payloads.
+    window._live_graph_reset("equilibrium")
+    for step, (lam, disp) in enumerate(((0.2, 0.001), (0.35, 0.004), (0.30, 0.009)), start=1):
+        window._apply_nonlinear_static_step({
+            "type": "nonlinear_static_step", "control": "arc length", "step_index": step,
+            "load_factor": lam, "peak_load_factor": 0.35, "max_translation": disp,
+            "max_equivalent_plastic_strain": 0.0,
+        })
+    xs, ys = window._live_graph_state["series"]["load factor"]
+    assert ys == [0.2, 0.35, 0.30], "descending branch recorded"
+    assert xs == [1.0, 4.0, 9.0], "x-axis is max displacement in mm"
+    assert window._run_status_history[-1].startswith("Arc-length step 3")
+
+    # Buckling fallback: empty series + factors -> mode/factor markers.
+    window._live_graph_reset("generic")
+    result = types.SimpleNamespace(buckling_factors=(1.8, 2.4, 3.1))
+    window._live_graph_finalize(result)
+    assert window._live_graph_state["kind"] == "buckling"
+    xs, ys = window._live_graph_state["series"]["load factor"]
+    assert xs == [1.0, 2.0, 3.0]
+    assert ys == [1.8, 2.4, 3.1]
+
+
+def test_post_buckling_forces_material_nonlinearity_and_curve():
+    """Post-buckling must run FULLY nonlinear: the DNV material curve is
+    applied even when the material-model dropdown is left at linear elastic
+    (an elastic post-buckling branch is non-physical for steel design)."""
+    from anystruct import fe_solver
+
+    config = fe_solver.LightweightFEMConfig(
+        post_buckling_enabled=True,
+        material_model="linear elastic",
+        analysis_type="linear eigenvalue",
+        steel_grade="S355",
+    )
+    assert fe_solver._wants_material_nonlinear_analysis(config) is True
+    curve, properties = fe_solver._nonlinear_curve_payload(config, {"thickness_m": 0.012})
+    assert curve is not None, "DNV hardening curve must reach the model"
+    assert str(properties.get("grade", "")) == "S355"
+
+    # Without post-buckling the linear-elastic selection stays elastic.
+    plain = fe_solver.LightweightFEMConfig(material_model="linear elastic")
+    assert fe_solver._wants_material_nonlinear_analysis(plain) is False
+    assert fe_solver._nonlinear_curve_payload(plain, {"thickness_m": 0.012})[0] is None
+
+
+def test_post_buckling_field_sync_sets_dependent_inputs():
+    """Enabling post-buckling mirrors the executed solve mode in the GUI
+    fields: analysis, material model and NL control are set to match."""
+    import types
+
+    class Var:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value):
+            self._value = value
+
+    window = types.SimpleNamespace()
+    window.post_buckling_enabled = Var(True)
+    window.analysis_type = Var("linear eigenvalue")
+    window.material_model = Var("linear elastic")
+    window.nonlinear_solution_control = Var("newton force control")
+    window._choice_key = fe_runtime_solver.RuntimeFEMWindow._choice_key
+    window._apply_post_buckling_field_sync = types.MethodType(
+        fe_runtime_solver.RuntimeFEMWindow._apply_post_buckling_field_sync, window)
+
+    window._apply_post_buckling_field_sync()
+    assert window.analysis_type.get() == "geom. + material nonlinear static"
+    assert window.material_model.get() == "DNV-RP-C208 steel"
+    assert window.nonlinear_solution_control.get() == "arc length"
+
+    # Disabled: nothing is touched.
+    window.post_buckling_enabled = Var(False)
+    window.analysis_type = Var("linear eigenvalue")
+    window._apply_post_buckling_field_sync()
+    assert window.analysis_type.get() == "linear eigenvalue"
