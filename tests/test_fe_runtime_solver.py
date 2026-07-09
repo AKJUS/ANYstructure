@@ -3529,3 +3529,117 @@ def test_nonlinear_collision_snapshots_keep_refined_skin_surfaces():
         deleted = len(tuple((snapshot or {}).get("hidden_deleted_element_ids", ()) or ()))
         assert len(surfaces) + deleted == skin_count, (len(surfaces), deleted, skin_count)
         assert len(surfaces) > 0.9 * skin_count, "refined skin must stay visible in snapshots"
+
+
+def test_collision_penalty_scale_multiplies_auto_penalty():
+    """collision_penalty_scale must scale the auto contact penalty so the
+    scout preconditioner can carry a convergence-friendly stiffness into the
+    real run.  A manual penalty ignores the scale."""
+    from anystruct import fe_solver as fs
+
+    cylinder = {
+        "geometry": "cylinder", "radius_m": 1.0, "length_m": 6.0, "thickness_m": 0.02,
+        "has_stiffener": False, "has_girder": False,
+    }
+    base = dict(
+        mesh_fidelity="coarse", boundary_condition="auto",
+        cylinder_lower_support="fixed", cylinder_upper_support="fixed",
+        include_end_lids=True,
+        collision_enabled=True, collision_radius_m=0.3, collision_mass_kg=500.0,
+        collision_speed_mps=2.0, collision_start_x_m=-1.31, collision_start_y_m=0.0,
+        collision_start_z_m=3.0, collision_vector_x=1.0, collision_vector_y=0.0, collision_vector_z=0.0,
+        collision_time_mode="manual", collision_total_time_s=0.004, collision_dt_s=5.0e-4,
+    )
+    full = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base))
+    half = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base, collision_penalty_scale=0.5))
+    p_full = float(full.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    p_half = float(half.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    assert p_full > 0.0 and p_half > 0.0
+    assert p_half == pytest.approx(0.5 * p_full, rel=1.0e-6)
+    assert "scaled" in str(half.prestress_summary.get("collision_contact_penalty_basis", ""))
+
+    # Manual penalty overrides the scale entirely.
+    manual = fs.run_production_fem(
+        cylinder,
+        fs.LightweightFEMConfig(**base, collision_penalty_stiffness_n_per_m=1.0e9, collision_penalty_scale=0.5),
+    )
+    assert float(manual.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0)) == pytest.approx(1.0e9)
+
+
+def test_collision_penalty_capped_at_shell_contact_stiffness():
+    """The auto contact penalty must be capped at a multiple of the shell
+    contact-stiffness scale E*t so heavy/fast impacts stay well conditioned.
+    Root cause of 'nonlinear iteration failed' on high-energy runs: the
+    energy/dt-based auto penalty ignored the shell stiffness and could be
+    ~10x E*t, diverging the staggered contact iteration."""
+    from anystruct import fe_solver as fs
+
+    E = 210.0e9
+    t = 0.030
+    et_scale = E * t
+    cap = fs._COLLISION_PENALTY_STRUCTURAL_FACTOR * et_scale
+
+    # Heavy, fast sphere: the uncapped desired penalty is far above E*t.
+    config = fs.LightweightFEMConfig(
+        collision_enabled=True, collision_radius_m=1.0, collision_mass_kg=1.0e6,
+        collision_speed_mps=5.0, collision_target_penetration_fraction=0.01,
+        elastic_modulus_pa=E,
+    )
+    heavy = fs._collision_dynamic_penalty(config, dt=1.0e-4, contact_stiffness_scale=et_scale)
+    assert heavy["penalty_stiffness"] == pytest.approx(cap, rel=1.0e-9)
+    assert heavy["basis"] == "dynamic_auto_structural_cap"
+    # Desired (uncapped) is far stiffer than the cap, confirming the cap binds.
+    assert float(heavy["desired_penalty_stiffness"]) > 3.0 * cap
+
+    # A light impact stays below the cap: the ceiling does not bind and the
+    # penalty is unchanged from the energy-based value.
+    light = fs.LightweightFEMConfig(
+        collision_enabled=True, collision_radius_m=0.15, collision_mass_kg=100.0,
+        collision_speed_mps=3.0, elastic_modulus_pa=E,
+    )
+    light_info = fs._collision_dynamic_penalty(light, dt=1.0e-4, contact_stiffness_scale=et_scale)
+    assert light_info["penalty_stiffness"] < cap
+    assert light_info["basis"] == "dynamic_auto"
+
+
+def test_collision_contact_stiffness_scale_uses_thinnest_skin():
+    """E*t is taken from the thinnest (most compliant) skin shell."""
+    from anystruct import fe_solver as fs
+
+    config = fs.LightweightFEMConfig(elastic_modulus_pa=200.0e9)
+    # Generated skin shells store the plate thickness under the "thickness"
+    # key (NOT "thickness_m"); reading the wrong key silently disabled the cap.
+    generated = {
+        "shells": [
+            {"id": 1, "node_ids": [1, 2, 3, 4], "thickness": 0.03},
+            {"id": 2, "node_ids": [2, 3, 5, 6], "thickness": 0.012},
+            {"id": 9, "node_ids": [1, 2, 7], "role": "stiffener", "thickness": 0.001},
+        ]
+    }
+    scale = fs._collision_contact_stiffness_scale(generated, config)
+    assert scale == pytest.approx(200.0e9 * 0.012)  # thinnest skin, member ignored
+
+
+def test_collision_auto_precondition_softens_penalty_further():
+    """The opt-in extra-conservative mode multiplies the (capped) penalty by
+    the extra softening factor."""
+    from anystruct import fe_solver as fs
+
+    cylinder = {
+        "geometry": "cylinder", "radius_m": 1.0, "length_m": 6.0, "thickness_m": 0.02,
+        "has_stiffener": False, "has_girder": False,
+    }
+    base = dict(
+        mesh_fidelity="coarse", boundary_condition="auto",
+        cylinder_lower_support="fixed", cylinder_upper_support="fixed", include_end_lids=True,
+        collision_enabled=True, collision_radius_m=0.3, collision_mass_kg=5.0e5,
+        collision_speed_mps=6.0, collision_start_x_m=-1.31, collision_start_y_m=0.0,
+        collision_start_z_m=3.0, collision_vector_x=1.0, collision_vector_y=0.0, collision_vector_z=0.0,
+        collision_time_mode="manual", collision_total_time_s=0.004, collision_dt_s=5.0e-4,
+    )
+    plain = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base))
+    conservative = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base, collision_auto_precondition=True))
+    p_plain = float(plain.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    p_cons = float(conservative.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    assert p_plain > 0.0
+    assert p_cons == pytest.approx(fs._COLLISION_PRECONDITION_EXTRA_SCALE * p_plain, rel=1.0e-6)

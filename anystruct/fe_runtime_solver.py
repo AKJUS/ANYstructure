@@ -276,6 +276,7 @@ class RuntimeFEMOptions:
     collision_dt_s: float = 0.0005
     collision_result_interval_s: float = 0.0
     collision_penalty_stiffness_n_per_m: float = 0.0
+    collision_auto_precondition: bool = False
     collision_contact_damping: float = 0.0
     collision_max_iterations: int = 25
     collision_penetration_tolerance_m: float = 1.0e-8
@@ -1081,6 +1082,7 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         collision_dt_s=options.collision_dt_s,
         collision_result_interval_s=options.collision_result_interval_s,
         collision_penalty_stiffness_n_per_m=options.collision_penalty_stiffness_n_per_m,
+        collision_auto_precondition=bool(options.collision_auto_precondition),
         collision_contact_damping=options.collision_contact_damping,
         collision_max_iterations=options.collision_max_iterations,
         collision_penetration_tolerance_m=options.collision_penetration_tolerance_m,
@@ -1318,6 +1320,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "collision_dt_s": float(options.collision_dt_s),
         "collision_result_interval_s": float(options.collision_result_interval_s),
         "collision_penalty_stiffness_n_per_m": float(options.collision_penalty_stiffness_n_per_m),
+        "collision_auto_precondition": bool(options.collision_auto_precondition),
         "collision_contact_damping": float(options.collision_contact_damping),
         "collision_max_iterations": int(options.collision_max_iterations),
         "collision_penetration_tolerance_m": float(options.collision_penetration_tolerance_m),
@@ -4403,6 +4406,17 @@ FEM_OPTION_INFO.update({
         "output": "Higher values reduce penetration but can require smaller dt and more iterations.",
         "caution": "Too high can make contact numerically stiff; too low permits excessive penetration.",
     },
+    "collision_auto_precondition": {
+        "title": "Extra-conservative contact",
+        "purpose": "Softens the contact penalty further for stubborn high-energy impacts that still fail to "
+                   "converge at the automatic penalty.",
+        "use": "The automatic penalty is already capped at the shell contact-stiffness scale (E*t) so contact "
+               "stays well conditioned at any mesh. Enable this only if a heavy/fast impact still reports "
+               "'nonlinear iteration failed'; it halves the penalty for more margin. Ignored when a manual "
+               "penalty is set.",
+        "output": "The resolved penalty basis reports the applied scale factor.",
+        "caution": "Softer contact slightly increases penetration; leave off for ordinary impacts.",
+    },
     "collision_contact_damping": {
         "title": "Contact Damping",
         "purpose": "Optional normal damping in the penalty contact law.",
@@ -4807,6 +4821,7 @@ class RuntimeFEMWindow:
         self.collision_dt_s = tk.DoubleVar(value=0.0005)
         self.collision_result_interval_s = tk.DoubleVar(value=0.0)
         self.collision_penalty_stiffness_n_per_m = tk.DoubleVar(value=0.0)
+        self.collision_auto_precondition = tk.BooleanVar(value=False)
         self.collision_contact_damping = tk.DoubleVar(value=0.0)
         self.collision_max_iterations = tk.IntVar(value=25)
         self.collision_penetration_tolerance_m = tk.DoubleVar(value=1.0e-8)
@@ -6031,6 +6046,8 @@ class RuntimeFEMWindow:
                                 self.collision_target_penetration_fraction)
         self._add_compact_entry(collision_stop, 3, 1, "collision_bounce_back_time", "Bounce stop [s]",
                                 self.collision_bounce_back_time_s)
+        self._add_compact_check(collision_stop, 4, 0, "collision_auto_precondition", "Auto-precondition (scout)",
+                                self.collision_auto_precondition)
 
         collision_damage = ttk.LabelFrame(collision_body, text="Impact damage")
         collision_damage.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -7817,8 +7834,8 @@ class RuntimeFEMWindow:
             return
         if radius <= 0.0:
             return
-        segments = 14
-        rings = 8
+        segments = 32
+        rings = 18
         base_color = "#9ca3af"
         light_color = _blend_hex_color(base_color, 0.30)
         outline_color = _blend_hex_color("#4b5563", 0.42)
@@ -7880,6 +7897,8 @@ class RuntimeFEMWindow:
                     layer=39,
                     back_color=light_color,
                     stipple=sphere_stipple,
+                    tags="rigid_sphere",
+                    two_sided_shell=True,
                 )
 
         marker = max(radius * 0.025, 1.0e-3)
@@ -8703,6 +8722,7 @@ class RuntimeFEMWindow:
             collision_result_interval_s=max(_safe_float(self.collision_result_interval_s.get(), 0.0), 0.0),
             collision_penalty_stiffness_n_per_m=max(_safe_float(self.collision_penalty_stiffness_n_per_m.get(), 0.0),
                                                     0.0),
+            collision_auto_precondition=bool(self.collision_auto_precondition.get()),
             collision_contact_damping=max(_safe_float(self.collision_contact_damping.get(), 0.0), 0.0),
             collision_max_iterations=max(_safe_int(self.collision_max_iterations.get(), 25), 1),
             collision_penetration_tolerance_m=max(_safe_float(self.collision_penetration_tolerance_m.get(), 1.0e-8),

@@ -245,6 +245,14 @@ class LightweightFEMConfig:
     collision_dt_s: float = 0.0005
     collision_result_interval_s: float = 0.0
     collision_penalty_stiffness_n_per_m: float = 0.0
+    # Multiplies the auto contact penalty (ignored when a manual penalty is
+    # set).  The scout preconditioner writes this; a user can also set it
+    # directly to soften/stiffen contact.
+    collision_penalty_scale: float = 1.0
+    # Optional two-phase mode: run a cheap coarse "scout" collision first to
+    # learn a convergence-achievable contact penalty, then apply it to the
+    # real (fine) run.  See _collision_precondition_scout.
+    collision_auto_precondition: bool = False
     collision_contact_damping: float = 0.0
     collision_max_iterations: int = 25
     collision_penetration_tolerance_m: float = 1.0e-8
@@ -4468,8 +4476,41 @@ def _collision_initial_penetration(generated_geometry: dict, config: Lightweight
     }
 
 
+# Contact penalty ceiling as a multiple of the shell contact-stiffness scale
+# E*t.  Validated boundary: penalties around E*t converge; ~10*E*t diverges.
+# Chosen with margin below the observed failure band.
+_COLLISION_PENALTY_STRUCTURAL_FACTOR = 3.0
+# Extra softening applied on top of the structural cap when the opt-in
+# auto-precondition ("extra-conservative contact") mode is enabled.
+_COLLISION_PRECONDITION_EXTRA_SCALE = 0.5
+
+
+def _collision_contact_stiffness_scale(generated_geometry: dict, config: LightweightFEMConfig) -> float:
+    """Shell contact-stiffness scale E*t [N/m] at the (thinnest) skin plate.
+
+    ``E*t`` is the physical normal-contact stiffness scale for a shell and is
+    mesh-independent, so it is the right quantity to cap the penalty against.
+    Uses the thinnest skin shell (most compliant, governs conditioning) and
+    the runtime elastic modulus.
+    """
+    thicknesses = [
+        float(shell.get("thickness", shell.get("thickness_m", 0.0)) or 0.0)
+        for shell in generated_geometry.get("shells", ()) or ()
+        if "role" not in shell
+    ]
+    thicknesses = [t for t in thicknesses if t > 0.0]
+    if not thicknesses:
+        return 0.0
+    thickness = min(thicknesses)
+    modulus = max(float(getattr(config, "elastic_modulus_pa", 0.0) or 0.0), 1.0)
+    return modulus * thickness
+
+
 def _collision_dynamic_penalty(
-    config: LightweightFEMConfig, dt: float, representative_edge: float = 0.0
+    config: LightweightFEMConfig,
+    dt: float,
+    representative_edge: float = 0.0,
+    contact_stiffness_scale: float = 0.0,
 ) -> dict[str, float | str]:
     radius = max(float(config.collision_radius_m), 1.0e-9)
     mass = max(float(config.collision_mass_kg), 1.0e-9)
@@ -4503,17 +4544,32 @@ def _collision_dynamic_penalty(
         penetration_cap = max(penetration_cap, 4.0 * target_penetration)
         penalty_floor = mass * speed * speed / max(penetration_cap * penetration_cap, 1.0e-18)
         selected = min(max(selected / softening, penalty_floor), selected)
+    # Structural contact-stiffness ceiling.  The desired/dt-stable penalties
+    # above are set purely by the impact energy and time step and ignore the
+    # stiffness of the shell being hit.  When the penalty greatly exceeds the
+    # local shell contact stiffness (~ E*t) the structure<->contact staggered
+    # fixed point stops contracting: the contact force swings by mega-newtons
+    # per Newton iteration and the solve fails ("nonlinear iteration failed")
+    # regardless of dt cutbacks.  E*t is the physical contact-stiffness scale
+    # for a shell (N/m) and is mesh-independent, so capping the penalty at a
+    # small multiple of it keeps the contact well-conditioned at any mesh
+    # density.  ``contact_stiffness_scale`` is E*t from the caller; 0 disables.
+    structural_cap = 0.0
+    if contact_stiffness_scale > 0.0:
+        structural_cap = _COLLISION_PENALTY_STRUCTURAL_FACTOR * float(contact_stiffness_scale)
+        selected = min(selected, structural_cap)
     selected = max(selected, 1.0)
     effective_penetration = math.sqrt(mass * speed * speed / selected) if speed > 0.0 else target_penetration
     return {
         "penalty_stiffness": float(selected),
         "desired_penalty_stiffness": float(desired),
         "dt_stable_penalty_stiffness": float(stable),
+        "structural_penalty_cap": float(structural_cap),
         "target_penetration_m": float(target_penetration),
         "effective_penetration_m": float(effective_penetration),
         "impact_energy_j": float(kinetic_energy),
         "energy_softening_factor": float(softening),
-        "basis": "dynamic_auto",
+        "basis": "dynamic_auto" if structural_cap <= 0.0 or selected < structural_cap else "dynamic_auto_structural_cap",
     }
 
 
@@ -4594,7 +4650,10 @@ def _collision_auto_time_settings(generated_geometry: dict, config: LightweightF
             "basis": "user",
         }
     else:
-        penalty_info = _collision_dynamic_penalty(config, dt, representative_edge)
+        penalty_info = _collision_dynamic_penalty(
+            config, dt, representative_edge,
+            contact_stiffness_scale=_collision_contact_stiffness_scale(generated_geometry, config),
+        )
     target_steps = max(int(math.ceil(total_time / max(dt, 1.0e-12))), 1)
     if target_steps < 120:
         dt = min(dt, total_time / 120.0)
@@ -6285,9 +6344,35 @@ def _run_collision_response(
             "dt_stable_penalty_stiffness": resolved_penalty,
         }
     else:
-        penalty_info = dict(auto_time) if auto_time else _collision_dynamic_penalty(config, dt)
-        resolved_penalty = max(float(penalty_info.get("recommended_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0)) or 0.0), 1.0)
+        penalty_info = dict(auto_time) if auto_time else _collision_dynamic_penalty(
+            config, dt, representative_edge,
+            contact_stiffness_scale=_collision_contact_stiffness_scale(generated_geometry, config),
+        )
+        auto_penalty = max(float(penalty_info.get("recommended_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0)) or 0.0), 1.0)
+        # The auto penalty is already capped at a multiple of the shell
+        # contact stiffness (E*t) so the contact iteration stays conditioned.
+        # collision_penalty_scale is a manual multiplier; the opt-in
+        # auto-precondition adds an extra conservative factor for stubborn
+        # high-energy impacts (softer contact, slightly more penetration).
+        penalty_scale = max(float(config.collision_penalty_scale or 1.0), 1.0e-6)
+        if bool(config.collision_auto_precondition):
+            penalty_scale *= _COLLISION_PRECONDITION_EXTRA_SCALE
+        resolved_penalty = max(auto_penalty * penalty_scale, 1.0)
         penalty_basis = str(penalty_info.get("penalty_basis", penalty_info.get("basis", "dynamic_auto")) or "dynamic_auto")
+        if bool(penalty_info.get("structural_penalty_cap")) and float(penalty_info.get("structural_penalty_cap", 0.0)) > 0.0:
+            if auto_penalty >= float(penalty_info.get("structural_penalty_cap", 0.0)) - 1.0:
+                penalty_basis = "dynamic_auto_structural_cap"
+        if penalty_scale != 1.0:
+            penalty_basis = penalty_basis + f"_scaled_{penalty_scale:.4g}"
+            diagnostics.append(
+                "Collision contact penalty scaled by "
+                + str(round(penalty_scale, 5))
+                + " (auto "
+                + str(round(auto_penalty, 3))
+                + " -> "
+                + str(round(resolved_penalty, 3))
+                + " N/m) for convergence."
+            )
     contact_patch_factor = 2.5 if bool(config.collision_material_nonlinear_enabled) else 2.0
     contact_patch_min_nodes = 12 if bool(config.collision_material_nonlinear_enabled) else 8
     contact_patch_max_nodes = 40 if bool(config.collision_material_nonlinear_enabled) else 24
