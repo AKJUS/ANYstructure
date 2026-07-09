@@ -168,6 +168,9 @@ class RuntimeFEMOptions:
     nonlinear_tolerance: float = 1.0e-6
     nonlinear_layers: int = 5
     nonlinear_solution_control: str = "newton force control"
+    post_buckling_enabled: bool = False
+    post_buckling_stop_load_fraction: float = 0.5
+    post_buckling_max_displacement_m: float = 0.0
     nonlinear_convergence_profile: str = "auto"
     nonlinear_assembly_threads: int = 0
     nonlinear_static_kinematics: str = "von_karman"
@@ -273,6 +276,7 @@ class RuntimeFEMOptions:
     collision_dt_s: float = 0.0005
     collision_result_interval_s: float = 0.0
     collision_penalty_stiffness_n_per_m: float = 0.0
+    collision_auto_precondition: bool = False
     collision_contact_damping: float = 0.0
     collision_max_iterations: int = 25
     collision_penetration_tolerance_m: float = 1.0e-8
@@ -780,12 +784,25 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
     girder = getattr(cyl_obj, "RingFrameObj", None)
     cone_r1 = _safe_float(_read_attr_or_call(shell, "cone_r1", default=None), 0.0)
     cone_r2 = _safe_float(_read_attr_or_call(shell, "cone_r2", default=None), 0.0)
+    if hasattr(cyl_obj, "geometry"):
+        is_cone = getattr(cyl_obj, "geometry") == 9
+    else:
+        is_cone = bool(cone_r1 > 0.0 and cone_r2 > 0.0 and abs(cone_r1 - cone_r2) > 1e-6)
+
+    # Standard cylinders might be imported as cones (geometry=9) but have constant diameter
+    if is_cone and abs(cone_r1 - cone_r2) < 1e-6:
+        is_cone = False
+
+    radius = _safe_float(_read_attr_or_call(shell, "radius", default=None), 0.0)
+    if radius <= 1e-6:
+        radius = cone_r1 if cone_r1 > 1e-6 else 1.0
+
     return {
         "geometry": "cylinder",
-        "radius_m": _safe_float(_read_attr_or_call(shell, "radius", default=None), 1.0),
+        "radius_m": radius,
         "length_m": _safe_float(_read_attr_or_call(shell, "length_of_shell", "tot_cyl_length", default=None), 1.0),
         "thickness_m": _safe_float(_read_attr_or_call(shell, "thk", default=None), 0.0),
-        "is_cone": bool(cone_r1 > 0.0 and cone_r2 > 0.0 and abs(cone_r1 - cone_r2) > 1e-6),
+        "is_cone": is_cone,
         "cone_r1_m": cone_r1,
         "cone_r2_m": cone_r2,
         "cone_length_m": _safe_float(_read_attr_or_call(shell, "cone_length", default=None), 0.0),
@@ -962,6 +979,9 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         nonlinear_convergence_profile=options.nonlinear_convergence_profile,
         nonlinear_assembly_threads=options.nonlinear_assembly_threads,
         nonlinear_static_kinematics=_normalise_kinematics(options.nonlinear_static_kinematics),
+        post_buckling_enabled=bool(options.post_buckling_enabled),
+        post_buckling_stop_load_fraction=float(options.post_buckling_stop_load_fraction),
+        post_buckling_max_displacement_m=float(options.post_buckling_max_displacement_m),
         beam_consistent_mass_enabled=bool(options.beam_consistent_mass_enabled),
         custom_loads_add_to_imported=options.custom_loads_add_to_imported,
         custom_use_nullspace_projection=options.custom_use_nullspace_projection,
@@ -1062,6 +1082,7 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         collision_dt_s=options.collision_dt_s,
         collision_result_interval_s=options.collision_result_interval_s,
         collision_penalty_stiffness_n_per_m=options.collision_penalty_stiffness_n_per_m,
+        collision_auto_precondition=bool(options.collision_auto_precondition),
         collision_contact_damping=options.collision_contact_damping,
         collision_max_iterations=options.collision_max_iterations,
         collision_penetration_tolerance_m=options.collision_penetration_tolerance_m,
@@ -1299,6 +1320,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "collision_dt_s": float(options.collision_dt_s),
         "collision_result_interval_s": float(options.collision_result_interval_s),
         "collision_penalty_stiffness_n_per_m": float(options.collision_penalty_stiffness_n_per_m),
+        "collision_auto_precondition": bool(options.collision_auto_precondition),
         "collision_contact_damping": float(options.collision_contact_damping),
         "collision_max_iterations": int(options.collision_max_iterations),
         "collision_penetration_tolerance_m": float(options.collision_penetration_tolerance_m),
@@ -3670,6 +3692,15 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Changes the size and smoothness of the transition band.",
         "caution": "A very high value makes abrupt mesh-size jumps.",
     },
+    "point_refinement_z_m": {
+        "title": "Point Z",
+        "purpose": "World-space height of the point-refinement centre.",
+        "use": "Filled automatically when you pick a point. On a cylinder the axial coordinate equals world z, so "
+               "editing Point Z also updates Point X (and vice versa). On a flat panel the plate lies at z = 0 and "
+               "this field is informational.",
+        "output": "Shows where the refinement centre sits in the 3D view.",
+        "caution": "For cylinders the circumferential position is set by the arc-length Point Y, not by X/Z.",
+    },
     "collision_adaptive_mesh": {
         "title": "Impact Detail Mesh",
         "purpose": "Uses the sphere trajectory impact point as a point-detail mesh source.",
@@ -4072,6 +4103,33 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Changes nonlinear static control mode and result interpretation; it does not change element formulation or loads.",
         "caution": "Arc length is more expensive and intended for collapse/path-following checks. Keep Newton for ordinary target-load verification.",
     },
+    "post_buckling_enabled": {
+        "title": "Post-buckling",
+        "purpose": "Trace the post-buckling (post-collapse) response instead of stopping at the limit point.",
+        "use": "Forces a FULL geometric + material nonlinear arc-length solve: the Analysis, Material and NL "
+               "control fields are set automatically (geom. + material nonlinear static, DNV-RP-C208 steel, arc "
+               "length) because an elastic post-buckling branch is non-physical for steel design. Follows the "
+               "descending equilibrium branch after the peak; use with an imperfection so the buckling mode is "
+               "seeded.",
+        "output": "The equilibrium path (load factor vs displacement) continues past the peak; the live run graph "
+                  "shows the full path and the result reports the peak and final load factors.",
+        "caution": "Post-buckling paths can be mesh- and imperfection-sensitive. The trace stops automatically at "
+                   "the configured load fraction, displacement guard, or step limit.",
+    },
+    "post_buckling_stop_load_fraction": {
+        "title": "Post-buckling Stop Fraction",
+        "purpose": "Automatic stop: end the trace when the load factor has fallen to this fraction of the peak.",
+        "use": "0.5 traces until half the peak load is shed; smaller values follow the collapse further.",
+        "output": "Sets how much of the descending branch is resolved; status becomes 'post buckling traced'.",
+        "caution": "Very small fractions can require many arc-length steps on flat post-collapse plateaus.",
+    },
+    "post_buckling_max_displacement_m": {
+        "title": "Post-buckling Displacement Guard",
+        "purpose": "Optional absolute stop on the largest nodal translation, in metres.",
+        "use": "0 disables the guard. Set a physical bound (e.g. several plate thicknesses) to stop runaway paths.",
+        "output": "The trace stops with status 'displacement limit reached' when exceeded.",
+        "caution": "A too-tight guard can stop the trace before the post-buckling response develops.",
+    },
     "nonlinear_convergence_profile": {
         "title": "Nonlinear Convergence Profile",
         "purpose": "Selects automatic Newton globalization and adaptive load-step behavior for nonlinear static runs.",
@@ -4348,6 +4406,17 @@ FEM_OPTION_INFO.update({
         "output": "Higher values reduce penetration but can require smaller dt and more iterations.",
         "caution": "Too high can make contact numerically stiff; too low permits excessive penetration.",
     },
+    "collision_auto_precondition": {
+        "title": "Extra-conservative contact",
+        "purpose": "Softens the contact penalty further for stubborn high-energy impacts that still fail to "
+                   "converge at the automatic penalty.",
+        "use": "The automatic penalty is already capped at the shell contact-stiffness scale (E*t) so contact "
+               "stays well conditioned at any mesh. Enable this only if a heavy/fast impact still reports "
+               "'nonlinear iteration failed'; it halves the penalty for more margin. Ignored when a manual "
+               "penalty is set.",
+        "output": "The resolved penalty basis reports the applied scale factor.",
+        "caution": "Softer contact slightly increases penetration; leave off for ordinary impacts.",
+    },
     "collision_contact_damping": {
         "title": "Contact Damping",
         "purpose": "Optional normal damping in the penalty contact law.",
@@ -4432,7 +4501,8 @@ FEM_OPTION_INFO.update({
         "use": "Fixed applies the manual strain threshold. Mesh-scaled (GL) computes the limit per element from "
                "thickness/size (0.056 + 0.54 t/l). RTCL additionally weights damage by stress triaxiality "
                "(Rice-Tracey/Cockcroft-Latham, the standard in ship-collision analysis): no damage in compression, "
-               "reduced in shear, accelerated in biaxial tension, on top of the mesh-scaled limit.",
+               "reduced in shear, accelerated in biaxial tension, on top of the mesh-scaled limit. RTCL modified "
+               "recalibrates the limit so plane-strain tension fails exactly at the GL curve (limit x 1.44).",
         "output": "RTCL gives the most stable erosion: compressed dent sides no longer erode spuriously and damage "
                   "accumulates smoothly instead of jumping with the plastic-strain peak.",
         "caution": "Mesh-scaled (GL) and RTCL ignore the manual threshold for shell elements (beams still use it).",
@@ -4607,6 +4677,9 @@ class RuntimeFEMWindow:
         self.nonlinear_tolerance = tk.DoubleVar(value=1.0e-6)
         self.nonlinear_layers = tk.IntVar(value=5)
         self.nonlinear_solution_control = tk.StringVar(value="newton force control")
+        self.post_buckling_enabled = tk.BooleanVar(value=False)
+        self.post_buckling_stop_load_fraction = tk.DoubleVar(value=0.5)
+        self.post_buckling_max_displacement_m = tk.DoubleVar(value=0.0)
         self.nonlinear_convergence_profile = tk.StringVar(value="auto")
         self.nonlinear_assembly_threads = tk.IntVar(value=0)
         self.nonlinear_static_kinematics = tk.StringVar(value="Von Karman")
@@ -4651,6 +4724,14 @@ class RuntimeFEMWindow:
         self.point_refinement_fine_size_m = tk.DoubleVar(value=0.0)
         self.point_refinement_extent_m = tk.DoubleVar(value=0.25)
         self.point_refinement_growth_factor = tk.DoubleVar(value=1.35)
+        self.point_refinement_z_m = tk.DoubleVar(value=0.0)
+        self._point_refinement_z_sync_active = False
+        self._bind_point_refinement_z_sync()
+        self._live_graph_figure = None
+        self._live_graph_axis = None
+        self._live_graph_axis2 = None
+        self._live_graph_canvas = None
+        self._live_graph_state: dict[str, Any] = {"kind": "idle", "series": {}, "last_draw": 0.0}
         self._custom_load_entries: list[dict[str, Any]] = []
         self._custom_selected_edge_keys: set[tuple[str, float, float, float]] = set()
         self._custom_load_tree: ttk.Treeview | None = None
@@ -4740,6 +4821,7 @@ class RuntimeFEMWindow:
         self.collision_dt_s = tk.DoubleVar(value=0.0005)
         self.collision_result_interval_s = tk.DoubleVar(value=0.0)
         self.collision_penalty_stiffness_n_per_m = tk.DoubleVar(value=0.0)
+        self.collision_auto_precondition = tk.BooleanVar(value=False)
         self.collision_contact_damping = tk.DoubleVar(value=0.0)
         self.collision_max_iterations = tk.IntVar(value=25)
         self.collision_penetration_tolerance_m = tk.DoubleVar(value=1.0e-8)
@@ -4915,7 +4997,29 @@ class RuntimeFEMWindow:
     def _collision_kinematics_selector_enabled(self) -> bool:
         return bool(self.collision_enabled.get()) and bool(self.collision_material_nonlinear_enabled.get())
 
+    def _apply_post_buckling_field_sync(self) -> None:
+        """Mirror the post-buckling solve mode in the dependent input fields.
+
+        Post-buckling always runs a geometric + material nonlinear arc-length
+        solve (the solver enforces this), so the Analysis, Material and NL
+        control fields are set to match what actually executes.  Values are
+        only written when different, which also terminates the trace
+        recursion from the option-state bindings.
+        """
+        try:
+            if not bool(self.post_buckling_enabled.get()):
+                return
+            if str(self.analysis_type.get()) != "geom. + material nonlinear static":
+                self.analysis_type.set("geom. + material nonlinear static")
+            if str(self.material_model.get()) != "DNV-RP-C208 steel":
+                self.material_model.set("DNV-RP-C208 steel")
+            if self._choice_key(self.nonlinear_solution_control.get()) != "arc length":
+                self.nonlinear_solution_control.set("arc length")
+        except Exception:
+            pass
+
     def _refresh_option_states(self, *_args: Any) -> None:
+        self._apply_post_buckling_field_sync()
         static_enabled = self._static_kinematics_selector_enabled()
         if not static_enabled and _normalise_kinematics(self.nonlinear_static_kinematics.get()) != "von_karman":
             self.nonlinear_static_kinematics.set("Von Karman")
@@ -4950,7 +5054,7 @@ class RuntimeFEMWindow:
         except Exception:
             pass
 
-        criterion_fixed = (self.collision_damage_criterion.get() not in ("mesh_scaled_gl", "rtcl"))
+        criterion_fixed = (self.collision_damage_criterion.get() not in ("mesh_scaled_gl", "rtcl", "rtcl_modified"))
         if hasattr(self, "_collision_plastic_damage_threshold_control"):
             is_active = criterion_fixed and bool(self.collision_damage_enabled.get())
             self._set_control_state(self._collision_plastic_damage_threshold_control, is_active)
@@ -4960,6 +5064,8 @@ class RuntimeFEMWindow:
             self.analysis_type,
             self.runtime_solver,
             self.nonlinear_solution_control,
+            self.material_model,
+            self.post_buckling_enabled,
             self.collision_enabled,
             self.collision_material_nonlinear_enabled,
             self.collision_beam_contact_enabled,
@@ -5299,8 +5405,20 @@ class RuntimeFEMWindow:
         status_frame = ttk.LabelFrame(left_panel, text="Run status")
         status_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.result_text = tk.Text(status_frame, height=12, wrap=tk.WORD)
-        self.result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.result_text = tk.Text(status_frame, height=8, wrap=tk.WORD)
+        self.result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 2))
+
+        # Live run graph: replaces the lower third of the status text with a
+        # small figure that streams run-type-appropriate measures (collision:
+        # displacement/contact force/plastic strain vs time; nonlinear static
+        # and post-buckling: the equilibrium path; buckling: mode factors).
+        self._live_graph_figure = Figure(figsize=(3.4, 1.8), dpi=100)
+        self._live_graph_axis = self._live_graph_figure.add_subplot(111)
+        self._live_graph_canvas = FigureCanvasTkAgg(self._live_graph_figure, master=status_frame)
+        live_graph_widget = self._live_graph_canvas.get_tk_widget()
+        live_graph_widget.configure(height=170)
+        live_graph_widget.pack(fill=tk.X, expand=False, padx=8, pady=(0, 8))
+        self._live_graph_reset("idle")
 
         self.options_notebook = ttk.Notebook(mid_panel)
         self.options_notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -5375,8 +5493,10 @@ class RuntimeFEMWindow:
                                 self.point_refinement_extent_m)
         self._add_compact_entry(point_group, 3, 0, "point_refinement_growth_factor", "Point growth",
                                 self.point_refinement_growth_factor)
+        self._add_compact_entry(point_group, 3, 1, "point_refinement_z_m", "Point Z [m]",
+                                self.point_refinement_z_m)
         point_actions = ttk.Frame(point_group)
-        point_actions.grid(row=3, column=3, columnspan=3, sticky=tk.EW, padx=8, pady=2)
+        point_actions.grid(row=4, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=2)
         self._mesh_point_selection_button = ttk.Button(
             point_actions,
             text="Start selection",
@@ -5538,6 +5658,16 @@ class RuntimeFEMWindow:
             self.nonlinear_static_kinematics,
             _KINEMATICS_LABELS,
         )
+
+        post_buckling = ttk.LabelFrame(tab_general, text="Post-buckling continuation")
+        post_buckling.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_compact_option_grid(post_buckling)
+        self._add_compact_check(post_buckling, 0, 0, "post_buckling_enabled", "Trace post-buckling response",
+                                self.post_buckling_enabled)
+        self._add_compact_entry(post_buckling, 1, 0, "post_buckling_stop_load_fraction", "Stop at load fraction",
+                                self.post_buckling_stop_load_fraction)
+        self._add_compact_entry(post_buckling, 1, 1, "post_buckling_max_displacement_m", "Max displacement [m]",
+                                self.post_buckling_max_displacement_m)
 
         buckling_validity = ttk.LabelFrame(tab_general, text="Buckling validity and resources")
         buckling_validity.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -5916,6 +6046,8 @@ class RuntimeFEMWindow:
                                 self.collision_target_penetration_fraction)
         self._add_compact_entry(collision_stop, 3, 1, "collision_bounce_back_time", "Bounce stop [s]",
                                 self.collision_bounce_back_time_s)
+        self._add_compact_check(collision_stop, 4, 0, "collision_auto_precondition", "Auto-precondition (scout)",
+                                self.collision_auto_precondition)
 
         collision_damage = ttk.LabelFrame(collision_body, text="Impact damage")
         collision_damage.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -5927,7 +6059,7 @@ class RuntimeFEMWindow:
         self._add_compact_check(collision_damage, 1, 0, "collision_damage_smoothing", "Neighbor smoothing",
                                 self.collision_damage_neighbor_smoothing)
         self._add_compact_option(collision_damage, 1, 1, "collision_damage_criterion", "Damage Criterion",
-                                 self.collision_damage_criterion, ("fixed", "mesh_scaled_gl", "rtcl"))
+                                 self.collision_damage_criterion, ("fixed", "mesh_scaled_gl", "rtcl", "rtcl_modified"))
         self._collision_plastic_damage_threshold_control = self._add_compact_entry(
             collision_damage, 2, 0, "collision_plastic_damage_threshold", "Plastic strain lim.",
             self.collision_plastic_damage_threshold)
@@ -6038,7 +6170,10 @@ class RuntimeFEMWindow:
         scrollbar = ttk.Scrollbar(self.upper_result_frame, orient=tk.VERTICAL, command=self.upper_result_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
         self.upper_result_text.configure(yscrollcommand=scrollbar.set)
-
+        
+        button_frame = ttk.Frame(self.upper_result_frame)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
+        ttk.Button(button_frame, text="Copy to Clipboard", command=self._copy_results_to_clipboard).pack(side=tk.RIGHT)
         result_frame = ttk.LabelFrame(right_panel, text="Run visualization")
         result_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -7194,6 +7329,55 @@ class RuntimeFEMWindow:
         y = min(max(point_y, 0.0), width)
         return Point3D(x, y, 0.0), extent
 
+    def _bind_point_refinement_z_sync(self) -> None:
+        """Keep the world-space Point Z field consistent with Point X/Y.
+
+        On a cylinder the axial parametric coordinate (Point X) IS the world
+        z, so the two fields mirror each other and either can be edited.  On
+        a flat panel the plate lies at z = 0, so Point Z is informational.
+        A guard flag breaks the trace recursion; partially typed values raise
+        in ``get()`` and are ignored until the entry parses.
+        """
+
+        def sync(source: str) -> None:
+            if self._point_refinement_z_sync_active:
+                return
+            if not getattr(self.snapshot, "is_cylinder", False):
+                return
+            self._point_refinement_z_sync_active = True
+            try:
+                if source == "z":
+                    self.point_refinement_x_m.set(float(self.point_refinement_z_m.get()))
+                else:
+                    self.point_refinement_z_m.set(float(self.point_refinement_x_m.get()))
+            except Exception:
+                pass
+            finally:
+                self._point_refinement_z_sync_active = False
+
+        try:
+            self.point_refinement_x_m.trace_add("write", lambda *_a: sync("x"))
+            self.point_refinement_z_m.trace_add("write", lambda *_a: sync("z"))
+        except Exception:
+            pass
+
+    def _sync_point_refinement_z_from_marker(self) -> None:
+        """Fill Point Z from the current refinement centre's world position."""
+        try:
+            marker = self._point_refinement_marker_xyz(runtime_geometry_summary(self.snapshot))
+        except Exception:
+            marker = None
+        if marker is None:
+            return
+        centre, _extent = marker
+        self._point_refinement_z_sync_active = True
+        try:
+            self.point_refinement_z_m.set(float(centre.z))
+        except Exception:
+            pass
+        finally:
+            self._point_refinement_z_sync_active = False
+
     def _point_refinement_report(self, point_x: float, point_y: float) -> str:
         """Status text for a picked point: parametric input plus 3D world XYZ.
 
@@ -7650,8 +7834,8 @@ class RuntimeFEMWindow:
             return
         if radius <= 0.0:
             return
-        segments = 14
-        rings = 8
+        segments = 32
+        rings = 18
         base_color = "#9ca3af"
         light_color = _blend_hex_color(base_color, 0.30)
         outline_color = _blend_hex_color("#4b5563", 0.42)
@@ -7713,6 +7897,8 @@ class RuntimeFEMWindow:
                     layer=39,
                     back_color=light_color,
                     stipple=sphere_stipple,
+                    tags="rigid_sphere",
+                    two_sided_shell=True,
                 )
 
         marker = max(radius * 0.025, 1.0e-3)
@@ -7850,6 +8036,15 @@ class RuntimeFEMWindow:
 
         self.upper_result_text.insert(tk.END, "\n".join(lines))
         self.upper_result_text.config(state=tk.DISABLED)
+
+    def _copy_results_to_clipboard(self) -> None:
+        if self.upper_result_text is None:
+            return
+        text = self.upper_result_text.get("1.0", tk.END).strip()
+        if text:
+            self.window.clipboard_clear()
+            self.window.clipboard_append(text)
+            self.window.update()
 
     def _parse_probe_id(self, variable: tk.StringVar) -> int | None:
         value = str(variable.get() or "").strip()
@@ -8412,6 +8607,9 @@ class RuntimeFEMWindow:
             nonlinear_tolerance=max(_safe_float(self.nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
             nonlinear_layers=_nearest_nonlinear_layer_count(self.nonlinear_layers.get()),
             nonlinear_solution_control=str(self.nonlinear_solution_control.get()),
+            post_buckling_enabled=bool(self.post_buckling_enabled.get()),
+            post_buckling_stop_load_fraction=float(self.post_buckling_stop_load_fraction.get()),
+            post_buckling_max_displacement_m=float(self.post_buckling_max_displacement_m.get()),
             nonlinear_convergence_profile=str(self.nonlinear_convergence_profile.get()),
             nonlinear_assembly_threads=max(_safe_int(self.nonlinear_assembly_threads.get(), 0), 0),
             nonlinear_static_kinematics=_normalise_kinematics(self.nonlinear_static_kinematics.get()),
@@ -8524,6 +8722,7 @@ class RuntimeFEMWindow:
             collision_result_interval_s=max(_safe_float(self.collision_result_interval_s.get(), 0.0), 0.0),
             collision_penalty_stiffness_n_per_m=max(_safe_float(self.collision_penalty_stiffness_n_per_m.get(), 0.0),
                                                     0.0),
+            collision_auto_precondition=bool(self.collision_auto_precondition.get()),
             collision_contact_damping=max(_safe_float(self.collision_contact_damping.get(), 0.0), 0.0),
             collision_max_iterations=max(_safe_int(self.collision_max_iterations.get(), 25), 1),
             collision_penetration_tolerance_m=max(_safe_float(self.collision_penetration_tolerance_m.get(), 1.0e-8),
@@ -8751,6 +8950,7 @@ class RuntimeFEMWindow:
         self.point_refinement_x_m.set(float(x))
         self.point_refinement_y_m.set(float(y))
         self.point_refinement_enabled.set(True)
+        self._sync_point_refinement_z_from_marker()
         self._write_status(self._point_refinement_report(float(x), float(y)), keep_run_results=True)
         self._refresh_figure(preserve_view=True)
         self._refresh_mesh_preview_if_present()
@@ -8759,7 +8959,7 @@ class RuntimeFEMWindow:
         self._mesh_point_selection_active = bool(active)
         self._mesh_point_click_origin = None
         if self._mesh_point_selection_button is not None:
-            self._mesh_point_selection_button.configure(text="Selecting… (cancel)" if active else "Start selection")
+            self._mesh_point_selection_button.configure(text="Finish selection" if active else "Start selection")
         if self.result_canvas is not None:
             try:
                 self.result_canvas.canvas.configure(
@@ -9227,6 +9427,7 @@ class RuntimeFEMWindow:
         self._live_collision_sphere_visualization = {}
         self._run_status_history = ["The result plot will update when the solver finishes.", ""]
         self._write_status(self._format_run_status_text(options, self._run_status_history))
+        self._live_graph_reset(self._live_graph_kind_for_options(options))
 
         def worker() -> None:
             def status_cb(msg: str):
@@ -9291,6 +9492,18 @@ class RuntimeFEMWindow:
                 # Visualizations are slightly heavy, maybe break to yield back to UI
                 break
 
+            if isinstance(msg, dict) and msg.get("type") == "nonlinear_static_step":
+                self._apply_nonlinear_static_step(msg)
+                needs_status_update = True
+                messages_processed += 1
+                continue
+
+            if isinstance(msg, dict):
+                # Unknown structured payload: ignore rather than crash the
+                # result unpack below.
+                messages_processed += 1
+                continue
+
             # If we get here, it must be the result tuple
             result, error = msg
             if needs_status_update:
@@ -9309,6 +9522,7 @@ class RuntimeFEMWindow:
             self._force_fit_next_refresh = True
             self._set_display_modes(result)
             self._sync_color_limit_controls(force=True)
+            self._live_graph_finalize(result)
             self._last_run_result_status_text = format_runtime_fem_result(result)
             self._write_status(self._last_run_result_status_text)
             self._refresh_figure()
@@ -9319,7 +9533,190 @@ class RuntimeFEMWindow:
             self._write_status(self._format_run_status_text(options, self._run_status_history))
         self.window.after(20, self._poll_solver_result)
 
+    _LIVE_GRAPH_LABELS = {
+        "collision": ("time [s]", "Collision transient"),
+        "equilibrium": ("max displacement [mm]", "Equilibrium path"),
+        "time_domain": ("time [s]", "Time-domain response"),
+        "buckling": ("mode", "Buckling factors"),
+        "generic": ("step", "Run measures"),
+        "idle": ("", "Live run graph (starts with the next run)"),
+    }
+
+    def _live_graph_kind_for_options(self, options: Any) -> str:
+        """Pick the live-graph series family for a run configuration."""
+        if bool(getattr(options, "collision_enabled", False)):
+            return "collision"
+        analysis = str(getattr(options, "analysis_type", "") or "").lower()
+        runtime = str(getattr(options, "runtime_solver", "") or "").lower()
+        control = str(getattr(options, "nonlinear_solution_control", "") or "").lower()
+        if (
+            bool(getattr(options, "post_buckling_enabled", False))
+            or "nonlinear static" in analysis
+            or "nonlinear static" in runtime
+            or "capacity" in analysis
+            or "capacity" in runtime
+            or control.startswith("arc")
+        ):
+            return "equilibrium"
+        if bool(getattr(options, "custom_time_domain_enabled", False)):
+            return "time_domain"
+        return "generic"
+
+    def _live_graph_reset(self, kind: str) -> None:
+        self._live_graph_state = {"kind": str(kind), "series": {}, "last_draw": 0.0}
+        self._live_graph_redraw(force=True)
+
+    def _live_graph_append(self, series_name: str, x: float, y: float) -> None:
+        """Add one live sample and redraw (throttled)."""
+        try:
+            x_value = float(x)
+            y_value = float(y)
+        except (TypeError, ValueError):
+            return
+        if not (np.isfinite(x_value) and np.isfinite(y_value)):
+            return
+        series = self._live_graph_state.setdefault("series", {})
+        xs, ys = series.setdefault(str(series_name), ([], []))
+        xs.append(x_value)
+        ys.append(y_value)
+        self._live_graph_redraw()
+
+    @staticmethod
+    def _live_graph_axis_split(series: dict[str, tuple[list, list]]) -> set[str]:
+        """Series names that belong on a secondary y-axis.
+
+        When magnitudes are mixed (contact force in kN next to displacement
+        in mm), the large series flattens the small ones to the x-axis.  The
+        populated series are split at the widest log-scale gap when the
+        overall spread exceeds one order of magnitude; the large group moves
+        to the right-hand axis.
+        """
+        scales = {
+            name: max((abs(float(value)) for value in ys), default=0.0)
+            for name, (xs, ys) in series.items()
+            if xs
+        }
+        positive = {name: scale for name, scale in scales.items() if scale > 0.0}
+        if len(positive) < 2:
+            return set()
+        ordered = sorted(positive.items(), key=lambda item: item[1])
+        if ordered[-1][1] / ordered[0][1] < 10.0:
+            return set()
+        log_scales = [math.log10(scale) for _name, scale in ordered]
+        gaps = [log_scales[index + 1] - log_scales[index] for index in range(len(log_scales) - 1)]
+        split_index = gaps.index(max(gaps)) + 1
+        return {name for name, _scale in ordered[split_index:]}
+
+    def _live_graph_redraw(self, force: bool = False) -> None:
+        axis = self._live_graph_axis
+        canvas = self._live_graph_canvas
+        if axis is None or canvas is None:
+            return
+        now = time.perf_counter()
+        if not force and now - float(self._live_graph_state.get("last_draw", 0.0)) < 0.3:
+            return
+        self._live_graph_state["last_draw"] = now
+        kind = str(self._live_graph_state.get("kind", "idle"))
+        xlabel, title = self._LIVE_GRAPH_LABELS.get(kind, self._LIVE_GRAPH_LABELS["generic"])
+        secondary = getattr(self, "_live_graph_axis2", None)
+        if secondary is not None:
+            try:
+                secondary.remove()
+            except Exception:
+                pass
+            self._live_graph_axis2 = None
+        axis.clear()
+        series = self._live_graph_state.get("series", {}) or {}
+        right_names = self._live_graph_axis_split(series)
+        right_axis = None
+        if right_names:
+            right_axis = axis.twinx()
+            self._live_graph_axis2 = right_axis
+        handles = []
+        labels = []
+        color_cycle = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b")
+        for color_index, (name, (xs, ys)) in enumerate(series.items()):
+            if not xs:
+                continue
+            target = right_axis if (right_axis is not None and name in right_names) else axis
+            label = name + (" (right)" if target is right_axis else "")
+            color = color_cycle[color_index % len(color_cycle)]
+            if kind == "buckling":
+                line, = target.plot(xs, ys, marker="o", linestyle="", markersize=4, label=label, color=color)
+            else:
+                line, = target.plot(
+                    xs, ys, linewidth=1.2, label=label, color=color,
+                    linestyle="--" if target is right_axis else "-",
+                )
+            handles.append(line)
+            labels.append(label)
+        if handles:
+            axis.legend(handles, labels, fontsize=6, loc="best")
+        else:
+            axis.text(0.5, 0.5, "waiting for data" if kind != "idle" else title,
+                      ha="center", va="center", fontsize=7, color="#6b7280",
+                      transform=axis.transAxes)
+        axis.set_xlabel(xlabel, fontsize=6)
+        axis.set_title(title, fontsize=7)
+        axis.tick_params(labelsize=6)
+        if right_axis is not None:
+            right_axis.tick_params(labelsize=6)
+        axis.grid(True, linewidth=0.3, alpha=0.5)
+        try:
+            self._live_graph_figure.tight_layout(pad=0.4)
+        except Exception:
+            pass
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _live_graph_finalize(self, result: Any) -> None:
+        """Fill the graph from the final result when no live series streamed."""
+        state = self._live_graph_state
+        has_data = any(xs for xs, _ys in (state.get("series", {}) or {}).values())
+        factors = tuple(getattr(result, "buckling_factors", ()) or ())
+        if not has_data and factors:
+            state["kind"] = "buckling"
+            state["series"] = {
+                "load factor": ([float(index + 1) for index in range(len(factors))],
+                                 [float(value) for value in factors]),
+            }
+        self._live_graph_redraw(force=True)
+
+    def _apply_nonlinear_static_step(self, payload: dict[str, Any]) -> None:
+        """Equilibrium-path point from the nonlinear static / arc-length solver."""
+        load_factor = _safe_float(payload.get("load_factor"), 0.0)
+        displacement_mm = _safe_float(payload.get("max_translation"), 0.0) * 1000.0
+        self._live_graph_append("load factor", displacement_mm, load_factor)
+        plastic = _safe_float(payload.get("max_equivalent_plastic_strain"), 0.0)
+        if plastic > 0.0:
+            self._live_graph_append("plastic strain [%]", displacement_mm, plastic * 100.0)
+        peak = _safe_float(payload.get("peak_load_factor"), 0.0)
+        step_line = (
+            f"{'Arc-length' if str(payload.get('control', '')) == 'arc length' else 'Nonlinear'} step "
+            f"{_safe_int(payload.get('step_index'), 0)}: load factor {load_factor:.4f}"
+            + (f" (peak {peak:.4f})" if peak > 0.0 else "")
+            + f", max displacement {displacement_mm:.2f} mm"
+        )
+        if not hasattr(self, "_run_status_history"):
+            self._run_status_history = []
+        if self._run_status_history and str(self._run_status_history[-1]).startswith(("Arc-length step", "Nonlinear step")):
+            self._run_status_history[-1] = step_line
+        else:
+            self._run_status_history.append(step_line)
+            self._run_status_history = self._run_status_history[-8:]
+
     def _apply_live_visualization(self, payload: dict[str, Any]) -> None:
+        live_time = _safe_float(payload.get("time_s"), 0.0)
+        self._live_graph_append("max displacement [mm]", live_time,
+                                _safe_float(payload.get("displacement_max_m"), 0.0) * 1000.0)
+        contact_force = _safe_float(payload.get("contact_force_n"), 0.0)
+        if contact_force > 0.0 or self._live_graph_state.get("series", {}).get("contact force [kN]"):
+            self._live_graph_append("contact force [kN]", live_time, contact_force / 1000.0)
+        plastic = _safe_float(payload.get("max_equivalent_plastic_strain"), 0.0)
+        if plastic > 0.0 or self._live_graph_state.get("series", {}).get("plastic strain [%]"):
+            self._live_graph_append("plastic strain [%]", live_time, plastic * 100.0)
         visualization = dict(payload.get("visualization") or {})
         if not visualization:
             return
@@ -9463,6 +9860,7 @@ class RuntimeFEMWindow:
             self.point_refinement_x_m.set(float(point[0]))
             self.point_refinement_y_m.set(float(point[1]))
             self.point_refinement_enabled.set(True)
+            self._sync_point_refinement_z_from_marker()
             self._set_mesh_point_selection_active(False, refresh=False)
             self._write_status(self._point_refinement_report(float(point[0]), float(point[1])),
                                keep_run_results=True)

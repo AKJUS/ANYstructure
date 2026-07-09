@@ -219,8 +219,8 @@ class PlasticImpactDamageConfig:
     def __post_init__(self) -> None:
         if not np.isfinite(self.threshold) or self.threshold <= 0.0:
             raise ValueError("PlasticImpactDamageConfig.threshold must be positive")
-        if self.criterion not in {"fixed", "mesh_scaled_gl", "rtcl"}:
-            raise ValueError("PlasticImpactDamageConfig.criterion must be 'fixed', 'mesh_scaled_gl' or 'rtcl'")
+        if self.criterion not in {"fixed", "mesh_scaled_gl", "rtcl", "rtcl_modified"}:
+            raise ValueError("PlasticImpactDamageConfig.criterion must be 'fixed', 'mesh_scaled_gl', 'rtcl' or 'rtcl_modified'")
         if not np.isfinite(self.softening_start) or not (0.0 <= self.softening_start < 1.0):
             raise ValueError("PlasticImpactDamageConfig.softening_start must be in [0, 1)")
         if not np.isfinite(self.delete_at) or self.delete_at <= self.softening_start:

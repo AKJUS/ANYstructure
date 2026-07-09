@@ -1352,6 +1352,12 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "self.upper_result_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))" in source
     assert "self.upper_result_text = tk.Text(" in source
     assert "self.result_canvas = Tkinter3DCanvas(" in source
+    # Left-panel live run graph below the status text.
+    assert "self._live_graph_canvas = FigureCanvasTkAgg(self._live_graph_figure, master=status_frame)" in source
+    assert "self._live_graph_reset(\"idle\")" in source
+    # Post-buckling continuation inputs on the General tab.
+    assert "post_buckling = ttk.LabelFrame(tab_general, text=\"Post-buckling continuation\")" in source
+    assert "\"post_buckling_enabled\", \"Trace post-buckling response\"" in source
     assert "self.interactive_3d_checkbox = ttk.Checkbutton(" in source
     assert "def _populate_canvas_with_geometry(" in source
     assert "def _populate_canvas_with_results(" in source
@@ -3300,3 +3306,340 @@ def test_collision_damage_criterion_reaches_backend_config():
         collision_damage_criterion="bogus",
     )
     assert fe_solver._collision_plastic_damage_config(config).criterion == "fixed"
+
+    # RTCL is the app default: stress-state aware and the most stable erosion.
+    assert fe_solver.LightweightFEMConfig().collision_damage_criterion == "rtcl"
+    assert fe_runtime_solver.RuntimeFEMOptions().collision_damage_criterion == "rtcl"
+
+
+def test_post_buckling_options_force_arc_length_with_automatic_stop():
+    """Post-buckling enable forces arc-length control, activates the nonlinear
+    static path, and configures the automatic stopping criteria."""
+    from anystruct import fe_solver
+
+    config = fe_solver.LightweightFEMConfig(
+        post_buckling_enabled=True,
+        post_buckling_stop_load_fraction=0.4,
+        post_buckling_max_displacement_m=0.08,
+        nonlinear_solution_control="newton force control",  # overridden
+        analysis_type="linear eigenvalue",                   # overridden
+        nonlinear_steps=10,
+        nonlinear_max_load_factor=2.0,
+    )
+    assert fe_solver._nonlinear_solution_control(config) == "arc length"
+    assert fe_solver._wants_static_nonlinear_analysis(config) is True
+    control = fe_solver._arc_length_control(config)
+    assert control is not None
+    assert control.post_peak_load_fraction == pytest.approx(0.4)
+    assert control.max_translation == pytest.approx(0.08)
+    assert control.stop_after_peak_steps >= 10_000
+    assert control.max_steps >= 100
+
+    # Disabled: plain arc-length keeps the short limit-point confirmation.
+    off = fe_solver.LightweightFEMConfig(nonlinear_solution_control="arc length")
+    plain = fe_solver._arc_length_control(off)
+    assert plain.post_peak_load_fraction is None
+    assert plain.max_translation is None
+    assert plain.stop_after_peak_steps == 4
+    assert fe_solver.LightweightFEMConfig().post_buckling_enabled is False
+
+
+def test_live_graph_routing_and_series_accumulation():
+    """Headless checks of the live-graph state machine: run-kind selection,
+    collision/equilibrium feeds, and the buckling fallback finalize."""
+    import types
+
+    window = types.SimpleNamespace()
+    window._live_graph_axis = None
+    window._live_graph_canvas = None
+    window._live_graph_figure = None
+    window._live_graph_state = {"kind": "idle", "series": {}, "last_draw": 0.0}
+    window._run_status_history = []
+    for name in ("_live_graph_kind_for_options", "_live_graph_reset", "_live_graph_append",
+                 "_live_graph_redraw", "_live_graph_finalize", "_apply_nonlinear_static_step"):
+        setattr(window, name, types.MethodType(getattr(fe_runtime_solver.RuntimeFEMWindow, name), window))
+
+    # Run-kind selection.
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(collision_enabled=True))
+    assert kind == "collision"
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(
+        collision_enabled=False, post_buckling_enabled=True))
+    assert kind == "equilibrium"
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(
+        collision_enabled=False, post_buckling_enabled=False,
+        analysis_type="geom. + material nonlinear static", runtime_solver="stepwise",
+        nonlinear_solution_control="newton force control"))
+    assert kind == "equilibrium"
+    kind = window._live_graph_kind_for_options(types.SimpleNamespace(
+        collision_enabled=False, post_buckling_enabled=False,
+        analysis_type="linear eigenvalue", runtime_solver="stepwise",
+        nonlinear_solution_control="newton force control", custom_time_domain_enabled=False))
+    assert kind == "generic"
+
+    # Equilibrium feed from the structured solver payloads.
+    window._live_graph_reset("equilibrium")
+    for step, (lam, disp) in enumerate(((0.2, 0.001), (0.35, 0.004), (0.30, 0.009)), start=1):
+        window._apply_nonlinear_static_step({
+            "type": "nonlinear_static_step", "control": "arc length", "step_index": step,
+            "load_factor": lam, "peak_load_factor": 0.35, "max_translation": disp,
+            "max_equivalent_plastic_strain": 0.0,
+        })
+    xs, ys = window._live_graph_state["series"]["load factor"]
+    assert ys == [0.2, 0.35, 0.30], "descending branch recorded"
+    assert xs == [1.0, 4.0, 9.0], "x-axis is max displacement in mm"
+    assert window._run_status_history[-1].startswith("Arc-length step 3")
+
+    # Buckling fallback: empty series + factors -> mode/factor markers.
+    window._live_graph_reset("generic")
+    result = types.SimpleNamespace(buckling_factors=(1.8, 2.4, 3.1))
+    window._live_graph_finalize(result)
+    assert window._live_graph_state["kind"] == "buckling"
+    xs, ys = window._live_graph_state["series"]["load factor"]
+    assert xs == [1.0, 2.0, 3.0]
+    assert ys == [1.8, 2.4, 3.1]
+
+
+def test_post_buckling_forces_material_nonlinearity_and_curve():
+    """Post-buckling must run FULLY nonlinear: the DNV material curve is
+    applied even when the material-model dropdown is left at linear elastic
+    (an elastic post-buckling branch is non-physical for steel design)."""
+    from anystruct import fe_solver
+
+    config = fe_solver.LightweightFEMConfig(
+        post_buckling_enabled=True,
+        material_model="linear elastic",
+        analysis_type="linear eigenvalue",
+        steel_grade="S355",
+    )
+    assert fe_solver._wants_material_nonlinear_analysis(config) is True
+    curve, properties = fe_solver._nonlinear_curve_payload(config, {"thickness_m": 0.012})
+    assert curve is not None, "DNV hardening curve must reach the model"
+    assert str(properties.get("grade", "")) == "S355"
+
+    # Without post-buckling the linear-elastic selection stays elastic.
+    plain = fe_solver.LightweightFEMConfig(material_model="linear elastic")
+    assert fe_solver._wants_material_nonlinear_analysis(plain) is False
+    assert fe_solver._nonlinear_curve_payload(plain, {"thickness_m": 0.012})[0] is None
+
+
+def test_post_buckling_field_sync_sets_dependent_inputs():
+    """Enabling post-buckling mirrors the executed solve mode in the GUI
+    fields: analysis, material model and NL control are set to match."""
+    import types
+
+    class Var:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value):
+            self._value = value
+
+    window = types.SimpleNamespace()
+    window.post_buckling_enabled = Var(True)
+    window.analysis_type = Var("linear eigenvalue")
+    window.material_model = Var("linear elastic")
+    window.nonlinear_solution_control = Var("newton force control")
+    window._choice_key = fe_runtime_solver.RuntimeFEMWindow._choice_key
+    window._apply_post_buckling_field_sync = types.MethodType(
+        fe_runtime_solver.RuntimeFEMWindow._apply_post_buckling_field_sync, window)
+
+    window._apply_post_buckling_field_sync()
+    assert window.analysis_type.get() == "geom. + material nonlinear static"
+    assert window.material_model.get() == "DNV-RP-C208 steel"
+    assert window.nonlinear_solution_control.get() == "arc length"
+
+    # Disabled: nothing is touched.
+    window.post_buckling_enabled = Var(False)
+    window.analysis_type = Var("linear eigenvalue")
+    window._apply_post_buckling_field_sync()
+    assert window.analysis_type.get() == "linear eigenvalue"
+
+
+def test_live_graph_axis_split_moves_large_series_to_secondary_axis():
+    """Mixed magnitudes: the large series (contact force) moves to the right
+    axis so small ones (displacement, strain) stay readable, while similar
+    magnitudes keep a single axis."""
+    split = fe_runtime_solver.RuntimeFEMWindow._live_graph_axis_split
+
+    mixed = {
+        "max displacement [mm]": ([0.0, 1.0], [2.0, 8.0]),
+        "contact force [kN]": ([0.0, 1.0], [400.0, 980.0]),
+        "plastic strain [%]": ([0.0, 1.0], [0.1, 1.5]),
+    }
+    assert split(mixed) == {"contact force [kN]"}
+
+    similar = {
+        "load factor": ([0.0, 1.0], [0.5, 1.6]),
+        "plastic strain [%]": ([0.0, 1.0], [0.2, 0.9]),
+    }
+    assert split(similar) == set()
+
+    assert split({"only": ([0.0], [5.0])}) == set()
+    assert split({}) == set()
+
+
+def test_nonlinear_collision_snapshots_keep_refined_skin_surfaces():
+    """Regression: nonlinear collision snapshots hid the entire refined skin
+    because per-element damage-state records (no timestamp) were fed to the
+    per-time deletion filter -- the GUI then fell back to the coarse plot
+    grid, which only looked right for graded/uniform meshes."""
+    from anystruct import fe_solver
+
+    flat = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.5,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": False,
+        "stiffener_spacing_m": 0.75,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        boundary_condition="clamped",
+        collision_enabled=True,
+        collision_adaptive_mesh_enabled=True,
+        collision_adaptive_fine_size_m=0.06,
+        collision_adaptive_extent_m=0.3,
+        collision_radius_m=0.15,
+        collision_start_x_m=1.0,
+        collision_start_y_m=0.75,
+        collision_start_z_m=0.3,
+        collision_vector_x=0.0,
+        collision_vector_y=0.0,
+        collision_vector_z=-1.0,
+        collision_mass_kg=200.0,
+        collision_speed_mps=3.0,
+        collision_material_nonlinear_enabled=True,
+        detail_transition_style="local patch (quad+tri)",
+    )
+    generated = fe_solver.build_generated_geometry(flat, config)
+    skin_count = sum(1 for shell in generated.get("shells", []) if "role" not in shell)
+    assert (generated.get("adaptive_mesh") or {}).get("transition") == "local patch (quad+tri)"
+
+    result = fe_solver.run_production_fem(flat, config)
+    visualization = result.visualization or {}
+    snapshots = tuple((visualization.get("time_domain") or {}).get("snapshots") or ())
+    assert snapshots, result.status
+    for snapshot in (snapshots[0], snapshots[-1]):
+        surfaces = tuple((snapshot or {}).get("skin_shell_surfaces") or ())
+        deleted = len(tuple((snapshot or {}).get("hidden_deleted_element_ids", ()) or ()))
+        assert len(surfaces) + deleted == skin_count, (len(surfaces), deleted, skin_count)
+        assert len(surfaces) > 0.9 * skin_count, "refined skin must stay visible in snapshots"
+
+
+def test_collision_penalty_scale_multiplies_auto_penalty():
+    """collision_penalty_scale must scale the auto contact penalty so the
+    scout preconditioner can carry a convergence-friendly stiffness into the
+    real run.  A manual penalty ignores the scale."""
+    from anystruct import fe_solver as fs
+
+    cylinder = {
+        "geometry": "cylinder", "radius_m": 1.0, "length_m": 6.0, "thickness_m": 0.02,
+        "has_stiffener": False, "has_girder": False,
+    }
+    base = dict(
+        mesh_fidelity="coarse", boundary_condition="auto",
+        cylinder_lower_support="fixed", cylinder_upper_support="fixed",
+        include_end_lids=True,
+        collision_enabled=True, collision_radius_m=0.3, collision_mass_kg=500.0,
+        collision_speed_mps=2.0, collision_start_x_m=-1.31, collision_start_y_m=0.0,
+        collision_start_z_m=3.0, collision_vector_x=1.0, collision_vector_y=0.0, collision_vector_z=0.0,
+        collision_time_mode="manual", collision_total_time_s=0.004, collision_dt_s=5.0e-4,
+    )
+    full = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base))
+    half = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base, collision_penalty_scale=0.5))
+    p_full = float(full.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    p_half = float(half.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    assert p_full > 0.0 and p_half > 0.0
+    assert p_half == pytest.approx(0.5 * p_full, rel=1.0e-6)
+    assert "scaled" in str(half.prestress_summary.get("collision_contact_penalty_basis", ""))
+
+    # Manual penalty overrides the scale entirely.
+    manual = fs.run_production_fem(
+        cylinder,
+        fs.LightweightFEMConfig(**base, collision_penalty_stiffness_n_per_m=1.0e9, collision_penalty_scale=0.5),
+    )
+    assert float(manual.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0)) == pytest.approx(1.0e9)
+
+
+def test_collision_penalty_capped_at_shell_contact_stiffness():
+    """The auto contact penalty must be capped at a multiple of the shell
+    contact-stiffness scale E*t so heavy/fast impacts stay well conditioned.
+    Root cause of 'nonlinear iteration failed' on high-energy runs: the
+    energy/dt-based auto penalty ignored the shell stiffness and could be
+    ~10x E*t, diverging the staggered contact iteration."""
+    from anystruct import fe_solver as fs
+
+    E = 210.0e9
+    t = 0.030
+    et_scale = E * t
+    cap = fs._COLLISION_PENALTY_STRUCTURAL_FACTOR * et_scale
+
+    # Heavy, fast sphere: the uncapped desired penalty is far above E*t.
+    config = fs.LightweightFEMConfig(
+        collision_enabled=True, collision_radius_m=1.0, collision_mass_kg=1.0e6,
+        collision_speed_mps=5.0, collision_target_penetration_fraction=0.01,
+        elastic_modulus_pa=E,
+    )
+    heavy = fs._collision_dynamic_penalty(config, dt=1.0e-4, contact_stiffness_scale=et_scale)
+    assert heavy["penalty_stiffness"] == pytest.approx(cap, rel=1.0e-9)
+    assert heavy["basis"] == "dynamic_auto_structural_cap"
+    # Desired (uncapped) is far stiffer than the cap, confirming the cap binds.
+    assert float(heavy["desired_penalty_stiffness"]) > 3.0 * cap
+
+    # A light impact stays below the cap: the ceiling does not bind and the
+    # penalty is unchanged from the energy-based value.
+    light = fs.LightweightFEMConfig(
+        collision_enabled=True, collision_radius_m=0.15, collision_mass_kg=100.0,
+        collision_speed_mps=3.0, elastic_modulus_pa=E,
+    )
+    light_info = fs._collision_dynamic_penalty(light, dt=1.0e-4, contact_stiffness_scale=et_scale)
+    assert light_info["penalty_stiffness"] < cap
+    assert light_info["basis"] == "dynamic_auto"
+
+
+def test_collision_contact_stiffness_scale_uses_thinnest_skin():
+    """E*t is taken from the thinnest (most compliant) skin shell."""
+    from anystruct import fe_solver as fs
+
+    config = fs.LightweightFEMConfig(elastic_modulus_pa=200.0e9)
+    # Generated skin shells store the plate thickness under the "thickness"
+    # key (NOT "thickness_m"); reading the wrong key silently disabled the cap.
+    generated = {
+        "shells": [
+            {"id": 1, "node_ids": [1, 2, 3, 4], "thickness": 0.03},
+            {"id": 2, "node_ids": [2, 3, 5, 6], "thickness": 0.012},
+            {"id": 9, "node_ids": [1, 2, 7], "role": "stiffener", "thickness": 0.001},
+        ]
+    }
+    scale = fs._collision_contact_stiffness_scale(generated, config)
+    assert scale == pytest.approx(200.0e9 * 0.012)  # thinnest skin, member ignored
+
+
+def test_collision_auto_precondition_softens_penalty_further():
+    """The opt-in extra-conservative mode multiplies the (capped) penalty by
+    the extra softening factor."""
+    from anystruct import fe_solver as fs
+
+    cylinder = {
+        "geometry": "cylinder", "radius_m": 1.0, "length_m": 6.0, "thickness_m": 0.02,
+        "has_stiffener": False, "has_girder": False,
+    }
+    base = dict(
+        mesh_fidelity="coarse", boundary_condition="auto",
+        cylinder_lower_support="fixed", cylinder_upper_support="fixed", include_end_lids=True,
+        collision_enabled=True, collision_radius_m=0.3, collision_mass_kg=5.0e5,
+        collision_speed_mps=6.0, collision_start_x_m=-1.31, collision_start_y_m=0.0,
+        collision_start_z_m=3.0, collision_vector_x=1.0, collision_vector_y=0.0, collision_vector_z=0.0,
+        collision_time_mode="manual", collision_total_time_s=0.004, collision_dt_s=5.0e-4,
+    )
+    plain = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base))
+    conservative = fs.run_production_fem(cylinder, fs.LightweightFEMConfig(**base, collision_auto_precondition=True))
+    p_plain = float(plain.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    p_cons = float(conservative.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
+    assert p_plain > 0.0
+    assert p_cons == pytest.approx(fs._COLLISION_PRECONDITION_EXTRA_SCALE * p_plain, rel=1.0e-6)

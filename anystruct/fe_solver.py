@@ -141,6 +141,9 @@ class LightweightFEMConfig:
     nonlinear_convergence_profile: str = "auto"
     nonlinear_assembly_threads: int = 0
     nonlinear_static_kinematics: str = "von_karman"
+    post_buckling_enabled: bool = False
+    post_buckling_stop_load_fraction: float = 0.5
+    post_buckling_max_displacement_m: float = 0.0
     beam_consistent_mass_enabled: bool = False
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
@@ -242,6 +245,14 @@ class LightweightFEMConfig:
     collision_dt_s: float = 0.0005
     collision_result_interval_s: float = 0.0
     collision_penalty_stiffness_n_per_m: float = 0.0
+    # Multiplies the auto contact penalty (ignored when a manual penalty is
+    # set).  The scout preconditioner writes this; a user can also set it
+    # directly to soften/stiffen contact.
+    collision_penalty_scale: float = 1.0
+    # Optional two-phase mode: run a cheap coarse "scout" collision first to
+    # learn a convergence-achievable contact penalty, then apply it to the
+    # real (fine) run.  See _collision_precondition_scout.
+    collision_auto_precondition: bool = False
     collision_contact_damping: float = 0.0
     collision_max_iterations: int = 25
     collision_penetration_tolerance_m: float = 1.0e-8
@@ -909,6 +920,31 @@ def _apply_local_patch_transition(
     if not any(level):
         return None
 
+    def surface_blend(u: float, v: float) -> float:
+        """Blend factor between chordal (0) and true-surface (1) placement.
+
+        Purely chordal refinement keeps the patch geometrically identical to
+        the faceted base mesh, but a subdivided FLAT facet then buckles like a
+        plate strip -- far softer than the real curved shell (spurious local
+        modes at a fraction of the true load factor).  Purely true-surface
+        placement restores curvature but steps the patch proud of the
+        neighbouring facets by the chord sagitta (a static stress dimple).
+        The blend ramps from chordal at the window boundary (where emitted
+        cells meet untouched facets) to the true surface deep inside, so the
+        geometry is smooth AND the fine region carries real shell curvature.
+        """
+        best = 0.0
+        offsets = (0.0, -v_span, v_span) if periodic_v else (0.0,)
+        for w in windows:
+            for off in offsets:
+                margin_u = min(u - float(w["u0"]), float(w["u1"]) - u)
+                margin_v = min(v + off - float(w["v0"]), float(w["v1"]) - (v + off))
+                depth = min(margin_u, margin_v)
+                if depth <= 0.0:
+                    continue
+                best = max(best, min(1.0, depth / max(base_size, 1.0e-9)))
+        return best
+
     # Edge-neighbour lookup keyed by shared-edge signature.
     def edge_keys(c: dict[str, object]) -> dict[str, tuple]:
         return {
@@ -952,14 +988,31 @@ def _apply_local_patch_transition(
         param_nodes[(round(p[0], 9), round(wrap_v(p[1]), 9))] = node_id_value
     new_edge_parents: dict[int, tuple[int, int]] = {}
 
-    def node_at(u: float, v: float, parents: tuple[int, int] | None = None) -> int:
+    def node_at(
+        u: float,
+        v: float,
+        parents: tuple[int, int] | None = None,
+        locator=None,
+    ) -> int:
         nonlocal max_node_id
         key = (round(u, 9), round(wrap_v(v), 9))
         existing = param_nodes.get(key)
         if existing is not None:
             return existing
         max_node_id += 1
-        coords = point_of_param(u, wrap_v(v))
+        # New nodes blend between the parent cell's bilinear (chordal) surface
+        # and the exact mapped surface via ``surface_blend`` -- see its
+        # docstring for why neither extreme works on a coarsely faceted base.
+        if locator is not None:
+            blend = surface_blend(u, v)
+            chord = np.asarray(locator(u, v), dtype=float)
+            if blend <= 0.0:
+                coords = chord
+            else:
+                exact = np.asarray(point_of_param(u, wrap_v(v)), dtype=float)
+                coords = (1.0 - blend) * chord + blend * exact
+        else:
+            coords = point_of_param(u, wrap_v(v))
         nodes.append({"id": max_node_id, "coords": [float(coords[0]), float(coords[1]), float(coords[2])]})
         coords_by_id[max_node_id] = [float(coords[0]), float(coords[1]), float(coords[2])]
         param_nodes[key] = max_node_id
@@ -1008,6 +1061,23 @@ def _apply_local_patch_transition(
             (0, 0): node_at(u0, v0), (n, 0): node_at(u1, v0),
             (0, n): node_at(u0, v1), (n, n): node_at(u1, v1),
         }
+        corner_xyz = {
+            key: np.asarray(coords_by_id[node_id], dtype=float)
+            for key, node_id in corner_ids.items()
+        }
+
+        def cell_point(u: float, v: float) -> np.ndarray:
+            # Bilinear (chordal) interpolation of the parent cell corners:
+            # shared edges are linear between the shared corner nodes, so
+            # adjacent refined cells and unrefined neighbours stay conforming.
+            fu = (u - u0) / max(u1 - u0, 1.0e-30)
+            fv = (v - v0) / max(v1 - v0, 1.0e-30)
+            return (
+                (1.0 - fu) * (1.0 - fv) * corner_xyz[(0, 0)]
+                + fu * (1.0 - fv) * corner_xyz[(n, 0)]
+                + fu * fv * corner_xyz[(n, n)]
+                + (1.0 - fu) * fv * corner_xyz[(0, n)]
+            )
 
         def lattice(i: int, j: int) -> int:
             u = u0 + du * i
@@ -1017,7 +1087,7 @@ def _apply_local_patch_transition(
                 parents = (corner_ids[(i, 0)], corner_ids[(i, n)])
             elif j in (0, n) and 0 < i < n:
                 parents = (corner_ids[(0, j)], corner_ids[(n, j)])
-            return node_at(u, v, parents)
+            return node_at(u, v, parents, locator=cell_point)
 
         for i in range(n):
             for j in range(n):
@@ -1037,17 +1107,17 @@ def _apply_local_patch_transition(
                 um = u0 + du * (i + 0.5)
                 vm = v0 + dv * (j + 0.5)
                 mid = {
-                    "b": (lambda: node_at(um, v0 + dv * j, (a, b))),
-                    "r": (lambda: node_at(u0 + du * (i + 1), vm, (b, c))),
-                    "t": (lambda: node_at(um, v0 + dv * (j + 1), (d, c))),
-                    "l": (lambda: node_at(u0 + du * i, vm, (a, d))),
+                    "b": (lambda: node_at(um, v0 + dv * j, (a, b), locator=cell_point)),
+                    "r": (lambda: node_at(u0 + du * (i + 1), vm, (b, c), locator=cell_point)),
+                    "t": (lambda: node_at(um, v0 + dv * (j + 1), (d, c), locator=cell_point)),
+                    "l": (lambda: node_at(u0 + du * i, vm, (a, d), locator=cell_point)),
                 }
                 flags = tuple(side for side in ("b", "r", "t", "l") if hang[side])
                 template = cell["shell"]
                 if not flags:
                     emit(template, [a, b, c, d])
                     continue
-                center = node_at(um, vm)
+                center = node_at(um, vm, locator=cell_point)
                 mids = {side: mid[side]() for side in flags}
                 if len(flags) == 4:
                     emit(template, [a, mids["b"], center, mids["l"]])
@@ -3182,6 +3252,21 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             target_size = mesh_size_cap / max(_fidelity_refinement(config.mesh_fidelity), 1)
             circumferential_div = max(circumferential_div, int(math.ceil(circumference / target_size)))
             axial_div = max(axial_div, int(math.ceil(length / target_size)))
+    if _wants_local_patch_transition(config) and not is_cone and radius > 0.0 and thickness > 0.0:
+        # Curvature-adequate base ring for the local-patch transition: the
+        # patch subdivides base facets, and if the facet chord sagitta is
+        # comparable to the plate thickness the subdivided facet behaves as a
+        # FLAT PLATE -- spuriously soft in buckling (plate-strip modes at a
+        # fraction of the true shell load factor) or, placed on the true
+        # surface, bulged proud of its neighbours (membrane stress dimple).
+        # Cap the sagitta at t/4 so both artifacts stay negligible.
+        sagitta_limit = 0.25 * thickness
+        cos_ratio = min(max(1.0 - sagitta_limit / radius, -1.0), 1.0)
+        curvature_div = int(math.ceil(math.pi / max(math.acos(cos_ratio), 1.0e-6)))
+        curvature_div = min(max(curvature_div, 8), 96)
+        if curvature_div > circumferential_div:
+            circumferential_div = curvature_div
+            mesh_generation["local_patch_curvature_min_circumferential_div"] = int(curvature_div)
     if stiffener_count > 0:
         circumferential_div = _multiple_at_least(circumferential_div, stiffener_count)
     if _wants_b3(config) and config.include_girders and geometry.get("has_girder"):
@@ -4279,7 +4364,7 @@ def _collision_plastic_damage_config(config: LightweightFEMConfig):
     ):
         return None
     criterion = str(config.collision_damage_criterion or "fixed").strip().lower()
-    if criterion not in {"fixed", "mesh_scaled_gl", "rtcl"}:
+    if criterion not in {"fixed", "mesh_scaled_gl", "rtcl", "rtcl_modified"}:
         criterion = "fixed"
     return _backend_PlasticImpactDamageConfig(
         threshold=max(float(config.collision_plastic_damage_threshold or 0.01), 1.0e-12),
@@ -4391,8 +4476,41 @@ def _collision_initial_penetration(generated_geometry: dict, config: Lightweight
     }
 
 
+# Contact penalty ceiling as a multiple of the shell contact-stiffness scale
+# E*t.  Validated boundary: penalties around E*t converge; ~10*E*t diverges.
+# Chosen with margin below the observed failure band.
+_COLLISION_PENALTY_STRUCTURAL_FACTOR = 3.0
+# Extra softening applied on top of the structural cap when the opt-in
+# auto-precondition ("extra-conservative contact") mode is enabled.
+_COLLISION_PRECONDITION_EXTRA_SCALE = 0.5
+
+
+def _collision_contact_stiffness_scale(generated_geometry: dict, config: LightweightFEMConfig) -> float:
+    """Shell contact-stiffness scale E*t [N/m] at the (thinnest) skin plate.
+
+    ``E*t`` is the physical normal-contact stiffness scale for a shell and is
+    mesh-independent, so it is the right quantity to cap the penalty against.
+    Uses the thinnest skin shell (most compliant, governs conditioning) and
+    the runtime elastic modulus.
+    """
+    thicknesses = [
+        float(shell.get("thickness", shell.get("thickness_m", 0.0)) or 0.0)
+        for shell in generated_geometry.get("shells", ()) or ()
+        if "role" not in shell
+    ]
+    thicknesses = [t for t in thicknesses if t > 0.0]
+    if not thicknesses:
+        return 0.0
+    thickness = min(thicknesses)
+    modulus = max(float(getattr(config, "elastic_modulus_pa", 0.0) or 0.0), 1.0)
+    return modulus * thickness
+
+
 def _collision_dynamic_penalty(
-    config: LightweightFEMConfig, dt: float, representative_edge: float = 0.0
+    config: LightweightFEMConfig,
+    dt: float,
+    representative_edge: float = 0.0,
+    contact_stiffness_scale: float = 0.0,
 ) -> dict[str, float | str]:
     radius = max(float(config.collision_radius_m), 1.0e-9)
     mass = max(float(config.collision_mass_kg), 1.0e-9)
@@ -4426,17 +4544,32 @@ def _collision_dynamic_penalty(
         penetration_cap = max(penetration_cap, 4.0 * target_penetration)
         penalty_floor = mass * speed * speed / max(penetration_cap * penetration_cap, 1.0e-18)
         selected = min(max(selected / softening, penalty_floor), selected)
+    # Structural contact-stiffness ceiling.  The desired/dt-stable penalties
+    # above are set purely by the impact energy and time step and ignore the
+    # stiffness of the shell being hit.  When the penalty greatly exceeds the
+    # local shell contact stiffness (~ E*t) the structure<->contact staggered
+    # fixed point stops contracting: the contact force swings by mega-newtons
+    # per Newton iteration and the solve fails ("nonlinear iteration failed")
+    # regardless of dt cutbacks.  E*t is the physical contact-stiffness scale
+    # for a shell (N/m) and is mesh-independent, so capping the penalty at a
+    # small multiple of it keeps the contact well-conditioned at any mesh
+    # density.  ``contact_stiffness_scale`` is E*t from the caller; 0 disables.
+    structural_cap = 0.0
+    if contact_stiffness_scale > 0.0:
+        structural_cap = _COLLISION_PENALTY_STRUCTURAL_FACTOR * float(contact_stiffness_scale)
+        selected = min(selected, structural_cap)
     selected = max(selected, 1.0)
     effective_penetration = math.sqrt(mass * speed * speed / selected) if speed > 0.0 else target_penetration
     return {
         "penalty_stiffness": float(selected),
         "desired_penalty_stiffness": float(desired),
         "dt_stable_penalty_stiffness": float(stable),
+        "structural_penalty_cap": float(structural_cap),
         "target_penetration_m": float(target_penetration),
         "effective_penetration_m": float(effective_penetration),
         "impact_energy_j": float(kinetic_energy),
         "energy_softening_factor": float(softening),
-        "basis": "dynamic_auto",
+        "basis": "dynamic_auto" if structural_cap <= 0.0 or selected < structural_cap else "dynamic_auto_structural_cap",
     }
 
 
@@ -4517,7 +4650,10 @@ def _collision_auto_time_settings(generated_geometry: dict, config: LightweightF
             "basis": "user",
         }
     else:
-        penalty_info = _collision_dynamic_penalty(config, dt, representative_edge)
+        penalty_info = _collision_dynamic_penalty(
+            config, dt, representative_edge,
+            contact_stiffness_scale=_collision_contact_stiffness_scale(generated_geometry, config),
+        )
     target_steps = max(int(math.ceil(total_time / max(dt, 1.0e-12))), 1)
     if target_steps < 120:
         dt = min(dt, total_time / 120.0)
@@ -4861,6 +4997,9 @@ def _wants_eigenvalue_buckling(config: LightweightFEMConfig) -> bool:
 
 
 def _wants_static_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    if bool(config.post_buckling_enabled):
+        # Post-buckling tracing is an arc-length nonlinear static solve.
+        return True
     choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
     runtime = _normalized_choice(config.runtime_solver, "stepwise")
     if runtime == "nonlinear static":
@@ -4895,6 +5034,10 @@ def _invalid_corotational_static_fracture(config: LightweightFEMConfig) -> bool:
 
 
 def _nonlinear_solution_control(config: LightweightFEMConfig) -> str:
+    if bool(config.post_buckling_enabled):
+        # Post-buckling continuation requires arc-length control: Newton
+        # force control cannot pass the limit point.
+        return "arc length"
     choice = _normalized_choice(config.nonlinear_solution_control, "newton force control")
     if choice in {"arc", "arc length", "arc-length", "arc length continuation", "crisfield arc length"}:
         return "arc length"
@@ -4909,18 +5052,34 @@ def _arc_length_control(config: LightweightFEMConfig):
     initial_increment = max(max_load / float(steps), 1.0e-6)
     minimum_increment = max(initial_increment / 64.0, 1.0e-8)
     maximum_increment = max(initial_increment * 4.0, initial_increment)
+    post_buckling = bool(config.post_buckling_enabled)
+    stop_fraction = min(max(float(config.post_buckling_stop_load_fraction or 0.5), 0.01), 0.99)
+    max_translation = float(config.post_buckling_max_displacement_m or 0.0)
     return _backend_arc_length_control(
         initial_load_increment=initial_increment,
         minimum_load_increment=minimum_increment,
         maximum_load_increment=maximum_increment,
         maximum_absolute_load_factor=max_load,
-        max_steps=max(steps * 4, steps + 4),
+        # Post-buckling: allow a long descending branch and stop automatically
+        # when the load has shed to the configured fraction of the peak (or
+        # when the optional displacement guard trips).  The plain arc-length
+        # mode keeps the short limit-point confirmation behaviour.
+        max_steps=max(steps * (12 if post_buckling else 4), steps + 4),
+        stop_after_peak_steps=(10_000 if post_buckling else 4),
+        post_peak_load_fraction=(stop_fraction if post_buckling else None),
+        max_translation=(max_translation if post_buckling and max_translation > 0.0 else None),
         target_iterations=max(3, min(_positive_int(config.nonlinear_max_iterations, 25) // 3, 10)),
         preload_steps=max(steps, 1),
     )
 
 
 def _wants_material_nonlinear_analysis(config: LightweightFEMConfig) -> bool:
+    if bool(config.post_buckling_enabled):
+        # Post-buckling capacity of steel structures is plasticity-governed:
+        # an elastic descending branch is non-physical for design work, so
+        # the trace always runs geometric + material nonlinear (DNV curve
+        # from the steel grade) regardless of the material-model dropdown.
+        return True
     choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
     model = _normalized_choice(config.material_model, "linear elastic")
     return "material" in choice or model in {
@@ -6185,9 +6344,35 @@ def _run_collision_response(
             "dt_stable_penalty_stiffness": resolved_penalty,
         }
     else:
-        penalty_info = dict(auto_time) if auto_time else _collision_dynamic_penalty(config, dt)
-        resolved_penalty = max(float(penalty_info.get("recommended_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0)) or 0.0), 1.0)
+        penalty_info = dict(auto_time) if auto_time else _collision_dynamic_penalty(
+            config, dt, representative_edge,
+            contact_stiffness_scale=_collision_contact_stiffness_scale(generated_geometry, config),
+        )
+        auto_penalty = max(float(penalty_info.get("recommended_penalty_stiffness", penalty_info.get("penalty_stiffness", 0.0)) or 0.0), 1.0)
+        # The auto penalty is already capped at a multiple of the shell
+        # contact stiffness (E*t) so the contact iteration stays conditioned.
+        # collision_penalty_scale is a manual multiplier; the opt-in
+        # auto-precondition adds an extra conservative factor for stubborn
+        # high-energy impacts (softer contact, slightly more penetration).
+        penalty_scale = max(float(config.collision_penalty_scale or 1.0), 1.0e-6)
+        if bool(config.collision_auto_precondition):
+            penalty_scale *= _COLLISION_PRECONDITION_EXTRA_SCALE
+        resolved_penalty = max(auto_penalty * penalty_scale, 1.0)
         penalty_basis = str(penalty_info.get("penalty_basis", penalty_info.get("basis", "dynamic_auto")) or "dynamic_auto")
+        if bool(penalty_info.get("structural_penalty_cap")) and float(penalty_info.get("structural_penalty_cap", 0.0)) > 0.0:
+            if auto_penalty >= float(penalty_info.get("structural_penalty_cap", 0.0)) - 1.0:
+                penalty_basis = "dynamic_auto_structural_cap"
+        if penalty_scale != 1.0:
+            penalty_basis = penalty_basis + f"_scaled_{penalty_scale:.4g}"
+            diagnostics.append(
+                "Collision contact penalty scaled by "
+                + str(round(penalty_scale, 5))
+                + " (auto "
+                + str(round(auto_penalty, 3))
+                + " -> "
+                + str(round(resolved_penalty, 3))
+                + " N/m) for convergence."
+            )
     contact_patch_factor = 2.5 if bool(config.collision_material_nonlinear_enabled) else 2.0
     contact_patch_min_nodes = 12 if bool(config.collision_material_nonlinear_enabled) else 8
     contact_patch_max_nodes = 40 if bool(config.collision_material_nonlinear_enabled) else 24
@@ -6265,6 +6450,7 @@ def _run_collision_response(
             live_visualization["active_contacts"] = active_contacts
         live_visualization["time_s"] = float(payload.get("time_s", 0.0) or 0.0)
         last_live_update[0] = now
+        contact_force = np.asarray(payload.get("contact_force", ()), dtype=float).reshape(-1)
         status_callback(
             {
                 "type": "live_visualization",
@@ -6273,6 +6459,8 @@ def _run_collision_response(
                 "step_index": int(payload.get("step_index", 0) or 0),
                 "visualization": live_visualization,
                 "displacement_max_m": _max_translation(model, np.asarray(displacement, dtype=float)),
+                "contact_force_n": float(np.linalg.norm(contact_force)) if contact_force.size else 0.0,
+                "max_equivalent_plastic_strain": float(payload.get("max_equivalent_plastic_strain", 0.0) or 0.0),
             }
         )
 
@@ -6296,7 +6484,17 @@ def _run_collision_response(
     contact_failure_summary = impact_diagnostics.get("contact_failure_summary", {}) or {}
     nonlinear_failure_summary = impact_diagnostics.get("nonlinear_failure_summary", {}) or {}
     state_vm_history = tuple(impact_diagnostics.get("state_von_mises_history", ()) or ())
-    records = tuple(damage_summary.get("records", ()) or ())
+    # Snapshot hiding must use the DELETION events, not the per-element damage
+    # state records: state records exist for every element with plastic state
+    # and carry no time stamp, so feeding them to the per-time deletion filter
+    # hid the entire skin from every snapshot on nonlinear runs.
+    records = tuple(damage_summary.get("deletion_records", ()) or ())
+    if not records:
+        records = tuple(
+            record
+            for record in damage_summary.get("records", ()) or ()
+            if isinstance(record, dict) and "trigger_name" in record
+        )
     times = np.asarray(getattr(impact, "times", ()), dtype=float).reshape(-1)
     displacements = np.asarray(getattr(impact, "displacements", np.zeros((0, model.mesh.dof_manager.total_dofs))), dtype=float)
     sphere_positions = np.asarray(getattr(impact, "sphere_positions", np.zeros((0, 3))), dtype=float)
@@ -6729,6 +6927,46 @@ def _mesh_size_diagnostics(generated_geometry: dict) -> dict[str, float | int | 
     return diagnostics
 
 
+def _ring_tributary_fractions(model, node_ids: list[int]) -> dict[int, float]:
+    """Tributary circumference fraction per node of a closed end ring.
+
+    End loads must be distributed proportionally to the arc each node
+    represents: refined meshes cluster ring nodes locally, and an equal
+    per-node split then concentrates the resultant on the refined side,
+    turning a pure axial force into a spurious global bending moment.
+    """
+    entries: list[tuple[float, int]] = []
+    for node_id in node_ids:
+        node = model.mesh.get_node(int(node_id))
+        if node is None:
+            continue
+        coords = node.coords()
+        theta = math.atan2(float(coords[1]), float(coords[0])) % (2.0 * math.pi)
+        entries.append((theta, int(node.id)))
+    if not entries:
+        return {}
+    if len(entries) == 1:
+        return {entries[0][1]: 1.0}
+    entries.sort()
+    full = 2.0 * math.pi
+    count = len(entries)
+    fractions: dict[int, float] = {}
+    for index, (theta, node_id) in enumerate(entries):
+        gap_prev = (theta - entries[index - 1][0]) % full
+        gap_next = (entries[(index + 1) % count][0] - theta) % full
+        fractions[node_id] = 0.5 * (gap_prev + gap_next) / full
+    return fractions
+
+
+def _edge_tributary_fractions(nodes: list[object], axis: int = 1) -> dict[int, float]:
+    """Tributary length fraction per node of an open panel edge."""
+    weights = _line_node_weights(list(nodes), axis)
+    total = sum(weights.values())
+    if total <= 0.0:
+        return {node_id: 1.0 / max(len(weights), 1) for node_id in weights}
+    return {node_id: weight / total for node_id, weight in weights.items()}
+
+
 def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial_force_n: float) -> None:
     try:
         axial_force = float(axial_force_n)
@@ -6741,10 +6979,12 @@ def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial
         top = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
         if not bottom or not top:
             return
-        for node_id in bottom:
-            load_case.add_nodal_load(node_id, forces=np.array([0.0, 0.0, axial_force / len(bottom)], dtype=float))
-        for node_id in top:
-            load_case.add_nodal_load(node_id, forces=np.array([0.0, 0.0, -axial_force / len(top)], dtype=float))
+        for ring, sign in ((bottom, 1.0), (top, -1.0)):
+            fractions = _ring_tributary_fractions(model, ring)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    node_id, forces=np.array([0.0, 0.0, sign * axial_force * fraction], dtype=float)
+                )
         return
     shell_node_ids = sorted({node_id for shell in generated_geometry.get("shells", []) for node_id in shell.get("node_ids", [])})
     nodes = [model.mesh.get_node(int(node_id)) for node_id in shell_node_ids]
@@ -6759,10 +6999,12 @@ def _add_generated_axial_force(model, load_case, generated_geometry: dict, axial
     right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
     if not left or not right:
         return
-    for node in left:
-        load_case.add_nodal_load(int(node.id), forces=np.array([axial_force / len(left), 0.0, 0.0], dtype=float))
-    for node in right:
-        load_case.add_nodal_load(int(node.id), forces=np.array([-axial_force / len(right), 0.0, 0.0], dtype=float))
+    for edge, sign in ((left, 1.0), (right, -1.0)):
+        fractions = _edge_tributary_fractions(edge, axis=1)
+        for node_id, fraction in fractions.items():
+            load_case.add_nodal_load(
+                int(node_id), forces=np.array([sign * axial_force * fraction, 0.0, 0.0], dtype=float)
+            )
 
 
 def _line_node_weights(nodes: list[object], axis: int, closed_length: float = 0.0) -> dict[int, float]:
@@ -6977,10 +7219,12 @@ def _add_generated_end_moments(model, load_case, generated_geometry: dict, momen
         right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
         if not left or not right:
             return
-        for node in left:
-            load_case.add_nodal_load(int(node.id), moments=np.array([0.0, moment / len(left), 0.0], dtype=float))
-        for node in right:
-            load_case.add_nodal_load(int(node.id), moments=np.array([0.0, -moment / len(right), 0.0], dtype=float))
+        for edge, sign in ((left, 1.0), (right, -1.0)):
+            fractions = _edge_tributary_fractions(edge, axis=1)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    int(node_id), moments=np.array([0.0, sign * moment * fraction, 0.0], dtype=float)
+                )
         return
 
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
@@ -6989,14 +7233,23 @@ def _add_generated_end_moments(model, load_case, generated_geometry: dict, momen
         return
 
     def add_ring_moment(node_ids: list[int], sign: float) -> None:
-        nodes = [model.mesh.get_node(node_id) for node_id in node_ids]
-        nodes = [node for node in nodes if node is not None]
-        denominator = sum(float(node.x) ** 2 for node in nodes)
+        # Tributary-weighted linear axial distribution p_i = w_i (a + b x_i)
+        # with the two constraints sum(p) = 0 (no spurious net axial force on
+        # clustered rings) and sum(p x) = M (exact bending moment).
+        fractions = _ring_tributary_fractions(model, node_ids)
+        if not fractions:
+            return
+        coords = {node_id: model.mesh.get_node(node_id).coords() for node_id in fractions}
+        s_x = sum(w * float(coords[nid][0]) for nid, w in fractions.items())
+        s_xx = sum(w * float(coords[nid][0]) ** 2 for nid, w in fractions.items())
+        denominator = s_xx - s_x * s_x
         if denominator <= 1.0e-12:
             return
-        for node in nodes:
-            axial_force = -sign * moment * float(node.x) / denominator
-            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, 0.0, axial_force], dtype=float))
+        b = moment / denominator
+        a = -b * s_x
+        for node_id, w in fractions.items():
+            axial_force = -sign * w * (a + b * float(coords[node_id][0]))
+            load_case.add_nodal_load(int(node_id), forces=np.array([0.0, 0.0, axial_force], dtype=float))
 
     add_ring_moment(bottom_ring, -1.0)
     add_ring_moment(top_ring, 1.0)
@@ -7020,20 +7273,24 @@ def _add_generated_shear_force(model, load_case, generated_geometry: dict, shear
         right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
         if not left or not right:
             return
-        for node in left:
-            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, -shear / len(left), 0.0], dtype=float))
-        for node in right:
-            load_case.add_nodal_load(int(node.id), forces=np.array([0.0, shear / len(right), 0.0], dtype=float))
+        for edge, sign in ((left, -1.0), (right, 1.0)):
+            fractions = _edge_tributary_fractions(edge, axis=1)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    int(node_id), forces=np.array([0.0, sign * shear * fraction, 0.0], dtype=float)
+                )
         return
 
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
     top_ring = [int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", [])]
     if not bottom_ring or not top_ring:
         return
-    for node_id in bottom_ring:
-        load_case.add_nodal_load(node_id, forces=np.array([0.0, -shear / len(bottom_ring), 0.0], dtype=float))
-    for node_id in top_ring:
-        load_case.add_nodal_load(node_id, forces=np.array([0.0, shear / len(top_ring), 0.0], dtype=float))
+    for ring, sign in ((bottom_ring, -1.0), (top_ring, 1.0)):
+        fractions = _ring_tributary_fractions(model, ring)
+        for node_id, fraction in fractions.items():
+            load_case.add_nodal_load(
+                node_id, forces=np.array([0.0, sign * shear * fraction, 0.0], dtype=float)
+            )
 
 
 def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, moment_nm: float) -> None:
@@ -7054,10 +7311,12 @@ def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, 
         right = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
         if not left or not right:
             return
-        for node in left:
-            load_case.add_nodal_load(int(node.id), moments=np.array([moment / len(left), 0.0, 0.0], dtype=float))
-        for node in right:
-            load_case.add_nodal_load(int(node.id), moments=np.array([-moment / len(right), 0.0, 0.0], dtype=float))
+        for edge, sign in ((left, 1.0), (right, -1.0)):
+            fractions = _edge_tributary_fractions(edge, axis=1)
+            for node_id, fraction in fractions.items():
+                load_case.add_nodal_load(
+                    int(node_id), moments=np.array([sign * moment * fraction, 0.0, 0.0], dtype=float)
+                )
         return
 
     bottom_ring = [int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", [])]
@@ -7066,15 +7325,22 @@ def _add_generated_torsional_moment(model, load_case, generated_geometry: dict, 
         return
 
     def add_ring_torsion(node_ids: list[int], sign: float) -> None:
-        nodes = [model.mesh.get_node(node_id) for node_id in node_ids]
-        nodes = [node for node in nodes if node is not None]
-        denominator = sum(float(node.x)**2 + float(node.y)**2 for node in nodes)
+        # Tributary-weighted tangential traction: exact torque on clustered
+        # rings without a spurious net in-plane force.
+        fractions = _ring_tributary_fractions(model, node_ids)
+        if not fractions:
+            return
+        coords = {node_id: model.mesh.get_node(node_id).coords() for node_id in fractions}
+        denominator = sum(
+            w * (float(coords[nid][0]) ** 2 + float(coords[nid][1]) ** 2)
+            for nid, w in fractions.items()
+        )
         if denominator <= 1.0e-12:
             return
-        for node in nodes:
-            fx = sign * moment * float(node.y) / denominator
-            fy = -sign * moment * float(node.x) / denominator
-            load_case.add_nodal_load(int(node.id), forces=np.array([fx, fy, 0.0], dtype=float))
+        for node_id, w in fractions.items():
+            fx = sign * moment * w * float(coords[node_id][1]) / denominator
+            fy = -sign * moment * w * float(coords[node_id][0]) / denominator
+            load_case.add_nodal_load(int(node_id), forces=np.array([fx, fy, 0.0], dtype=float))
 
     add_ring_torsion(bottom_ring, -1.0)
     add_ring_torsion(top_ring, 1.0)
@@ -7666,6 +7932,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             mesh_info={"nodes": model.mesh.num_nodes, "shells": len(generated_geometry.get("shells", [])), "beams": len(generated_geometry.get("beams", []))},
             load_resultant=_resultant_dict(load_resultant),
             solver_name="ANYstructure production FE mesh",
+            visualization=_visualization_from_full_result(generated_geometry, model, None),
         )
 
     prestress_states, prestress_summary = _full_backend.recover_prestress_from_static_result(model, displacements)
@@ -7824,7 +8091,26 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         else:
             try:
                 nonlinear_resource_config = None
+                # Structured per-increment progress for the GUI live graph:
+                # the runtime status callback already carries dict payloads
+                # for collision runs, so equilibrium-path points reuse it.
+                nonlinear_progress = status_callback if callable(status_callback) else None
                 if nonlinear_control == "arc length":
+                    if bool(config.post_buckling_enabled):
+                        diagnostics.append(
+                            "Post-buckling continuation is enabled: arc-length tracing continues past the limit "
+                            "point and stops automatically when the load factor falls to "
+                            + str(round(min(max(float(config.post_buckling_stop_load_fraction or 0.5), 0.01), 0.99), 3))
+                            + " of the recorded peak"
+                            + (
+                                " or the max displacement guard of "
+                                + str(round(float(config.post_buckling_max_displacement_m), 4))
+                                + " m trips"
+                                if float(config.post_buckling_max_displacement_m or 0.0) > 0.0
+                                else ""
+                            )
+                            + "."
+                        )
                     nonlinear_static_result = _backend_solve_static_arc_length(
                         model,
                         load_case,
@@ -7833,7 +8119,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         arc_tolerance=max(float(config.nonlinear_tolerance), 1.0e-12),
                         num_layers=_nonlinear_layer_count(config.nonlinear_layers),
-                        status_callback=status_callback,
+                        progress_callback=nonlinear_progress,
                     )
                 else:
                     nonlinear_resource_config = _resource_config(config, generated_geometry, auto_assembly=True)
@@ -7850,6 +8136,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
                         fracture_config=_runtime_fracture_config(config),
                         kinematics=static_kinematics,
                         status_callback=status_callback,
+                        progress_callback=nonlinear_progress,
                     )
                 nonlinear_static_factor = float(nonlinear_static_result.capacity_estimate)
                 _nl_info = nonlinear_static_result.info or {}

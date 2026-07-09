@@ -367,13 +367,13 @@ class Tkinter3DCanvas(tk.Frame):
         self._world_primitive_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         # Animation Cache Fields
-        self._animation_cache: List[List[Tuple[str, Tuple[float, ...], Dict[str, Any]]]] = []
+        self._animation_cache: List[Dict[str, Any]] = []
         self._is_capturing_animation = False
-        self._current_animation_frame: List[Tuple[str, Tuple[float, ...], Dict[str, Any]]] = []
         self._is_playing_animation = False
         self._animation_frame_index = 0
         self._animation_after_id: Optional[str] = None
         self._animation_fps = 30
+        self._polygon_pool: List[int] = []
 
         self.canvas.bind("<Configure>", self._on_resize, add="+")
         self.canvas.bind("<ButtonPress-1>", lambda event: self._on_mouse_down(event, "pan"), add="+")
@@ -525,6 +525,7 @@ class Tkinter3DCanvas(tk.Frame):
             fill=self.bg,
             outline="#d0d0d0",
             width=1,
+            tags="overlay_item"
         )
 
         padding = 14
@@ -542,6 +543,7 @@ class Tkinter3DCanvas(tk.Frame):
                 anchor="nw",
                 font=("TkDefaultFont", 10, "bold"),
                 fill="#202020",
+                tags="overlay_item"
             )
             title_y += 15
 
@@ -567,6 +569,7 @@ class Tkinter3DCanvas(tk.Frame):
                     fill=color,
                     outline="#505050",
                     width=1,
+                    tags="overlay_item"
                 )
                 self.canvas.create_text(
                     left + padding + swatch_width + 10,
@@ -574,6 +577,7 @@ class Tkinter3DCanvas(tk.Frame):
                     text=self._format_legend_value(value),
                     anchor="w",
                     fill="#202020",
+                    tags="overlay_item"
                 )
                 y_coord += row_height
             return
@@ -597,6 +601,7 @@ class Tkinter3DCanvas(tk.Frame):
                 y_1,
                 fill=color,
                 outline=color,
+                tags="overlay_item"
             )
         self.canvas.create_rectangle(
             bar_left,
@@ -606,6 +611,7 @@ class Tkinter3DCanvas(tk.Frame):
             fill="",
             outline="#505050",
             width=1,
+            tags="overlay_item"
         )
 
         tick_count = 6
@@ -613,13 +619,14 @@ class Tkinter3DCanvas(tk.Frame):
             fraction = index / (tick_count - 1)
             value = maximum - fraction * (maximum - minimum)
             y_coord = bar_top + fraction * (bar_bottom - bar_top)
-            self.canvas.create_line(bar_right, y_coord, bar_right + 5, y_coord, fill="#505050")
+            self.canvas.create_line(bar_right, y_coord, bar_right + 5, y_coord, fill="#505050", tags="overlay_item")
             self.canvas.create_text(
                 bar_right + 10,
                 y_coord,
                 text=self._format_legend_value(value),
                 anchor="w",
                 fill="#202020",
+                tags="overlay_item"
             )
 
     def _draw_axis_indicator(self) -> None:
@@ -658,6 +665,7 @@ class Tkinter3DCanvas(tk.Frame):
             origin_y + 2,
             fill="#202020",
             outline="",
+            tags="overlay_item"
         )
         for label, vector, color in axes:
             dx, dy = screen_delta(vector)
@@ -674,6 +682,7 @@ class Tkinter3DCanvas(tk.Frame):
                 width=2,
                 arrow=tk.LAST,
                 arrowshape=(9, 11, 4),
+                tags="overlay_item"
             )
             label_offset = 11.0
             length = max(math.hypot(dx, dy), 1.0)
@@ -683,6 +692,7 @@ class Tkinter3DCanvas(tk.Frame):
                 text=label,
                 fill=color,
                 font=("TkDefaultFont", 10, "bold"),
+                tags="overlay_item"
             )
 
     # ------------------------------------------------------------------
@@ -714,9 +724,6 @@ class Tkinter3DCanvas(tk.Frame):
         self._request_redraw()
 
     def _on_mouse_drag(self, event: tk.Event) -> None:
-        if self._is_playing_animation:
-            self.stop_animation()
-            
         if not self._is_dragging:
             return
 
@@ -736,9 +743,6 @@ class Tkinter3DCanvas(tk.Frame):
         self._request_redraw(interactive=True)
 
     def _on_mouse_wheel(self, event: tk.Event) -> str:
-        if self._is_playing_animation:
-            self.stop_animation()
-            
         event_num = getattr(event, "num", None)
         event_delta = getattr(event, "delta", 0)
 
@@ -804,10 +808,20 @@ class Tkinter3DCanvas(tk.Frame):
 
     def capture_animation_frame(self) -> None:
         self._is_capturing_animation = True
-        self._current_animation_frame = []
-        self.redraw()
-        self._animation_cache.append(self._current_animation_frame)
-        self._current_animation_frame = []
+        
+        primitives_full = self._get_world_primitives("full")
+        np_vertices_full = self._np_vertices_cache["full"]
+        
+        primitives_fast = self._get_world_primitives("fast")
+        np_vertices_fast = self._np_vertices_cache.get("fast", np_vertices_full)
+        
+        self._animation_cache.append({
+            "primitives_full": primitives_full,
+            "np_vertices_full": np_vertices_full,
+            "primitives_fast": primitives_fast,
+            "np_vertices_fast": np_vertices_fast,
+            "legend": self._thickness_legend,
+        })
         self._is_capturing_animation = False
 
     def play_animation(self, fps: int = 30) -> None:
@@ -831,18 +845,31 @@ class Tkinter3DCanvas(tk.Frame):
         if not self._is_playing_animation or not self._animation_cache:
             return
         
-        frame = self._animation_cache[self._animation_frame_index]
-        self._clear_canvas_only()
-        for kind, coords, kwargs in frame:
-            if kind == "polygon":
-                self.canvas.create_polygon(*coords, **kwargs)
-            elif kind == "line":
-                self.canvas.create_line(*coords, **kwargs)
-            elif kind == "text":
-                self.canvas.create_text(*coords, **kwargs)
-
-        self._draw_thickness_legend()
-        self._draw_axis_indicator()
+        frame_data = self._animation_cache[self._animation_frame_index]
+        
+        orig_primitives_full = self._world_primitive_cache.get("full")
+        orig_vertices_full = self._np_vertices_cache.get("full")
+        orig_primitives_fast = self._world_primitive_cache.get("fast")
+        orig_vertices_fast = self._np_vertices_cache.get("fast")
+        orig_legend = self._thickness_legend
+        
+        self._world_primitive_cache["full"] = frame_data["primitives_full"]
+        self._np_vertices_cache["full"] = frame_data["np_vertices_full"]
+        self._world_primitive_cache["fast"] = frame_data["primitives_fast"]
+        self._np_vertices_cache["fast"] = frame_data["np_vertices_fast"]
+        self._thickness_legend = frame_data["legend"]
+        
+        self.redraw()
+        
+        if orig_primitives_full is not None:
+            self._world_primitive_cache["full"] = orig_primitives_full
+        if orig_vertices_full is not None:
+            self._np_vertices_cache["full"] = orig_vertices_full
+        if orig_primitives_fast is not None:
+            self._world_primitive_cache["fast"] = orig_primitives_fast
+        if orig_vertices_fast is not None:
+            self._np_vertices_cache["fast"] = orig_vertices_fast
+        self._thickness_legend = orig_legend
 
         self._animation_frame_index = (self._animation_frame_index + 1) % len(self._animation_cache)
         delay_ms = max(1, int(1000.0 / self._animation_fps))
@@ -854,6 +881,7 @@ class Tkinter3DCanvas(tk.Frame):
 
     def _clear_canvas_only(self) -> None:
         self.canvas.delete("all")
+        self._polygon_pool.clear()
 
     def clear(self, keep_canvas: bool = False) -> None:
         self.objects.clear()
@@ -912,8 +940,6 @@ class Tkinter3DCanvas(tk.Frame):
 
         self.width = max(1, self.canvas.winfo_width())
         self.height = max(1, self.canvas.winfo_height())
-        if not self._is_capturing_animation:
-            self._clear_canvas_only()
 
         interactive = self._interactive_render
         quality = "fast" if interactive else "full"
@@ -1009,8 +1035,11 @@ class Tkinter3DCanvas(tk.Frame):
             
             if not p_valid.all():
                 continue
+            kind = primitive.get("kind")
+            if not kind:
+                continue
                 
-            if primitive["kind"] == "line":
+            if kind == "line":
                 if (max(p_proj[0,0], p_proj[1,0]) < min_screen_x or
                     min(p_proj[0,0], p_proj[1,0]) > max_screen_x or
                     max(p_proj[0,1], p_proj[1,1]) < min_screen_y or
@@ -1018,7 +1047,7 @@ class Tkinter3DCanvas(tk.Frame):
                     continue
                 depth = 0.5 * (p_proj[0,2] + p_proj[1,2])
                 coords = (p_proj[0,0], p_proj[0,1], p_proj[1,0], p_proj[1,1])
-            elif primitive["kind"] == "text":
+            elif kind == "text":
                 if (p_proj[0,0] < min_screen_x or p_proj[0,0] > max_screen_x or
                     p_proj[0,1] < min_screen_y or p_proj[0,1] > max_screen_y):
                     continue
@@ -1060,75 +1089,70 @@ class Tkinter3DCanvas(tk.Frame):
             item[2],
         ))
 
-        target_list = self._current_animation_frame if self._is_capturing_animation else None
+        self.canvas.delete("overlay_item")
 
-        for _phase, _depth, _layer, primitive, coords in render_items:
-            if primitive["kind"] == "line":
-                kwargs = {
-                    "fill": primitive["color"],
-                    "width": primitive["width"],
-                }
-                if target_list is not None:
-                    target_list.append(("line", coords, kwargs))
-                else:
-                    self.canvas.create_line(*coords, **kwargs)
-            elif primitive["kind"] == "text":
-                kwargs = {
-                    "text": primitive["text"],
-                    "fill": primitive["color"],
-                    "font": primitive["font"],
-                    "anchor": primitive["anchor"],
-                }
-                if target_list is not None:
-                    target_list.append(("text", coords, kwargs))
-                else:
-                    self.canvas.create_text(*coords, **kwargs)
+        polygon_items = []
+        for item in render_items:
+            primitive = item[3]
+            if primitive.get("kind") == "polygon":
+                polygon_items.append((primitive, item[4]))
             else:
-                outline = "" if (not self.show_mesh_lines) or (interactive and primitive.get("fast_no_outline")) else primitive["outline"]
-                fill_color = primitive["color"]
-                if not primitive.get("_front_facing", True):
-                    fill_color = primitive.get("back_color") or fill_color
-                stipple = "" if interactive else primitive.get("stipple", "")
-                kwargs = {
-                    "fill": fill_color,
-                    "outline": outline,
-                    "width": primitive["width"],
-                    "stipple": stipple,
-                }
-                if primitive.get("tags"):
-                    kwargs["tags"] = primitive.get("tags")
+                overlay_items.append(item)
+
+        pool_size = len(self._polygon_pool)
+        needed_polygons = len(polygon_items)
+        if needed_polygons > pool_size:
+            for _ in range(needed_polygons - pool_size):
+                item_id = self.canvas.create_polygon(0, 0, 0, 0, 0, 0, state="hidden")
+                self._polygon_pool.append(item_id)
+
+        for i, (primitive, coords) in enumerate(polygon_items):
+            item_id = self._polygon_pool[i]
+            outline = "" if (not self.show_mesh_lines) or (interactive and primitive.get("fast_no_outline")) else primitive["outline"]
+            fill_color = primitive["color"]
+            if not primitive.get("_front_facing", True):
+                fill_color = primitive.get("back_color") or fill_color
+            stipple = "" if interactive else primitive.get("stipple", "")
+            
+            kwargs = {
+                "fill": fill_color,
+                "outline": outline,
+                "width": primitive["width"],
+                "stipple": stipple,
+                "state": "normal",
+            }
+            if primitive.get("tags"):
+                kwargs["tags"] = primitive.get("tags")
                 
-                if target_list is not None:
-                    target_list.append(("polygon", coords, kwargs))
-                else:
-                    self.canvas.create_polygon(*coords, **kwargs)
+            self.canvas.coords(item_id, *coords)
+            self.canvas.itemconfig(item_id, **kwargs)
+
+        for i in range(needed_polygons, len(self._polygon_pool)):
+            self.canvas.itemconfig(self._polygon_pool[i], state="hidden")
 
         overlay_items.sort(key=lambda item: (
             item[0],
             -(item[1] - item[2] * layer_epsilon),
             item[2],
         ))
+        
         for _phase, _depth, _layer, primitive, coords in overlay_items:
             if primitive["kind"] == "line":
                 kwargs = {
                     "fill": primitive["color"],
                     "width": primitive["width"],
+                    "tags": "overlay_item",
                 }
-                if target_list is not None:
-                    target_list.append(("line", coords, kwargs))
-                else:
-                    self.canvas.create_line(*coords, **kwargs)
+                self.canvas.create_line(*coords, **kwargs)
             elif primitive["kind"] == "text":
                 kwargs = {
                     "text": primitive["text"],
                     "fill": primitive["color"],
                     "font": primitive["font"],
                     "anchor": primitive["anchor"],
+                    "tags": "overlay_item",
                 }
-                if target_list is not None:
-                    target_list.append(("text", coords, kwargs))
-                else:
-                    self.canvas.create_text(*coords, **kwargs)
+                self.canvas.create_text(*coords, **kwargs)
 
         if not interactive and not self._is_capturing_animation:
             self._draw_thickness_legend()
@@ -2052,6 +2076,7 @@ class Tkinter3DCanvas(tk.Frame):
         stipple: str = "",
         tags: str = "",
         back_color: str = "",
+        two_sided_shell: bool = False,
     ) -> None:
         self.objects.append(
             {
@@ -2065,6 +2090,7 @@ class Tkinter3DCanvas(tk.Frame):
                 "layer": layer,
                 "stipple": stipple,
                 "tags": tags,
+                "two_sided_shell": two_sided_shell,
             }
         )
         self._invalidate_geometry_cache()

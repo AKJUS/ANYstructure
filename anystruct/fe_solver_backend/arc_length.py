@@ -80,6 +80,14 @@ class ArcLengthControl:
     peak_drop_tolerance: float = 1.0e-3
     maximum_absolute_load_factor: Optional[float] = None
     preload_steps: int = 10
+    # Post-buckling continuation controls.  When ``post_peak_load_fraction``
+    # is set the trace continues past the limit point and stops automatically
+    # once the load factor has fallen to that fraction of the recorded peak
+    # (set ``stop_after_peak_steps`` high to allow the descending branch).
+    # ``max_translation`` is an absolute displacement guard in metres on the
+    # largest nodal translation, protecting against runaway post-peak paths.
+    post_peak_load_fraction: Optional[float] = None
+    max_translation: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.initial_load_increment <= 0.0:
@@ -110,6 +118,10 @@ class ArcLengthControl:
             raise ValueError("maximum_absolute_load_factor must be positive when supplied")
         if self.preload_steps <= 0:
             raise ValueError("preload_steps must be positive")
+        if self.post_peak_load_fraction is not None and not (0.0 < self.post_peak_load_fraction < 1.0):
+            raise ValueError("post_peak_load_fraction must be in (0, 1) when supplied")
+        if self.max_translation is not None and self.max_translation <= 0.0:
+            raise ValueError("max_translation must be positive when supplied")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -127,6 +139,8 @@ class ArcLengthControl:
             "peak_drop_tolerance": float(self.peak_drop_tolerance),
             "maximum_absolute_load_factor": self.maximum_absolute_load_factor,
             "preload_steps": int(self.preload_steps),
+            "post_peak_load_fraction": self.post_peak_load_fraction,
+            "max_translation": self.max_translation,
         }
 
 
@@ -183,6 +197,8 @@ class ArcLengthResult:
             "peak_confirmed",
             "maximum_steps_reached",
             "load_factor_limit_reached",
+            "post_buckling_traced",
+            "displacement_limit_reached",
         }
 
     @property
@@ -259,6 +275,20 @@ def _copy_model_with_imperfection(model: "FEModel", imperfection: Optional[Any])
     return apply_imperfection(model, imperfection, copy_model=True)
 
 
+def _max_nodal_translation(model: "FEModel", displacements: np.ndarray) -> float:
+    """Largest nodal translation magnitude in the displacement vector."""
+    peak = 0.0
+    size = int(displacements.size)
+    for node in model.mesh.nodes.values():
+        dofs = np.asarray(node.dofs[:3], dtype=np.intp)
+        if dofs.size == 0 or int(dofs.max()) >= size:
+            continue
+        value = float(np.linalg.norm(displacements[dofs]))
+        if value > peak:
+            peak = value
+    return peak
+
+
 def solve_static_arc_length(
     model: "FEModel",
     load_case: "LoadCase",
@@ -271,6 +301,7 @@ def solve_static_arc_length(
     num_layers: int = 5,
     imperfection: Optional[Any] = None,
     initial_element_states: Optional[Mapping[int, Any]] = None,
+    progress_callback: Optional[Any] = None,
 ) -> ArcLengthResult:
     """Trace the first nonlinear limit point with spherical arc-length control.
 
@@ -400,6 +431,7 @@ def solve_static_arc_length(
     previous_dlambda: Optional[float] = None
     peak_load_factor = float(lam)
     peak_step_index: Optional[int] = None
+    max_translation = 0.0
     descending_steps = 0
     status = "maximum_steps_reached"
     failure_reason: Optional[str] = None
@@ -583,6 +615,24 @@ def solve_static_arc_length(
                 steps.append(step)
                 previous_dq = dq_total.copy()
                 previous_dlambda = float(dlambda_total)
+                max_translation = _max_nodal_translation(working_model, u)
+                if progress_callback is not None:
+                    try:
+                        progress_callback(
+                            {
+                                "type": "nonlinear_static_step",
+                                "control": "arc length",
+                                "step_index": int(step_index),
+                                "load_factor": float(lam),
+                                "peak_load_factor": float(peak_load_factor),
+                                "displacement_norm": float(np.linalg.norm(u)),
+                                "max_translation": float(max_translation),
+                                "iterations": int(iteration),
+                                "max_equivalent_plastic_strain": float(step.max_equivalent_plastic_strain),
+                            }
+                        )
+                    except Exception:
+                        pass
 
                 old_radius = radius
                 if iteration <= max(settings.target_iterations // 2, 1):
@@ -630,6 +680,20 @@ def solve_static_arc_length(
             failure_reason = step_failure if radius >= min_radius else "minimum_arc_radius_reached"
             break
 
+        if (
+            settings.post_peak_load_fraction is not None
+            and peak_step_index is not None
+            and step_index > peak_step_index
+            and lam <= settings.post_peak_load_fraction * peak_load_factor
+        ):
+            # Automatic post-buckling stop: the descending branch has shed
+            # the requested fraction of the peak load, so the post-buckling
+            # response is traced and further continuation adds no insight.
+            status = "post_buckling_traced"
+            break
+        if settings.max_translation is not None and max_translation > settings.max_translation:
+            status = "displacement_limit_reached"
+            break
         if descending_steps >= settings.stop_after_peak_steps:
             status = "peak_confirmed"
             break
@@ -648,6 +712,7 @@ def solve_static_arc_length(
     info["peak_load_factor"] = float(peak_load_factor)
     info["peak_step_index"] = peak_step_index
     info["descending_steps_after_peak"] = int(descending_steps)
+    info["final_max_translation"] = float(max_translation)
     info["load_scaling"] = float(load_scaling)
     info["rotation_length_scale"] = float(rotation_scale)
     info["initial_arc_radius"] = float(settings.initial_load_increment * predictor_norm)
