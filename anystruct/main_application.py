@@ -2525,7 +2525,10 @@ class Application():
                 ml_algo=getattr(self, '_ML_buckling', None),
                 run_buckling=has_result_source,
                 stress_reduction_method=self._fea_stress_reduction_method.get(),
+                load_case=getattr(self, '_fea_selected_load_case', None),
             )
+            if self._fea_buckling_session and hasattr(self._fea_buckling_session, 'active_load_case') and self._fea_buckling_session.active_load_case is not None:
+                self._fea_selected_load_case = self._fea_buckling_session.active_load_case
         except Exception as err:
             messagebox.showerror('FEA import error', str(err))
             return
@@ -2561,7 +2564,10 @@ class Application():
                 ml_algo=getattr(self, '_ML_buckling', None),
                 run_buckling=True,
                 stress_reduction_method=self._fea_stress_reduction_method.get(),
+                load_case=getattr(self, '_fea_selected_load_case', None),
             )
+            if self._fea_buckling_session and hasattr(self._fea_buckling_session, 'active_load_case') and self._fea_buckling_session.active_load_case is not None:
+                self._fea_selected_load_case = self._fea_buckling_session.active_load_case
         except Exception as err:
             messagebox.showerror('Runtime FEA import error', str(err))
             return False
@@ -2785,6 +2791,16 @@ class Application():
             self.reimport_fea_buckling_files()
         else:
             self._gui_fea_buckling_options()
+
+    def _on_fea_load_case_changed(self, event=None):
+        if not getattr(self, '_fea_buckling_mode', False):
+            return
+        try:
+            val = self._fea_load_case_combobox.get()
+            self._fea_selected_load_case = int(val.split(' - ')[0])
+            self.reimport_fea_buckling_files()
+        except ValueError:
+            pass
 
     @staticmethod
     def _fea_stress_method_description(method):
@@ -3898,6 +3914,31 @@ class Application():
             row=0, column=1, sticky='ew', padx=(4, 0)
         )
         rows.append(button_row)
+
+        session = self._fea_buckling_session
+        if session and getattr(session, 'load_cases', ()):
+            if len(session.load_cases) > 1:
+                add_separator()
+                add_label('Load Case', bold=True)
+                
+                def _lc_label(lc: int) -> str:
+                    name = session.load_case_names.get(lc)
+                    return f"{lc} - {name}" if name else str(lc)
+                    
+                self._fea_load_case_combobox = ttk.Combobox(
+                    panel_frame,
+                    values=[_lc_label(lc) for lc in session.load_cases],
+                    state="readonly",
+                )
+                if getattr(self, '_fea_selected_load_case', None) is not None and getattr(self, '_fea_selected_load_case', None) in session.load_cases:
+                    self._fea_load_case_combobox.set(_lc_label(self._fea_selected_load_case))
+                else:
+                    active = session.active_load_case if session.active_load_case is not None else session.load_cases[0]
+                    self._fea_load_case_combobox.set(_lc_label(active))
+                self._fea_load_case_combobox.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 6))
+                self._fea_load_case_combobox.bind("<<ComboboxSelected>>", self._on_fea_load_case_changed)
+                rows.append(self._fea_load_case_combobox)
+                row += 1
 
         add_separator()
         add_label('Analysis', bold=True)
@@ -5957,6 +5998,9 @@ class Application():
         except Exception:
             pass
 
+        original_request_redraw = tk3d._request_redraw
+        tk3d._request_redraw = lambda: None
+
         for field_id, record in getattr(self, '_fea_tk3d_panel_records', {}).items():
             try:
                 panel = session.panel(field_id)
@@ -5976,9 +6020,13 @@ class Application():
                     width=width,
                     cull_backface=False,
                     layer=layer,
-                    tags=f'fea_panel {field_id}',
+                    tags=f'feapanel_{field_id}',
                 )
             self._add_fea_tk3d_local_axes(record)
+
+        tk3d._request_redraw = original_request_redraw
+        tk3d._invalidate_geometry_cache()
+        tk3d._request_redraw()
 
         if fit_view:
             try:
@@ -6050,30 +6098,13 @@ class Application():
         tk3d = getattr(self, '_fea_tk3d_canvas', None)
         if tk3d is None:
             return None
-        width = max(1, int(tk3d._plot_width()))
-        height = max(1, int(tk3d.canvas.winfo_height() or tk3d.height))
-        best_field_id = None
-        best_depth = float('inf')
-        for field_id, record in getattr(self, '_fea_tk3d_panel_records', {}).items():
-            for polygon in record.get('polygons', []):
-                projected = []
-                depths = []
-                for point in polygon:
-                    point3d = tkinter_3d_canvas.Point3D(point[0], point[1], point[2])
-                    screen_point = tk3d.camera.project_point(point3d, width, height)
-                    if screen_point is None:
-                        projected = []
-                        break
-                    _camera_x, _camera_y, camera_z = tk3d.camera.world_to_camera(point3d)
-                    projected.append(screen_point)
-                    depths.append(-camera_z)
-                if not projected or not self._point_in_screen_polygon(x, y, projected):
-                    continue
-                depth = sum(depths) / max(len(depths), 1)
-                if depth < best_depth:
-                    best_depth = depth
-                    best_field_id = field_id
-        return best_field_id
+        item_ids = tk3d.canvas.find_overlapping(x, y, x, y)
+        for item_id in reversed(item_ids):
+            tags = tk3d.canvas.gettags(item_id)
+            for tag in tags:
+                if tag.startswith('feapanel_'):
+                    return tag.replace('feapanel_', '')
+        return None
 
     @staticmethod
     def _point_in_screen_polygon(x, y, polygon):

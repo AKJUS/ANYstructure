@@ -1174,7 +1174,7 @@ class Tkinter3DCanvas(tk.Frame):
         for obj in self.objects:
             if quality == "fast" and obj.get("type") == "polygon":
                 polygon_index += 1
-                if polygon_stride > 1 and not obj.get("tags") and (polygon_index - 1) % polygon_stride:
+                if polygon_stride > 1 and "rigid_sphere" not in obj.get("tags", "") and (polygon_index - 1) % polygon_stride:
                     continue
             primitives.extend(self._object_to_primitives(obj, quality))
 

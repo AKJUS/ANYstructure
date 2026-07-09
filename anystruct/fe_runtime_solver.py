@@ -140,6 +140,8 @@ class RuntimeFEMOptions:
     added_mass_kg: float = 0.0
     added_mass_location: str = "none"
     boundary_condition: str = "auto"
+    boundary_constraint_json: str = "{}"
+    boundary_auto_supports: bool = True
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
     beam_element_order: str = "B2"
@@ -948,6 +950,8 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         added_mass_kg=options.added_mass_kg,
         added_mass_location=options.added_mass_location,
         boundary_condition=options.boundary_condition,
+        boundary_constraint_json=str(options.boundary_constraint_json),
+        boundary_auto_supports=bool(options.boundary_auto_supports),
         symmetry_mode=options.symmetry_mode,
         shell_element_order=options.shell_element_order,
         beam_element_order=options.beam_element_order,
@@ -1161,6 +1165,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "torsional_moment_nm": float(options.torsional_moment_nm),
         "shear_force_n": float(options.shear_force_n),
         "boundary_condition": str(options.boundary_condition),
+        "boundary_constraint_json": str(options.boundary_constraint_json),
+        "boundary_auto_supports": bool(options.boundary_auto_supports),
         "symmetry_mode": str(options.symmetry_mode),
         "shell_element_order": str(options.shell_element_order),
         "beam_element_order": str(options.beam_element_order),
@@ -3928,6 +3934,45 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Affects stiffness, displacement, stress recovery and buckling factors.",
         "caution": "Nullspace projection is only a numerical gauge, not the plate bending support. For manual flat-plate support studies, use custom load/BC mode.",
     },
+    "boundary_auto_supports": {
+        "title": "Automatic supports",
+        "purpose": "Applies the generator's automatic, well-posed supports to the whole boundary when no DOF is "
+                   "constrained in the grid below.",
+        "use": "Leave ticked for the usual behaviour (flat: simply supported edges; cylinder: end supports). Tick "
+               "any DOF below to define the boundary explicitly instead. Untick with no DOF selected for a truly "
+               "free (unsupported) boundary.",
+        "output": "Determines the whole-boundary restraint when the DOF grid is empty.",
+        "caution": "A free boundary needs another restraint (selected-edge BC or symmetry) or the static solve is "
+                   "a mechanism.",
+    },
+    "boundary_edge_select": {
+        "title": "Apply to edge",
+        "purpose": "Choose which boundary edge the DOF grid below edits.",
+        "use": "Cylinder: Bottom, Top, or Both ends. Flat plate: any of the four edges (x0/x1/y0/y1), or All "
+               "edges. Each edge keeps its own DOF selection and enforced values; switching the radio loads that "
+               "edge's spec. 'Both ends'/'All edges' applies the grid to every edge at once.",
+        "output": "Determines which edge nodes receive the DOFs set in the grid.",
+        "caution": "A per-edge value overrides the 'All'/'Both' value on that edge.",
+    },
+    "boundary_dof_grid": {
+        "title": "Whole-boundary DOFs",
+        "purpose": "Constrain chosen degrees of freedom on the entire model boundary (all plate edges / both "
+                   "cylinder ends).",
+        "use": "Tick the DOFs to constrain (Ux/Uy/Uz translations, Rx/Ry/Rz rotations) and set the enforced value "
+               "(0 = fixed). Non-zero values are enforced displacements/rotations applied in every run and can "
+               "drive significant geometric nonlinearity.",
+        "output": "Generates a support on all boundary nodes with the selected DOFs held at their values.",
+        "caution": "Enforced rotations/displacements are real loads; large values may need the nonlinear solver.",
+    },
+    "edge_dof_grid": {
+        "title": "Selected-edge DOFs",
+        "purpose": "Constrain chosen degrees of freedom on the edges picked in the 3D view only.",
+        "use": "Right-click edges in the selection view, tick the DOFs and enforced values, then 'Set BC on "
+               "selected edges'. Each set is added to the applied list below and can be deleted there. Additive on "
+               "top of the whole-boundary supports.",
+        "output": "Generates supports on the selected edge nodes with the chosen DOFs/values.",
+        "caution": "Enforced values here also apply to every run and can cause nonlinearity.",
+    },
     "symmetry_mode": {
         "title": "Symmetry",
         "purpose": "Applies global symmetry constraints for x, y or z symmetry planes.",
@@ -4644,6 +4689,24 @@ class RuntimeFEMWindow:
         self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
         self.num_buckling_modes = tk.IntVar(value=5)
         self.boundary_condition = tk.StringVar(value="auto")
+        # Per-DOF boundary model (redesigned BC tab): whole-boundary grid,
+        # selected-edge staging grid, and the automatic-supports fallback.
+        self._bc_dof_names = ("ux", "uy", "uz", "rx", "ry", "rz")
+        self._bc_dof_labels = {
+            "ux": "Ux [m]", "uy": "Uy [m]", "uz": "Uz [m]",
+            "rx": "Rx [rad]", "ry": "Ry [rad]", "rz": "Rz [rad]",
+        }
+        self.boundary_auto_supports = tk.BooleanVar(value=True)
+        # Whole-boundary grid is edited one named edge at a time; the staging
+        # DOF vars reflect the currently selected edge and are persisted into
+        # _boundary_edge_specs when the radio changes.
+        self.boundary_dof_on = {dof: tk.BooleanVar(value=False) for dof in self._bc_dof_names}
+        self.boundary_dof_value = {dof: tk.DoubleVar(value=0.0) for dof in self._bc_dof_names}
+        self._boundary_edge_specs: dict[str, dict[str, dict]] = {}
+        self.boundary_edge_choice = tk.StringVar(value="all")
+        self._boundary_active_edge = "all"
+        self.edge_dof_on = {dof: tk.BooleanVar(value=False) for dof in self._bc_dof_names}
+        self.edge_dof_value = {dof: tk.DoubleVar(value=0.0) for dof in self._bc_dof_names}
         self.symmetry_mode = tk.StringVar(value="none")
         self.shell_element_order = tk.StringVar(value="S4")
         self.beam_element_order = tk.StringVar(value="B2")
@@ -5200,6 +5263,89 @@ class RuntimeFEMWindow:
         control = ttk.Checkbutton(parent, text=text, variable=variable)
         control.grid(row=row, column=1, columnspan=2, sticky=tk.W, padx=(0, 8), pady=4)
         return control
+
+    def _build_dof_constraint_grid(self, parent: Any, start_row: int, prefix: str,
+                                   on_vars: dict, value_vars: dict) -> None:
+        """Six DOF rows: [constrain checkbox] <dof label> [enforced value].
+
+        A ticked DOF is held at the enforced value (0 = fixed); the value box
+        accepts translations (m) and rotations (rad).  Same layout for the
+        whole-boundary and selected-edge sections.
+        """
+        info_key = "boundary_dof_grid" if prefix == "boundary" else "edge_dof_grid"
+        self._info_button(parent, info_key).grid(row=start_row, column=0, sticky=tk.W, padx=(8, 4), pady=(2, 0))
+        ttk.Label(parent, text="Constrain DOF (tick) and enforced value:").grid(
+            row=start_row, column=1, columnspan=3, sticky=tk.W, padx=(0, 8), pady=(2, 0))
+        for offset, dof in enumerate(self._bc_dof_names):
+            row = start_row + 1 + offset
+            ttk.Checkbutton(parent, text=self._bc_dof_labels[dof], variable=on_vars[dof]).grid(
+                row=row, column=1, sticky=tk.W, padx=(0, 6), pady=1)
+            ttk.Entry(parent, textvariable=value_vars[dof], width=12).grid(
+                row=row, column=2, sticky=tk.W, padx=(0, 8), pady=1)
+
+    def _dof_grid_constraints(self, on_vars: dict, value_vars: dict) -> dict:
+        """Collect {dof: enforced_value} for the ticked DOFs of a grid."""
+        constraints: dict = {}
+        for dof in self._bc_dof_names:
+            try:
+                if bool(on_vars[dof].get()):
+                    constraints[dof] = _safe_float(value_vars[dof].get(), 0.0)
+            except Exception:
+                continue
+        return constraints
+
+    def _boundary_edge_options(self) -> list:
+        """(key, label) edge choices for the whole-boundary radio, per geometry."""
+        if getattr(self.snapshot, "is_cylinder", False):
+            return [("all", "Both ends"), ("lower", "Bottom"), ("upper", "Top")]
+        return [("all", "All edges"), ("x0", "Edge x0"), ("x1", "Edge x1"),
+                ("y0", "Edge y0"), ("y1", "Edge y1")]
+
+    def _persist_boundary_edge(self, edge_key: str) -> None:
+        """Store the current DOF grid into the per-edge spec for edge_key."""
+        spec = {}
+        for dof in self._bc_dof_names:
+            try:
+                if bool(self.boundary_dof_on[dof].get()):
+                    spec[dof] = {"on": True, "value": _safe_float(self.boundary_dof_value[dof].get(), 0.0)}
+            except Exception:
+                continue
+        if spec:
+            self._boundary_edge_specs[edge_key] = spec
+        else:
+            self._boundary_edge_specs.pop(edge_key, None)
+
+    def _load_boundary_edge(self, edge_key: str) -> None:
+        """Load the stored spec for edge_key into the DOF grid (blank if none)."""
+        spec = self._boundary_edge_specs.get(edge_key, {})
+        for dof in self._bc_dof_names:
+            entry = spec.get(dof)
+            self.boundary_dof_on[dof].set(bool(entry))
+            self.boundary_dof_value[dof].set(float(entry.get("value", 0.0)) if entry else 0.0)
+
+    def _on_boundary_edge_change(self) -> None:
+        """Radio callback: persist the edge just left, load the newly picked one."""
+        previous = getattr(self, "_boundary_active_edge", "all")
+        current = str(self.boundary_edge_choice.get())
+        if previous != current:
+            self._persist_boundary_edge(previous)
+            self._load_boundary_edge(current)
+            self._boundary_active_edge = current
+
+    def _collect_boundary_constraint_json(self) -> str:
+        """JSON of the per-edge whole-boundary constraints for the solver.
+
+        {edge: {dof: value}} for edges with any constrained DOF; the "all"
+        edge means every boundary edge.
+        """
+        self._persist_boundary_edge(str(self.boundary_edge_choice.get()))
+        payload = {}
+        for edge_key, spec in self._boundary_edge_specs.items():
+            dofs = {dof: float(entry.get("value", 0.0))
+                    for dof, entry in spec.items() if entry.get("on", True)}
+            if dofs:
+                payload[edge_key] = dofs
+        return json.dumps(payload)
 
     @staticmethod
     def _configure_option_grid(parent: Any) -> None:
@@ -5790,17 +5936,40 @@ class RuntimeFEMWindow:
                              ("front", "back"))
 
         # --- Boundary conditions tab ---
-        constraints = ttk.LabelFrame(tab_bc, text="Supports and constraints")
-        constraints.pack(fill=tk.X, padx=8, pady=(8, 6))
-        self._configure_option_grid(constraints)
-
-        self._add_option_row(constraints, 0, "boundary_condition", "Boundary", self.boundary_condition,
-                             ("auto", "free", "simply supported", "pinned", "clamped"))
-        self._add_option_row(constraints, 1, "symmetry_mode", "Symmetry", self.symmetry_mode,
+        whole_bc = ttk.LabelFrame(tab_bc, text="Whole-boundary supports (per edge)")
+        whole_bc.pack(fill=tk.X, padx=8, pady=(8, 6))
+        self._configure_option_grid(whole_bc)
+        self._add_check_row(whole_bc, 0, "boundary_auto_supports",
+                            "Automatic supports when no edge is constrained below", self.boundary_auto_supports)
+        edge_pick = ttk.Frame(whole_bc)
+        edge_pick.grid(row=1, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(2, 0))
+        self._info_button(edge_pick, "boundary_edge_select").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(edge_pick, text="Apply to edge:").pack(side=tk.LEFT, padx=(0, 6))
+        for key, label in self._boundary_edge_options():
+            ttk.Radiobutton(edge_pick, text=label, value=key, variable=self.boundary_edge_choice,
+                            command=self._on_boundary_edge_change).pack(side=tk.LEFT, padx=(0, 6))
+        self._build_dof_constraint_grid(whole_bc, start_row=2, prefix="boundary",
+                                        on_vars=self.boundary_dof_on, value_vars=self.boundary_dof_value)
+        self._add_option_row(whole_bc, 9, "symmetry_mode", "Symmetry", self.symmetry_mode,
                              ("none", "x", "y", "z", "cyclic"))
-        self._add_entry_row(constraints, 2, "enforced_displacement_x_m", "Enforced disp. X [m]", self.enforced_displacement_x_m)
-        self._add_entry_row(constraints, 3, "enforced_displacement_y_m", "Enforced disp. Y [m]", self.enforced_displacement_y_m)
-        self._add_entry_row(constraints, 4, "enforced_displacement_z_m", "Enforced disp. Z [m]", self.enforced_displacement_z_m)
+
+        edge_bc = ttk.LabelFrame(tab_bc, text="Selected-edge supports")
+        edge_bc.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._configure_option_grid(edge_bc)
+        edge_select = ttk.Frame(edge_bc)
+        edge_select.grid(row=0, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 2))
+        self.custom_bc_area_var = tk.StringVar(value="Selected Area: 0.000 m2")
+        ttk.Label(edge_select, textvariable=self.custom_bc_area_var).pack(side=tk.LEFT, padx=(0, 8))
+        self._custom_bc_selection_button = ttk.Button(edge_select, text="Start selection",
+                                                      command=self._toggle_custom_load_selection)
+        self._custom_bc_selection_button.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(edge_select, text="Select All", command=self._custom_load_select_all).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(edge_select, text="Clear", command=self._custom_load_clear_all).pack(side=tk.LEFT)
+        self._build_dof_constraint_grid(edge_bc, start_row=1, prefix="edge",
+                                        on_vars=self.edge_dof_on, value_vars=self.edge_dof_value)
+        ttk.Button(edge_bc, text="Set BC on selected edges",
+                   command=self._add_custom_bc_from_selection).grid(row=7, column=0, columnspan=4,
+                                                                    sticky=tk.EW, padx=8, pady=(2, 6))
 
         accel = ttk.LabelFrame(tab_loads, text="Acceleration and added mass")
         accel.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -5864,35 +6033,6 @@ class RuntimeFEMWindow:
         self._custom_load_tree_scrollbar = ttk.Scrollbar(load_list, orient=tk.VERTICAL, command=self._custom_load_tree.yview)
         self._custom_load_tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=(0, 8))
         self._custom_load_tree.configure(yscrollcommand=self._custom_load_tree_scrollbar.set)
-        
-        custom_bc = ttk.LabelFrame(tab_bc, text="Custom boundary conditions")
-        custom_bc.pack(fill=tk.X, padx=8, pady=(0, 8))
-        self._configure_option_grid(custom_bc)
-        self._add_check_row(custom_bc, 0, "custom_use_nullspace_projection", "Use nullspace projection as boundary", self.custom_use_nullspace_projection)
-        
-        selection_bc = ttk.LabelFrame(custom_bc, text="Edge selection")
-        selection_bc.grid(row=1, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 8))
-        self._configure_option_grid(selection_bc)
-        self.custom_bc_area_var = tk.StringVar(value="Selected Area: 0.000 m2")
-        ttk.Label(selection_bc, textvariable=self.custom_bc_area_var).grid(row=0, column=0, sticky=tk.W, padx=8, pady=4)
-        self._custom_bc_selection_button = ttk.Button(selection_bc, text="Start selection", command=self._toggle_custom_load_selection)
-        self._custom_bc_selection_button.grid(row=0, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(selection_bc, text="Select All", command=self._custom_load_select_all).grid(row=0, column=2, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(selection_bc, text="Clear", command=self._custom_load_clear_all).grid(row=0, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._info_button(selection_bc, "custom_bc_segments").grid(row=1, column=0, sticky=tk.W, padx=(8, 4), pady=4)
-        ttk.OptionMenu(selection_bc, self.custom_bc_support_choice, self.custom_bc_support_choice.get(),
-                       "simply supported", "fixed").grid(row=1, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(selection_bc, text="Set BC on selected edges", command=self._add_custom_bc_from_selection).grid(
-            row=1, column=2, columnspan=2, sticky=tk.EW, padx=(0, 8), pady=4)
-        selection_bc.columnconfigure(3, weight=1)
-
-        self._add_option_row(custom_bc, 2, "plate_edge_supports", "Plate x0 / x1", self.plate_edge_x0_support, ("free", "simply supported", "fixed"))
-        self._add_option_row(custom_bc, 3, "plate_edge_supports", "Plate y0 / y1", self.plate_edge_y0_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom_bc, self.plate_edge_x1_support, self.plate_edge_x1_support.get(), "free", "simply supported", "fixed").grid(row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        ttk.OptionMenu(custom_bc, self.plate_edge_y1_support, self.plate_edge_y1_support.get(), "free", "simply supported", "fixed").grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_option_row(custom_bc, 4, "cylinder_end_supports", "Cyl. lower / upper", self.cylinder_lower_support, ("free", "simply supported", "fixed"))
-        ttk.OptionMenu(custom_bc, self.cylinder_upper_support, self.cylinder_upper_support.get(), "free", "simply supported", "fixed").grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        custom_bc.columnconfigure(3, weight=1)
         
         bc_list = ttk.LabelFrame(tab_bc, text="Applied boundary conditions")
         bc_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -8579,6 +8719,8 @@ class RuntimeFEMWindow:
             added_mass_kg=_safe_float(self.added_mass_kg.get(), 0.0),
             added_mass_location=str(self.added_mass_location.get() or "none"),
             boundary_condition=str(self.boundary_condition.get()),
+            boundary_constraint_json=self._collect_boundary_constraint_json(),
+            boundary_auto_supports=bool(self.boundary_auto_supports.get()),
             symmetry_mode=str(self.symmetry_mode.get()),
             shell_element_order=str(self.shell_element_order.get()),
             beam_element_order=str(self.beam_element_order.get()),
@@ -9049,11 +9191,15 @@ class RuntimeFEMWindow:
     def _sync_custom_bc_payloads(self) -> None:
         segments: list[dict[str, Any]] = []
         for entry in self._custom_bc_entries:
-            support = str(entry.get("support", "fixed"))
+            constraints = entry.get("constraints")
+            support = str(entry.get("support", "")) if not constraints else ""
             for edge in entry.get("edges", []) or []:
                 if isinstance(edge, dict):
                     segment = dict(edge)
-                    segment["support"] = support
+                    if constraints:
+                        segment["constraints"] = dict(constraints)
+                    else:
+                        segment["support"] = support
                     segments.append(segment)
         self.custom_bc_segments_json.set(json.dumps(segments))
         self._refresh_custom_load_list()
@@ -9067,12 +9213,18 @@ class RuntimeFEMWindow:
                 keep_run_results=True,
             )
             return
-        support = str(self.custom_bc_support_choice.get() or "fixed")
-        self._custom_bc_entries.append({"support": support, "edges": selected_edges})
-        self.custom_load_bc_enabled.set(True)
+        constraints = self._dof_grid_constraints(self.edge_dof_on, self.edge_dof_value)
+        if not constraints:
+            self._write_status(
+                "Tick at least one DOF in the Selected-edge supports grid before setting a boundary condition.",
+                keep_run_results=True,
+            )
+            return
+        self._custom_bc_entries.append({"constraints": constraints, "edges": selected_edges})
         self._sync_custom_bc_payloads()
+        label = ", ".join(f"{dof}={value:g}" for dof, value in constraints.items())
         self._write_status(
-            f"Set '{support}' boundary condition on {len(selected_edges)} selected edge segment(s).",
+            f"Set edge BC ({label}) on {len(selected_edges)} selected edge segment(s).",
             keep_run_results=True,
         )
 

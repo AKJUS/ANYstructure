@@ -11,6 +11,7 @@ axial/circumferential cylinder axes.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import os
@@ -216,6 +217,19 @@ class FeaBucklingSession:
     panels: tuple[FeaBucklingPanel, ...]
     frd_summary: dict[str, Any] | None = None
     diagnostics: tuple[str, ...] = ()
+    active_load_case: int | None = None
+
+    @property
+    def load_cases(self) -> tuple[int, ...]:
+        if self.frd_summary and "load_cases" in self.frd_summary:
+            return tuple(self.frd_summary["load_cases"])
+        return ()
+
+    @property
+    def load_case_names(self) -> dict[int, str]:
+        if self.frd_summary and "load_case_names" in self.frd_summary:
+            return dict(self.frd_summary["load_case_names"])
+        return {}
 
     @property
     def field_count(self) -> int:
@@ -435,7 +449,7 @@ def read_calculix_frd_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
     }
 
 
-def read_calculix_frd_stress(path: str | os.PathLike[str]) -> FrdStressResult:
+def read_calculix_frd_stress(path: str | os.PathLike[str], load_case: int | None = None) -> FrdStressResult:
     """Read expanded FRD nodes/connectivity and the first ``STRESS`` result block."""
 
     path = str(path)
@@ -620,12 +634,12 @@ def read_sesam_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
     )
 
 
-def read_sesam_sif_stress_result(path: str | os.PathLike[str]) -> FrdStressResult:
+def read_sesam_sif_stress_result(path: str | os.PathLike[str], load_case: int | None = None) -> FrdStressResult:
     """Read SESAM SIF RVSTRESS as the FRD-like stress object used here."""
 
     from anystruct.fe_solver_backend.sesam_fem.sif_importer import read_sesam_sif_stress
 
-    stress = read_sesam_sif_stress(path)
+    stress = read_sesam_sif_stress(path, load_case=load_case)
     return FrdStressResult(
         path=stress.path,
         nodes=dict(stress.nodes),
@@ -637,17 +651,20 @@ def read_sesam_sif_stress_result(path: str | os.PathLike[str]) -> FrdStressResul
     )
 
 
-def read_fea_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
-    """Read a supported FE shell model: CalculiX INP or SESAM FEM/SIF."""
-
+@functools.lru_cache(maxsize=4)
+def _cached_read_fea_shell_model(path: str) -> FeShellModel:
     if _is_sesam_model_path(path):
         return read_sesam_shell_model(path)
     return read_calculix_inp(path)
 
 
-def read_fea_result_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
-    """Return lightweight result metadata for FRD or SIF files."""
+def read_fea_shell_model(path: str | os.PathLike[str]) -> FeShellModel:
+    """Read a supported FE shell model: CalculiX INP or SESAM FEM/SIF."""
+    return _cached_read_fea_shell_model(str(path))
 
+
+@functools.lru_cache(maxsize=4)
+def _cached_read_fea_result_summary(path: str) -> dict[str, Any]:
     if _is_sesam_result_path(path):
         from anystruct.fe_solver_backend.sesam_fem.sif_importer import read_sesam_sif_summary
 
@@ -655,12 +672,21 @@ def read_fea_result_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
     return read_calculix_frd_summary(path)
 
 
-def read_fea_stress(path: str | os.PathLike[str]) -> FrdStressResult:
-    """Read supported FE stress results: CalculiX FRD or SESAM SIF."""
+def read_fea_result_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Return lightweight result metadata for FRD or SIF files."""
+    return _cached_read_fea_result_summary(str(path))
 
+
+@functools.lru_cache(maxsize=16)
+def _cached_read_fea_stress(path: str, load_case: int | None) -> FrdStressResult:
     if _is_sesam_result_path(path):
-        return read_sesam_sif_stress_result(path)
-    return read_calculix_frd_stress(path)
+        return read_sesam_sif_stress_result(path, load_case=load_case)
+    return read_calculix_frd_stress(path, load_case=load_case)
+
+
+def read_fea_stress(path: str | os.PathLike[str], load_case: int | None = None) -> FrdStressResult:
+    """Read supported FE stress results: CalculiX FRD or SESAM SIF."""
+    return _cached_read_fea_stress(str(path), load_case)
 
 
 def reduce_field_stresses(
@@ -899,6 +925,7 @@ def _create_flat_fea_buckling_session(
     inp_path: str | os.PathLike[str],
     frd_path: str | os.PathLike[str] | None = None,
     *,
+    load_case: int | None = None,
     calculation_method: str = "SemiAnalytical S3/U3",
     buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,
@@ -921,8 +948,12 @@ def _create_flat_fea_buckling_session(
     reduction_method = normalize_stress_reduction_method(stress_reduction_method)
     diagnostics.append(f"stress reduction method: {reduction_method}")
 
+    if frd_summary and "load_cases" in frd_summary and load_case is None:
+        if frd_summary["load_cases"]:
+            load_case = frd_summary["load_cases"][0]
+
     if frd_path_text:
-        frd_stress = read_fea_stress(frd_path_text)
+        frd_stress = read_fea_stress(frd_path_text, load_case=load_case)
         panel_stresses = tuple(
             reduce_field_stresses(
                 model,
@@ -1002,6 +1033,7 @@ def _create_flat_fea_buckling_session(
         panels=panels,
         frd_summary=frd_summary,
         diagnostics=tuple(diagnostics),
+        active_load_case=load_case,
     )
 
 
@@ -4017,6 +4049,19 @@ class FeaCylinderSession:
     panels: tuple[FeaCylinderPanel, ...]
     frd_summary: dict[str, Any] | None = None
     diagnostics: tuple[str, ...] = ()
+    active_load_case: int | None = None
+
+    @property
+    def load_cases(self) -> tuple[int, ...]:
+        if self.frd_summary and "load_cases" in self.frd_summary:
+            return tuple(self.frd_summary["load_cases"])
+        return ()
+
+    @property
+    def load_case_names(self) -> dict[int, str]:
+        if self.frd_summary and "load_case_names" in self.frd_summary:
+            return dict(self.frd_summary["load_case_names"])
+        return {}
 
     @property
     def field_count(self) -> int:
@@ -5240,6 +5285,7 @@ def _create_flat_fea_buckling_session_from_model(
         panels=panels,
         frd_summary=frd_summary,
         diagnostics=tuple(diagnostics),
+        active_load_case=load_case,
     )
 
 
@@ -5348,6 +5394,7 @@ def _create_cylinder_fea_buckling_session_from_model(
         panels=panels,
         frd_summary=frd_summary,
         diagnostics=tuple(diagnostics),
+        active_load_case=load_case,
     )
 
 
@@ -5355,6 +5402,7 @@ def create_runtime_fea_buckling_session(
     runtime_result: Any,
     *,
     geometry_type: str = "auto",
+    load_case: int | None = None,
     **kwargs: Any,
 ) -> FeaBucklingSession | FeaCylinderSession:
     """Return panel-by-panel buckling sessions directly from a runtime FEM result."""
@@ -5388,6 +5436,7 @@ def create_runtime_fea_buckling_session(
             inp_path=source,
             frd_path=source,
             frd_summary=frd_summary,
+            load_case=load_case,
             **kwargs,
         )
     if geometry_choice == "flat":
@@ -5397,6 +5446,7 @@ def create_runtime_fea_buckling_session(
             inp_path=source,
             frd_path=source,
             frd_summary=frd_summary,
+            load_case=load_case,
             **kwargs,
         )
 
@@ -5420,6 +5470,7 @@ def create_runtime_fea_buckling_session(
             inp_path=source,
             frd_path=source,
             frd_summary=frd_summary,
+            load_case=load_case,
             **kwargs,
         )
     return _create_flat_fea_buckling_session_from_model(
@@ -5428,6 +5479,7 @@ def create_runtime_fea_buckling_session(
         inp_path=source,
         frd_path=source,
         frd_summary=frd_summary,
+        load_case=load_case,
         **kwargs,
     )
 
@@ -5436,6 +5488,7 @@ def create_fea_cylinder_buckling_session(
     inp_path: str | os.PathLike[str],
     frd_path: str | os.PathLike[str] | None = None,
     *,
+    load_case: int | None = None,
     calculation_method: str = "DNV-RP-C202",
     buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,
@@ -5559,6 +5612,7 @@ def create_fea_structure_buckling_session(
     frd_path: str | os.PathLike[str] | None = None,
     *,
     geometry_type: str = "auto",
+    load_case: int | None = None,
     **kwargs: Any,
 ) -> FeaBucklingSession | FeaCylinderSession:
     """Dispatch to flat-plate or cylindrical-shell extraction.
@@ -5570,16 +5624,16 @@ def create_fea_structure_buckling_session(
     if geometry_type not in {"auto", "flat", "cylinder"}:
         raise ValueError("geometry_type must be 'auto', 'flat', or 'cylinder'")
     if geometry_type == "cylinder":
-        return create_fea_cylinder_buckling_session(inp_path, frd_path, **kwargs)
+        return create_fea_cylinder_buckling_session(inp_path, frd_path, load_case=load_case, **kwargs)
     if geometry_type == "flat":
-        return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
+        return _create_flat_fea_buckling_session(inp_path, frd_path, load_case=load_case, **kwargs)
 
     model = read_fea_shell_model(inp_path)
     if _is_sesam_model_path(inp_path):
-        return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
+        return _create_flat_fea_buckling_session(inp_path, frd_path, load_case=load_case, **kwargs)
     if is_cylindrical_shell_model(model):
-        return create_fea_cylinder_buckling_session(inp_path, frd_path, **kwargs)
-    return _create_flat_fea_buckling_session(inp_path, frd_path, **kwargs)
+        return create_fea_cylinder_buckling_session(inp_path, frd_path, load_case=load_case, **kwargs)
+    return _create_flat_fea_buckling_session(inp_path, frd_path, load_case=load_case, **kwargs)
 
 
 def create_fea_buckling_session(
@@ -5587,6 +5641,7 @@ def create_fea_buckling_session(
     frd_path: str | os.PathLike[str] | None = None,
     *,
     geometry_type: str = "auto",
+    load_case: int | None = None,
     **kwargs: Any,
 ) -> FeaBucklingSession | FeaCylinderSession:
     """Public FEA-session entry point used by the ANYstructure GUI.
@@ -5598,6 +5653,7 @@ def create_fea_buckling_session(
         inp_path,
         frd_path,
         geometry_type=geometry_type,
+        load_case=load_case,
         **kwargs,
     )
 

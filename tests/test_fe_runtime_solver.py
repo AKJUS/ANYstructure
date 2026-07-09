@@ -1342,7 +1342,12 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "mesh_preview = ttk.LabelFrame(tab_mesh, text=\"Mesh preview and statistics\")" in source
     assert "self._mesh_preview_button = ttk.Button(preview_actions, text=\"Generate mesh\", command=self._generate_mesh)" in source
     assert "self.mesh_statistics_text = tk.Text(mesh_preview" in source
-    assert "constraints = ttk.LabelFrame(tab_bc, text=\"Supports and constraints\")" in source
+    assert "whole_bc = ttk.LabelFrame(tab_bc, text=\"Whole-boundary supports (per edge)\")" in source
+    assert "edge_bc = ttk.LabelFrame(tab_bc, text=\"Selected-edge supports\")" in source
+    assert "variable=self.boundary_edge_choice" in source
+    assert "self._build_dof_constraint_grid(whole_bc, start_row=2, prefix=\"boundary\"" in source
+    assert "self._build_dof_constraint_grid(edge_bc, start_row=1, prefix=\"edge\"" in source
+    assert "command=self._add_custom_bc_from_selection" in source
     assert "accel = ttk.LabelFrame(tab_loads, text=\"Acceleration and added mass\")" in source
     assert "time_domain = ttk.LabelFrame(collision_body, text=\"Custom time-domain load\")" in source
     assert "solver_options = ttk.LabelFrame(tab_general, text=\"Solver\")" in source
@@ -1414,7 +1419,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
 
     assert "self.deformation_scale = tk.StringVar(value=\"0.0\")" in source
     assert "custom_loads = ttk.LabelFrame(tab_loads, text=\"Custom loads\")" in source
-    assert "custom_bc = ttk.LabelFrame(tab_bc, text=\"Custom boundary conditions\")" in source
+    assert "bc_list = ttk.LabelFrame(tab_bc, text=\"Applied boundary conditions\")" in source
     assert "selection_loads = ttk.LabelFrame(custom_loads, text=\"Panel and edge selection\")" in source
     assert "load_list = ttk.LabelFrame(tab_loads, text=\"Loads to run\")" in source
     assert "ttk.Button(actions_loads, text=\"Add load\", command=self._add_custom_load_from_selection)" in source
@@ -3643,3 +3648,195 @@ def test_collision_auto_precondition_softens_penalty_further():
     p_cons = float(conservative.prestress_summary.get("collision_contact_penalty_stiffness_n_per_m", 0.0))
     assert p_plain > 0.0
     assert p_cons == pytest.approx(fs._COLLISION_PRECONDITION_EXTRA_SCALE * p_plain, rel=1.0e-6)
+
+
+def test_boundary_dof_constraint_map_parsing():
+    """The whole-boundary / selected-edge per-DOF specs parse to {dof: value},
+    accepting plain numbers, on/value dicts and bools; enforced rotations kept."""
+    from anystruct import fe_solver as fs
+    import json
+
+    parsed = fs._dof_constraint_map(json.dumps({
+        "ux": 0.001, "uz": 0.0, "rx": {"on": True, "value": 0.01},
+        "ry": {"on": False, "value": 5.0}, "rz": False, "bogus": 1.0,
+    }))
+    assert parsed == {"ux": 0.001, "uz": 0.0, "rx": 0.01}
+    assert fs._dof_constraint_map("") == {}
+    assert fs._dof_constraint_map("not json") == {}
+
+
+def test_whole_boundary_per_dof_supports_and_free_boundary():
+    """Whole-boundary DOF grid constrains all boundary nodes with enforced
+    values; auto-off + empty grid gives a free boundary; default is unchanged."""
+    from anystruct import fe_solver as fs
+    import json
+
+    flat = {"geometry": "flat panel", "length_m": 4.0, "width_m": 3.0, "thickness_m": 0.012,
+            "has_stiffener": False, "has_girder": False}
+
+    default = fs.build_generated_geometry(flat, fs.LightweightFEMConfig(mesh_fidelity="coarse"))
+    assert any("simply_supported" in s["name"] for s in default["supports"]), "auto default preserved"
+
+    enforced = fs.build_generated_geometry(flat, fs.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        boundary_constraint_json=json.dumps({"ux": 0.002, "uz": 0.0, "ry": 0.01})))
+    wb = [s for s in enforced["supports"] if s["name"] == "whole_boundary_dof_constraint"]
+    assert len(wb) == 1
+    assert wb[0]["constraints"] == {"ux": 0.002, "uz": 0.0, "ry": 0.01}  # enforced disp + rotation
+    assert len(wb[0]["node_ids"]) > 4
+    assert not any("simply_supported" in s["name"] for s in enforced["supports"]), "grid overrides auto"
+
+    free = fs.build_generated_geometry(flat, fs.LightweightFEMConfig(
+        mesh_fidelity="coarse", boundary_auto_supports=False))
+    assert free["supports"] == []
+
+
+def test_selected_edge_per_dof_segment_additive():
+    """A selected-edge segment carries per-DOF constraints (incl. enforced
+    rotation) and is additive on top of the automatic whole-boundary supports."""
+    from anystruct import fe_solver as fs
+    import json
+
+    flat = {"geometry": "flat panel", "length_m": 4.0, "width_m": 3.0, "thickness_m": 0.012,
+            "has_stiffener": False, "has_girder": False}
+    seg = [{"varying_axis": "a", "fixed_coordinate": 0.0, "start_coordinate": 0.0,
+            "end_coordinate": 4.0, "constraints": {"uz": 0.0, "ry": 0.02}}]
+    generated = fs.build_generated_geometry(flat, fs.LightweightFEMConfig(
+        mesh_fidelity="coarse", boundary_auto_supports=True,
+        custom_bc_segments_json=json.dumps(seg)))
+    edge = [s for s in generated["supports"] if s["name"].startswith("custom_edge_bc")]
+    assert len(edge) == 1
+    assert edge[0]["constraints"] == {"uz": 0.0, "ry": 0.02}
+    assert any("simply_supported" in s["name"] for s in generated["supports"]), "auto still applied"
+
+    # Collision support check accepts a selected-edge segment as valid restraint.
+    cfg = fs.LightweightFEMConfig(boundary_auto_supports=True, custom_bc_segments_json=json.dumps(seg))
+    assert fs._runtime_collision_has_fixed_support(cfg, flat) is True
+
+
+def test_selected_edge_overrides_whole_boundary_on_shared_dof():
+    """When a selected-edge segment enforces a DOF that the whole-boundary
+    grid also constrains, the edge value wins: the whole-boundary support
+    splits so overlapping nodes drop that DOF (no conflicting-prescribed
+    error) and the run completes."""
+    from anystruct import fe_solver as fs
+    import json
+
+    flat = {"geometry": "flat panel", "length_m": 4.0, "width_m": 3.0, "thickness_m": 0.012,
+            "has_stiffener": False, "has_girder": False}
+    seg = [{"varying_axis": "a", "fixed_coordinate": 0.0, "start_coordinate": 0.0,
+            "end_coordinate": 4.0, "constraints": {"ry": 0.05}}]
+    cfg = fs.LightweightFEMConfig(
+        mesh_fidelity="coarse", pressure_pa=50000.0,
+        boundary_constraint_json=json.dumps({d: 0.0 for d in ("ux", "uy", "uz", "rx", "ry", "rz")}),
+        custom_bc_segments_json=json.dumps(seg))
+    generated = fs.build_generated_geometry(flat, cfg)
+    whole = [s for s in generated["supports"] if s["name"].startswith("whole_boundary")]
+    edge = [s for s in generated["supports"] if s["name"].startswith("custom_edge_bc")]
+    assert edge and edge[0]["constraints"] == {"ry": 0.05}
+    # The edge nodes' whole-boundary group must not re-prescribe ry.
+    edge_nodes = set(edge[0]["node_ids"])
+    for support in whole:
+        if edge_nodes.intersection(support["node_ids"]):
+            assert "ry" not in support["constraints"], "edge must override whole-boundary ry"
+    # No node carries ry from both an edge and a whole-boundary group.
+    result = fs.run_production_fem(flat, cfg)
+    assert result.status == "ok", result.status
+
+
+def test_boundary_edge_constraints_per_edge_and_legacy():
+    """Per-edge whole-boundary schema {edge: {dof: value}} parses per edge;
+    the legacy flat {dof: value} schema maps to the 'all' edge."""
+    from anystruct import fe_solver as fs
+    import json
+
+    per_edge = fs._boundary_edge_constraints(fs.LightweightFEMConfig(
+        boundary_constraint_json=json.dumps({"x0": {"ux": 0.0, "uz": 0.001}, "y1": {"ry": 0.01}})))
+    assert per_edge == {"x0": {"ux": 0.0, "uz": 0.001}, "y1": {"ry": 0.01}}
+
+    legacy = fs._boundary_edge_constraints(fs.LightweightFEMConfig(
+        boundary_constraint_json=json.dumps({"uz": 0.0, "ux": 0.0})))
+    assert legacy == {"all": {"uz": 0.0, "ux": 0.0}}
+
+    assert fs._boundary_edge_constraints(fs.LightweightFEMConfig(boundary_constraint_json="{}")) == {}
+
+
+def test_flat_per_edge_supports_target_correct_edges():
+    """Each named flat edge receives only its own DOFs on its own nodes; the
+    shared corner node takes the union of both edges' DOFs."""
+    from anystruct import fe_solver as fs
+    import json
+
+    flat = {"geometry": "flat panel", "length_m": 4.0, "width_m": 3.0, "thickness_m": 0.012,
+            "has_stiffener": False, "has_girder": False}
+    generated = fs.build_generated_geometry(flat, fs.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        boundary_constraint_json=json.dumps({"x0": {"ux": 0.0, "uy": 0.0, "uz": 0.0}, "y1": {"ry": 0.01}})))
+    coords = {int(n["id"]): n["coords"] for n in generated["nodes"]}
+    whole = [s for s in generated["supports"] if s["name"].startswith("whole_boundary")]
+    # Nodes carrying ry must lie on y = 3 (the y1 edge); nodes with the clamp
+    # triple must lie on x = 0 (the x0 edge).
+    for s in whole:
+        if set(s["constraints"]) == {"ry"}:
+            assert all(abs(float(coords[i][1]) - 3.0) < 1e-9 for i in s["node_ids"])
+        if {"ux", "uy", "uz"}.issubset(set(s["constraints"])):
+            assert all(abs(float(coords[i][0])) < 1e-9 for i in s["node_ids"])
+
+
+def test_cylinder_bottom_only_constraint_leaves_top_free():
+    """A 'lower' whole-boundary spec constrains only the z=0 ring; the top
+    ring stays free."""
+    from anystruct import fe_solver as fs
+    import json
+
+    cyl = {"geometry": "cylinder", "radius_m": 2.0, "length_m": 8.0, "thickness_m": 0.012,
+           "has_stiffener": False, "has_girder": False}
+    generated = fs.build_generated_geometry(cyl, fs.LightweightFEMConfig(
+        mesh_fidelity="coarse", include_end_lids=False,
+        boundary_constraint_json=json.dumps({"lower": {d: 0.0 for d in ("ux", "uy", "uz")}})))
+    coords = {int(n["id"]): n["coords"] for n in generated["nodes"]}
+    whole = [s for s in generated["supports"] if s["name"].startswith("whole_boundary")]
+    constrained = {i for s in whole for i in s["node_ids"]}
+    assert constrained, "bottom ring must be constrained"
+    assert all(abs(float(coords[i][2])) < 1e-6 for i in constrained), "only the z=0 ring"
+
+
+def test_boundary_edge_grid_persist_and_collect():
+    """Headless: editing the DOF grid under one edge radio, switching, and
+    editing another persists both into the per-edge JSON payload."""
+    import types
+    import json as _json
+
+    win = types.SimpleNamespace()
+    win._bc_dof_names = ("ux", "uy", "uz", "rx", "ry", "rz")
+    win._boundary_edge_specs = {}
+    win._boundary_active_edge = "x0"
+
+    class Var:
+        def __init__(self, v):
+            self._v = v
+
+        def get(self):
+            return self._v
+
+        def set(self, v):
+            self._v = v
+
+    win.boundary_dof_on = {d: Var(False) for d in win._bc_dof_names}
+    win.boundary_dof_value = {d: Var(0.0) for d in win._bc_dof_names}
+    win.boundary_edge_choice = Var("x0")
+    for name in ("_persist_boundary_edge", "_load_boundary_edge", "_on_boundary_edge_change",
+                 "_collect_boundary_constraint_json"):
+        setattr(win, name, types.MethodType(getattr(fe_runtime_solver.RuntimeFEMWindow, name), win))
+
+    # Edit x0: clamp uz.
+    win.boundary_dof_on["uz"].set(True)
+    # Switch to y1 and enforce ry.
+    win.boundary_edge_choice.set("y1")
+    win._on_boundary_edge_change()
+    assert win.boundary_dof_on["uz"].get() is False, "grid reloaded blank for y1"
+    win.boundary_dof_on["ry"].set(True)
+    win.boundary_dof_value["ry"].set(0.02)
+
+    payload = _json.loads(win._collect_boundary_constraint_json())
+    assert payload == {"x0": {"uz": 0.0}, "y1": {"ry": 0.02}}
