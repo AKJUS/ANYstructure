@@ -4752,6 +4752,8 @@ class RuntimeFEMWindow:
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
         self.custom_use_nullspace_projection = tk.BooleanVar(value=False)
         self.custom_pressure_pa = tk.DoubleVar(value=0.0)
+        # Small status text showing whether the last run used nullspace projection (updated after runs)
+        self.last_run_nullspace_text = tk.StringVar(value="Last run nullspace: unknown")
         self.plate_edge_x0_support = tk.StringVar(value="free")
         self.plate_edge_x1_support = tk.StringVar(value="free")
         self.plate_edge_y0_support = tk.StringVar(value="free")
@@ -6039,6 +6041,8 @@ class RuntimeFEMWindow:
         actions_bc = ttk.Frame(bc_list)
         actions_bc.pack(fill=tk.X, padx=8, pady=(8, 4))
         ttk.Button(actions_bc, text="Delete BC", command=self._delete_selected_custom_bc).pack(side=tk.LEFT)
+        # Show last-run nullspace projection status on the Boundary Conditions tab
+        ttk.Label(actions_bc, textvariable=self.last_run_nullspace_text, justify=tk.LEFT).pack(side=tk.RIGHT)
         self._custom_bc_tree = ttk.Treeview(bc_list, columns=columns, show="headings", height=4, selectmode="browse")
         self._custom_bc_tree.heading("type", text="Type")
         self._custom_bc_tree.heading("value", text="Value")
@@ -6998,6 +7002,30 @@ class RuntimeFEMWindow:
         sync_time_slider = getattr(self, "_sync_time_slider", None)
         if callable(sync_time_slider):
             sync_time_slider()
+
+    def _update_nullspace_status(self) -> None:
+        """Update the small status label on the Boundary Conditions tab showing whether
+        the last run used nullspace projection and how many rigid-body modes remain.
+        """
+        text = "Last run nullspace: unknown"
+        try:
+            result = getattr(self, "current_result", None)
+            if result is None:
+                self.last_run_nullspace_text.set(text)
+                return
+            prestress = (result.summary or {}).get("prestress_summary", {}) or {}
+            proj = _safe_float(prestress.get("nullspace_projection"), 0.0)
+            rank = _safe_int(prestress.get("nullspace_rank"), 0)
+            if proj > 0.0:
+                text = f"Last run nullspace: used, remaining modes: {rank}"
+            else:
+                text = "Last run nullspace: not used"
+        except Exception:
+            text = "Last run nullspace: unknown"
+        try:
+            self.last_run_nullspace_text.set(text)
+        except Exception:
+            pass
 
     def _time_result_labels(self) -> list[str]:
         return [label for label, mode in self.result_case_labels.items() if str(mode).startswith("time:")]
@@ -9676,6 +9704,11 @@ class RuntimeFEMWindow:
             self._sync_color_limit_controls(force=True)
             self._live_graph_finalize(result)
             self._last_run_result_status_text = format_runtime_fem_result(result)
+            # Update the small Boundary tab label to reflect whether this run used nullspace projection
+            try:
+                self._update_nullspace_status()
+            except Exception:
+                pass
             self._write_status(self._last_run_result_status_text)
             self._refresh_figure()
             self._update_buckling_handoff_button(is_running=False)
