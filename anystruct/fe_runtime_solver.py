@@ -5707,8 +5707,9 @@ class RuntimeFEMWindow:
                    command=self._clear_thickness_regions).pack(side=tk.LEFT)
         selection_geometry = ttk.Frame(thickness_group)
         selection_geometry.grid(row=2, column=0, columnspan=6, sticky=tk.EW, padx=8, pady=3)
-        ttk.Button(selection_geometry, text="Start selection",
-                   command=self._toggle_custom_load_selection).pack(side=tk.LEFT, padx=(0, 4))
+        self._geometry_selection_button = ttk.Button(selection_geometry, text="Start selection",
+                                                     command=self._toggle_custom_load_selection)
+        self._geometry_selection_button.pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(selection_geometry, text="Stop selection",
                    command=lambda: self._set_custom_load_selection_active(False)).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(selection_geometry, text="Select All",
@@ -6657,6 +6658,8 @@ class RuntimeFEMWindow:
             self.mesh_preview_canvas = Tkinter3DCanvas(parent, bg="white")
             self.mesh_preview_canvas.pack(fill=tk.BOTH, expand=True)
         canvas = self.mesh_preview_canvas
+        canvas.set_mesh_lines(bool(self.show_mesh_lines_vis.get()))
+        canvas.set_axis_ruler(bool(self.show_axis_ruler_vis.get()))
         canvas.clear()
         self._populate_canvas_with_mesh(canvas, generated)
         canvas.fit_to_scene()
@@ -8028,10 +8031,13 @@ class RuntimeFEMWindow:
                 lon0 = 2.0 * math.pi * segment / segments
                 lon1 = 2.0 * math.pi * (segment + 1) / segments
                 if ring == 0:
+                    # Wind the south-cap triangles so the face normal points
+                    # outward (matching the body quads); the previous order gave
+                    # inward normals, misclassifying the cap as back-facing.
                     vertices = (
                         sphere_point(lat0, lon0),
-                        sphere_point(lat1, lon0),
                         sphere_point(lat1, lon1),
+                        sphere_point(lat1, lon0),
                     )
                 elif ring == rings - 1:
                     vertices = (
@@ -8550,6 +8556,8 @@ class RuntimeFEMWindow:
             if canvas_created:
                 self.result_canvas = Tkinter3DCanvas(self.figure_parent, bg="white")
                 self.result_canvas.pack(fill=tk.BOTH, expand=True)
+                self.result_canvas.set_mesh_lines(bool(self.show_mesh_lines_vis.get()))
+                self.result_canvas.set_axis_ruler(bool(self.show_axis_ruler_vis.get()))
                 self._bind_custom_load_canvas_selection(self.result_canvas)
 
             try:
@@ -9488,6 +9496,8 @@ class RuntimeFEMWindow:
             self.geometry_preview_canvas = Tkinter3DCanvas(parent, bg="white")
             self.geometry_preview_canvas.pack(fill=tk.BOTH, expand=True)
         canvas = self.geometry_preview_canvas
+        canvas.set_mesh_lines(bool(self.show_mesh_lines_vis.get()))
+        canvas.set_axis_ruler(bool(self.show_axis_ruler_vis.get()))
         canvas.clear()
         self._populate_canvas_with_thickness(canvas, generated)
         canvas.fit_to_scene()
@@ -10012,10 +10022,15 @@ class RuntimeFEMWindow:
         self._custom_load_selection_active = bool(active)
         self._custom_load_click_origin = None
         self._custom_load_edge_click_origin = None
-        if self._custom_load_selection_button is not None:
-            self._custom_load_selection_button.configure(
-                text="Finish selection" if self._custom_load_selection_active else "Start selection"
-            )
+        label = "Finish selection" if self._custom_load_selection_active else "Start selection"
+        for button_name in ("_custom_load_selection_button", "_custom_bc_selection_button",
+                            "_geometry_selection_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                try:
+                    button.configure(text=label)
+                except Exception:
+                    pass
         if self.result_canvas is not None:
             try:
                 self.result_canvas.canvas.configure(

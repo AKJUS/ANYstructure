@@ -444,7 +444,10 @@ class Tkinter3DCanvas(tk.Frame):
         self._show_axis_indicator = bool(visible)
 
     def set_mesh_lines(self, visible: bool = True) -> None:
-        self.show_mesh_lines = bool(visible)
+        new_val = bool(visible)
+        if self.show_mesh_lines != new_val:
+            self.show_mesh_lines = new_val
+            self._request_redraw()
 
     def set_axis_ruler(self, visible: bool = True) -> None:
         new_val = bool(visible)
@@ -931,6 +934,18 @@ class Tkinter3DCanvas(tk.Frame):
             primitives.append({"kind": "line", "start": Point3D(min_p.x, max_p.y, val), "end": Point3D(min_p.x - tick_size, max_p.y, val), "color": color, "width": 1.0, "dash": ()})
             primitives.append({"kind": "text", "point": Point3D(min_p.x - tick_size * 2.5, max_p.y, val), "text": f"{val:.1f}", "color": color, "font": ("Arial", 9), "anchor": "center", "fast_no_outline": True})
 
+        # Axis name labels at the positive ends of each ruler line.
+        label_font = ("Arial", 10, "bold")
+        primitives.append({"kind": "text", "point": Point3D(max_p.x + tick_size * 2.0, min_p.y, min_p.z),
+                           "text": "x [m]", "color": color, "font": label_font, "anchor": "center",
+                           "fast_no_outline": True})
+        primitives.append({"kind": "text", "point": Point3D(min_p.x, max_p.y + tick_size * 2.0, min_p.z),
+                           "text": "y [m]", "color": color, "font": label_font, "anchor": "center",
+                           "fast_no_outline": True})
+        primitives.append({"kind": "text", "point": Point3D(min_p.x, max_p.y, max_p.z + tick_size * 2.0),
+                           "text": "z [m]", "color": color, "font": label_font, "anchor": "center",
+                           "fast_no_outline": True})
+
         return primitives
 
     def redraw(self) -> None:
@@ -1232,6 +1247,7 @@ class Tkinter3DCanvas(tk.Frame):
         stipple: str = "",
         tags: str = "",
         back_color: str = "",
+        two_sided_shell: bool = False,
     ) -> Optional[Dict[str, Any]]:
         if len(vertices) < 3:
             return None
@@ -1256,6 +1272,7 @@ class Tkinter3DCanvas(tk.Frame):
             "fast_no_outline": fast_no_outline,
             "stipple": stipple,
             "tags": tags,
+            "two_sided_shell": bool(two_sided_shell),
         }
 
     @staticmethod
@@ -1318,6 +1335,7 @@ class Tkinter3DCanvas(tk.Frame):
                 stipple=obj.get("stipple", ""),
                 tags=obj.get("tags", ""),
                 back_color=obj.get("back_color", ""),
+                two_sided_shell=bool(obj.get("two_sided_shell", False)),
             )
             return [primitive] if primitive else []
         if object_type == "cylinder":

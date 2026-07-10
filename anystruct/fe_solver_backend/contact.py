@@ -1961,6 +1961,12 @@ def _solve_transient_sphere_impact_nonlinear(
     ]
     travel_scale = max(float(sphere.radius) * float(config.max_sphere_travel_fraction), 1.0e-12)
     pending_save: Optional[Tuple[float, np.ndarray, Tuple[SphereContactRecord, ...]]] = None
+    # Convergence-distress carryover: after a cutback, upcoming base steps start
+    # pre-halved (up to quartered) instead of retrying the full dt, then the
+    # subdivision decays as Newton recovers.  This avoids paying a full failed
+    # Newton budget on every step of a difficult (yielding/limit-point) phase.
+    distress_halvings = 0
+    preemptive_substep_count = 0
     while segments:
         step_index, segment_start, sub_time, needs_travel_check = segments.pop(0)
         dt = float(sub_time - segment_start)
@@ -1968,7 +1974,10 @@ def _solve_transient_sphere_impact_nonlinear(
             continue
         if needs_travel_check:
             predicted_travel = max(float(np.linalg.norm(sphere_velocity)) * dt, float(sphere.speed) * dt)
-            n_travel = min(max(int(np.ceil(predicted_travel / travel_scale)), 1), int(config.max_event_substeps))
+            n_travel = int(np.ceil(predicted_travel / travel_scale))
+            if distress_halvings > 0:
+                n_travel = max(n_travel, 2 ** distress_halvings)
+            n_travel = min(max(n_travel, 1), int(config.max_event_substeps))
             if n_travel > 1:
                 pieces: List[Tuple[int, float, float, bool]] = []
                 piece_start = float(segment_start)
@@ -1978,6 +1987,8 @@ def _solve_transient_sphere_impact_nonlinear(
                     piece_start = piece_end
                 segments[:0] = pieces
                 event_substep_count += n_travel - 1
+                if distress_halvings > 0:
+                    preemptive_substep_count += n_travel - 1
                 continue
         total_substep_count += 1
         pre_state = (
@@ -2133,6 +2144,12 @@ def _solve_transient_sphere_impact_nonlinear(
                 else:
                     convergence_reason = "stagnation_energy"
                 iteration_counts.append(iteration)
+                # Newton recovered comfortably: relax the distress carryover so
+                # the base time step is restored once the difficult phase ends.
+                if iteration <= max(4, int(nl.max_iterations) // 3):
+                    distress_halvings = max(distress_halvings - 1, 0)
+                elif iteration >= int(nl.max_iterations) - 2:
+                    distress_halvings = min(distress_halvings + 1, 2)
                 break
         if not converged:
             if status in {"nonlinear_tangent_failed", "nonlinear_iteration_failed"}:
@@ -2158,6 +2175,7 @@ def _solve_transient_sphere_impact_nonlinear(
                 segments.insert(0, (step_index, float(segment_start), midpoint, False))
                 cutback_count += 1
                 event_substep_count += 1
+                distress_halvings = min(distress_halvings + 1, 2)
                 step_diagnostics.append(
                     {
                         "step_index": int(step_index),
@@ -2431,6 +2449,7 @@ def _solve_transient_sphere_impact_nonlinear(
         "num_steps": max(int(len(times) - 1), 0),
         "num_substeps": int(total_substep_count),
         "event_substep_count": int(event_substep_count),
+        "preemptive_substep_count": int(preemptive_substep_count),
         "cutback_count": int(cutback_count),
         "num_saved_steps": len(saved_times),
         "num_reduced_dofs": int(M_red.shape[0]),
