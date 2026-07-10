@@ -180,7 +180,7 @@ class RuntimeFEMOptions:
     deformation_scale: float = 0.0
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
-    custom_use_nullspace_projection: bool = False
+    custom_use_nullspace_projection: bool = True
     custom_pressure_pa: float = 0.0
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
@@ -4750,7 +4750,7 @@ class RuntimeFEMWindow:
         self.deformation_scale = tk.StringVar(value="0.0")
         self.custom_load_bc_enabled = tk.BooleanVar(value=False)
         self.custom_loads_add_to_imported = tk.BooleanVar(value=False)
-        self.custom_use_nullspace_projection = tk.BooleanVar(value=False)
+        self.custom_use_nullspace_projection = tk.BooleanVar(value=True)
         self.custom_pressure_pa = tk.DoubleVar(value=0.0)
         # Small status text showing whether the last run used nullspace projection (updated after runs)
         self.last_run_nullspace_text = tk.StringVar(value="Last run nullspace: unknown")
@@ -5943,16 +5943,18 @@ class RuntimeFEMWindow:
         self._configure_option_grid(whole_bc)
         self._add_check_row(whole_bc, 0, "boundary_auto_supports",
                             "Automatic supports when no edge is constrained below", self.boundary_auto_supports)
+        self._add_check_row(whole_bc, 1, "custom_use_nullspace_projection",
+                            "Use nullspace projection", self.custom_use_nullspace_projection)
         edge_pick = ttk.Frame(whole_bc)
-        edge_pick.grid(row=1, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(2, 0))
+        edge_pick.grid(row=2, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(2, 0))
         self._info_button(edge_pick, "boundary_edge_select").pack(side=tk.LEFT, padx=(0, 4))
         ttk.Label(edge_pick, text="Apply to edge:").pack(side=tk.LEFT, padx=(0, 6))
         for key, label in self._boundary_edge_options():
             ttk.Radiobutton(edge_pick, text=label, value=key, variable=self.boundary_edge_choice,
                             command=self._on_boundary_edge_change).pack(side=tk.LEFT, padx=(0, 6))
-        self._build_dof_constraint_grid(whole_bc, start_row=2, prefix="boundary",
+        self._build_dof_constraint_grid(whole_bc, start_row=3, prefix="boundary",
                                         on_vars=self.boundary_dof_on, value_vars=self.boundary_dof_value)
-        self._add_option_row(whole_bc, 9, "symmetry_mode", "Symmetry", self.symmetry_mode,
+        self._add_option_row(whole_bc, 10, "symmetry_mode", "Symmetry", self.symmetry_mode,
                              ("none", "x", "y", "z", "cyclic"))
 
         edge_bc = ttk.LabelFrame(tab_bc, text="Selected-edge supports")
@@ -8918,7 +8920,7 @@ class RuntimeFEMWindow:
     def _bind_custom_load_list_traces(self) -> None:
         if self._custom_load_trace_ids:
             return
-        variables: tuple[tk.Variable, ...] = (
+        variables: list[tk.Variable] = [
             self.custom_load_bc_enabled,
             self.custom_loads_add_to_imported,
             self.custom_use_nullspace_projection,
@@ -8941,7 +8943,13 @@ class RuntimeFEMWindow:
             self.custom_time_domain_dt_s,
             self.custom_time_domain_result_interval_s,
             self.custom_time_domain_include_static_load,
-        )
+            self.boundary_edge_choice,
+        ]
+        for var in self.boundary_dof_on.values():
+            variables.append(var)
+        for var in self.boundary_dof_value.values():
+            variables.append(var)
+            
         for variable in variables:
             trace_id = variable.trace_add("write", lambda *_args: self._refresh_custom_load_list())
             self._custom_load_trace_ids.append((variable, trace_id))
@@ -8955,11 +8963,32 @@ class RuntimeFEMWindow:
             flags.append("nullspace")
         if bool(self.allow_unbalanced_free_free.get()):
             flags.append("allow free-free")
+            
+        try:
+            constraints = json.loads(self._collect_boundary_constraint_json())
+        except Exception:
+            constraints = {}
+            
+        if not constraints:
+            supports = "free"
+        else:
+            parts = []
+            for edge, dofs in constraints.items():
+                if edge == "all":
+                    edge_name = "all edges"
+                else:
+                    edge_name = edge
+                dof_strs = []
+                for k, v in dofs.items():
+                    if abs(v) > 1e-12:
+                        dof_strs.append(f"{k}={v:g}")
+                    else:
+                        dof_strs.append(k)
+                dof_str = ",".join(sorted(dof_strs))
+                parts.append(f"{edge_name}=[{dof_str}]")
+            supports = "; ".join(parts)
+
         if self.snapshot.is_cylinder:
-            supports = (
-                    "lower=" + str(self.cylinder_lower_support.get())
-                    + ", upper=" + str(self.cylinder_upper_support.get())
-            )
             edge_loads = (
                     "lower "
                     + f"{_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0):g}"
@@ -8968,12 +8997,6 @@ class RuntimeFEMWindow:
                     + " N/m"
             )
         else:
-            supports = (
-                    "x0=" + str(self.plate_edge_x0_support.get())
-                    + ", x1=" + str(self.plate_edge_x1_support.get())
-                    + ", y0=" + str(self.plate_edge_y0_support.get())
-                    + ", y1=" + str(self.plate_edge_y1_support.get())
-            )
             edge_loads = (
                     "x0 "
                     + f"{_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0):g}"
@@ -9001,7 +9024,11 @@ class RuntimeFEMWindow:
                 time_domain += ", result interval=" + f"{interval:g}" + " s"
             if bool(self.custom_time_domain_include_static_load.get()):
                 time_domain += ", static included"
-        return supports, "; ".join(flags + [edge_loads, time_domain])
+        notes = "; ".join(flags)
+        if edge_loads:
+            notes += "; " + edge_loads
+        notes += "; " + time_domain
+        return supports, notes
 
     @staticmethod
     def _custom_load_entry_selection_text(entry: dict[str, Any]) -> str:
@@ -9530,6 +9557,8 @@ class RuntimeFEMWindow:
     def _collision_support_is_valid(self) -> bool:
         boundary = str(self.boundary_condition.get() or "auto").strip().lower()
         if boundary not in {"auto", "free", "none"}:
+            return True
+        if self._custom_bc_entries:
             return True
         if self.snapshot.is_cylinder:
             supports = (self.cylinder_lower_support.get(), self.cylinder_upper_support.get())

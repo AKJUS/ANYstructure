@@ -2365,7 +2365,11 @@ class Application():
         if not self._fea_last_inp_path:
             self.open_fea_buckling_files()
             return
-        self.import_fea_buckling_files(self._fea_last_inp_path, self._fea_last_frd_path)
+        self.import_fea_buckling_files(
+            self._fea_last_inp_path, 
+            self._fea_last_frd_path,
+            forced_geometry_type=getattr(self, '_fea_last_geometry_type', None)
+        )
 
     @staticmethod
     def _fea_panel_line_length_m(panel):
@@ -2504,7 +2508,7 @@ class Application():
             self._line_is_active = old_line_is_active
             self._fea_selected_panel_id = old_selected
 
-    def import_fea_buckling_files(self, inp_path, frd_path=None):
+    def import_fea_buckling_files(self, inp_path, frd_path=None, forced_geometry_type=None):
         """Load FEA files and prepare clickable buckling panels."""
         input_text = str(inp_path)
         input_lower = input_text.lower()
@@ -2513,10 +2517,27 @@ class Application():
             base_path, _extension = os.path.splitext(input_text)
             paired_sif_exists = os.path.exists(base_path + '.SIF') or os.path.exists(base_path + '.sif')
         has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists
+        
+        geometry_type = forced_geometry_type or "auto"
+        if geometry_type == "auto":
+            try:
+                model = fe_plate_fields.read_fea_shell_model(inp_path)
+                if fe_plate_fields.is_cylindrical_shell_model(model):
+                    ans = messagebox.askyesno(
+                        "Cylinder detected",
+                        "The imported model appears to be a cylindrical shell.\nDo you want to process it as a cylinder?\n\nSelecting 'No' will process it as a flat plate.",
+                        parent=self._parent
+                    )
+                    geometry_type = "cylinder" if ans else "flat"
+            except Exception:
+                pass
+        self._fea_last_geometry_type = geometry_type
+
         try:
             self._fea_buckling_session = fe_plate_fields.create_fea_buckling_session(
                 inp_path,
                 frd_path,
+                geometry_type=geometry_type,
                 calculation_method=self._new_buckling_method.get(),
                 buckling_acceptance=self._new_puls_method.get(),
                 pressure_mpa=0.0,

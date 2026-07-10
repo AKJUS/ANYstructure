@@ -1345,7 +1345,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "whole_bc = ttk.LabelFrame(tab_bc, text=\"Whole-boundary supports (per edge)\")" in source
     assert "edge_bc = ttk.LabelFrame(tab_bc, text=\"Selected-edge supports\")" in source
     assert "variable=self.boundary_edge_choice" in source
-    assert "self._build_dof_constraint_grid(whole_bc, start_row=2, prefix=\"boundary\"" in source
+    assert "self._build_dof_constraint_grid(whole_bc, start_row=3, prefix=\"boundary\"" in source
     assert "self._build_dof_constraint_grid(edge_bc, start_row=1, prefix=\"edge\"" in source
     assert "command=self._add_custom_bc_from_selection" in source
     assert "accel = ttk.LabelFrame(tab_loads, text=\"Acceleration and added mass\")" in source
@@ -1411,7 +1411,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "\"yield_stress_mpa\"" in source
     assert "self.custom_load_bc_enabled = tk.BooleanVar(value=False)" in source
     assert "self.custom_loads_add_to_imported = tk.BooleanVar(value=False)" in source
-    assert "self.custom_use_nullspace_projection = tk.BooleanVar(value=False)" in source
+    assert "self.custom_use_nullspace_projection = tk.BooleanVar(value=True)" in source
     assert "self.custom_pressure_pa = tk.DoubleVar(value=0.0)" in source
     assert "self.custom_loads_json = tk.StringVar(value=\"[]\")" in source
     assert "self._custom_load_entries: list[dict[str, Any]] = []" in source
@@ -2112,6 +2112,7 @@ def test_flat_member_shell_boundary_conditions_include_generated_edge_shell_node
             mesh_fidelity="coarse",
             member_model="all shell",
             custom_load_bc_enabled=True,
+            custom_use_nullspace_projection=False,
             plate_edge_x0_support="fixed",
             plate_edge_x1_support="fixed",
             plate_edge_y0_support="fixed",
@@ -2220,6 +2221,7 @@ def test_custom_plate_supports_and_edge_loads_are_applied():
     config = fe_solver.LightweightFEMConfig(
         pressure_pa=100.0,
         custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=False,
         plate_edge_x0_support="fixed",
         plate_edge_x1_support="simply supported",
         plate_edge_x1_load_n_per_m=-1000.0,
@@ -2456,6 +2458,7 @@ def test_custom_cylinder_lid_support_and_edge_loads_constrain_reference_node_kin
         pressure_pa=100.0,
         include_end_lids=True,
         custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=False,
         cylinder_lower_support="free",
         cylinder_upper_support="simply supported",
         cylinder_upper_edge_load_n_per_m=-500.0,
@@ -2484,6 +2487,7 @@ def test_custom_cylinder_single_fixed_lid_constrains_reference_rotations():
     config = fe_solver.LightweightFEMConfig(
         include_end_lids=True,
         custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=False,
         cylinder_lower_support="fixed",
         cylinder_upper_support="free",
     )
@@ -2662,7 +2666,9 @@ def test_cylinder_end_lids_are_stress_free_rigid_diaphragms():
     assert len(lidded_generated["nodes"]) == len(open_generated["nodes"]) + 2
     assert len(lidded_generated["rigid_lids"]) == 2
     bottom_lid, top_lid = lidded_generated["rigid_lids"]
-    assert lidded_generated["supports"] == []
+    assert len(lidded_generated["supports"]) == 1
+    assert lidded_generated["supports"][0]["name"] == "rigid_body_anchor"
+    assert lidded_generated["supports"][0]["node_ids"] == [bottom_lid["center_node_id"]]
 
     backend = fe_solver.full_backend_api()
     backend_config = backend.AnyStructureFEMConfig(pressure_pa=1000.0, require_idealized_member_beams=False)
@@ -2680,10 +2686,10 @@ def test_cylinder_end_lids_are_stress_free_rigid_diaphragms():
     assert not ({element.element_id for element in lid_elements} & set(load_case.pressure_loads))
     assert sum(len(element.get_mpc_constraints(model.mesh)) for element in lid_elements) > 0
     assert solver_info["convergence_info"]["status"] == "converged"
-    assert solver_info["constraint_method"] == "transformation_fixed_plus_mpc_nullspace"
-    assert solver_info["constraint_info"]["num_fixed_dofs"] == 0
+    assert solver_info["constraint_method"] == "transformation_fixed_plus_mpc"
+    assert solver_info["constraint_info"]["num_fixed_dofs"] == 6
     assert displacements[model.mesh.get_node(top_lid["center_node_id"]).dofs[2]] != 0.0
-    assert displacements[model.mesh.get_node(bottom_lid["center_node_id"]).dofs[2]] != 0.0
+    assert displacements[model.mesh.get_node(bottom_lid["center_node_id"]).dofs[2]] == 0.0
 
 
 def test_runtime_solver_records_new_analysis_material_and_load_options():

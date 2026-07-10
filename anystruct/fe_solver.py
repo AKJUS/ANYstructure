@@ -156,7 +156,7 @@ class LightweightFEMConfig:
     beam_consistent_mass_enabled: bool = False
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
-    custom_use_nullspace_projection: bool = False
+    custom_use_nullspace_projection: bool = True
     custom_pressure_pa: float = 0.0
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
@@ -2662,12 +2662,20 @@ def _cylinder_lid_boundary_supports(
         config: LightweightFEMConfig,
 ) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
-    if mode not in {"clamped", "fixed", "fixed ends"}:
+    if mode in {"free", "none", "nullspace", "nullspace projection"}:
         return []
+    if mode in {"clamped", "fixed", "fixed ends"}:
+        return [
+            {
+                "name": "clamped_cylinder_lid_references",
+                "node_ids": sorted(set(int(node) for node in lower_center_nodes + upper_center_nodes)),
+                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+            }
+        ]
     return [
         {
-            "name": "clamped_cylinder_lid_references",
-            "node_ids": sorted(set(int(node) for node in lower_center_nodes + upper_center_nodes)),
+            "name": "rigid_body_anchor",
+            "node_ids": sorted(set(int(node) for node in lower_center_nodes)),
             "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
         }
     ]
@@ -4148,6 +4156,17 @@ def _visualization_member_lines(
             except Exception:
                 pass
 
+        def _safe_stress(val) -> float:
+            if val is None: return 0.0
+            if hasattr(val, "item"):
+                try:
+                    return float(val.item(0) if getattr(val, "size", 0) > 0 else val.item())
+                except Exception: pass
+            if hasattr(val, "__len__") and not isinstance(val, str):
+                return float(val[0]) if len(val) > 0 else 0.0
+            try: return float(val)
+            except Exception: return 0.0
+
         lines.append(
             {
                 "id": int(beam.get("id", 0)),
@@ -4165,13 +4184,13 @@ def _visualization_member_lines(
                 "c_z": float(c_z),
                 "eccentricity": float((beam.get("section") or {}).get("eccentricity_m") or 0.0),
                 # Include stress component results
-                "axial_stress": float(beam_stresses.get("axial_stress", 0.0) if hasattr(beam_stresses.get("axial_stress"), "real") else (beam_stresses.get("axial_stress", [0.0])[0] if beam_stresses.get("axial_stress") is not None else 0.0)),
-                "bending_stress_y": float(beam_stresses.get("bending_stress_y", 0.0) if hasattr(beam_stresses.get("bending_stress_y"), "real") else (beam_stresses.get("bending_stress_y", [0.0])[0] if beam_stresses.get("bending_stress_y") is not None else 0.0)),
-                "bending_stress_z": float(beam_stresses.get("bending_stress_z", 0.0) if hasattr(beam_stresses.get("bending_stress_z"), "real") else (beam_stresses.get("bending_stress_z", [0.0])[0] if beam_stresses.get("bending_stress_z") is not None else 0.0)),
-                "shear_stress_y": float(beam_stresses.get("shear_stress_y", 0.0) if hasattr(beam_stresses.get("shear_stress_y"), "real") else (beam_stresses.get("shear_stress_y", [0.0])[0] if beam_stresses.get("shear_stress_y") is not None else 0.0)),
-                "shear_stress_z": float(beam_stresses.get("shear_stress_z", 0.0) if hasattr(beam_stresses.get("shear_stress_z"), "real") else (beam_stresses.get("shear_stress_z", [0.0])[0] if beam_stresses.get("shear_stress_z") is not None else 0.0)),
-                "torsional_stress": float(beam_stresses.get("torsional_stress", 0.0) if hasattr(beam_stresses.get("torsional_stress"), "real") else (beam_stresses.get("torsional_stress", [0.0])[0] if beam_stresses.get("torsional_stress") is not None else 0.0)),
-                "von_mises": float(beam_stresses.get("von_mises", 0.0) if hasattr(beam_stresses.get("von_mises"), "real") else (beam_stresses.get("von_mises", [0.0])[0] if beam_stresses.get("von_mises") is not None else 0.0)),
+                "axial_stress": _safe_stress(beam_stresses.get("axial_stress")),
+                "bending_stress_y": _safe_stress(beam_stresses.get("bending_stress_y")),
+                "bending_stress_z": _safe_stress(beam_stresses.get("bending_stress_z")),
+                "shear_stress_y": _safe_stress(beam_stresses.get("shear_stress_y")),
+                "shear_stress_z": _safe_stress(beam_stresses.get("shear_stress_z")),
+                "torsional_stress": _safe_stress(beam_stresses.get("torsional_stress")),
+                "von_mises": _safe_stress(beam_stresses.get("von_mises")),
             }
         )
     return tuple(lines)
@@ -4986,7 +5005,9 @@ def _has_custom_support(config: LightweightFEMConfig) -> bool:
 
 
 def _constraint_mode(config: LightweightFEMConfig, geometry: dict | None = None) -> str:
-    if config.custom_load_bc_enabled and config.custom_use_nullspace_projection:
+    if not config.custom_use_nullspace_projection:
+        return "transformation"
+    if config.custom_load_bc_enabled and not (_custom_has_fixed_support(config) or _has_custom_support(config)):
         return "nullspace"
     if config.custom_load_bc_enabled and (_custom_has_fixed_support(config) or _has_custom_support(config)):
         return "transformation"

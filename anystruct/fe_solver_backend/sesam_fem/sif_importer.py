@@ -355,7 +355,7 @@ def read_sesam_sif_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
     load_case_names = {}
     for record in read_raw_records(Path(path_text), strict=False):
         counts[record.name] += 1
-        if record.name == "RVSTRESS" and len(record.numeric_fields) >= 2:
+        if record.name == "RVSTRESS" and len(record.numeric_fields) >= 8:
             load_cases.add(int(round(record.numeric_fields[1])))
         elif record.name in ("TDLOAD", "TDRESREF") and len(record.numeric_fields) >= 2 and record.text_fields:
             lc_id = int(round(record.numeric_fields[1]))

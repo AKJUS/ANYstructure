@@ -1619,7 +1619,18 @@ def _split_sesam_patch_by_beams(
         )
     else:
         u_free_edge_members, v_free_edge_members = [], []
-    split_u_members, split_v_members = _sesam_split_member_families(u_members, v_members)
+    split_u_members, split_v_members = _sesam_split_member_families(
+        _filter_sesam_sustained_boundary_members(
+            u_members,
+            station_tolerance,
+            min_required_length=max(u_extent * 0.25, overlap_tolerance * 1.5),
+        ),
+        _filter_sesam_sustained_boundary_members(
+            v_members,
+            station_tolerance,
+            min_required_length=max(v_extent * 0.25, overlap_tolerance * 1.5),
+        ),
+    )
     has_u_beam_splits = bool(split_u_members)
     has_v_beam_splits = bool(split_v_members)
     split_u_members = list(split_u_members) if has_u_beam_splits else list(u_plate_members)
@@ -1709,25 +1720,11 @@ def _sesam_split_member_families(
 ) -> tuple[Sequence[InferredMember], Sequence[InferredMember]]:
     """Return beam families that should split a SESAM plate patch.
 
-    Beams above the girder-height threshold split in either direction.  If both
-    local families only contain stiffeners, keep the denser family as the
-    stiffener-spacing boundaries and leave the other direction bounded by plate
-    edges or separate plate patches.
+    All sustained beams (both longitudinal and transverse) act as boundaries
+    to divide the plate into stiffened sub-panels, where the boundaries themselves
+    are treated as the panel's stiffeners.
     """
-
-    u_girders = [member for member in u_members if member.role == "girder"]
-    v_girders = [member for member in v_members if member.role == "girder"]
-    if u_girders or v_girders:
-        split_u = list(u_members) if u_girders else []
-        split_v = list(v_members) if v_girders else []
-        if not split_u and len(u_members) >= len(v_members):
-            split_u = list(u_members)
-        if not split_v and len(v_members) > len(u_members):
-            split_v = list(v_members)
-        return split_u, split_v
-    if len(u_members) >= len(v_members):
-        return u_members, ()
-    return (), v_members
+    return u_members, v_members
 
 
 def _merge_sesam_curved_side_fields(model: FeShellModel, fields: Sequence[PlateField]) -> list[PlateField]:
