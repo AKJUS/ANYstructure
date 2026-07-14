@@ -207,6 +207,21 @@ def _stress_components_from_local(member_axis, transverse_axis, sigma_x, sigma_y
     )
 
 
+def test_shell_corner_nodes_follow_solver_conventions():
+    # CalculiX S8/S8R and S6 list corner nodes first; SESAM Q8/SCQS and
+    # T6/SCTS alternate corner and midside nodes around the perimeter.
+    s8 = fe_plate_fields.ShellElement(1, (1, 2, 3, 4, 5, 6, 7, 8), element_type="S8R")
+    assert s8.corner_node_ids == (1, 2, 3, 4)
+    q8 = fe_plate_fields.ShellElement(2, (1, 2, 3, 4, 5, 6, 7, 8), element_type="Q8")
+    assert q8.corner_node_ids == (1, 3, 5, 7)
+    t6 = fe_plate_fields.ShellElement(3, (1, 2, 3, 4, 5, 6), element_type="T6")
+    assert t6.corner_node_ids == (1, 3, 5)
+    s6 = fe_plate_fields.ShellElement(4, (1, 2, 3, 4, 5, 6), element_type="S6")
+    assert s6.corner_node_ids == (1, 2, 3)
+    s4 = fe_plate_fields.ShellElement(5, (1, 2, 3, 4), element_type="S4")
+    assert s4.corner_node_ids == (1, 2, 3, 4)
+
+
 def test_read_calculix_inp_keeps_shell_section_metadata(tmp_path):
     inp = _write_panel_inp(tmp_path)
 

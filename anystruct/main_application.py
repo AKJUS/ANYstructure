@@ -2365,7 +2365,11 @@ class Application():
         if not self._fea_last_inp_path:
             self.open_fea_buckling_files()
             return
-        self.import_fea_buckling_files(self._fea_last_inp_path, self._fea_last_frd_path)
+        self.import_fea_buckling_files(
+            self._fea_last_inp_path, 
+            self._fea_last_frd_path,
+            forced_geometry_type=getattr(self, '_fea_last_geometry_type', None)
+        )
 
     @staticmethod
     def _fea_panel_line_length_m(panel):
@@ -2504,7 +2508,7 @@ class Application():
             self._line_is_active = old_line_is_active
             self._fea_selected_panel_id = old_selected
 
-    def import_fea_buckling_files(self, inp_path, frd_path=None):
+    def import_fea_buckling_files(self, inp_path, frd_path=None, forced_geometry_type=None):
         """Load FEA files and prepare clickable buckling panels."""
         input_text = str(inp_path)
         input_lower = input_text.lower()
@@ -2513,10 +2517,27 @@ class Application():
             base_path, _extension = os.path.splitext(input_text)
             paired_sif_exists = os.path.exists(base_path + '.SIF') or os.path.exists(base_path + '.sif')
         has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists
+        
+        geometry_type = forced_geometry_type or "auto"
+        if geometry_type == "auto":
+            try:
+                model = fe_plate_fields.read_fea_shell_model(inp_path)
+                if fe_plate_fields.is_cylindrical_shell_model(model):
+                    ans = messagebox.askyesno(
+                        "Cylinder detected",
+                        "The imported model appears to be a cylindrical shell.\nDo you want to process it as a cylinder?\n\nSelecting 'No' will process it as a flat plate.",
+                        parent=self._parent
+                    )
+                    geometry_type = "cylinder" if ans else "flat"
+            except Exception:
+                pass
+        self._fea_last_geometry_type = geometry_type
+
         try:
             self._fea_buckling_session = fe_plate_fields.create_fea_buckling_session(
                 inp_path,
                 frd_path,
+                geometry_type=geometry_type,
                 calculation_method=self._new_buckling_method.get(),
                 buckling_acceptance=self._new_puls_method.get(),
                 pressure_mpa=0.0,
@@ -2525,7 +2546,10 @@ class Application():
                 ml_algo=getattr(self, '_ML_buckling', None),
                 run_buckling=has_result_source,
                 stress_reduction_method=self._fea_stress_reduction_method.get(),
+                load_case=getattr(self, '_fea_selected_load_case', None),
             )
+            if self._fea_buckling_session and hasattr(self._fea_buckling_session, 'active_load_case') and self._fea_buckling_session.active_load_case is not None:
+                self._fea_selected_load_case = self._fea_buckling_session.active_load_case
         except Exception as err:
             messagebox.showerror('FEA import error', str(err))
             return
@@ -2561,7 +2585,10 @@ class Application():
                 ml_algo=getattr(self, '_ML_buckling', None),
                 run_buckling=True,
                 stress_reduction_method=self._fea_stress_reduction_method.get(),
+                load_case=getattr(self, '_fea_selected_load_case', None),
             )
+            if self._fea_buckling_session and hasattr(self._fea_buckling_session, 'active_load_case') and self._fea_buckling_session.active_load_case is not None:
+                self._fea_selected_load_case = self._fea_buckling_session.active_load_case
         except Exception as err:
             messagebox.showerror('Runtime FEA import error', str(err))
             return False
@@ -2786,6 +2813,16 @@ class Application():
         else:
             self._gui_fea_buckling_options()
 
+    def _on_fea_load_case_changed(self, event=None):
+        if not getattr(self, '_fea_buckling_mode', False):
+            return
+        try:
+            val = self._fea_load_case_combobox.get()
+            self._fea_selected_load_case = int(val.split(' - ')[0])
+            self.reimport_fea_buckling_files()
+        except ValueError:
+            pass
+
     @staticmethod
     def _fea_stress_method_description(method):
         if method == 'Centre strip mean':
@@ -2858,6 +2895,47 @@ class Application():
 
         canvas.create_text(20, 100, text=stress_text, anchor=tk.W, font=self._text_size['Text 8'], width=250)
         canvas.create_text(20, 116, text=reduction_text, anchor=tk.W, font=self._text_size['Text 8'], width=250)
+
+    def _show_fea_buckling_details_popup(self):
+        """Show every calculated UF and buckling detail for the selected FE panel."""
+        session = getattr(self, '_fea_buckling_session', None)
+        selected_id = getattr(self, '_fea_selected_panel_id', None)
+        panel = None
+        if session is not None and selected_id is not None:
+            try:
+                panel = session.panel(selected_id)
+            except KeyError:
+                panel = None
+        if panel is None:
+            messagebox.showinfo(
+                'FEA buckling details',
+                'Select an FE buckling panel first.',
+                parent=self._parent,
+            )
+            return
+
+        details = fe_plate_fields.format_panel_buckling_details(
+            panel,
+            uf_basis=self._new_puls_method.get(),
+        )
+        popup = tk.Toplevel(self._parent)
+        popup.title(f'Buckling details - {panel.field_id}')
+        popup.geometry('560x640')
+        text_frame = tk.Frame(popup)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget = tk.Text(
+            text_frame,
+            wrap=tk.NONE,
+            font=('Consolas', 9),
+            yscrollcommand=scrollbar.set,
+        )
+        text_widget.insert('1.0', details)
+        text_widget.configure(state=tk.DISABLED)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.configure(command=text_widget.yview)
+        ttk.Button(popup, text='Close', command=popup.destroy).pack(side=tk.BOTTOM, pady=4)
 
     def _select_fea_panel(self, field_id):
         self._fea_selected_panel_id = field_id
@@ -3899,6 +3977,31 @@ class Application():
         )
         rows.append(button_row)
 
+        session = self._fea_buckling_session
+        if session and getattr(session, 'load_cases', ()):
+            if len(session.load_cases) > 1:
+                add_separator()
+                add_label('Load Case', bold=True)
+                
+                def _lc_label(lc: int) -> str:
+                    name = session.load_case_names.get(lc)
+                    return f"{lc} - {name}" if name else str(lc)
+                    
+                self._fea_load_case_combobox = ttk.Combobox(
+                    panel_frame,
+                    values=[_lc_label(lc) for lc in session.load_cases],
+                    state="readonly",
+                )
+                if getattr(self, '_fea_selected_load_case', None) is not None and getattr(self, '_fea_selected_load_case', None) in session.load_cases:
+                    self._fea_load_case_combobox.set(_lc_label(self._fea_selected_load_case))
+                else:
+                    active = session.active_load_case if session.active_load_case is not None else session.load_cases[0]
+                    self._fea_load_case_combobox.set(_lc_label(active))
+                self._fea_load_case_combobox.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(0, 6))
+                self._fea_load_case_combobox.bind("<<ComboboxSelected>>", self._on_fea_load_case_changed)
+                rows.append(self._fea_load_case_combobox)
+                row += 1
+
         add_separator()
         add_label('Analysis', bold=True)
         add_label('Buckling method')
@@ -4004,6 +4107,14 @@ class Application():
         add_label(f'UF: {uf_text}')
         add_label(f'Geometry: {geometry_text}', wrap=285)
         add_label(f'Stress: {stress_text}', wrap=285)
+        details_button = ttk.Button(
+            panel_frame,
+            text='Show all UFs / details',
+            command=self._show_fea_buckling_details_popup,
+        )
+        details_button.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(2, 6))
+        row += 1
+        rows.append(details_button)
 
         add_separator()
         add_label('Import Summary', bold=True)
@@ -5957,6 +6068,9 @@ class Application():
         except Exception:
             pass
 
+        original_request_redraw = tk3d._request_redraw
+        tk3d._request_redraw = lambda: None
+
         for field_id, record in getattr(self, '_fea_tk3d_panel_records', {}).items():
             try:
                 panel = session.panel(field_id)
@@ -5976,9 +6090,31 @@ class Application():
                     width=width,
                     cull_backface=False,
                     layer=layer,
-                    tags=f'fea_panel {field_id}',
+                    tags=f'feapanel_{field_id}',
+                )
+            label_parts = []
+            if self._fea_show_panel_text.get():
+                label_parts.append(field_id.replace('field_', '').replace('cyl_', ''))
+            if self._fea_show_uf_text.get() and panel is not None and panel.usage_factor is not None:
+                label_parts.append(f'UF {panel.usage_factor:.2f}')
+            if label_parts:
+                centroid = record.get('centroid', (0.0, 0.0, 0.0))
+                normal = record.get('normal', (0.0, 0.0, 1.0))
+                tk3d.add_text(
+                    tkinter_3d_canvas.Point3D(
+                        centroid[0] + normal[0] * 0.03,
+                        centroid[1] + normal[1] * 0.03,
+                        centroid[2] + normal[2] * 0.03,
+                    ),
+                    '\n'.join(label_parts),
+                    color='#111111',
+                    layer=60,
                 )
             self._add_fea_tk3d_local_axes(record)
+
+        tk3d._request_redraw = original_request_redraw
+        tk3d._invalidate_geometry_cache()
+        tk3d._request_redraw()
 
         if fit_view:
             try:
@@ -6050,30 +6186,13 @@ class Application():
         tk3d = getattr(self, '_fea_tk3d_canvas', None)
         if tk3d is None:
             return None
-        width = max(1, int(tk3d._plot_width()))
-        height = max(1, int(tk3d.canvas.winfo_height() or tk3d.height))
-        best_field_id = None
-        best_depth = float('inf')
-        for field_id, record in getattr(self, '_fea_tk3d_panel_records', {}).items():
-            for polygon in record.get('polygons', []):
-                projected = []
-                depths = []
-                for point in polygon:
-                    point3d = tkinter_3d_canvas.Point3D(point[0], point[1], point[2])
-                    screen_point = tk3d.camera.project_point(point3d, width, height)
-                    if screen_point is None:
-                        projected = []
-                        break
-                    _camera_x, _camera_y, camera_z = tk3d.camera.world_to_camera(point3d)
-                    projected.append(screen_point)
-                    depths.append(-camera_z)
-                if not projected or not self._point_in_screen_polygon(x, y, projected):
-                    continue
-                depth = sum(depths) / max(len(depths), 1)
-                if depth < best_depth:
-                    best_depth = depth
-                    best_field_id = field_id
-        return best_field_id
+        item_ids = tk3d.canvas.find_overlapping(x, y, x, y)
+        for item_id in reversed(item_ids):
+            tags = tk3d.canvas.gettags(item_id)
+            for tag in tags:
+                if tag.startswith('feapanel_'):
+                    return tag.replace('feapanel_', '')
+        return None
 
     @staticmethod
     def _point_in_screen_polygon(x, y, polygon):

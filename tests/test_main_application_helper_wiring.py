@@ -245,7 +245,7 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "Open FEA result buckling files..." in source
     assert "def open_fea_buckling_files(self):" in source
     assert "def reimport_fea_buckling_files(self):" in source
-    assert "def import_fea_buckling_files(self, inp_path, frd_path=None):" in source
+    assert "def import_fea_buckling_files(self, inp_path, frd_path=None, forced_geometry_type=None):" in source
     assert "fe_plate_fields.create_fea_buckling_session(" in source
     assert "SESAM FEM/SIF" in source
     assert "has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists" in source
@@ -368,6 +368,22 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "Panel local y arrow" in load_block
     assert "Show mesh" in load_block
     assert "Color code" in load_block
+    assert "Show all UFs / details" in load_block
+    assert "command=self._show_fea_buckling_details_popup" in load_block
+
+    assert "def _show_fea_buckling_details_popup(self):" in source
+    assert "fe_plate_fields.format_panel_buckling_details" in source
+
+    # The live pure-Tk 3D canvas must honour the UF/panel text options; the
+    # legacy matplotlib block is unreachable and must not be the only place
+    # the options are read.
+    populate_block = source[
+        source.index("def _populate_fea_buckling_tk3d_canvas"):
+        source.index("def _add_fea_tk3d_local_axes")
+    ]
+    assert "self._fea_show_uf_text.get()" in populate_block
+    assert "self._fea_show_panel_text.get()" in populate_block
+    assert "tk3d.add_text(" in populate_block
 
 
 def test_initial_property_layout_uses_domain_selection_after_root_geometry_is_realized():

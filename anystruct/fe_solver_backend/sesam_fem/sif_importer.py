@@ -266,7 +266,10 @@ def _local_membrane_to_global_components(
     )
 
 
-def read_sesam_sif_stress(path: str | os.PathLike[str]) -> SesamStressResult:
+def read_sesam_sif_stress(
+    path: str | os.PathLike[str],
+    load_case: int | None = None,
+) -> SesamStressResult:
     """Read RVSTRESS shell results as FRD-like global stress tensors."""
 
     path_text = str(path)
@@ -286,10 +289,24 @@ def read_sesam_sif_stress(path: str | os.PathLike[str]) -> SesamStressResult:
         internal_id = int(round(record.numeric_fields[1]))
         internal_to_external[internal_id] = external_id
 
+    if load_case is None:
+        # Lock onto the first load case present so element and nodal stresses
+        # stay from one consistent case instead of mixing every case in the
+        # file (element stresses would keep the last case per element while
+        # nodal averages blended all cases).
+        for record in raw_records:
+            if record.name == "RVSTRESS" and record.numeric_fields and len(record.numeric_fields) >= 8:
+                load_case = int(round(record.numeric_fields[1]))
+                break
+
     for record in raw_records:
         if record.name != "RVSTRESS" or not record.numeric_fields or len(record.numeric_fields) < 8:
             continue
         values = record.numeric_fields
+        if load_case is not None:
+            record_load_case = int(round(values[1]))
+            if record_load_case != load_case:
+                continue
         result_element_id = int(values[2]) if values[2].is_integer() else int(round(values[2]))
         element_id = internal_to_external.get(result_element_id, result_element_id)
         type_code = int(values[4]) if values[4].is_integer() else int(round(values[4]))
@@ -344,8 +361,15 @@ def read_sesam_sif_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
 
     path_text = str(path)
     counts: Counter[str] = Counter()
+    load_cases = set()
+    load_case_names = {}
     for record in read_raw_records(Path(path_text), strict=False):
         counts[record.name] += 1
+        if record.name == "RVSTRESS" and len(record.numeric_fields) >= 8:
+            load_cases.add(int(round(record.numeric_fields[1])))
+        elif record.name in ("TDLOAD", "TDRESREF") and len(record.numeric_fields) >= 2 and record.text_fields:
+            lc_id = int(round(record.numeric_fields[1]))
+            load_case_names[lc_id] = record.text_fields[0]
 
     result = import_sesam_fem(path_text, build_model=False, strict=False)
     document = result.document
@@ -368,4 +392,6 @@ def read_sesam_sif_summary(path: str | os.PathLike[str]) -> dict[str, Any]:
         "shell_elements": shell_count,
         "beam_elements": beam_count,
         "records": dict(counts),
+        "load_cases": sorted(list(load_cases)),
+        "load_case_names": load_case_names,
     }

@@ -422,7 +422,9 @@ def _parse_sections(
 def _is_bulb_section_name(name: object) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
     words = set(normalized.split())
-    return "bulb" in words or "hpbulb" in normalized.replace(" ", "") or "hp" in words
+    # Bulb names are often one token with a maker prefix (HPbulb220x11,
+    # BSRAbulb220x11x31x9x9x3), so match "bulb" as a substring too.
+    return "bulb" in normalized.replace(" ", "") or "hp" in words
 
 
 def _parse_coordinates(

@@ -108,6 +108,15 @@ class LightweightFEMConfig:
     added_mass_kg: float = 0.0
     added_mass_location: str = "none"
     boundary_condition: str = "auto"
+    # Per-DOF boundary model (new BC tab).  ``boundary_constraint_json`` is a
+    # JSON object of the DOFs constrained on the WHOLE boundary, each mapped to
+    # its enforced value, e.g. {"uz": 0.0, "rx": 0.0, "ux": 0.001}.  Empty +
+    # boundary_auto_supports=True keeps the automatic well-posed supports;
+    # empty + auto off means a free boundary.  Enforced (nonzero) values apply
+    # to every run.  Selected-edge per-DOF constraints live in
+    # custom_bc_segments_json (each segment carries a "constraints" dict).
+    boundary_constraint_json: str = "{}"
+    boundary_auto_supports: bool = True
     symmetry_mode: str = "none"
     shell_element_order: str = "S4"
     beam_element_order: str = "B2"
@@ -147,7 +156,7 @@ class LightweightFEMConfig:
     beam_consistent_mass_enabled: bool = False
     custom_load_bc_enabled: bool = False
     custom_loads_add_to_imported: bool = False
-    custom_use_nullspace_projection: bool = False
+    custom_use_nullspace_projection: bool = True
     custom_pressure_pa: float = 0.0
     plate_edge_x0_support: str = "free"
     plate_edge_x1_support: str = "free"
@@ -1869,6 +1878,146 @@ def _symmetry_supports(nodes: list[dict[str, object]], config: LightweightFEMCon
     return [{"name": f"symmetry_{plane_name}", "node_ids": sorted(node_ids), "constraints": constraints}]
 
 
+_DOF_NAMES = ("ux", "uy", "uz", "rx", "ry", "rz")
+
+
+def _dof_constraint_map(raw: object) -> dict[str, float]:
+    """Parse a per-DOF constraint object into {dof: enforced_value}.
+
+    Accepts either a JSON string or an already-decoded dict.  Values may be a
+    plain number (constrained at that value) or a nested
+    {"on": bool, "value": float}.  Only recognised, active DOFs are returned.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for dof in _DOF_NAMES:
+        if dof not in raw:
+            continue
+        entry = raw[dof]
+        if isinstance(entry, dict):
+            if not bool(entry.get("on", True)):
+                continue
+            try:
+                result[dof] = float(entry.get("value", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                result[dof] = 0.0
+        elif isinstance(entry, bool):
+            if entry:
+                result[dof] = 0.0
+        else:
+            try:
+                result[dof] = float(entry)
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+_FLAT_EDGE_KEYS = ("x0", "x1", "y0", "y1")
+_CYLINDER_EDGE_KEYS = ("lower", "upper")
+
+
+def _boundary_edge_constraints(config: LightweightFEMConfig) -> dict[str, dict[str, float]]:
+    """Per-edge whole-boundary constraints {edge: {dof: value}} from the BC tab.
+
+    Accepts the current schema {"x0": {"uz": 0}, "upper": {"ux": 0.001}, ...}
+    with an "all" key meaning every edge.  Backward compatible with the earlier
+    flat single-DOF-map schema ({"uz": 0.0, ...}), which is treated as "all".
+    Empty/blank => no whole-boundary constraint.
+    """
+    raw = getattr(config, "boundary_constraint_json", "") or ""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return {}
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    edge_keys = set(_FLAT_EDGE_KEYS) | set(_CYLINDER_EDGE_KEYS) | {"all"}
+    if not (set(raw.keys()) & edge_keys):
+        # Legacy flat {dof: value} schema -> applies to the whole boundary.
+        flat = _dof_constraint_map(raw)
+        return {"all": flat} if flat else {}
+    result: dict[str, dict[str, float]] = {}
+    for edge, spec in raw.items():
+        if edge not in edge_keys:
+            continue
+        dofs = _dof_constraint_map(spec)
+        if dofs:
+            result[str(edge)] = dofs
+    return result
+
+
+def _boundary_constraint_map(config: LightweightFEMConfig) -> dict[str, float]:
+    """Union of all whole-boundary constrained DOFs (for quick 'any?' checks)."""
+    merged: dict[str, float] = {}
+    for spec in _boundary_edge_constraints(config).values():
+        merged.update(spec)
+    return merged
+
+
+def _edge_support_dofs_by_node(edge_supports: list[dict[str, object]]) -> dict[int, set[str]]:
+    """Map node id -> set of DOFs already constrained by selected-edge supports."""
+    covered: dict[int, set[str]] = {}
+    for support in edge_supports or ():
+        dofs = set((support.get("constraints") or {}).keys())
+        if not dofs:
+            continue
+        for node_id in support.get("node_ids", ()) or ():
+            covered.setdefault(int(node_id), set()).update(dofs)
+    return covered
+
+
+def _whole_boundary_constraint_supports(
+    edge_node_map: dict[str, list[int]],
+    config: LightweightFEMConfig,
+    exclude_dofs_by_node: dict[int, set[str]] | None = None,
+) -> list[dict[str, object]]:
+    """Support groups per named edge with that edge's per-DOF constraints.
+
+    ``edge_node_map`` maps an edge key (flat: x0/x1/y0/y1; cylinder:
+    lower/upper) to its node ids.  Each edge holds its chosen DOFs at their
+    enforced values (0 = fixed); the "all" key applies to every edge.  A node
+    reached by several specs takes their union (last value wins on a repeat).
+    DOFs already constrained on a node by a selected-edge segment are dropped
+    so the selected-edge value wins.  Nodes are grouped by resulting DOF
+    subset for compact support records.
+    """
+    edge_constraints = _boundary_edge_constraints(config)
+    if not edge_constraints or not edge_node_map:
+        return []
+    exclude_dofs_by_node = exclude_dofs_by_node or {}
+    # Accumulate per-node {dof: value} from the matching edge specs.
+    per_node: dict[int, dict[str, float]] = {}
+    for edge_key, dof_map in edge_constraints.items():
+        target_edges = edge_node_map.keys() if edge_key == "all" else (edge_key,)
+        for target in target_edges:
+            for node in edge_node_map.get(target, ()) or ():
+                per_node.setdefault(int(node), {}).update(dof_map)
+    groups: dict[tuple[tuple[str, float], ...], list[int]] = {}
+    for node, dof_map in per_node.items():
+        excluded = exclude_dofs_by_node.get(node, set())
+        active = tuple(sorted((dof, float(value)) for dof, value in dof_map.items() if dof not in excluded))
+        if active:
+            groups.setdefault(active, []).append(node)
+    supports: list[dict[str, object]] = []
+    for suffix, (items, node_ids) in enumerate(sorted(groups.items(), key=lambda kv: (len(kv[1]), kv[0]), reverse=True)):
+        name = "whole_boundary_dof_constraint" if suffix == 0 else f"whole_boundary_dof_constraint_{suffix}"
+        supports.append(
+            {
+                "name": name,
+                "node_ids": sorted(node_ids),
+                "constraints": {dof: value for dof, value in items},
+            }
+        )
+    return supports
+
+
 def _enforced_displacement_supports(
     nodes: list[dict[str, object]],
     config: LightweightFEMConfig,
@@ -2513,12 +2662,20 @@ def _cylinder_lid_boundary_supports(
         config: LightweightFEMConfig,
 ) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
-    if mode not in {"clamped", "fixed", "fixed ends"}:
+    if mode in {"free", "none", "nullspace", "nullspace projection"}:
         return []
+    if mode in {"clamped", "fixed", "fixed ends"}:
+        return [
+            {
+                "name": "clamped_cylinder_lid_references",
+                "node_ids": sorted(set(int(node) for node in lower_center_nodes + upper_center_nodes)),
+                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+            }
+        ]
     return [
         {
-            "name": "clamped_cylinder_lid_references",
-            "node_ids": sorted(set(int(node) for node in lower_center_nodes + upper_center_nodes)),
+            "name": "rigid_body_anchor",
+            "node_ids": sorted(set(int(node) for node in lower_center_nodes)),
             "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
         }
     ]
@@ -3079,9 +3236,23 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
         supports = _custom_flat_supports(node_id, rows, cols, config, edge_nodes=edge_nodes)
         supports.extend(_custom_bc_segment_supports(nodes, config, length, width))
     else:
-        supports = _flat_supports(boundary_nodes, node_id, rows, cols, config, geometry, edge_nodes=edge_nodes)
+        # Whole-boundary per-DOF constraints govern when any DOF is selected;
+        # otherwise the automatic supports apply (unless auto is switched off,
+        # giving a free boundary).  Selected-edge segments are always additive.
+        boundary_map = _boundary_constraint_map(config)
+        edge_supports = _custom_bc_segment_supports(nodes, config, length, width)
+        if boundary_map:
+            supports = _whole_boundary_constraint_supports(
+                {key: list(edge_nodes.get(key, [])) for key in _FLAT_EDGE_KEYS},
+                config, exclude_dofs_by_node=_edge_support_dofs_by_node(edge_supports))
+        elif bool(getattr(config, "boundary_auto_supports", True)):
+            supports = _flat_supports(boundary_nodes, node_id, rows, cols, config, geometry, edge_nodes=edge_nodes)
+        else:
+            supports = []
+        supports.extend(edge_supports)
         supports.extend(_symmetry_supports(nodes, config))
-        supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
+        if not boundary_map:
+            supports.extend(_enforced_displacement_supports(nodes, config, "flat", exclude_node_ids=set(boundary_nodes)))
     return {
         "name": "ANYstructureFlatPanelFullMesh",
         "thickness_regions": thickness_region_info,
@@ -3586,10 +3757,27 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
         else:
             supports = _custom_cylinder_supports(start_ring, end_ring, config)
     else:
-        if custom_lid_support_nodes is not None:
+        # Whole-boundary per-DOF constraints on the model boundary (the lid
+        # reference nodes when end lids are present, otherwise both end rings)
+        # when any DOF is selected; otherwise the automatic end supports.
+        # Selected-edge segments are always additive.
+        boundary_map = _boundary_constraint_map(config)
+        edge_supports = _custom_bc_segment_supports(nodes, config, length, circumference, radius=radius)
+        if boundary_map:
+            if custom_lid_support_nodes is not None:
+                cyl_edge_map = {"lower": list(custom_lid_support_nodes[0]), "upper": list(custom_lid_support_nodes[1])}
+            else:
+                cyl_edge_map = {"lower": list(start_ring), "upper": list(end_ring)}
+            supports = _whole_boundary_constraint_supports(
+                cyl_edge_map, config, exclude_dofs_by_node=_edge_support_dofs_by_node(edge_supports))
+        elif not bool(getattr(config, "boundary_auto_supports", True)):
+            supports = []
+        elif custom_lid_support_nodes is not None:
             supports.extend(_cylinder_lid_boundary_supports(custom_lid_support_nodes[0], custom_lid_support_nodes[1], config))
+        supports.extend(edge_supports)
         supports.extend(_symmetry_supports(nodes, config))
-        supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
+        if not boundary_map:
+            supports.extend(_enforced_displacement_supports(nodes, config, "cylinder"))
     return {
         "name": "ANYstructureCylinderFullMesh",
         "thickness_regions": thickness_region_info,
@@ -3968,6 +4156,17 @@ def _visualization_member_lines(
             except Exception:
                 pass
 
+        def _safe_stress(val) -> float:
+            if val is None: return 0.0
+            if hasattr(val, "item"):
+                try:
+                    return float(val.item(0) if getattr(val, "size", 0) > 0 else val.item())
+                except Exception: pass
+            if hasattr(val, "__len__") and not isinstance(val, str):
+                return float(val[0]) if len(val) > 0 else 0.0
+            try: return float(val)
+            except Exception: return 0.0
+
         lines.append(
             {
                 "id": int(beam.get("id", 0)),
@@ -3985,13 +4184,13 @@ def _visualization_member_lines(
                 "c_z": float(c_z),
                 "eccentricity": float((beam.get("section") or {}).get("eccentricity_m") or 0.0),
                 # Include stress component results
-                "axial_stress": float(beam_stresses.get("axial_stress", 0.0) if hasattr(beam_stresses.get("axial_stress"), "real") else (beam_stresses.get("axial_stress", [0.0])[0] if beam_stresses.get("axial_stress") is not None else 0.0)),
-                "bending_stress_y": float(beam_stresses.get("bending_stress_y", 0.0) if hasattr(beam_stresses.get("bending_stress_y"), "real") else (beam_stresses.get("bending_stress_y", [0.0])[0] if beam_stresses.get("bending_stress_y") is not None else 0.0)),
-                "bending_stress_z": float(beam_stresses.get("bending_stress_z", 0.0) if hasattr(beam_stresses.get("bending_stress_z"), "real") else (beam_stresses.get("bending_stress_z", [0.0])[0] if beam_stresses.get("bending_stress_z") is not None else 0.0)),
-                "shear_stress_y": float(beam_stresses.get("shear_stress_y", 0.0) if hasattr(beam_stresses.get("shear_stress_y"), "real") else (beam_stresses.get("shear_stress_y", [0.0])[0] if beam_stresses.get("shear_stress_y") is not None else 0.0)),
-                "shear_stress_z": float(beam_stresses.get("shear_stress_z", 0.0) if hasattr(beam_stresses.get("shear_stress_z"), "real") else (beam_stresses.get("shear_stress_z", [0.0])[0] if beam_stresses.get("shear_stress_z") is not None else 0.0)),
-                "torsional_stress": float(beam_stresses.get("torsional_stress", 0.0) if hasattr(beam_stresses.get("torsional_stress"), "real") else (beam_stresses.get("torsional_stress", [0.0])[0] if beam_stresses.get("torsional_stress") is not None else 0.0)),
-                "von_mises": float(beam_stresses.get("von_mises", 0.0) if hasattr(beam_stresses.get("von_mises"), "real") else (beam_stresses.get("von_mises", [0.0])[0] if beam_stresses.get("von_mises") is not None else 0.0)),
+                "axial_stress": _safe_stress(beam_stresses.get("axial_stress")),
+                "bending_stress_y": _safe_stress(beam_stresses.get("bending_stress_y")),
+                "bending_stress_z": _safe_stress(beam_stresses.get("bending_stress_z")),
+                "shear_stress_y": _safe_stress(beam_stresses.get("shear_stress_y")),
+                "shear_stress_z": _safe_stress(beam_stresses.get("shear_stress_z")),
+                "torsional_stress": _safe_stress(beam_stresses.get("torsional_stress")),
+                "von_mises": _safe_stress(beam_stresses.get("von_mises")),
             }
         )
     return tuple(lines)
@@ -4287,6 +4486,13 @@ def _pressure_sign(config: LightweightFEMConfig) -> float:
 
 
 def _runtime_collision_has_fixed_support(config: LightweightFEMConfig, geometry: dict) -> bool:
+    # New per-DOF BC model: a whole-boundary DOF constraint or any selected-edge
+    # segment provides the required restraint for a collision run.
+    if _boundary_constraint_map(config):
+        return True
+    if any(seg.get("constraints") or seg.get("support") not in (None, "", "free", "none")
+           for seg in _custom_bc_segments(config)):
+        return True
     if _normalized_choice(config.boundary_condition, "auto") not in {"auto", "free", "none"}:
         return True
     if geometry.get("geometry") == "cylinder":
@@ -4799,7 +5005,9 @@ def _has_custom_support(config: LightweightFEMConfig) -> bool:
 
 
 def _constraint_mode(config: LightweightFEMConfig, geometry: dict | None = None) -> str:
-    if config.custom_load_bc_enabled and config.custom_use_nullspace_projection:
+    if not config.custom_use_nullspace_projection:
+        return "transformation"
+    if config.custom_load_bc_enabled and not (_custom_has_fixed_support(config) or _has_custom_support(config)):
         return "nullspace"
     if config.custom_load_bc_enabled and (_custom_has_fixed_support(config) or _has_custom_support(config)):
         return "transformation"
@@ -5496,8 +5704,11 @@ def _custom_bc_segments(config: LightweightFEMConfig) -> list[dict[str, float | 
     for entry in raw:
         if not isinstance(entry, dict):
             continue
+        # Per-DOF constraints (new BC tab) take precedence; fall back to the
+        # legacy named "support" ("simply supported"/"fixed") for old saves.
+        constraints = _dof_constraint_map(entry.get("constraints"))
         support = _normalized_choice(entry.get("support"), "free")
-        if support in {"", "free", "none"}:
+        if not constraints and support in {"", "free", "none"}:
             continue
         try:
             start = float(entry.get("start_coordinate", 0.0))
@@ -5514,6 +5725,7 @@ def _custom_bc_segments(config: LightweightFEMConfig) -> list[dict[str, float | 
                 "start_coordinate": min(start, end),
                 "end_coordinate": max(start, end),
                 "support": support,
+                "constraints": constraints,
             }
         )
     return segments
@@ -5524,15 +5736,27 @@ def _custom_bc_segment_supports(
     config: LightweightFEMConfig,
     length: float,
     width: float,
+    radius: float = 0.0,
 ) -> list[dict[str, object]]:
-    """Support groups for selected-edge boundary conditions (flat panels)."""
+    """Support groups for selected-edge boundary conditions.
+
+    Each segment carries either a per-DOF constraints dict (new BC tab) or a
+    legacy named support.  Flat panels select on (x, y) at z=0; cylinders map
+    the node to (axial z, arc-length) so an edge line is a constant-arc
+    generator or a constant-z ring.
+    """
     segments = _custom_bc_segments(config)
     if not segments:
         return []
-    tol = max((float(length) + float(width)) * 1.0e-9, 1.0e-9)
+    is_cylinder = float(radius) > 0.0
+    span = float(length) + float(width) + (2.0 * math.pi * float(radius) if is_cylinder else 0.0)
+    tol = max(span * 1.0e-6, 1.0e-6)
+    circumference = 2.0 * math.pi * float(radius) if is_cylinder else 0.0
     supports: list[dict[str, object]] = []
     for index, segment in enumerate(segments):
-        constraints = _support_constraints(segment.get("support"), "flat")
+        constraints = dict(segment.get("constraints") or {})
+        if not constraints:
+            constraints = _support_constraints(segment.get("support"), "cylinder" if is_cylinder else "flat")
         if not constraints:
             continue
         varying = str(segment.get("varying_axis", "a"))
@@ -5542,24 +5766,34 @@ def _custom_bc_segment_supports(
         node_ids: list[int] = []
         for node in nodes:
             coords = node.get("coords", (0.0, 0.0, 0.0))
-            x, y = float(coords[0]), float(coords[1])
-            if abs(float(coords[2])) > tol:
-                continue
-            if varying == "a":
-                on_line = abs(y - fixed) <= tol and (start - tol) <= x <= (end + tol)
+            if is_cylinder:
+                r = math.hypot(float(coords[0]), float(coords[1]))
+                if abs(r - float(radius)) > max(0.05 * float(radius), tol):
+                    continue  # skip member/off-skin nodes
+                a_coord = float(coords[2])  # axial
+                b_coord = (math.atan2(float(coords[1]), float(coords[0])) % (2.0 * math.pi)) * float(radius)
             else:
-                on_line = abs(x - fixed) <= tol and (start - tol) <= y <= (end + tol)
+                if abs(float(coords[2])) > tol:
+                    continue
+                a_coord = float(coords[0])
+                b_coord = float(coords[1])
+            if varying == "a":
+                if is_cylinder and circumference > 0.0:
+                    delta = abs((b_coord - fixed + 0.5 * circumference) % circumference - 0.5 * circumference)
+                    on_fixed = delta <= tol
+                else:
+                    on_fixed = abs(b_coord - fixed) <= tol
+                on_line = on_fixed and (start - tol) <= a_coord <= (end + tol)
+            else:
+                on_line = abs(a_coord - fixed) <= tol and (start - tol) <= b_coord <= (end + tol)
             if on_line:
                 node_ids.append(int(node["id"]))
         if node_ids:
             supports.append(
                 {
-                    "name": "custom_edge_bc_{index}_{support}".format(
-                        index=index,
-                        support=str(segment.get("support", "")).replace(" ", "_"),
-                    ),
+                    "name": "custom_edge_bc_{index}".format(index=index),
                     "node_ids": sorted(set(node_ids)),
-                    "constraints": constraints,
+                    "constraints": {dof: float(value) for dof, value in constraints.items()},
                 }
             )
     return supports

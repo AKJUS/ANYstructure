@@ -99,6 +99,113 @@ def _internal_reference_transformed_shell_sif() -> str:
     )
 
 
+def _stiffened_flat_panel_sif(dx: float, dy: float, internal_divisions: bool = False) -> str:
+    """Flat plate 1.5 x 2.4 m in XY with Y-stiffener lines at x=0.5 and x=1.0.
+
+    Every shell carries a uniform membrane compression of 100 MPa along the
+    stiffener direction (global Y) via an identity BNTRCOS shell transform, so
+    the reduced panel stress must report sigma_x (along span/stiffener) = 100
+    and sigma_y = 0 regardless of the mesh edge-length statistics controlled
+    by ``dx``/``dy``.
+
+    With ``internal_divisions`` the plate changes thickness at mid-span
+    (12 mm -> 16 mm) and the middle bay is meshed with triangles in the upper
+    half: internal property/mesh-type changes that must NOT split the panels.
+    """
+
+    n_cols = int(round(1.5 / dx))
+    n_rows = int(round(2.4 / dy))
+    lines = [
+        "IDENT          101               1",
+        "UNITS            1               1               1",
+        "MISOSEL          1  2.100000D+11  3.000000D-01  7.850000D+03",
+        "GELTH           10  1.200000D-02",
+        "GELTH           11  1.600000D-02",
+        "GLSEC           20  2.500000E-01  1.200000E-02  1.000000E-01  1.400000E-02",
+        "BNTRCOS          7               1               0               0               0               1               0               0               0               1",
+    ]
+
+    def node_id(col: int, row: int) -> int:
+        return row * (n_cols + 1) + col + 1
+
+    for row in range(n_rows + 1):
+        for col in range(n_cols + 1):
+            lines.append(f"GCOORD {node_id(col, row):10d} {col * dx:15.6E} {row * dy:15.6E} {0.0:15.6E}")
+    for row in range(n_rows + 1):
+        for col in range(n_cols + 1):
+            lines.append(f"GNODE  {node_id(col, row):10d} {node_id(col, row):10d}               6          123456")
+
+    element_id = 100
+    shell_records = []
+    for row in range(n_rows):
+        for col in range(n_cols):
+            n1 = node_id(col, row)
+            n2 = node_id(col + 1, row)
+            n3 = node_id(col + 1, row + 1)
+            n4 = node_id(col, row + 1)
+            upper_half = (row + 0.5) * dy > 1.2
+            thickness_id = 11 if internal_divisions and upper_half else 10
+            middle_bay = 0.5 <= (col + 0.5) * dx <= 1.0
+            if internal_divisions and upper_half and middle_bay:
+                for tri_nodes in ((n1, n2, n3), (n1, n3, n4)):
+                    node_text = "".join(f" {node:9d}" for node in tri_nodes)
+                    lines.append(f"GELMNT1 {element_id:9d}               0              25               0{node_text}")
+                    lines.append(
+                        f"GELREF1 {element_id:9d}               1               0               0               0               0"
+                        f"               0               0 {thickness_id:9d}               0               0               7"
+                    )
+                    shell_records.append((element_id, 25))
+                    element_id += 1
+            else:
+                lines.append(f"GELMNT1 {element_id:9d}               0              24               0 {n1:9d} {n2:9d} {n3:9d} {n4:9d}")
+                lines.append(
+                    f"GELREF1 {element_id:9d}               1               0               0               0               0"
+                    f"               0               0 {thickness_id:9d}               0               0               7"
+                )
+                shell_records.append((element_id, 24))
+                element_id += 1
+
+    beam_id = 500
+    for x_station in (0.5, 1.0):
+        col = int(round(x_station / dx))
+        for row in range(n_rows):
+            n1 = node_id(col, row)
+            n2 = node_id(col, row + 1)
+            lines.append(f"GELMNT1 {beam_id:9d}               0              15               0 {n1:9d} {n2:9d}")
+            lines.append(f"GELREF1 {beam_id:9d}               1               0               0               0               0               0               0              20               0               0               0")
+            beam_id += 1
+
+    for shell_id, type_code in shell_records:
+        lines.append(
+            f"RVSTRESS         1               1 {shell_id:9d}               0 {type_code:9d}"
+            "               0   -1.000000E+08               0               0   -1.000000E+08               0"
+        )
+    lines.extend(["IEND", ""])
+    return "\n".join(lines)
+
+
+def _multi_load_case_shell_sif() -> str:
+    return "\n".join(
+        [
+            "IDENT          101               1",
+            "UNITS            1               1               1",
+            "MISOSEL          1  2.100000D+11  3.000000D-01  7.850000D+03",
+            "GELTH           10  2.000000D-02",
+            "BNTRCOS          7               1               0               0               0               1               0               0               0               1",
+            "GCOORD           1               0               0               0",
+            "GCOORD           2               1               0               0",
+            "GCOORD           3               1               1               0",
+            "GCOORD           4               0               1               0",
+            "GELMNT1        100               0              24               0               1               2               3               4",
+            "GELREF1        100               1               0               0               0               0               0               0              10               0               0               7",
+            "RVSTRESS         1               1             100               0              24               0    1.000000E+08               0               0    1.000000E+08               0",
+            "RVSTRESS         1               2             100               0              24               0    5.000000E+08               0               0    5.000000E+08               0",
+            "IEND",
+            "",
+        ]
+    )
+
+
 def _oriented_beam_fem() -> str:
     return "\n".join(
         [
@@ -153,6 +260,99 @@ def test_sif_stress_uses_internal_element_reference_for_shell_transform() -> Non
     assert stress[0] == pytest.approx(0.0, abs=1.0e-6)
     assert stress[1] == pytest.approx(100.0e6)
     assert stress[3] == pytest.approx(0.0, abs=1.0e-6)
+
+
+@pytest.mark.parametrize(
+    ("dx", "dy", "tag"),
+    [
+        (0.5, 0.3, "x_dominant_edges"),
+        (0.25, 0.6, "y_dominant_edges"),
+    ],
+)
+def test_sesam_flat_panel_stress_axes_follow_stiffener_direction(dx: float, dy: float, tag: str) -> None:
+    path = _work_dir() / f"stiffened_panel_{tag}.SIF"
+    path.write_text(_stiffened_flat_panel_sif(dx, dy), encoding="ascii")
+
+    model = fe_plate_fields.read_fea_shell_model(path)
+    fields = fe_plate_fields.infer_plate_fields(model)
+    stiffened = [
+        field for field in fields
+        if any(member.role == "stiffener" for member in field.members)
+    ]
+    assert stiffened
+
+    for field in stiffened:
+        stiffener_direction = next(
+            member.direction for member in field.members if member.role == "stiffener"
+        )
+        assert field.span_direction is not None
+        alignment = abs(sum(a * b for a, b in zip(field.span_direction, stiffener_direction)))
+        assert alignment > 0.99
+        assert field.span_m == pytest.approx(2.4, abs=1.0e-6)
+        assert field.spacing_m == pytest.approx(0.5, abs=1.0e-6)
+
+    stress = fe_plate_fields.read_fea_stress(path)
+    for method in fe_plate_fields.available_stress_reduction_methods():
+        reduced = {
+            item.field_id: item
+            for item in fe_plate_fields.reduce_field_stresses(
+                model, fields, stress, stress_reduction_method=method
+            )
+        }
+        for field in stiffened:
+            panel_stress = reduced[field.field_id]
+            assert panel_stress.sample_count > 0, (tag, method)
+            assert panel_stress.sigma_x1_mpa == pytest.approx(100.0, abs=1.0e-3), (tag, method)
+            assert panel_stress.sigma_y1_mpa == pytest.approx(0.0, abs=1.0e-3), (tag, method)
+            assert panel_stress.tau_xy_mpa == pytest.approx(0.0, abs=1.0e-3), (tag, method)
+
+
+def test_internal_thickness_and_mesh_type_changes_do_not_split_panels() -> None:
+    path = _work_dir() / "stiffened_panel_internal_divisions.SIF"
+    path.write_text(_stiffened_flat_panel_sif(0.25, 0.3, internal_divisions=True), encoding="ascii")
+
+    model = fe_plate_fields.read_fea_shell_model(path)
+    fields = fe_plate_fields.infer_plate_fields(model)
+
+    # Panels are bounded by the two stiffener lines only: three bays of
+    # 0.5 x 2.4 m even though the thickness changes at mid-span and part of
+    # the middle bay is meshed with triangles.
+    assert len(fields) == 3
+    for field in fields:
+        assert field.span_m == pytest.approx(2.4, abs=1.0e-6)
+        assert field.spacing_m == pytest.approx(0.5, abs=1.0e-6)
+        # Half the bay is 12 mm, half is 16 mm: area-weighted mean 14 mm.
+        assert field.shell_section_thickness_m == pytest.approx(0.014, abs=1.0e-6)
+
+    element_types = {
+        model.shell_elements[element_id].element_type
+        for field in fields
+        for element_id in field.element_ids
+    }
+    assert {"Q4", "T3"}.issubset(element_types)
+
+    stress = fe_plate_fields.read_fea_stress(path)
+    reduced = {
+        item.field_id: item
+        for item in fe_plate_fields.reduce_field_stresses(model, fields, stress)
+    }
+    for field in fields:
+        panel_stress = reduced[field.field_id]
+        assert panel_stress.sigma_x1_mpa == pytest.approx(100.0, abs=1.0e-3)
+        assert panel_stress.sigma_y1_mpa == pytest.approx(0.0, abs=1.0e-3)
+
+
+def test_sif_stress_defaults_to_first_load_case_instead_of_mixing() -> None:
+    path = _work_dir() / "multi_load_case_shell.SIF"
+    path.write_text(_multi_load_case_shell_sif(), encoding="ascii")
+
+    default_stress = read_sesam_sif_stress(path)
+    assert default_stress.element_stress[100][1] == pytest.approx(100.0e6)
+    assert default_stress.nodal_stress[1][1] == pytest.approx(100.0e6)
+
+    second_case = read_sesam_sif_stress(path, load_case=2)
+    assert second_case.element_stress[100][1] == pytest.approx(500.0e6)
+    assert second_case.nodal_stress[1][1] == pytest.approx(500.0e6)
 
 
 def test_fem_importer_attaches_explicit_shell_transform_metadata() -> None:
@@ -307,6 +507,72 @@ def test_dnv_panel_usage_factor_uses_highest_calculated_subcheck() -> None:
     assert fe_plate_fields._selected_uf_from_buckling_result(result) == pytest.approx(0.955)
 
 
+def test_semi_analytical_selected_uf_respects_acceptance_basis() -> None:
+    # With acceptance = "ultimate" the selected UF is the ultimate UF even
+    # when the buckling UF is larger; the colour coding must follow it.
+    result = {
+        "result": {
+            "method": "SemiAnalytical S3/U3",
+            "buckling UF": 0.85,
+            "ultimate UF": 0.72,
+            "buckling UF raw": 0.7391,
+            "ultimate UF raw": 0.6261,
+            "material factor": 1.15,
+            "selected UF": 0.72,
+        }
+    }
+
+    assert fe_plate_fields._selected_uf_from_buckling_result(result) == pytest.approx(0.72)
+
+
+def test_format_panel_buckling_details_lists_all_ufs() -> None:
+    from types import SimpleNamespace
+
+    stress = fe_plate_fields.PanelStress(
+        field_id="field_001",
+        sigma_x1_mpa=55.0,
+        sigma_x2_mpa=55.0,
+        sigma_y1_mpa=12.0,
+        sigma_y2_mpa=12.0,
+        tau_xy_mpa=8.0,
+        sample_count=64,
+        reduction="CSR area weighted membrane mean",
+    )
+    panel = SimpleNamespace(
+        field_id="field_001",
+        field=SimpleNamespace(span_m=4.0, spacing_m=0.8, shell_section_thickness_m=0.016),
+        stress=stress,
+        anystructure_input={"calculation_domain": "Flat plate, stiffened"},
+        buckling_result={
+            "calculation_method": "SemiAnalytical S3/U3",
+            "buckling_acceptance": "ultimate",
+            "result": {
+                "buckling UF": 0.85,
+                "ultimate UF": 0.72,
+                "selected UF": 0.72,
+                "valid label": "valid SemiAnalytical S3 UF predicted (high confidence)",
+                "controlling limit": "ultimate_capacity",
+                "CSR": [1, 1, 1, 1],
+            },
+        },
+        usage_factor=0.72,
+    )
+
+    text = fe_plate_fields.format_panel_buckling_details(panel, uf_basis="ultimate")
+
+    assert "Panel field_001" in text
+    assert "Domain: Flat plate, stiffened" in text
+    assert "Calculation method: SemiAnalytical S3/U3" in text
+    assert "UF basis (acceptance): ultimate" in text
+    assert "Governing UF: 0.7200" in text
+    assert "buckling UF: 0.8500" in text
+    assert "ultimate UF: 0.7200" in text
+    assert "valid label: valid SemiAnalytical S3 UF predicted (high confidence)" in text
+    assert "sigma_x1 / sigma_x2: 55.00 / 55.00 MPa" in text
+    assert "tau_xy: 8.00 MPa" in text
+    assert "span 4.000 m, spacing 0.800 m, thickness 16.00 mm" in text
+
+
 def test_writer_roundtrip_and_no_overwrite_guard() -> None:
     work_dir = _work_dir()
     input_path = work_dir / "roundtrip_in.FEM"
@@ -395,13 +661,21 @@ def test_reader_accepts_fixed_width_numeric_fields() -> None:
     assert document.nodes[1].coordinates == pytest.approx((1.25, -2.5, 0.0))
 
 
-def test_reader_classifies_named_hp_bulb_sections_as_l_bulb() -> None:
-    path = _work_dir() / "hp_bulb_section.SIF"
+@pytest.mark.parametrize(
+    ("section_name", "tag"),
+    [
+        ("HPbulb160x7x22x6x6", "hp"),
+        ("BSRAbulb220x11x31x9x9x3", "bsra"),
+        ("JIS-bulb 180x8", "jis"),
+    ],
+)
+def test_reader_classifies_named_bulb_sections_as_l_bulb(section_name: str, tag: str) -> None:
+    path = _work_dir() / f"bulb_section_{tag}.SIF"
     path.write_text(
         "\n".join(
             [
                 "IDENT          101               1",
-                "TDSECT           4              10  HPbulb160x7x22x6x6",
+                f"TDSECT           4              10  {section_name}",
                 "GLSEC           10    1.600000E-01    7.000000E-03    2.900000E-02    1.546379E-02",
                 "IEND",
                 "",
@@ -467,6 +741,40 @@ def test_sesam_split_filters_short_intersection_beams_and_keeps_sustained_bounda
 
     assert [member.section_type for member in beams] == ["L-bulb"]
     assert boundaries == [boundary]
+
+
+@pytest.mark.skipif(not REF_CASES.exists(), reason="SESAM reference cases are not available")
+def test_flat_sif_bulb_stiffeners_get_semi_analytical_usage_factor() -> None:
+    case = REF_CASES / "flatPlate_AllQuadLinear_LineForceMoment_Pressure.SIF"
+    model = fe_plate_fields.read_fea_shell_model(case)
+    fields = fe_plate_fields.infer_plate_fields(model)
+    stiffened = [
+        field for field in fields
+        if any(member.role == "stiffener" for member in field.members)
+    ]
+    assert stiffened
+
+    for field in stiffened:
+        stiffener = next(member for member in field.members if member.role == "stiffener")
+        # BSRAbulb220x11... sections must classify as L-bulb so the S3
+        # validity gate does not reject them as narrow-flanged angles.
+        assert stiffener.section_type == "L-bulb"
+        assert field.span_direction is not None
+        alignment = abs(sum(a * b for a, b in zip(field.span_direction, stiffener.direction)))
+        assert alignment > 0.99
+
+    stress = fe_plate_fields.read_fea_stress(case)
+    panel_stresses = fe_plate_fields.reduce_field_stresses(model, fields[:2], stress)
+    results = fe_plate_fields.calculate_field_buckling(
+        fields[:2],
+        panel_stresses,
+        calculation_method="SemiAnalytical S3/U3",
+        buckling_acceptance="ultimate",
+    )
+    for result in results:
+        assert result.get("available"), result.get("error")
+        assert result.get("usage_factor") is not None
+        assert 0.0 < result["usage_factor"] < 1.5
 
 
 @pytest.mark.skipif(not REF_CASES.exists(), reason="SESAM reference cases are not available")

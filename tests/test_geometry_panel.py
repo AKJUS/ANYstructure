@@ -82,7 +82,8 @@ def test_custom_bc_segments_create_edge_supports() -> None:
     )
     groups = [s for s in generated["supports"] if str(s.get("name", "")).startswith("custom_edge_bc")]
     assert len(groups) == 1
-    assert groups[0]["name"].endswith("fixed")
+    # Legacy "fixed" segment maps to a clamped per-DOF constraint set.
+    assert set(groups[0]["constraints"]) == {"ux", "uy", "uz", "rx", "ry", "rz"}
     assert len(groups[0]["node_ids"]) >= 2
     # The constrained nodes all lie on the y=0 edge.
     coords = {int(n["id"]): n["coords"] for n in generated["nodes"]}

@@ -69,7 +69,7 @@ SUPPORTED_RECORDS: FrozenSet[str] = (
     | BOUNDARY_LOAD_RECORDS
 )
 
-TEXT_RECORDS: FrozenSet[str] = frozenset({"DATE", "TDMATER", "TDSECT", "TDSCONC", "TDLOAD"})
+TEXT_RECORDS: FrozenSet[str] = frozenset({"DATE", "TDMATER", "TDSECT", "TDSCONC", "TDLOAD", "TDRESREF"})
 
 KNOWN_UNSUPPORTED_STRUCTURAL_RECORDS: FrozenSet[str] = frozenset(
     {
