@@ -229,6 +229,96 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
     assert result.buckling_factors == tuple(sorted(result.buckling_factors))
 
 
+def test_runtime_fem_state_save_load_round_trip(tmp_path):
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="medium",
+        pressure_pa=100_000.0,
+        load_scale=1.2,
+        num_buckling_modes=4,
+        include_end_lids=False,
+        boundary_constraint_json='{"all": {"uz": 0.0}}',
+    )
+    result = fe_runtime_solver.run_runtime_fem(snapshot, options)
+    assert result.status == "ok"
+    original_session = fe_plate_fields.create_runtime_fea_buckling_session(
+        result, run_buckling=False, geometry_type="flat"
+    )
+
+    for name in ("state.fem.json", "state.fem.json.gz"):
+        path = tmp_path / name
+        fe_runtime_solver.save_runtime_fem_state(path, options, result=result, snapshot=snapshot)
+        state = fe_runtime_solver.load_runtime_fem_state(path)
+
+        assert state["options"] == options
+        assert state["snapshot"]["line_name"] == snapshot.line_name
+
+        loaded = state["result"]
+        assert loaded is not None
+        assert loaded.status == "ok"
+        assert loaded.buckling_factors == pytest.approx(result.buckling_factors)
+        assert loaded.stress_percentiles[0][0] == "p95"
+        assert loaded.summary["mesh_info"]["shells"] == result.summary["mesh_info"]["shells"]
+
+        # The mesh and stresses survive the file round trip: the FEA-result
+        # buckling handoff must rebuild the same panels from the loaded state.
+        session = fe_plate_fields.create_runtime_fea_buckling_session(
+            loaded, run_buckling=False, geometry_type="flat"
+        )
+        assert session.panel_count == original_session.panel_count
+        assert len(session.model.shell_elements) == len(original_session.model.shell_elements)
+        assert session.panels[0].stress is not None
+        assert session.panels[0].stress.sample_count == original_session.panels[0].stress.sample_count
+        assert session.panels[0].stress.sigma_x1_mpa == pytest.approx(
+            original_session.panels[0].stress.sigma_x1_mpa, abs=1.0e-9
+        )
+
+
+def test_runtime_fem_options_from_dict_coerces_and_ignores_unknown():
+    options = fe_runtime_solver.runtime_fem_options_from_dict(
+        {
+            "pressure_pa": "2500",
+            "num_buckling_modes": 7.0,
+            "include_end_lids": 0,
+            "mesh_fidelity": "fine",
+            "not_a_real_option": 123,
+        }
+    )
+
+    assert options.pressure_pa == pytest.approx(2500.0)
+    assert options.num_buckling_modes == 7
+    assert options.include_end_lids is False
+    assert options.mesh_fidelity == "fine"
+    assert options.load_scale == pytest.approx(1.0)
+
+
+def test_load_runtime_fem_state_rejects_foreign_json(tmp_path):
+    path = tmp_path / "other.fem.json"
+    path.write_text(json.dumps({"format": "something-else"}), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        fe_runtime_solver.load_runtime_fem_state(path)
+
+
+def test_runtime_fem_popup_wires_save_load_buttons():
+    source = Path(fe_runtime_solver.__file__).read_text(encoding="utf-8")
+
+    assert 'text="Save FEM..."' in source
+    assert "command=self._save_fem_state" in source
+    assert 'text="Load FEM..."' in source
+    assert "command=self._load_fem_state" in source
+    assert "def _apply_options_to_controls(self, options: RuntimeFEMOptions) -> None:" in source
+    assert "def _adopt_loaded_result(self, result: RuntimeFEMRunResult" in source
+    # Loading a result must reuse the normal post-run ingestion steps.
+    adopt_block = source[
+        source.index("def _adopt_loaded_result"):
+        source.index("def _options(self) -> RuntimeFEMOptions:")
+    ]
+    assert "self._set_display_modes(result)" in adopt_block
+    assert "self._refresh_figure()" in adopt_block
+    assert "self._update_buckling_handoff_button(is_running=False)" in adopt_block
+
+
 def test_run_runtime_fem_passes_phase_five_options_to_solver(monkeypatch):
     captured = {}
 

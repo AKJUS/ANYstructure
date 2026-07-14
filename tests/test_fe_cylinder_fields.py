@@ -165,6 +165,54 @@ def _global_stress_components_from_local(first_axis, second_axis, sigma_first, s
     )
 
 
+def _flat_stiffened_panel_model() -> FeShellModel:
+    """Small flat panel with webs/flanges that lures a degenerate circle fit."""
+
+    nodes = {}
+    elements = {}
+    node_id = 1
+    element_id = 1
+
+    def add_node(x: float, y: float, z: float) -> int:
+        nonlocal node_id
+        nodes[node_id] = (x, y, z)
+        node_id += 1
+        return node_id - 1
+
+    def add_quad(corners, elset: str) -> None:
+        nonlocal element_id
+        elements[element_id] = ShellElement(
+            element_id=element_id,
+            node_ids=tuple(add_node(*corner) for corner in corners),
+            element_type="S4",
+            elset=elset,
+        )
+        element_id += 1
+
+    for x0 in (0.0, 1.0):
+        for y0 in (0.0, 0.7):
+            add_quad(
+                ((x0, y0, 0.0), (x0 + 1.0, y0, 0.0), (x0 + 1.0, y0 + 0.7, 0.0), (x0, y0 + 0.7, 0.0)),
+                "BASE",
+            )
+    for y_station in (0.0, 0.7, 1.4):
+        add_quad(
+            ((0.0, y_station, 0.0), (2.0, y_station, 0.0), (2.0, y_station, 0.2), (0.0, y_station, 0.2)),
+            "WEBS",
+        )
+        add_quad(
+            ((0.0, y_station - 0.05, 0.2), (2.0, y_station - 0.05, 0.2), (2.0, y_station + 0.05, 0.2), (0.0, y_station + 0.05, 0.2)),
+            "FLANGES",
+        )
+
+    return FeShellModel(
+        nodes=nodes,
+        shell_elements=elements,
+        elsets={"ALL": tuple(sorted(elements))},
+        shell_sections=(ShellSection(elset="ALL", material="S355", thickness_m=0.01),),
+    )
+
+
 def test_detects_cylinder_axis_and_radius() -> None:
     model = _orthogonally_stiffened_cylinder()
     geometry = detect_cylinder_geometry(model)
@@ -172,6 +220,14 @@ def test_detects_cylinder_axis_and_radius() -> None:
     assert geometry.radius_m == pytest.approx(2.0, abs=1.0e-8)
     assert abs(geometry.axis_direction[2]) == pytest.approx(1.0, abs=1.0e-8)
     assert len(geometry.skin_element_ids) == 64 * 6
+
+
+def test_cylinder_detection_requires_angular_coverage() -> None:
+    # A full cylinder is detected while a small flat stiffened panel is not,
+    # even when a large-radius circle fits its few radial positions with a
+    # near-zero residual.
+    assert fe_plate_fields.is_cylindrical_shell_model(_orthogonally_stiffened_cylinder()) is True
+    assert fe_plate_fields.is_cylindrical_shell_model(_flat_stiffened_panel_model()) is False
 
 
 def test_extracts_orthogonal_cylinder_bays() -> None:

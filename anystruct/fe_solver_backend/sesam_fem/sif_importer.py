@@ -289,6 +289,16 @@ def read_sesam_sif_stress(
         internal_id = int(round(record.numeric_fields[1]))
         internal_to_external[internal_id] = external_id
 
+    if load_case is None:
+        # Lock onto the first load case present so element and nodal stresses
+        # stay from one consistent case instead of mixing every case in the
+        # file (element stresses would keep the last case per element while
+        # nodal averages blended all cases).
+        for record in raw_records:
+            if record.name == "RVSTRESS" and record.numeric_fields and len(record.numeric_fields) >= 8:
+                load_case = int(round(record.numeric_fields[1]))
+                break
+
     for record in raw_records:
         if record.name != "RVSTRESS" or not record.numeric_fields or len(record.numeric_fields) < 8:
             continue

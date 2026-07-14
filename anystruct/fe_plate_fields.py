@@ -65,15 +65,16 @@ class ShellElement:
     @property
     def corner_node_ids(self) -> tuple[int, ...]:
         element_type = self.element_type.upper()
-        if element_type.startswith(("S8", "Q8")) and len(self.node_ids) >= 4:
-            if len(self.node_ids) >= 8:
-                return (self.node_ids[0], self.node_ids[2], self.node_ids[4], self.node_ids[6])
+        # SESAM Q8/SCQS and T6/SCTS number nodes around the perimeter with
+        # corners and midside nodes alternating; CalculiX S8/S8R and S6 list
+        # the corner nodes first.
+        if element_type.startswith("Q8") and len(self.node_ids) >= 8:
+            return (self.node_ids[0], self.node_ids[2], self.node_ids[4], self.node_ids[6])
+        if element_type.startswith("T6") and len(self.node_ids) >= 6:
+            return (self.node_ids[0], self.node_ids[2], self.node_ids[4])
+        if element_type.startswith("S8") and len(self.node_ids) >= 4:
             return self.node_ids[:4]
-        if element_type.startswith("T6") and len(self.node_ids) >= 3:
-            if len(self.node_ids) >= 6:
-                return (self.node_ids[0], self.node_ids[2], self.node_ids[4])
-            return self.node_ids[:3]
-        if element_type.startswith("S6") and len(self.node_ids) >= 3:
+        if element_type.startswith(("S6", "T6")) and len(self.node_ids) >= 3:
             return self.node_ids[:3]
         return self.node_ids[:4]
 
@@ -175,6 +176,12 @@ class PlateField:
     shell_section_thickness_m: float | None = None
     confidence: float = 1.0
     diagnostics: tuple[str, ...] = ()
+    # In-plane axes fixed at inference time so stress reduction uses the same
+    # frame as span/spacing/transverse_bounds: sigma_x acts along
+    # span_direction (the stiffener direction when stiffeners exist) and
+    # transverse_bounds is measured along transverse_direction.
+    span_direction: Vector3D | None = None
+    transverse_direction: Vector3D | None = None
 
 
 @dataclass(frozen=True)
@@ -720,8 +727,19 @@ def reduce_field_stresses(
 
     panel_stresses: list[PanelStress] = []
     for field_item in fields:
+        has_stored_axes = (
+            field_item.span_direction is not None
+            and field_item.transverse_direction is not None
+        )
+        if has_stored_axes:
+            # Use the axes fixed at field-inference time so sigma_x follows the
+            # span/stiffener direction and the centre-strip filter compares
+            # coordinates against transverse_bounds in the same frame.
+            member_direction = field_item.span_direction
+            transverse_direction = field_item.transverse_direction
         if use_field_axes:
-            member_direction, transverse_direction = _field_local_axes(model, field_item)
+            if not has_stored_axes:
+                member_direction, transverse_direction = _field_local_axes(model, field_item)
             field_normal = _field_representative_normal(model, field_item)
             field_points = [
                 point
@@ -732,8 +750,9 @@ def reduce_field_stresses(
             stress_base_normal = field_normal
             stress_base_offset = _dot(field_centroid, field_normal)
         else:
-            member_direction = default_member_direction
-            transverse_direction = default_transverse_direction
+            if not has_stored_axes:
+                member_direction = default_member_direction
+                transverse_direction = default_transverse_direction
             stress_base_normal = base_normal
             stress_base_offset = base_offset
         if reduction_method == "CSR area weighted mean":
@@ -799,6 +818,101 @@ def summarize_panel_stresses(panel_stresses: Sequence[PanelStress]) -> list[dict
         }
         for stress in panel_stresses
     ]
+
+
+def _format_detail_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return str(value)
+        return f"{value:.4f}" if abs(value) < 1.0e4 else f"{value:.4g}"
+    if isinstance(value, (list, tuple, set)):
+        items = [_format_detail_value(item) for item in list(value)[:8]]
+        suffix = ", ..." if len(value) > 8 else ""
+        return "[" + ", ".join(items) + suffix + "]"
+    return str(value)
+
+
+def _format_result_tree(value: dict[str, Any], indent: int = 1) -> list[str]:
+    pad = "  " * indent
+    lines: list[str] = []
+    for key, nested in value.items():
+        if isinstance(nested, dict):
+            if not nested:
+                continue
+            lines.append(f"{pad}{key}:")
+            lines.extend(_format_result_tree(nested, indent + 1))
+        else:
+            text = _format_detail_value(nested)
+            if text == "":
+                continue
+            lines.append(f"{pad}{key}: {text}")
+    return lines
+
+
+def format_panel_buckling_details(panel: Any, uf_basis: str | None = None) -> str:
+    """Return a readable multi-line report of all UFs/details for one FE panel.
+
+    Works for flat and cylinder FE-result panels and for every calculation
+    method: prescriptive results list each plate/stiffener/girder sub-check,
+    SemiAnalytical results list buckling/ultimate UFs, raw values, validity,
+    controlling limits and CSR information.
+    """
+
+    field_id = getattr(panel, "field_id", "?")
+    data = getattr(panel, "anystructure_input", None) or {}
+    buckling_input = data.get("buckling", {}) if isinstance(data, dict) else {}
+    result_record = getattr(panel, "buckling_result", None) or {}
+
+    lines: list[str] = [f"Panel {field_id}"]
+    domain = result_record.get("domain") or (data.get("calculation_domain") if isinstance(data, dict) else None)
+    if domain:
+        lines.append(f"Domain: {domain}")
+    method = result_record.get("calculation_method") or buckling_input.get("calculation_method")
+    if method:
+        lines.append(f"Calculation method: {method}")
+    acceptance = uf_basis or result_record.get("buckling_acceptance") or buckling_input.get("buckling_acceptance")
+    if acceptance:
+        lines.append(f"UF basis (acceptance): {acceptance}")
+    usage_factor = getattr(panel, "usage_factor", None)
+    lines.append(f"Governing UF: {'-' if usage_factor is None else f'{usage_factor:.4f}'}")
+
+    result = result_record.get("result")
+    if isinstance(result, dict) and result:
+        lines.append("")
+        lines.append("Calculated usage factors and results:")
+        lines.extend(_format_result_tree(result))
+    error = result_record.get("error")
+    if error:
+        lines.append(f"Message: {error}")
+    if not result_record:
+        lines.append("No buckling calculation stored for this panel.")
+
+    stress = getattr(panel, "stress", None)
+    if stress is not None:
+        lines.append("")
+        lines.append("Reduced FE stresses:")
+        if hasattr(stress, "sigma_x1_mpa"):
+            lines.append(f"  sigma_x1 / sigma_x2: {stress.sigma_x1_mpa:.2f} / {stress.sigma_x2_mpa:.2f} MPa")
+            lines.append(f"  sigma_y1 / sigma_y2: {stress.sigma_y1_mpa:.2f} / {stress.sigma_y2_mpa:.2f} MPa")
+            lines.append(f"  tau_xy: {stress.tau_xy_mpa:.2f} MPa")
+        else:
+            lines.append(f"  axial: {stress.axial_stress_mpa:.2f} MPa")
+            lines.append(f"  hoop: {stress.hoop_stress_mpa:.2f} MPa")
+            lines.append(f"  torsional shear: {stress.torsional_shear_mpa:.2f} MPa")
+        lines.append(f"  samples: {stress.sample_count}")
+        lines.append(f"  reduction: {stress.reduction}")
+
+    field = getattr(panel, "field", None)
+    if field is not None and hasattr(field, "span_m"):
+        lines.append("")
+        lines.append("Panel geometry:")
+        lines.append(
+            f"  span {field.span_m:.3f} m, spacing {field.spacing_m:.3f} m, "
+            f"thickness {(getattr(field, 'shell_section_thickness_m', None) or 0.0) * 1000.0:.2f} mm"
+        )
+    return "\n".join(lines)
 
 
 def calculate_field_buckling(
@@ -1403,6 +1517,8 @@ def infer_plate_fields(model: FeShellModel) -> list[PlateField]:
                 attached_member_ids=(),
                 shell_section_thickness_m=base_section_thickness,
                 diagnostics=("unstiffened base plate",),
+                span_direction=inference.member_direction,
+                transverse_direction=inference.transverse_direction,
             )
         ]
 
@@ -1449,6 +1565,8 @@ def infer_plate_fields(model: FeShellModel) -> list[PlateField]:
                     members=field_members,
                     shell_section_thickness_m=base_section_thickness,
                     diagnostics=("bounded by adjacent stiffener stations and longitudinal girder/boundary",),
+                    span_direction=inference.member_direction,
+                    transverse_direction=inference.transverse_direction,
                 )
             )
             field_index += 1
@@ -1696,22 +1814,63 @@ def _split_sesam_patch_by_beams(
                 if abs(member.station - v0) <= station_tolerance or abs(member.station - v1) <= station_tolerance
             )
             unique_members = tuple({member.member_id: member for member in attached}.values())
+            u_size = u1 - u0
+            v_size = v1 - v0
+            span_axis = _sesam_span_axis_from_members(unique_members, local_u, local_v)
+            if span_axis is None:
+                span_axis = "u" if u_size >= v_size else "v"
+            if span_axis == "u":
+                span_m = u_size
+                spacing_m = v_size
+                span_direction = local_u
+                transverse_direction = local_v
+                transverse_bounds = (min(v0, v1), max(v0, v1))
+            else:
+                span_m = v_size
+                spacing_m = u_size
+                span_direction = local_v
+                transverse_direction = local_u
+                transverse_bounds = (min(u0, u1), max(u0, u1))
             fields.append(
                 PlateField(
                     field_id=f"field_{start_index + len(fields):03d}",
                     base_patch_id=patch.patch_id,
                     element_ids=selected,
                     bbox=_bbox_for_elements(model, selected),
-                    span_m=max(u1 - u0, v1 - v0),
-                    spacing_m=min(u1 - u0, v1 - v0),
-                    transverse_bounds=(min(u0, u1), max(u0, u1)),
+                    span_m=span_m,
+                    spacing_m=spacing_m,
+                    transverse_bounds=transverse_bounds,
                     attached_member_ids=tuple(member.member_id for member in unique_members),
                     members=unique_members,
                     shell_section_thickness_m=_shell_section_thickness_for_elements(model, selected),
                     diagnostics=("SESAM plate patch split by beam sections, out-of-plane plates, and free edges",),
+                    span_direction=span_direction,
+                    transverse_direction=transverse_direction,
                 )
             )
     return fields
+
+
+def _sesam_span_axis_from_members(
+    members: Sequence[InferredMember],
+    local_u: Vector3D,
+    local_v: Vector3D,
+) -> str | None:
+    """Return "u" or "v" when attached stiffeners identify the panel span axis."""
+
+    counts = {"u": 0, "v": 0}
+    for member in members:
+        if member.role != "stiffener":
+            continue
+        align_u = abs(_dot(member.direction, local_u))
+        align_v = abs(_dot(member.direction, local_v))
+        if align_u > align_v:
+            counts["u"] += 1
+        elif align_v > align_u:
+            counts["v"] += 1
+    if counts["u"] == counts["v"]:
+        return None
+    return "u" if counts["u"] > counts["v"] else "v"
 
 
 def _sesam_split_member_families(
@@ -1892,26 +2051,36 @@ def _merge_sesam_general_fields(
     polygons = _element_polygons_for_ids(model, element_ids)
     points = [point for polygon in polygons for point in polygon]
     normal = _field_representative_normal(model, first)
+    members = tuple({member.member_id: member for field_item in (first, second) for member in field_item.members}.values())
     try:
         local_u, local_v = _patch_local_axes_from_polygons(polygons, normal)
         u_values = [_dot(point, local_u) for point in points]
         v_values = [_dot(point, local_v) for point in points]
         u_extent = max(u_values) - min(u_values)
         v_extent = max(v_values) - min(v_values)
-        span = max(u_extent, v_extent)
-        spacing = min(u_extent, v_extent)
-        transverse_bounds = (
-            (min(v_values), max(v_values))
-            if u_extent >= v_extent
-            else (min(u_values), max(u_values))
-        )
+        span_axis = _sesam_span_axis_from_members(members, local_u, local_v)
+        if span_axis is None:
+            span_axis = "u" if u_extent >= v_extent else "v"
+        if span_axis == "u":
+            span = u_extent
+            spacing = v_extent
+            transverse_bounds = (min(v_values), max(v_values))
+            span_direction: Vector3D | None = local_u
+            transverse_direction: Vector3D | None = local_v
+        else:
+            span = v_extent
+            spacing = u_extent
+            transverse_bounds = (min(u_values), max(u_values))
+            span_direction = local_v
+            transverse_direction = local_u
     except Exception:
         ranges = [bbox[index][1] - bbox[index][0] for index in range(3)]
         span = max(ranges)
         spacing = sorted(ranges)[1]
         transverse_bounds = (0.0, spacing)
+        span_direction = None
+        transverse_direction = None
 
-    members = tuple({member.member_id: member for field_item in (first, second) for member in field_item.members}.values())
     return replace(
         first,
         base_patch_id=f"merged_{first.base_patch_id}",
@@ -1925,6 +2094,8 @@ def _merge_sesam_general_fields(
         shell_section_thickness_m=_shell_section_thickness_for_elements(model, element_ids),
         confidence=min(first.confidence, second.confidence),
         diagnostics=first.diagnostics + (diagnostic,),
+        span_direction=span_direction,
+        transverse_direction=transverse_direction,
     )
 
 
@@ -3421,6 +3592,14 @@ def _find_usage_factor(value: object) -> float | None:
 
     visit(value)
     if candidates:
+        top_priority = max(priority for priority, _number in candidates)
+        if top_priority >= 100:
+            # "selected UF"/"governing UF" already reflect the chosen
+            # buckling/ultimate acceptance basis, so other UF keys in the same
+            # result must not override the basis with a larger value.
+            return max(number for priority, number in candidates if priority >= 100)
+        # Legacy prescriptive results have no selected key: the governing UF
+        # is the largest calculated plate/stiffener/girder sub-check.
         return max(number for _priority, number in candidates)
 
     # Compatibility fallback for APIs returning a bare scalar/list as result.
@@ -4128,6 +4307,7 @@ def is_cylindrical_shell_model(
     *,
     minimum_skin_fraction: float = 0.35,
     maximum_relative_rms_error: float = 0.03,
+    minimum_angular_coverage_rad: float = math.pi,
 ) -> bool:
     """Return whether the shell mesh contains a credible circular cylindrical skin."""
 
@@ -4137,13 +4317,74 @@ def is_cylindrical_shell_model(
         return False
     relative_error = geometry.radial_rms_error_m / max(geometry.radius_m, 1.0e-12)
     skin_fraction = len(geometry.skin_element_ids) / max(len(model.shell_elements), 1)
-    return relative_error <= maximum_relative_rms_error and skin_fraction >= minimum_skin_fraction
+    if relative_error > maximum_relative_rms_error or skin_fraction < minimum_skin_fraction:
+        return False
+    # A flat or shallow model can fit a large-radius circle with a tiny
+    # residual (a degenerate fit through few distinct radial positions), but
+    # its "skin" only subtends a narrow arc. A credible cylinder wraps around
+    # its axis, so require the skin to cover a substantial angular range.
+    coverage = _cylinder_skin_angular_coverage_rad(model, geometry)
+    return coverage >= minimum_angular_coverage_rad
+
+
+def _element_angular_span(
+    model: FeShellModel,
+    element: ShellElement,
+    origin: Point3D,
+    axis: Vector3D,
+) -> float:
+    """Return the largest angle subtended about the axis by the element corners."""
+
+    radial_units = []
+    for node_id in element.corner_node_ids:
+        point = model.nodes.get(node_id)
+        if point is None:
+            continue
+        radial = _radial_vector(point, origin, axis)
+        length = _length(radial)
+        if length <= 1.0e-12:
+            continue
+        radial_units.append(tuple(value / length for value in radial))
+    if len(radial_units) < 2:
+        return 0.0
+    smallest_dot = min(
+        _dot(radial_units[first], radial_units[second])
+        for first in range(len(radial_units) - 1)
+        for second in range(first + 1, len(radial_units))
+    )
+    return math.acos(max(-1.0, min(1.0, smallest_dot)))
+
+
+def _cylinder_skin_angular_coverage_rad(
+    model: FeShellModel,
+    geometry: CylinderGeometry,
+    *,
+    bins: int = 72,
+) -> float:
+    axis = _normalise(geometry.axis_direction)
+    reference = (0.0, 0.0, 1.0) if abs(axis[2]) < 0.9 else (1.0, 0.0, 0.0)
+    plane_u = _normalise(_cross(axis, reference))
+    if _length(plane_u) <= 1.0e-12:
+        return 0.0
+    plane_v = _normalise(_cross(axis, plane_u))
+    occupied: set[int] = set()
+    for element_id in geometry.skin_element_ids:
+        element = model.shell_elements.get(element_id)
+        if element is None:
+            continue
+        centroid = _element_centroid(model, element)
+        radial = _radial_vector(centroid, geometry.axis_origin, axis)
+        if _length(radial) <= 1.0e-12:
+            continue
+        angle = math.atan2(_dot(radial, plane_v), _dot(radial, plane_u))
+        occupied.add(int((angle + math.pi) / (2.0 * math.pi) * bins) % bins)
+    return len(occupied) * 2.0 * math.pi / bins
 
 
 def detect_cylinder_geometry(
     model: FeShellModel,
     *,
-    radial_tolerance_fraction: float = 0.02,
+    radial_tolerance_fraction: float = 0.006,
     normal_alignment: float = 0.65,
 ) -> CylinderGeometry:
     """Fit a circular cylinder and identify the true shell skin.
@@ -4230,7 +4471,41 @@ def detect_cylinder_geometry(
     ]
     radius = _median(coarse_node_distances) or outer_reference
 
-    radial_tolerance = max(radius * radial_tolerance_fraction, 1.0e-7)
+    # Coarse or faceted meshes place skin nodes between circumferential
+    # vertices genuinely inside the true radius (facet sagitta), so widen the
+    # base tolerance with the sagitta implied by the element angular pitch
+    # instead of using one fixed fraction for every mesh density.
+    element_angular_spans = sorted(
+        span
+        for span in (
+            _element_angular_span(model, model.shell_elements[element_id], origin, axis)
+            for element_id in coarse_ids
+        )
+        if span > 0.0
+    )
+    # Use a high percentile so irregular meshes report the coarse facet pitch
+    # rather than their smallest elements.
+    angular_pitch = (
+        element_angular_spans[int(0.90 * (len(element_angular_spans) - 1))]
+        if element_angular_spans
+        else 0.0
+    )
+    facet_sagitta = radius * (1.0 - math.cos(min(angular_pitch, math.pi) / 2.0))
+    radial_tolerance = max(radius * radial_tolerance_fraction, 2.0 * facet_sagitta, 1.0e-7)
+
+    # Skin deviations form a continuum (mesh facets sweep from the vertices
+    # to the deepest facet middle) while internal flanges sit a web height
+    # inside, so grow the band while candidate deviations stay continuous and
+    # stop at the first clear radial gap.
+    gap_threshold = max(0.5 * radial_tolerance, 0.002 * radius)
+    maximum_band = 0.04 * radius
+    for deviation in sorted(abs(distance - radius) for _eid, distance, _al in radial_candidates):
+        if deviation <= radial_tolerance:
+            continue
+        if deviation - radial_tolerance <= gap_threshold and deviation <= maximum_band:
+            radial_tolerance = deviation
+        else:
+            break
     skin_ids: list[int] = []
     axial_values: list[float] = []
     skin_node_ids: set[int] = set()
@@ -5192,6 +5467,7 @@ def _create_flat_fea_buckling_session_from_model(
     inp_path: str = "runtime FEM result",
     frd_path: str | None = None,
     frd_summary: dict[str, Any] | None = None,
+    load_case: int | None = None,
     calculation_method: str = "SemiAnalytical S3/U3",
     buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,
@@ -5295,6 +5571,7 @@ def _create_cylinder_fea_buckling_session_from_model(
     inp_path: str = "runtime FEM result",
     frd_path: str | None = None,
     frd_summary: dict[str, Any] | None = None,
+    load_case: int | None = None,
     calculation_method: str = "DNV-RP-C202",
     buckling_acceptance: str = "ultimate",
     pressure_mpa: float = 0.0,

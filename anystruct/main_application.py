@@ -2896,6 +2896,47 @@ class Application():
         canvas.create_text(20, 100, text=stress_text, anchor=tk.W, font=self._text_size['Text 8'], width=250)
         canvas.create_text(20, 116, text=reduction_text, anchor=tk.W, font=self._text_size['Text 8'], width=250)
 
+    def _show_fea_buckling_details_popup(self):
+        """Show every calculated UF and buckling detail for the selected FE panel."""
+        session = getattr(self, '_fea_buckling_session', None)
+        selected_id = getattr(self, '_fea_selected_panel_id', None)
+        panel = None
+        if session is not None and selected_id is not None:
+            try:
+                panel = session.panel(selected_id)
+            except KeyError:
+                panel = None
+        if panel is None:
+            messagebox.showinfo(
+                'FEA buckling details',
+                'Select an FE buckling panel first.',
+                parent=self._parent,
+            )
+            return
+
+        details = fe_plate_fields.format_panel_buckling_details(
+            panel,
+            uf_basis=self._new_puls_method.get(),
+        )
+        popup = tk.Toplevel(self._parent)
+        popup.title(f'Buckling details - {panel.field_id}')
+        popup.geometry('560x640')
+        text_frame = tk.Frame(popup)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget = tk.Text(
+            text_frame,
+            wrap=tk.NONE,
+            font=('Consolas', 9),
+            yscrollcommand=scrollbar.set,
+        )
+        text_widget.insert('1.0', details)
+        text_widget.configure(state=tk.DISABLED)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.configure(command=text_widget.yview)
+        ttk.Button(popup, text='Close', command=popup.destroy).pack(side=tk.BOTTOM, pady=4)
+
     def _select_fea_panel(self, field_id):
         self._fea_selected_panel_id = field_id
         line_name = getattr(self, '_fea_panel_line_by_field', {}).get(field_id)
@@ -4066,6 +4107,14 @@ class Application():
         add_label(f'UF: {uf_text}')
         add_label(f'Geometry: {geometry_text}', wrap=285)
         add_label(f'Stress: {stress_text}', wrap=285)
+        details_button = ttk.Button(
+            panel_frame,
+            text='Show all UFs / details',
+            command=self._show_fea_buckling_details_popup,
+        )
+        details_button.grid(row=row, column=0, columnspan=3, sticky='ew', padx=12, pady=(2, 6))
+        row += 1
+        rows.append(details_button)
 
         add_separator()
         add_label('Import Summary', bold=True)
@@ -6042,6 +6091,24 @@ class Application():
                     cull_backface=False,
                     layer=layer,
                     tags=f'feapanel_{field_id}',
+                )
+            label_parts = []
+            if self._fea_show_panel_text.get():
+                label_parts.append(field_id.replace('field_', '').replace('cyl_', ''))
+            if self._fea_show_uf_text.get() and panel is not None and panel.usage_factor is not None:
+                label_parts.append(f'UF {panel.usage_factor:.2f}')
+            if label_parts:
+                centroid = record.get('centroid', (0.0, 0.0, 0.0))
+                normal = record.get('normal', (0.0, 0.0, 1.0))
+                tk3d.add_text(
+                    tkinter_3d_canvas.Point3D(
+                        centroid[0] + normal[0] * 0.03,
+                        centroid[1] + normal[1] * 0.03,
+                        centroid[2] + normal[2] * 0.03,
+                    ),
+                    '\n'.join(label_parts),
+                    color='#111111',
+                    layer=60,
                 )
             self._add_fea_tk3d_local_axes(record)
 

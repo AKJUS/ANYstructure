@@ -8,9 +8,10 @@ and can later be copied into that local module without changing this GUI layer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from typing import Any, Iterable, Sequence
 import argparse
+import gzip
 import json
 import queue
 import math
@@ -22,7 +23,7 @@ import time
 import types
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 import numpy as np
 
@@ -323,6 +324,157 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+RUNTIME_FEM_STATE_FORMAT = "anystructure-runtime-fem-state-v1"
+
+
+def _jsonable_state_value(value: Any) -> Any:
+    """Convert solver payload values (numpy included) to JSON-safe data."""
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _jsonable_state_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable_state_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def runtime_fem_state_to_dict(
+    options: RuntimeFEMOptions,
+    result: RuntimeFEMRunResult | None = None,
+    snapshot: RuntimeFEMLineSnapshot | None = None,
+) -> dict[str, Any]:
+    """Serialize FE-GUI settings and the solver result (mesh included) to plain data.
+
+    The stored payload is plain JSON data: numpy arrays become nested lists and
+    dictionary keys become strings.  All runtime-result consumers already
+    normalise those (``int(...)``/``np.asarray`` on read), so a loaded state
+    feeds the result viewer and the FEA-buckling handoff unchanged.
+    """
+
+    state: dict[str, Any] = {
+        "format": RUNTIME_FEM_STATE_FORMAT,
+        "saved_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "options": {
+            item.name: _jsonable_state_value(getattr(options, item.name))
+            for item in dataclass_fields(RuntimeFEMOptions)
+        },
+    }
+    if snapshot is not None:
+        state["snapshot"] = {
+            "line_name": str(snapshot.line_name),
+            "domain": str(snapshot.domain),
+            "is_cylinder": bool(snapshot.is_cylinder),
+            "pressure_pa": _safe_float(snapshot.pressure_pa),
+            "axial_force_n": _safe_float(snapshot.axial_force_n),
+            "top_bottom_moment_nm": _safe_float(snapshot.top_bottom_moment_nm),
+            "torsional_moment_nm": _safe_float(snapshot.torsional_moment_nm),
+            "shear_force_n": _safe_float(snapshot.shear_force_n),
+        }
+    if result is not None:
+        state["result"] = {
+            "status": str(result.status),
+            "summary": _jsonable_state_value(result.summary),
+            "diagnostics": [str(item) for item in result.diagnostics],
+            "buckling_factors": [_safe_float(item) for item in result.buckling_factors],
+            "stress_percentiles": [[str(name), _safe_float(value)] for name, value in result.stress_percentiles],
+            "displacement_scale": _safe_float(result.displacement_scale),
+            "visualization": _jsonable_state_value(result.visualization),
+        }
+    return state
+
+
+def save_runtime_fem_state(
+    path: Any,
+    options: RuntimeFEMOptions,
+    result: RuntimeFEMRunResult | None = None,
+    snapshot: RuntimeFEMLineSnapshot | None = None,
+) -> None:
+    """Write settings and (optionally) results including the mesh to ``path``.
+
+    ``*.gz`` paths are gzip-compressed; anything else is plain JSON.
+    """
+
+    text = json.dumps(runtime_fem_state_to_dict(options, result=result, snapshot=snapshot))
+    path_text = str(path)
+    if path_text.lower().endswith(".gz"):
+        with gzip.open(path_text, "wt", encoding="utf-8") as handle:
+            handle.write(text)
+    else:
+        with open(path_text, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+
+def runtime_fem_options_from_dict(data: Any) -> RuntimeFEMOptions:
+    """Rebuild options from stored data; unknown keys are ignored and missing
+    keys keep their defaults so older/newer files stay loadable."""
+
+    values: dict[str, Any] = {}
+    source = data if isinstance(data, dict) else {}
+    for item in dataclass_fields(RuntimeFEMOptions):
+        if item.name not in source:
+            continue
+        raw = source[item.name]
+        default = item.default
+        if isinstance(default, bool):
+            values[item.name] = bool(raw)
+        elif isinstance(default, int):
+            values[item.name] = _safe_int(raw, default)
+        elif isinstance(default, float):
+            values[item.name] = _safe_float(raw, default)
+        else:
+            values[item.name] = str(raw)
+    return RuntimeFEMOptions(**values)
+
+
+def runtime_fem_result_from_dict(data: Any) -> RuntimeFEMRunResult | None:
+    if not isinstance(data, dict):
+        return None
+    percentiles: list[tuple[str, float]] = []
+    for item in data.get("stress_percentiles", ()) or ():
+        try:
+            percentiles.append((str(item[0]), float(item[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return RuntimeFEMRunResult(
+        status=str(data.get("status", "")),
+        summary=dict(data.get("summary", {}) or {}),
+        diagnostics=tuple(str(item) for item in data.get("diagnostics", ()) or ()),
+        buckling_factors=tuple(_safe_float(item) for item in data.get("buckling_factors", ()) or ()),
+        stress_percentiles=tuple(percentiles),
+        displacement_scale=_safe_float(data.get("displacement_scale"), 0.0),
+        visualization=data.get("visualization", {}) or {},
+    )
+
+
+def load_runtime_fem_state(path: Any) -> dict[str, Any]:
+    """Read a saved runtime FEM state: options, optional result, snapshot meta."""
+
+    path_text = str(path)
+    if path_text.lower().endswith(".gz"):
+        with gzip.open(path_text, "rt", encoding="utf-8") as handle:
+            state = json.load(handle)
+    else:
+        with open(path_text, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    if not isinstance(state, dict) or state.get("format") != RUNTIME_FEM_STATE_FORMAT:
+        raise ValueError(
+            "not an ANYstructure runtime FEM state file "
+            f"(expected format tag {RUNTIME_FEM_STATE_FORMAT!r})"
+        )
+    return {
+        "format": str(state.get("format")),
+        "saved_utc": str(state.get("saved_utc", "")),
+        "options": runtime_fem_options_from_dict(state.get("options", {})),
+        "result": runtime_fem_result_from_dict(state.get("result")),
+        "snapshot": state.get("snapshot", {}) or {},
+    }
 
 
 _FE_KERNEL_WARMUP_LOCK = threading.RLock()
@@ -5546,6 +5698,8 @@ class RuntimeFEMWindow:
             state=tk.DISABLED,
         )
         self.use_for_buckling_button.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(buttons, text="Save FEM...", command=self._save_fem_state).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(buttons, text="Load FEM...", command=self._load_fem_state).pack(side=tk.LEFT, padx=(4, 0))
         self.progress_bar = ttk.Progressbar(buttons, mode="indeterminate", length=140)
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
         ttk.Button(buttons, text="Close", command=self.window.destroy).pack(side=tk.RIGHT)
@@ -8737,6 +8891,115 @@ class RuntimeFEMWindow:
             return
         if imported:
             self._write_status("Returned FEM result to FEA-result buckling mode.", keep_run_results=True)
+
+    _FEM_STATE_FILETYPES = (
+        ("ANYstructure FEM state (compressed)", "*.fem.json.gz"),
+        ("ANYstructure FEM state (plain JSON)", "*.fem.json"),
+        ("All files", "*.*"),
+    )
+
+    def _save_fem_state(self) -> None:
+        """Save the FE-GUI settings and, when available, the solver results with mesh."""
+        path = filedialog.asksaveasfilename(
+            parent=self.window,
+            title="Save FEM settings and results",
+            defaultextension=".fem.json.gz",
+            filetypes=self._FEM_STATE_FILETYPES,
+        )
+        if not path:
+            return
+        try:
+            save_runtime_fem_state(
+                path,
+                self._options(),
+                result=self.current_result,
+                snapshot=self.snapshot,
+            )
+        except Exception as error:
+            messagebox.showerror("Save FEM state", str(error))
+            return
+        note = "settings only (run FEM to include results)" if self.current_result is None \
+            else "settings and results including the mesh"
+        self._write_status(f"Saved {note} to {os.path.basename(path)}.", keep_run_results=True)
+
+    def _load_fem_state(self) -> None:
+        """Load previously saved FE-GUI settings and solver results with mesh."""
+        if self.run_button is not None and str(self.run_button["state"]) == "disabled":
+            messagebox.showinfo("Load FEM state", "Wait for the running analysis to finish first.")
+            return
+        path = filedialog.askopenfilename(
+            parent=self.window,
+            title="Load FEM settings and results",
+            filetypes=self._FEM_STATE_FILETYPES,
+        )
+        if not path:
+            return
+        try:
+            state = load_runtime_fem_state(path)
+        except Exception as error:
+            messagebox.showerror("Load FEM state", str(error))
+            return
+        self._apply_options_to_controls(state["options"])
+        result = state["result"]
+        if result is not None:
+            self._adopt_loaded_result(result, source=os.path.basename(path))
+        else:
+            self._write_status(
+                f"Loaded FEM settings from {os.path.basename(path)} (file holds no stored results)."
+            )
+
+    def _apply_options_to_controls(self, options: RuntimeFEMOptions) -> None:
+        """Push a RuntimeFEMOptions object back into the popup controls."""
+        for item in dataclass_fields(RuntimeFEMOptions):
+            variable = getattr(self, item.name, None)
+            if variable is None or not hasattr(variable, "set"):
+                continue
+            try:
+                variable.set(getattr(options, item.name))
+            except Exception:
+                continue
+        # Per-edge whole-boundary constraints live outside the tk variables.
+        try:
+            constraints = json.loads(options.boundary_constraint_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            constraints = {}
+        specs: dict[str, dict[str, dict[str, Any]]] = {}
+        for edge_key, dofs in (constraints or {}).items():
+            if not isinstance(dofs, dict):
+                continue
+            spec = {
+                str(dof): {"on": True, "value": _safe_float(value, 0.0)}
+                for dof, value in dofs.items()
+            }
+            if spec:
+                specs[str(edge_key)] = spec
+        self._boundary_edge_specs = specs
+        try:
+            self._load_boundary_edge(str(self.boundary_edge_choice.get()))
+        except Exception:
+            pass
+        try:
+            self._sync_mode_shapes_from_json()
+        except Exception:
+            pass
+
+    def _adopt_loaded_result(self, result: RuntimeFEMRunResult, source: str = "") -> None:
+        """Show a loaded solver result exactly like a freshly finished run."""
+        self.current_result = result
+        self._live_collision_sphere_visualization = {}
+        self._display_base_geometry = False
+        try:
+            self._set_custom_load_selection_active(False, refresh=False)
+        except Exception:
+            pass
+        self._force_fit_next_refresh = True
+        self._set_display_modes(result)
+        self._sync_color_limit_controls(force=True)
+        self._last_run_result_status_text = format_runtime_fem_result(result)
+        prefix = f"Loaded FEM settings and results from {source}.\n\n" if source else ""
+        self._write_status(prefix + self._last_run_result_status_text)
+        self._refresh_figure()
+        self._update_buckling_handoff_button(is_running=False)
 
     def _options(self) -> RuntimeFEMOptions:
         return RuntimeFEMOptions(
