@@ -487,6 +487,193 @@ def test_run_runtime_fem_flat_member_geometry_matches_generated_fe_model():
     assert {"stiffener", "girder"} <= roles
 
 
+def _stiffener_web_z_levels(generated):
+    node_z = {int(node["id"]): float(node["coords"][2]) for node in generated["nodes"]}
+    levels = {
+        round(node_z[int(node_id)], 6)
+        for shell in generated["shells"]
+        if str(shell.get("role", "")) == "stiffener_web"
+        for node_id in shell.get("node_ids", ())
+    }
+    return sorted(levels)
+
+
+def test_web_shell_depth_follows_mesh_fidelity_with_flange_beams():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    summary = fe_runtime_solver.runtime_geometry_summary(snapshot)
+
+    def generated_for(fidelity, mesh_size=0.0):
+        return fe_solver.build_generated_geometry(
+            summary,
+            fe_solver.LightweightFEMConfig(
+                mesh_fidelity=fidelity,
+                include_stiffeners=True,
+                include_girders=True,
+                member_model="webs as shells, flanges as beams",
+                mesh_size_m=mesh_size,
+            ),
+        )
+
+    # 0.4 m stiffener web: coarse keeps one row, medium two, fine three.
+    assert len(_stiffener_web_z_levels(generated_for("coarse"))) == 2
+    assert len(_stiffener_web_z_levels(generated_for("medium"))) == 3
+    assert len(_stiffener_web_z_levels(generated_for("fine"))) == 4
+    # An explicit mesh-size override refines the web depth further.
+    assert len(_stiffener_web_z_levels(generated_for("coarse", mesh_size=0.1))) == 5
+
+
+def test_flat_stiffened_panel_without_girder_uses_girder_length_by_default():
+    class _NoGirderStructure(_AllStructureWithFlatMembers):
+        Girder = None
+
+    class _NoGirderApp(_FakeApp):
+        _line_to_struc = {"line1": [_NoGirderStructure(), None, None, object(), None, None]}
+
+    snapshot = fe_runtime_solver.active_line_snapshot(_NoGirderApp())
+
+    default_geometry = fe_runtime_solver.runtime_geometry_summary(
+        snapshot, fe_runtime_solver.RuntimeFEMOptions()
+    )
+    single_bay = fe_runtime_solver.runtime_geometry_summary(
+        snapshot, fe_runtime_solver.RuntimeFEMOptions(ignore_girder_length=True)
+    )
+
+    # Plate.girder_lg = 3.5 in the fake app: the FE model follows the main
+    # application 3D model and spans the girder length with several
+    # stiffeners unless the user opts out.
+    assert default_geometry["width_m"] == pytest.approx(3.5)
+    assert single_bay["width_m"] == pytest.approx(0.75)
+    assert default_geometry["stiffener_spacing_m"] == pytest.approx(0.75)
+
+
+def test_flat_end_moment_matches_constant_moment_strip_theory():
+    class _NoMembersStructure(_AllStructureWithFlatMembers):
+        Stiffener = None
+        Girder = None
+
+    class _NoMembersApp(_FakeApp):
+        _line_to_struc = {"line1": [_NoMembersStructure(), None, None, object(), None, None]}
+
+        def get_highest_pressure(self, line):
+            return {"normal": 0.0}
+
+    moment = -10_000.0
+    snapshot = fe_runtime_solver.active_line_snapshot(_NoMembersApp())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="medium",
+        pressure_pa=0.0,
+        top_bottom_moment_nm=moment,
+        include_stiffeners=False,
+        include_girders=False,
+    )
+    geometry = fe_runtime_solver.runtime_geometry_summary(snapshot, options)
+    # Free side edges make the panel a beam-like strip: equal-and-opposite end
+    # moments then give a constant bending moment and uniform surface stress
+    # sigma = 6*M/(b*t^2) along the whole span.
+    geometry["plate_edge_supports"] = ("simply supported", "simply supported", "free", "free")
+    config = fe_runtime_solver._solver_config_from_options(options)
+
+    result = fe_solver.run_production_fem(geometry, config)
+    assert result.status == "ok"
+
+    length = float(geometry["length_m"])
+    width = float(geometry["width_m"])
+    thickness = float(geometry["thickness_m"])
+    expected = 6.0 * abs(moment) / (width * thickness ** 2)
+
+    mid_values = []
+    for surface in result.visualization.get("skin_shell_surfaces") or ():
+        points = surface.get("points") or ()
+        if not points:
+            continue
+        centroid_x = sum(float(point[0]) for point in points) / len(points)
+        if abs(centroid_x - 0.5 * length) <= 0.2 * length:
+            mid_values.append(float((surface.get("field_values") or {}).get("von_mises_pa", 0.0)))
+
+    assert mid_values
+    mean_mid = sum(mid_values) / len(mid_values)
+    assert mean_mid == pytest.approx(expected, rel=0.05)
+
+
+def test_runtime_imperfection_preview_offsets_follow_solver_shape():
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="coarse",
+        imperfection_enabled=True,
+        imperfection_amplitude_m=0.005,
+        imperfection_wave_a=1,
+        imperfection_wave_b=1,
+    )
+    geometry = fe_runtime_solver.runtime_geometry_summary(snapshot, options)
+    config = fe_runtime_solver._solver_config_from_options(options)
+    generated = fe_solver.build_generated_geometry(geometry, config)
+
+    offsets = fe_solver.runtime_imperfection_preview_offsets(generated, config, geometry)
+
+    assert offsets
+    magnitudes = [math.sqrt(dx * dx + dy * dy + dz * dz) for dx, dy, dz in offsets.values()]
+    # The plate half-wave imperfection peaks at the requested amplitude and
+    # acts out of plane only.
+    assert max(magnitudes) == pytest.approx(0.005, rel=0.05)
+    assert all(abs(dx) <= 1.0e-12 and abs(dy) <= 1.0e-12 for dx, dy, _dz in offsets.values())
+
+    disabled_config = fe_runtime_solver._solver_config_from_options(
+        fe_runtime_solver.RuntimeFEMOptions(mesh_fidelity="coarse")
+    )
+    assert fe_solver.runtime_imperfection_preview_offsets(generated, disabled_config, geometry) == {}
+
+
+def test_mesh_preview_uses_shared_canvas_refresh_contract():
+    source = Path(fe_runtime_solver.__file__).read_text(encoding="utf-8")
+
+    render_block = source[
+        source.index("def _render_mesh_preview_canvas"):
+        source.index("def _refresh_mesh_preview_current")
+    ]
+    # Same contract as the result canvas: smooth item-reusing refresh for
+    # view-option changes, camera fit only for a new mesh.
+    assert "canvas.clear(keep_canvas=not fit_view)" in render_block
+    assert "if fit_view:" in render_block
+    assert "canvas.fit_to_scene()" in render_block
+
+    offsets_block = source[
+        source.index("def _mesh_preview_imperfection_offsets"):
+        source.index("def _imperfection_preview_scale_value")
+    ]
+    # Standard-imperfection preview offsets are cached; redraws must not
+    # rebuild the backend FE model.
+    assert "_imperfection_offsets_cache" in offsets_block
+
+
+def test_runtime_fem_mesh_preview_wires_imperfection_controls():
+    source = Path(fe_runtime_solver.__file__).read_text(encoding="utf-8")
+
+    assert "self.show_imperfections_vis = tk.BooleanVar(value=False)" in source
+    assert "self.imperfection_preview_scale = tk.DoubleVar(value=0.0)" in source
+    assert 'text="Show imperfections"' in source
+    assert "def _mesh_preview_imperfection_offsets" in source
+    assert "fe_solver.runtime_imperfection_preview_offsets" in source
+
+    populate_block = source[
+        source.index("def _populate_canvas_with_mesh"):
+        source.index("def _draw_mesh_detail_overlays")
+    ]
+    assert "set_thickness_legend" in populate_block
+    assert "_interpolate_thickness_color" in populate_block
+    assert "_imperfection_preview_scale_value" in populate_block
+
+    set_block = source[
+        source.index("def _set_mode_shapes_to_mesh"):
+        source.index("def _render_mesh_preview_canvas")
+    ]
+    # The popup object is not a tk widget: idle-task flushes must go through
+    # self.window, and pressing "Set to mesh" without mode rows must explain
+    # what to do instead of failing.
+    assert "self.window.update_idletasks()" in set_block
+    assert "\n            self.update_idletasks()" not in set_block
+    assert "No buckling mode shapes are selected" in set_block
+
+
 def test_generated_beam_sections_preserve_consistent_mass_in_backend_model():
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
     summary = fe_runtime_solver.runtime_geometry_summary(snapshot)
@@ -568,7 +755,9 @@ def test_runtime_flat_girder_panel_uses_lg_width_and_span_girder_stations():
 
     assert max(x_values) == pytest.approx(7.5)
     assert max(y_values) == pytest.approx(3.5)
-    assert girder_x_values == {2.5, 5.0}
+    # Lp = 7.5 is an exact multiple of the 2.5 m stiffener span, so the
+    # girders bound the bays and sit on the panel edges as well.
+    assert girder_x_values == {0.0, 2.5, 5.0, 7.5}
     assert stiffener_y_values == {0.25, 1.0, 1.75, 2.5, 3.25}
 
 
@@ -1463,8 +1652,11 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "import_runtime_fem_buckling_result" in source
     assert "self.progress_bar = ttk.Progressbar(buttons, mode=\"indeterminate\", length=140)" in source
     assert "self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))" in source
-    assert "self._add_check_row(contents, 2, \"include_end_lids\", \"Top/bottom lid\", self.include_end_lids)" in source
+    assert "self._add_check_row(contents, 3, \"include_end_lids\", \"Top/bottom lid\", self.include_end_lids)" in source
     assert "include_end_lids=bool(self.include_end_lids.get())" in source
+    assert "self.ignore_girder_length = tk.BooleanVar(value=False)" in source
+    assert "\"Ignore girder length (single stiffener bay)\"" in source
+    assert "ignore_girder_length=bool(self.ignore_girder_length.get())" in source
     assert "self.boundary_condition = tk.StringVar(value=\"auto\")" in source
     assert "self.shell_element_order = tk.StringVar(value=\"S4\")" in source
     assert "self.beam_element_order = tk.StringVar(value=\"B2\")" in source
@@ -2123,8 +2315,11 @@ def test_all_shell_web_depth_subdivision_follows_mesh_fidelity(mesh_fidelity, ex
 
     circumferential_divisions = len(generated["plot_grid"][0]) - 1
 
-    assert len(_role_shells(generated, "girder_web")) == circumferential_divisions * expected_segments
-    assert len(_role_shells(generated, "girder_flange")) == circumferential_divisions * 2
+    # L = 2.0 is an exact multiple of the 1.0 m girder spacing: the ring
+    # frames bound the bays (bottom, middle, top), giving three frames.
+    frame_count = 3
+    assert len(_role_shells(generated, "girder_web")) == circumferential_divisions * expected_segments * frame_count
+    assert len(_role_shells(generated, "girder_flange")) == circumferential_divisions * 2 * frame_count
 
 
 @pytest.mark.parametrize("member_model", ("webs as shells, flanges as beams", "all shell"))

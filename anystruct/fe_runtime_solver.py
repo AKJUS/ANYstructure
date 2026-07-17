@@ -129,6 +129,7 @@ class RuntimeFEMOptions:
     load_scale: float = 1.0
     include_stiffeners: bool = True
     include_girders: bool = True
+    ignore_girder_length: bool = False
     include_end_lids: bool = True
     num_buckling_modes: int = 5
     mesh_size_m: float = 0.0
@@ -687,7 +688,7 @@ def _length_input_to_m(value: Any, default: float = 0.0) -> float:
     return number / 1000.0 if number > 100.0 else number
 
 
-def _flat_lg_from_objects(plate: Any, stiffener: Any, girder: Any, spacing: float) -> float:
+def _flat_lg_from_objects(plate: Any, stiffener: Any, girder: Any, spacing: float, fallback: float | None = None) -> float:
     for obj in (girder, stiffener, plate):
         if obj is None:
             continue
@@ -695,6 +696,8 @@ def _flat_lg_from_objects(plate: Any, stiffener: Any, girder: Any, spacing: floa
         lg = _length_input_to_m(value, 0.0)
         if lg > 1.0e-9:
             return lg
+    if fallback is not None:
+        return fallback
     return max(4.0 * spacing, 0.8)
 
 
@@ -899,7 +902,7 @@ def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
     )
 
 
-def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
+def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot, ignore_girder_length: bool = False) -> dict[str, Any]:
     bundle = snapshot.structure_bundle
     all_obj = bundle[0] if bundle and len(bundle) > 0 else None
     plate = getattr(all_obj, "Plate", None)
@@ -909,7 +912,15 @@ def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
     spacing = _safe_float(_read_attr_or_call(plate, "get_s", default=None), 1.0)
     has_girder = girder is not None
     length = _flat_lp_from_structure(all_obj, span, spacing, has_girder)
-    width = _flat_lg_from_objects(plate, stiffener, girder, spacing) if has_girder else spacing
+    if has_girder:
+        width = _flat_lg_from_objects(plate, stiffener, girder, spacing)
+    elif ignore_girder_length:
+        width = spacing
+    else:
+        # A stiffened panel without girders still spans the girder length LG in
+        # the main-application 3D model, so mirror that here to get the full
+        # stiffener count. Falls back to one bay when LG is undefined.
+        width = _flat_lg_from_objects(plate, stiffener, girder, spacing, fallback=spacing)
     girder_spacing = span if has_girder else _safe_float(
         _read_attr_or_call(girder, "get_s", "spacing", "s", default=None), 0.0)
     return {
@@ -971,12 +982,33 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
     }
 
 
-def runtime_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, Any]:
+def runtime_geometry_summary(
+    snapshot: RuntimeFEMLineSnapshot,
+    options: RuntimeFEMOptions | None = None,
+) -> dict[str, Any]:
     """Return compact geometry metadata for plotting and future solver handoff."""
 
     if snapshot.is_cylinder:
         return _cylinder_geometry_summary(snapshot)
-    return _flat_geometry_summary(snapshot)
+    ignore_girder_length = bool(getattr(options, "ignore_girder_length", False)) if options is not None else False
+    return _flat_geometry_summary(snapshot, ignore_girder_length=ignore_girder_length)
+
+
+def _popup_geometry_summary(popup: Any) -> dict[str, Any]:
+    """Geometry summary for popup drawing code, honouring the popup options.
+
+    Test harnesses drive popup methods with plain stand-in objects, so missing
+    or partially built option controls fall back to default options.
+    """
+
+    options = None
+    options_getter = getattr(popup, "_options", None)
+    if callable(options_getter):
+        try:
+            options = options_getter()
+        except Exception:
+            options = None
+    return runtime_geometry_summary(popup.snapshot, options)
 
 
 def _runtime_custom_load_entries(raw_json: str) -> list[dict[str, Any]]:
@@ -1262,7 +1294,7 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
                     precomputed_generated_geometry=None) -> RuntimeFEMRunResult:
     """Run the ANYstructure-owned lightweight FEM solver."""
 
-    geometry = runtime_geometry_summary(snapshot)
+    geometry = runtime_geometry_summary(snapshot, options)
     diagnostics = list(snapshot.diagnostics)
     pressure_side = _normalise_pressure_side(options.pressure_direction)
     custom_load_entries = _runtime_custom_load_entries(options.custom_loads_json)
@@ -2452,6 +2484,7 @@ def _plot_base_geometry_surface(
                         length,
                         spacing,
                         fallback_midpoint=True,
+                        include_ends=True,
                 ):
                     z_position = station
                     axis.plot(
@@ -2500,6 +2533,7 @@ def _plot_base_geometry_surface(
                         width,
                         spacing,
                         fallback_midpoint=True,
+                        include_ends=True,
                 ):
                     axis.plot(
                         [0.0, length],
@@ -2519,6 +2553,7 @@ def _plot_base_geometry_surface(
                     length,
                     spacing,
                     fallback_midpoint=True,
+                    include_ends=True,
             ):
                 axis.plot(
                     [x_position, x_position],
@@ -2669,6 +2704,7 @@ def create_runtime_fem_result_figure(
         probe_element_id: int | None = None,
         show_sphere: bool = True,
         base_sphere: dict[str, Any] | None = None,
+        options: RuntimeFEMOptions | None = None,
 ) -> Figure:
     """Create the Matplotlib result visualization used in the runtime popup."""
 
@@ -2680,7 +2716,7 @@ def create_runtime_fem_result_figure(
         return figure
 
     geometry_ax = figure.add_subplot(111, projection="3d")
-    geometry = runtime_geometry_summary(snapshot) if result is None else result.summary
+    geometry = runtime_geometry_summary(snapshot, options) if result is None else result.summary
 
     if result is None or not result.visualization:
         _plot_base_geometry_surface(
@@ -2789,7 +2825,11 @@ def create_runtime_fem_mesh_preview_figure(generated_geometry: dict) -> Figure:
     return figure
 
 
-def create_runtime_fem_geometry_preview_figure(snapshot: RuntimeFEMLineSnapshot, app: Any | None = None) -> Figure:
+def create_runtime_fem_geometry_preview_figure(
+    snapshot: RuntimeFEMLineSnapshot,
+    app: Any | None = None,
+    options: RuntimeFEMOptions | None = None,
+) -> Figure:
     """Create the 3D geometry preview shown in the runtime FEM popup."""
 
     if app is not None and hasattr(app, "create_prop_3d_figure_for_line"):
@@ -2802,7 +2842,7 @@ def create_runtime_fem_geometry_preview_figure(snapshot: RuntimeFEMLineSnapshot,
         except Exception:
             pass
 
-    geometry = runtime_geometry_summary(snapshot)
+    geometry = runtime_geometry_summary(snapshot, options)
     figure = Figure(figsize=(3.0, 2.05), dpi=100)
     axis = figure.add_subplot(111, projection="3d")
 
@@ -4838,6 +4878,7 @@ class RuntimeFEMWindow:
         )
         self.include_stiffeners = tk.BooleanVar(value=True)
         self.include_girders = tk.BooleanVar(value=True)
+        self.ignore_girder_length = tk.BooleanVar(value=False)
         self.include_end_lids = tk.BooleanVar(value=bool(self.snapshot.is_cylinder))
         self.num_buckling_modes = tk.IntVar(value=5)
         self.boundary_condition = tk.StringVar(value="auto")
@@ -5110,6 +5151,8 @@ class RuntimeFEMWindow:
         self.show_collision_sphere_vis = tk.BooleanVar(value=True)
         self.show_mesh_lines_vis = tk.BooleanVar(value=True)
         self.show_axis_ruler_vis = tk.BooleanVar(value=False)
+        self.show_imperfections_vis = tk.BooleanVar(value=False)
+        self.imperfection_preview_scale = tk.DoubleVar(value=0.0)
         self.animation_fast_mode = tk.BooleanVar(value=False)
         self.animation_interval_ms = tk.IntVar(value=80)
         self.animation_speed_multiplier = tk.DoubleVar(value=1.0)
@@ -5832,6 +5875,17 @@ class RuntimeFEMWindow:
         preview_actions.pack(fill=tk.X, padx=8, pady=(8, 4))
         self._mesh_preview_button = ttk.Button(preview_actions, text="Generate mesh", command=self._generate_mesh)
         self._mesh_preview_button.pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            preview_actions,
+            text="Show imperfections",
+            variable=self.show_imperfections_vis,
+            command=self._refresh_mesh_preview_current,
+        ).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Label(preview_actions, text="Scale (0 = auto):").pack(side=tk.LEFT, padx=(12, 4))
+        imperfection_scale_entry = ttk.Entry(preview_actions, textvariable=self.imperfection_preview_scale, width=8)
+        imperfection_scale_entry.pack(side=tk.LEFT)
+        imperfection_scale_entry.bind("<Return>", lambda _event: self._refresh_mesh_preview_current())
+        imperfection_scale_entry.bind("<FocusOut>", lambda _event: self._refresh_mesh_preview_current())
         self.mesh_statistics_text = tk.Text(mesh_preview, height=4, wrap=tk.WORD)
         self.mesh_statistics_text.pack(fill=tk.X, padx=8, pady=(0, 6))
         self.mesh_statistics_text.insert(
@@ -5912,7 +5966,14 @@ class RuntimeFEMWindow:
         self._configure_option_grid(contents)
         self._add_check_row(contents, 0, "include_stiffeners", "Include stiffener beams", self.include_stiffeners)
         self._add_check_row(contents, 1, "include_girders", "Include girder/frame beams", self.include_girders)
-        self._add_check_row(contents, 2, "include_end_lids", "Top/bottom lid", self.include_end_lids)
+        self._add_check_row(
+            contents,
+            2,
+            "ignore_girder_length",
+            "Ignore girder length (single stiffener bay)",
+            self.ignore_girder_length,
+        )
+        self._add_check_row(contents, 3, "include_end_lids", "Top/bottom lid", self.include_end_lids)
 
         solver_options = ttk.LabelFrame(tab_general, text="Solver")
         solver_options.pack(fill=tk.X, padx=8, pady=(0, 6))
@@ -6759,11 +6820,12 @@ class RuntimeFEMWindow:
                                        "Warning: You are about to overwrite the generated custom imperfection mesh. Do you want to continue?"):
                 return
             self._imperfection_mesh = None
+            self._imperfection_base_mesh = None
 
         try:
             options = self._options()
             config = _solver_config_from_options(options)
-            geometry = runtime_geometry_summary(self.snapshot)
+            geometry = _popup_geometry_summary(self)
             generated = fe_solver.build_generated_geometry(geometry, config)
         except Exception as error:
             messagebox.showwarning("Mesh generation", "Could not build the mesh:\n" + str(error))
@@ -6781,43 +6843,149 @@ class RuntimeFEMWindow:
         self._write_status(summary)
         self._write_mesh_statistics(generated, metrics, adaptive)
 
+    def _selected_mode_shape_rows(self) -> list[dict[str, Any]]:
+        try:
+            rows = json.loads(str(self.imperfection_mode_shapes_json.get()) or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            rows = []
+        return [row for row in rows if isinstance(row, dict) and row.get("mode") is not None]
+
     def _set_mode_shapes_to_mesh(self):
         """Build mesh, run linear buckling, extract mode shapes, and perturb the mesh."""
+        if not self._selected_mode_shape_rows():
+            messagebox.showinfo(
+                "Imperfection generation",
+                "No buckling mode shapes are selected, so there is nothing to set on the mesh.\n\n"
+                "In the 'Mode Shape Imperfections' table above, enter a mode shape number "
+                "and a scaling factor and press 'Add' (repeat for every mode you want to "
+                "combine), then press 'Set to mesh' again.",
+            )
+            return
         try:
             options = self._options()
             config = _solver_config_from_options(options)
-            geometry = runtime_geometry_summary(self.snapshot)
+            geometry = _popup_geometry_summary(self)
             generated = fe_solver.build_generated_geometry(geometry, config)
 
             # We need to run a buckling solve using fe_solver.
             # But the buckling is normally run in run_production_fem or lightweight.
             # I will add a helper to run just buckling and perturb the mesh.
             self._write_status("Running buckling analysis to extract mode shapes...")
-            self.update_idletasks()
+            self.window.update_idletasks()
             perturbed_mesh = fe_solver.apply_mode_shape_imperfections(generated, config, geometry)
             self._imperfection_mesh = perturbed_mesh
+            self._imperfection_base_mesh = generated
 
-            self._render_mesh_preview_canvas(self._imperfection_mesh)
+            self.show_imperfections_vis.set(True)
+            self._render_mesh_preview_canvas(generated)
             self._write_status("Mode shape imperfections applied successfully.")
         except Exception as error:
             messagebox.showwarning("Imperfection generation",
                                    "Could not generate mode shape imperfections:\n" + str(error))
 
-    def _render_mesh_preview_canvas(self, generated: dict) -> None:
-        """Draw the generated mesh into the embedded Mesh-tab 3D viewer."""
+    def _render_mesh_preview_canvas(self, generated: dict, fit_view: bool | None = None) -> None:
+        """Draw the generated mesh into the embedded Mesh-tab 3D viewer.
+
+        The camera is fitted only for a new mesh (or when ``fit_view`` forces
+        it) so re-rendering after a view-option change keeps the user's view,
+        exactly like the result canvas refresh.
+        """
         parent = getattr(self, "mesh_preview_parent", None)
         if parent is None:
             return
         if self.mesh_preview_canvas is None:
             self.mesh_preview_canvas = Tkinter3DCanvas(parent, bg="white")
             self.mesh_preview_canvas.pack(fill=tk.BOTH, expand=True)
+        if fit_view is None:
+            fit_view = getattr(self, "_last_preview_mesh", None) is not generated
+        self._last_preview_mesh = generated
         canvas = self.mesh_preview_canvas
         canvas.set_mesh_lines(bool(self.show_mesh_lines_vis.get()))
         canvas.set_axis_ruler(bool(self.show_axis_ruler_vis.get()))
-        canvas.clear()
+        # Same refresh contract as the result canvas: smooth (item-reusing)
+        # refresh when only view options changed, full clear for a new mesh.
+        canvas.clear(keep_canvas=not fit_view)
         self._populate_canvas_with_mesh(canvas, generated)
-        canvas.fit_to_scene()
+        if fit_view:
+            canvas.fit_to_scene()
         canvas.redraw()
+
+    def _refresh_mesh_preview_current(self) -> None:
+        """Redraw the mesh preview with the current view options (no rebuild)."""
+        generated = getattr(self, "_last_preview_mesh", None)
+        if generated is None or getattr(self, "mesh_preview_canvas", None) is None:
+            return
+        self._render_mesh_preview_canvas(generated, fit_view=False)
+
+    def _mesh_preview_imperfection_offsets(self, generated: dict) -> dict[int, tuple[float, float, float]]:
+        """Nodal imperfection offsets to visualize on the mesh preview."""
+        if not bool(getattr(self, "show_imperfections_vis", None) and self.show_imperfections_vis.get()):
+            return {}
+        imperfect = getattr(self, "_imperfection_mesh", None)
+        base = getattr(self, "_imperfection_base_mesh", None)
+        if imperfect is not None and base is not None:
+            base_nodes = {int(n["id"]): n["coords"] for n in base.get("nodes", ()) or () if "id" in n}
+            offsets: dict[int, tuple[float, float, float]] = {}
+            for n in imperfect.get("nodes", ()) or ():
+                node_id = int(n.get("id", 0))
+                base_coords = base_nodes.get(node_id)
+                if base_coords is None:
+                    continue
+                delta = (
+                    float(n["coords"][0]) - float(base_coords[0]),
+                    float(n["coords"][1]) - float(base_coords[1]),
+                    float(n["coords"][2]) - float(base_coords[2]),
+                )
+                if max(abs(value) for value in delta) > 1.0e-15:
+                    offsets[node_id] = delta
+            return offsets
+        try:
+            options = self._options()
+            # Standard-imperfection offsets require a backend model build, so
+            # cache them per generated mesh + imperfection settings; toggling
+            # the checkbox or rotating must not rebuild the FE model.
+            cache_key = (
+                id(generated),
+                bool(options.imperfection_enabled),
+                str(options.imperfection_shape),
+                float(options.imperfection_amplitude_m),
+                int(options.imperfection_wave_a),
+                int(options.imperfection_wave_b),
+                str(options.member_model),
+            )
+            cached = getattr(self, "_imperfection_offsets_cache", None)
+            if cached is not None and cached[0] == cache_key:
+                return cached[1]
+            config = _solver_config_from_options(options)
+            geometry = _popup_geometry_summary(self)
+            offsets = fe_solver.runtime_imperfection_preview_offsets(generated, config, geometry)
+            self._imperfection_offsets_cache = (cache_key, offsets)
+            return offsets
+        except Exception:
+            return {}
+
+    def _imperfection_preview_scale_value(
+        self,
+        offsets: dict[int, tuple[float, float, float]],
+        nodes: dict[int, Any],
+    ) -> float:
+        """Display multiplier for imperfection offsets; 0 in the entry = auto."""
+        requested = _safe_float(self.imperfection_preview_scale.get(), 0.0)
+        if requested > 0.0:
+            return requested
+        max_offset = max(
+            (math.sqrt(dx * dx + dy * dy + dz * dz) for dx, dy, dz in offsets.values()),
+            default=0.0,
+        )
+        if max_offset <= 0.0 or not nodes:
+            return 1.0
+        values = list(nodes.values())
+        spans = [
+            max(float(coord[axis]) for coord in values) - min(float(coord[axis]) for coord in values)
+            for axis in range(3)
+        ]
+        extent = max(max(spans), 1.0e-6)
+        return max(0.05 * extent / max_offset, 1.0)
 
     def _refresh_mesh_preview_if_present(self) -> None:
         """Rebuild and redraw the left mesh preview if it has already been shown.
@@ -6831,15 +6999,55 @@ class RuntimeFEMWindow:
         try:
             options = self._options()
             config = _solver_config_from_options(options)
-            geometry = runtime_geometry_summary(self.snapshot)
+            geometry = _popup_geometry_summary(self)
             generated = fe_solver.build_generated_geometry(geometry, config)
         except Exception:
             return
         self._render_mesh_preview_canvas(generated)
 
     def _populate_canvas_with_mesh(self, canvas: "Tkinter3DCanvas", generated: dict) -> None:
-        """Render shell elements as outlined faces and beams as lines (mesh only)."""
+        """Render shell elements as outlined faces and beams as lines (mesh only).
+
+        With "Show imperfections" enabled, the nodes are displaced by the
+        applied imperfection field (scaled for visibility) and the elements are
+        colour coded by imperfection magnitude with a colour bar.
+        """
         nodes = {int(n["id"]): n["coords"] for n in generated.get("nodes", ()) or () if "id" in n}
+        offsets = self._mesh_preview_imperfection_offsets(generated)
+        scale = self._imperfection_preview_scale_value(offsets, nodes) if offsets else 0.0
+        magnitudes_mm = {
+            node_id: 1000.0 * math.sqrt(dx * dx + dy * dy + dz * dz)
+            for node_id, (dx, dy, dz) in offsets.items()
+        }
+        max_magnitude_mm = max(magnitudes_mm.values(), default=0.0)
+        if offsets and max_magnitude_mm > 0.0:
+            try:
+                canvas.set_thickness_legend(
+                    list(magnitudes_mm.values()),
+                    unit="mm",
+                    title="Imperfection",
+                    width=120,
+                    value_range=(0.0, max_magnitude_mm),
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                canvas.clear_thickness_legend()
+            except Exception:
+                pass
+
+        def display_point(node_id: int) -> Point3D:
+            coords = nodes[node_id]
+            offset = offsets.get(node_id)
+            if offset is None or scale <= 0.0:
+                return Point3D(float(coords[0]), float(coords[1]), float(coords[2]))
+            return Point3D(
+                float(coords[0]) + offset[0] * scale,
+                float(coords[1]) + offset[1] * scale,
+                float(coords[2]) + offset[2] * scale,
+            )
+
         for shell in generated.get("shells", ()) or ():
             ids = [int(i) for i in shell.get("node_ids", ()) or () if int(i) in nodes]
             if len(ids) in (3, 6):
@@ -6850,11 +7058,18 @@ class RuntimeFEMWindow:
                 corners = ids
             if len(corners) < 3:
                 continue
-            pts = [Point3D(*[float(c) for c in nodes[i]]) for i in corners]
+            pts = [display_point(i) for i in corners]
+            if offsets and max_magnitude_mm > 0.0:
+                element_magnitude = sum(magnitudes_mm.get(i, 0.0) for i in corners) / len(corners)
+                face_color = _interpolate_thickness_color(element_magnitude, 0.0, max_magnitude_mm)
+                back_color = face_color
+            else:
+                face_color = "#dbe4f0"
+                back_color = "#c3cede"
             canvas.add_polygon(
                 pts,
-                color="#dbe4f0",
-                back_color="#c3cede",
+                color=face_color,
+                back_color=back_color,
                 outline="#334155",
                 width=1,
             )
@@ -6862,14 +7077,14 @@ class RuntimeFEMWindow:
             ids = [int(i) for i in beam.get("node_ids", ()) or () if int(i) in nodes]
             if len(ids) < 2:
                 continue
-            pts = [Point3D(*[float(c) for c in nodes[i]]) for i in ids]
+            pts = [display_point(i) for i in ids]
             for k in range(len(pts) - 1):
                 canvas.add_line(pts[k], pts[k + 1], color="#1d4ed8", width=2)
         self._draw_mesh_detail_overlays(canvas, generated, nodes)
         # Live point-refinement crosshair: the extent circle already comes from
         # the adaptive overlay above, so only the centre marker is added here.
         if hasattr(self, "point_refinement_enabled"):
-            self._draw_point_refinement_marker(canvas, runtime_geometry_summary(self.snapshot), draw_circle=False)
+            self._draw_point_refinement_marker(canvas, _popup_geometry_summary(self), draw_circle=False)
 
     def _draw_mesh_detail_overlays(self, canvas: "Tkinter3DCanvas", generated: dict, nodes: dict[int, Any]) -> None:
         adaptive = generated.get("adaptive_mesh", {}) or {}
@@ -7431,7 +7646,7 @@ class RuntimeFEMWindow:
                 )
 
     def _populate_canvas_with_geometry(self, canvas: Tkinter3DCanvas, fit_view: bool = True) -> None:
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         show_plate_var = getattr(self, "show_plate_vis", None)
         show_plate = show_plate_var.get() if show_plate_var is not None else True
         show_stiffeners_var = getattr(self, "show_stiffener_vis", None)
@@ -7546,6 +7761,7 @@ class RuntimeFEMWindow:
                             length,
                             gir_spacing,
                             fallback_midpoint=True,
+                            include_ends=True,
                     ):
                         z_pos = station
                         t = z_pos / length if length > 0 else 0.0
@@ -7586,6 +7802,7 @@ class RuntimeFEMWindow:
                             width,
                             spacing,
                             fallback_midpoint=True,
+                            include_ends=True,
                     ):
                         canvas.add_flat_stiffener(
                             x_start=0.0, x_end=length,
@@ -7606,6 +7823,7 @@ class RuntimeFEMWindow:
                         length,
                         spacing,
                         fallback_midpoint=True,
+                        include_ends=True,
                 ):
                     canvas.add_flat_girder(
                         x=x_mid,
@@ -7691,7 +7909,7 @@ class RuntimeFEMWindow:
     def _sync_point_refinement_z_from_marker(self) -> None:
         """Fill Point Z from the current refinement centre's world position."""
         try:
-            marker = self._point_refinement_marker_xyz(runtime_geometry_summary(self.snapshot))
+            marker = self._point_refinement_marker_xyz(_popup_geometry_summary(self))
         except Exception:
             marker = None
         if marker is None:
@@ -7714,7 +7932,7 @@ class RuntimeFEMWindow:
         """
         base = f"Point mesh refinement set at ({point_x:.3f}, {point_y:.3f}) m"
         try:
-            marker = self._point_refinement_marker_xyz(runtime_geometry_summary(self.snapshot))
+            marker = self._point_refinement_marker_xyz(_popup_geometry_summary(self))
         except Exception:
             marker = None
         if marker is None:
@@ -8767,6 +8985,7 @@ class RuntimeFEMWindow:
                     probe_element_id=self._parse_probe_id(self.probe_element_id),
                     show_sphere=bool(self.show_collision_sphere_vis.get()),
                     base_sphere=self._collision_sphere_preview_visualization(),
+                    options=self._options(),
                 ),
                 self.figure_parent,
             )
@@ -9008,6 +9227,7 @@ class RuntimeFEMWindow:
             load_scale=_safe_float(self.load_scale.get(), 1.0),
             include_stiffeners=bool(self.include_stiffeners.get()),
             include_girders=bool(self.include_girders.get()),
+            ignore_girder_length=bool(self.ignore_girder_length.get()),
             include_end_lids=bool(self.include_end_lids.get()),
             num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
             mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
@@ -9653,7 +9873,7 @@ class RuntimeFEMWindow:
 
     def _division_plane_param_cuts(self, axis: str, coordinate: float) -> tuple[list[tuple[str, float]], str]:
         """World plane -> parametric cut coordinates ((param_axis, value), ...)."""
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         axis = str(axis).lower()
         if self.snapshot.is_cylinder:
             radius = max(_safe_float(geometry.get("radius_m"), 1.0), 1.0e-9)
@@ -9747,7 +9967,7 @@ class RuntimeFEMWindow:
         try:
             options = self._options()
             config = _solver_config_from_options(options)
-            geometry = runtime_geometry_summary(self.snapshot)
+            geometry = _popup_geometry_summary(self)
             generated = fe_solver.build_generated_geometry(geometry, config)
         except Exception as error:
             messagebox.showwarning("Thickness plot", "Could not build the geometry:\n" + str(error))
@@ -10217,7 +10437,7 @@ class RuntimeFEMWindow:
                     float(value) for value in np.asarray(live_sphere.get("position", ()), dtype=float).reshape(-1)[:3])
             except Exception:
                 live_sphere_position = ()
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         time_value = _safe_float(payload.get("time_s"), 0.0)
         options = self._active_run_options or self._options()
         summary = {
@@ -10552,7 +10772,7 @@ class RuntimeFEMWindow:
         return inside
 
     def _normalise_cylinder_axial_coordinate(self, value: float, patch: dict[str, Any] | None = None) -> float:
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         length = max(_safe_float(geometry.get("length_m"), 1.0), 1.0e-9)
         coordinate = float(value)
         origin = str((patch or {}).get("axis_a_origin", "") or "").strip().lower()
@@ -10586,7 +10806,7 @@ class RuntimeFEMWindow:
             patch: dict[str, Any],
             surface_offset: float = 0.0,
     ) -> list[Point3D]:
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         min_a, max_a, min_b, max_b = self._custom_load_patch_intervals(patch)
 
         if self.snapshot.is_cylinder:
@@ -10765,7 +10985,7 @@ class RuntimeFEMWindow:
             surface_offset: float,
     ) -> list[Point3D]:
         # Convert one boundary segment in patch coordinates to 3D points.
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         start_coordinate = float(start_coordinate)
         end_coordinate = float(end_coordinate)
         fixed_coordinate = float(fixed_coordinate)
@@ -10876,7 +11096,7 @@ class RuntimeFEMWindow:
         ]
 
     def _custom_load_selection_visual_offset(self) -> float:
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         side_var = getattr(self, "pressure_direction", None)
         side_value = side_var.get() if side_var is not None and hasattr(side_var, "get") else "front"
         side_sign = _pressure_surface_sign(side_value)
@@ -11204,7 +11424,7 @@ class RuntimeFEMWindow:
         self._sync_custom_load_payloads()
 
     def _generate_default_custom_load_patches(self) -> None:
-        geometry = runtime_geometry_summary(self.snapshot)
+        geometry = _popup_geometry_summary(self)
         is_cylinder = str(geometry.get("geometry", "")).lower() == "cylinder"
         if is_cylinder:
             length = max(float(geometry.get("length_m") or 1.0), 1.0e-6)

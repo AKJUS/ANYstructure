@@ -1456,13 +1456,19 @@ def _member_positions(total_length: float, spacing: float, fallback_midpoint: bo
     return tuple(positions)
 
 
-def _centered_member_positions(total_length: float, spacing: float, fallback_midpoint: bool = True) -> tuple[float, ...]:
+def _centered_member_positions(
+    total_length: float,
+    spacing: float,
+    fallback_midpoint: bool = True,
+    include_ends: bool = False,
+) -> tuple[float, ...]:
     """Return member stations with any cut length shared symmetrically."""
 
     return _representation_geometry.centered_member_positions(
         total_length,
         spacing,
         fallback_midpoint=fallback_midpoint,
+        include_ends=include_ends,
     )
 
 
@@ -2196,7 +2202,7 @@ def _member_shell_length_cap(geometry: dict, config: LightweightFEMConfig, thick
         web_height = _member_section_dimension(data, "web_height")
         flange_width = _member_section_dimension(data, "flange_width")
         if web_height > 0.0:
-            candidates.append(5.0 * web_height / max(_minimum_member_web_depth_segments(config), 1))
+            candidates.append(5.0 * web_height / max(_minimum_member_web_depth_segments(config, web_height), 1))
         if _member_flanges_as_shells(config) and flange_width > 0.0:
             candidates.append(2.5 * flange_width)
 
@@ -2336,17 +2342,28 @@ def _intersection_height_levels(
     return levels
 
 
-def _minimum_member_web_depth_segments(config: LightweightFEMConfig) -> int:
-    if not _member_flanges_as_shells(config):
+def _minimum_member_web_depth_segments(config: LightweightFEMConfig, web_height: float = 0.0) -> int:
+    """Shell rows over a member web depth when webs are meshed as shells.
+
+    Follows the selected mesh fidelity for every webs-as-shells member model
+    (not only "all shell"), and honours an explicit mesh-size override so the
+    web element height tracks the requested size.
+    """
+
+    if not _member_webs_as_shells(config):
         return 1
-    return max(1, _fidelity_refinement(config.mesh_fidelity))
+    segments = max(1, _fidelity_refinement(config.mesh_fidelity))
+    mesh_size = _requested_mesh_size(config)
+    if web_height > 0.0 and mesh_size > 0.0:
+        segments = max(segments, int(math.ceil(web_height / mesh_size - 1.0e-9)))
+    return segments
 
 
 def _member_web_section_depth_levels(section: dict[str, float], config: LightweightFEMConfig) -> list[float]:
     web_height = _member_section_dimension(section, "web_height")
     if web_height <= 0.0:
         return []
-    return _member_web_depth_levels(web_height, _minimum_member_web_depth_segments(config))
+    return _member_web_depth_levels(web_height, _minimum_member_web_depth_segments(config, web_height))
 
 
 def _member_web_depth_levels(own_height: float, min_segments: int = 1, *endpoint_levels: list[float]) -> list[float]:
@@ -2452,7 +2469,7 @@ def _add_flat_member_shell_model(
             right_levels = _intersection_height_levels(intersection_heights, x1, web_height)
             z_levels = _member_web_depth_levels(
                 web_height,
-                _minimum_member_web_depth_segments(config),
+                _minimum_member_web_depth_segments(config, web_height),
                 left_levels,
                 right_levels,
             )
@@ -2492,7 +2509,7 @@ def _add_flat_member_shell_model(
         upper_levels = _intersection_height_levels(intersection_heights, y1, web_height)
         z_levels = _member_web_depth_levels(
             web_height,
-            _minimum_member_web_depth_segments(config),
+            _minimum_member_web_depth_segments(config, web_height),
             lower_levels,
             upper_levels,
         )
@@ -2787,7 +2804,7 @@ def _add_cylinder_member_shell_model(
             end_levels = _intersection_height_levels(intersection_heights, z1, web_height)
             depth_levels = _member_web_depth_levels(
                 web_height,
-                _minimum_member_web_depth_segments(config),
+                _minimum_member_web_depth_segments(config, web_height),
                 start_levels,
                 end_levels,
             )
@@ -2835,7 +2852,7 @@ def _add_cylinder_member_shell_model(
         end_levels = _intersection_height_levels(intersection_heights, float((col + 1) % max(cols, 1)), web_height)
         depth_levels = _member_web_depth_levels(
             web_height,
-            _minimum_member_web_depth_segments(config),
+            _minimum_member_web_depth_segments(config, web_height),
             start_levels,
             end_levels,
         )
@@ -2895,13 +2912,16 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     member_shell_cap = _member_shell_length_cap(geometry, config, thickness)
     if member_shell_cap > 0.0:
         member_spacing_cap = min([value for value in (member_spacing_cap, member_shell_cap) if value > 0.0], default=member_shell_cap)
+    # Members bound their bays: stations are symmetric about the panel centre
+    # and sit on the panel edges when the length is an exact multiple, so the
+    # generated model matches the calculated span/spacing exactly.
     stiffener_positions = (
-        _centered_member_positions(width, stiffener_spacing, fallback_midpoint=True)
+        _centered_member_positions(width, stiffener_spacing, fallback_midpoint=True, include_ends=True)
         if config.include_stiffeners and geometry.get("has_stiffener")
         else ()
     )
     girder_positions = (
-        _centered_member_positions(length, girder_spacing, fallback_midpoint=True)
+        _centered_member_positions(length, girder_spacing, fallback_midpoint=True, include_ends=True)
         if config.include_girders and geometry.get("has_girder")
         else ()
     )
@@ -3445,7 +3465,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     girder_positions = []
     if config.include_girders and geometry.get("has_girder"):
         if girder_spacing > 1.0e-9:
-            girder_positions = list(_centered_member_positions(length, girder_spacing, fallback_midpoint=True))
+            # Ring frames/girders bound the axial bays: symmetric about the
+            # shell mid-height, on the shell ends when L is a multiple.
+            girder_positions = list(
+                _centered_member_positions(length, girder_spacing, fallback_midpoint=True, include_ends=True)
+            )
         else:
             girder_positions = [length / 2.0]
     axial_mandatory_breaks = (
@@ -5470,6 +5494,56 @@ def _apply_runtime_imperfection(model, generated_geometry: dict, geometry: dict,
         metadata["max_offset_m"] = float(records[-1].get("max_offset", 0.0) or 0.0)
     metadata["status"] = "applied"
     return metadata
+
+
+def runtime_imperfection_preview_offsets(
+    generated_geometry: dict,
+    config: LightweightFEMConfig,
+    geometry: dict,
+) -> dict[int, tuple[float, float, float]]:
+    """Nodal offsets the standard runtime imperfection would apply, without solving.
+
+    Builds the backend FE model from the generated geometry and runs the exact
+    imperfection path used by the solver, then returns the coordinate deltas per
+    node so the mesh preview can display what the analysis will actually use.
+    """
+
+    if _full_backend is None or not hasattr(_full_backend, "apply_imperfection"):
+        return {}
+    if not bool(config.imperfection_enabled):
+        return {}
+    backend_config = _full_backend.AnyStructureFEMConfig(
+        pressure_pa=0.0,
+        load_scale=1.0,
+        num_buckling_modes=1,
+        add_inplane_edge_loads=False,
+        auto_idealize_member_plates_as_beams=not _member_webs_as_shells(config),
+        exclude_idealized_member_plates=not _member_webs_as_shells(config),
+        require_idealized_member_beams=False,
+        elastic_modulus=float(config.elastic_modulus_pa),
+        poisson_ratio=float(config.poisson_ratio),
+        yield_stress=float(config.yield_stress_pa),
+    )
+    try:
+        model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
+    except Exception:
+        return {}
+    original = {
+        int(node_id): np.asarray(node.coords(), dtype=float).copy()
+        for node_id, node in model.mesh.nodes.items()
+    }
+    metadata = _apply_runtime_imperfection(model, generated_geometry, geometry, config)
+    if metadata.get("status") != "applied":
+        return {}
+    offsets: dict[int, tuple[float, float, float]] = {}
+    for node_id, before in original.items():
+        node = model.mesh.get_node(node_id)
+        if node is None:
+            continue
+        delta = np.asarray(node.coords(), dtype=float) - before
+        if float(np.max(np.abs(delta))) > 1.0e-15:
+            offsets[node_id] = (float(delta[0]), float(delta[1]), float(delta[2]))
+    return offsets
 
 
 def _element_centroid(model, element_id: int) -> np.ndarray | None:

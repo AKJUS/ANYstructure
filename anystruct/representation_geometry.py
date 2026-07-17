@@ -30,12 +30,19 @@ def centered_member_positions(
         *,
         fallback_midpoint: bool = True,
         max_count: int | None = 1000,
+        include_ends: bool = False,
 ) -> tuple[float, ...]:
     """Return repeated member/support stations with symmetric end compensation.
 
     ``spacing`` is preserved as the nominal distance between adjacent stations.
     If ``total_length`` is not an exact multiple of ``spacing``, the leftover
-    length is split equally at both ends.
+    length is split equally at both ends so the pattern stays symmetric about
+    the model centre.
+
+    With ``include_ends`` the stations bound the repeated bays: when the total
+    length is an exact multiple of the spacing the first/last stations sit on
+    the model edges (girders at the panel ends, ring frames at the cylinder
+    top/bottom). Without it only strictly internal stations are returned.
     """
 
     total_length = max(float(total_length), EPS)
@@ -44,21 +51,26 @@ def centered_member_positions(
     if spacing <= 0.0:
         return (0.5 * total_length,) if fallback_midpoint else ()
 
-    full_count = int(math.floor(total_length / spacing))
+    full_count = int(math.floor(total_length / spacing + EPS))
     if full_count <= 0:
         return (0.5 * total_length,) if fallback_midpoint else ()
 
     offset = 0.5 * (total_length - full_count * spacing)
     if offset <= tol:
-        positions = [spacing * idx for idx in range(1, full_count)]
+        if include_ends:
+            positions = [spacing * idx for idx in range(full_count + 1)]
+            positions[-1] = total_length
+        else:
+            positions = [spacing * idx for idx in range(1, full_count)]
     else:
         positions = [offset + spacing * idx for idx in range(full_count + 1)]
 
-    positions = [
-        position
-        for position in positions
-        if tol < position < total_length - tol
-    ]
+    if not include_ends:
+        positions = [
+            position
+            for position in positions
+            if tol < position < total_length - tol
+        ]
     if not positions and fallback_midpoint:
         positions = [0.5 * total_length]
     if max_count is not None and max_count > 0 and len(positions) > max_count:

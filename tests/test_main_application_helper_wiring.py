@@ -386,6 +386,170 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "tk3d.add_text(" in populate_block
 
 
+def test_prop_3d_preview_defaults_to_tk3d_with_matplotlib_fallback():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    assert "def _embed_prop_3d(self, fig, ax, default_view=(22, -55)):" in source
+    assert "self._embed_prop_3d_tk3d(ax, default_view=default_view)" in source
+    assert "self._embed_prop_3d_figure(fig, ax, default_view=default_view)" in source
+    # Both single-object previews (flat panel and cylinder) go through the
+    # dispatcher so the pure-Tk canvas is the default renderer.
+    assert source.count("self._embed_prop_3d(fig, ax, default_view=(22, -55))") == 2
+
+    embed_block = source[
+        source.index("def _embed_prop_3d_tk3d"):
+        source.index("def _embed_prop_3d_figure")
+    ]
+    # Text and dimensions from the Matplotlib version are preserved.
+    assert "ax.get_title()" in embed_block
+    assert "ax.get_xlabel()" in embed_block
+    assert "ax.get_ylabel()" in embed_block
+    assert "ax.get_zlabel()" in embed_block
+    assert "'SELECTED: ' + str(self._active_line)" in embed_block
+    assert "tk3d.set_axis_ruler(True)" in embed_block
+    assert "face_colors" in embed_block
+    assert "export_prop_3d_ifc_model" in embed_block
+    assert "export_prop_3d_ifc_shell_model" in embed_block
+
+
+def test_prop_3d_tk3d_uses_native_thickness_primitives():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    # The preview records native primitive specs while drawing...
+    assert "def _record_prop_3d_tk3d_item(ax, **item):" in source
+    assert source.count("kind='flat_plate'") == 2
+    assert source.count("kind='flat_member'") == 2
+    assert "kind='cylinder_shell'" in source
+    assert "kind='cylinder_long'" in source
+    assert "kind='cylinder_ring'" in source
+
+    # ...and replays them with the canvas's native example-style primitives.
+    native_block = source[
+        source.index("def _populate_prop_3d_tk3d_native"):
+        source.index("def _populate_prop_3d_tk3d_faces")
+    ]
+    assert "set_thickness_legend" in native_block
+    assert "thickness_color" in native_block
+    assert "add_rectangular_plate" in native_block
+    assert "add_flat_stiffener" in native_block
+    assert "add_flat_girder" in native_block
+    assert "add_cylinder(" in native_block
+    assert "add_longitudinal_stiffener(" in native_block
+    assert "add_ring_stiffener(" in native_block
+    assert "plate_thickness=" in native_block
+
+
+def test_prop_3d_native_replay_builds_thickness_styled_scene():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import math
+    import tkinter as tk
+    from matplotlib.figure import Figure
+
+    from anystruct.main_application import Application
+    from anystruct import tkinter_3d_canvas_thickness_v6 as t3d
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        import pytest as _pytest
+
+        _pytest.skip("no display available for tkinter")
+    root.withdraw()
+
+    fig = Figure()
+    ax = fig.add_subplot(111, projection="3d")
+    Application._init_prop_3d_export_mesh(ax, "check")
+    Application._record_prop_3d_tk3d_item(
+        ax, kind="flat_plate", x0=0.0, x1=4.0, y0=0.0, y1=3.5, thickness_m=0.018
+    )
+    dims = {"web_h": 0.4, "web_thk": 0.012, "flange_w": 0.15, "flange_thk": 0.02, "type": "T"}
+    Application._draw_section_web_and_flange_3d(Application, ax, "x", 2.0, 0.75, 4.0, 0.018, dims)
+    Application._draw_section_web_and_flange_3d(Application, ax, "y", 2.0, 1.75, 3.5, 0.018, dims)
+
+    items = ax._anystruct_tk3d_items
+    assert [item["kind"] for item in items] == ["flat_plate", "flat_member", "flat_member"]
+    assert items[1]["orientation"] == "x"
+    assert items[2]["orientation"] == "y"
+    assert items[1]["z_base"] == 0.018
+    assert items[1]["hw"] == 0.4
+
+    canvas = t3d.Tkinter3DCanvas(root, width=800, height=500, bg="white")
+    Application._populate_prop_3d_tk3d_native(Application, canvas, items)
+    legend = canvas._thickness_legend
+    assert legend is not None and legend["unit"] == "mm"
+    # Plate, web and flange thicknesses are all part of the legend.
+    assert {12.0, 18.0, 20.0} <= set(legend["values"])
+    assert sum(1 for obj in canvas.objects if obj.get("type") == "polygon") > 100
+
+    cylinder_items = [
+        {"kind": "cylinder_shell", "radius": 2.0, "radius_top": None, "length": 4.0,
+         "thickness_m": 0.016, "theta_start": 0.0, "theta_end": 2.0 * math.pi, "is_panel": False},
+        {"kind": "cylinder_long", "radius": 2.0, "length": 4.0, "angle": 0.5, "web_h": 0.15,
+         "web_thickness_m": 0.01, "flange_w": 0.1, "flange_thickness_m": 0.02, "side_sign": -1.0},
+        {"kind": "cylinder_ring", "radius": 2.0, "z": 2.0, "web_h": 0.12, "web_thickness_m": 0.02,
+         "flange_w": 0.08, "flange_thickness_m": 0.015, "is_frame": True,
+         "theta_start": 0.0, "theta_end": 2.0 * math.pi, "is_panel": False, "side_sign": -1.0},
+    ]
+    cylinder_canvas = t3d.Tkinter3DCanvas(root, width=800, height=500, bg="white")
+    Application._populate_prop_3d_tk3d_native(Application, cylinder_canvas, cylinder_items)
+    object_types = {obj.get("type") for obj in cylinder_canvas.objects}
+    assert "cylinder" in object_types
+    stiffener_kinds = sorted(
+        obj.get("stiffener_type") for obj in cylinder_canvas.objects if obj.get("type") == "stiffener"
+    )
+    assert stiffener_kinds == ["longitudinal", "ring"]
+    assert 16.0 in cylinder_canvas._thickness_legend["values"]
+    root.destroy()
+
+
+def test_prop_3d_export_mesh_records_face_colors_for_tk3d():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    from anystruct.main_application import Application
+
+    fig = Figure()
+    ax = fig.add_subplot(111, projection="3d")
+    Application._init_prop_3d_export_mesh(ax, "test_preview")
+    Application._add_box_3d(ax, 0.0, 1.0, 0.0, 2.0, 0.0, 0.02, facecolor="lightgrey", alpha=0.55)
+
+    mesh = ax._anystruct_export_mesh
+    assert len(mesh["faces"]) == 6
+    assert mesh["face_colors"] == [("lightgrey", 0.55)] * 6
+
+    grid = np.linspace(0.0, 1.0, 3)
+    x_grid, y_grid = np.meshgrid(grid, grid)
+    Application._append_grid_surface_to_prop_3d_export_mesh(
+        ax, x_grid, y_grid, np.zeros_like(x_grid), color="silver", alpha=0.82
+    )
+    assert len(mesh["faces"]) == 10
+    assert len(mesh["face_colors"]) == len(mesh["faces"])
+    assert mesh["face_colors"][-1] == ("silver", 0.82)
+
+
+def test_prop_3d_face_fill_maps_colors_and_alpha_to_tk():
+    from anystruct.main_application import Application
+
+    fill, stipple = Application._prop_3d_face_fill("lightgrey", 1.0)
+    assert fill.startswith("#")
+    assert stipple == ""
+    _fill, stipple = Application._prop_3d_face_fill("silver", 0.82)
+    assert stipple == "gray75"
+    _fill, stipple = Application._prop_3d_face_fill("lightgrey", 0.30)
+    assert stipple == "gray25"
+    fill, _stipple = Application._prop_3d_face_fill(None, 1.0)
+    assert fill.startswith("#")
+    fill, _stipple = Application._prop_3d_face_fill("not-a-colour", 1.0)
+    assert fill == "#d1d5db"
+
+
 def test_initial_property_layout_uses_domain_selection_after_root_geometry_is_realized():
     main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
     source = main_source.read_text(encoding="utf-8")
@@ -607,7 +771,7 @@ def test_flat_panel_3d_preview_keeps_physical_aspect_and_uses_opaque_stiffeners(
     assert "visual_z_span" not in flat_3d_block
     assert "self._apply_prop_3d_layout(fig, ax, width + 2.0 * x_pad, length + 2.0 * y_pad, z_top - z_bottom, zoom=1.52)" in flat_3d_block
     assert "ax.view_init(elev=22, azim=-55)" in flat_3d_block
-    assert "self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))" in flat_3d_block
+    assert "self._embed_prop_3d(fig, ax, default_view=(22, -55))" in flat_3d_block
 
 
 def test_3d_preview_can_export_prepomax_stl_mesh():
@@ -676,11 +840,14 @@ def test_3d_preview_can_export_prepomax_stl_mesh():
     assert "ax._anystruct_shell_export_mesh = shell_mesh" in source
     assert "self._prop_3d_shell_export_mesh" in source
     assert "_anystruct_shell_export_mesh' if shell_model else '_anystruct_export_mesh" in source
-    assert "def _append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=False):" in source
-    assert "Application._append_faces_to_prop_3d_export_mesh(ax, vertices)" in source
+    assert (
+        "def _append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=False,\n"
+        "                                                    color=None, alpha=1.0):"
+    ) in source
+    assert "Application._append_faces_to_prop_3d_export_mesh(ax, vertices, color=facecolor, alpha=alpha)" in source
     assert "self._init_prop_3d_export_mesh(ax, 'flat_panel_preview')" in source
     assert "self._init_prop_3d_export_mesh(ax, 'cylinder_preview')" in source
-    assert "self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)" in source
+    assert "self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)" in source
 
 
 def test_ifc_solid_and_shell_exports_use_separate_geometry_paths():
@@ -840,8 +1007,11 @@ def test_3d_member_positions_keep_exact_spacing_and_symmetric_remainder():
     internal_positions = Application._positions_from_length_and_spacing(10.0, 3.0, include_ends=False)
     assert internal_positions == positions
 
+    # Exact multiples put the bounding members on the model edges so every
+    # bay keeps the exact spacing; growth stays symmetric about the centre.
     regular_end_positions = Application._positions_from_length_and_spacing(12.0, 3.0, include_ends=True)
-    assert regular_end_positions == [3.0, 6.0, 9.0]
+    assert regular_end_positions == [0.0, 3.0, 6.0, 9.0, 12.0]
+    assert Application._positions_from_length_and_spacing(12.0, 3.0, include_ends=False) == [3.0, 6.0, 9.0]
 
     dense_end_positions = Application._positions_from_length_and_spacing(10.0, 0.75, include_ends=True)
     dense_gaps = [dense_end_positions[idx + 1] - dense_end_positions[idx]
@@ -860,7 +1030,10 @@ def test_shared_representation_positions_are_used_by_preview_and_fe_solver():
 
 
 def test_panel_length_expansion_keeps_stiffener_span_as_girder_bay():
-    assert Application._support_positions_from_length_and_span(12.0, 4.0) == [4.0, 8.0]
+    # Lp equal to the stiffener span puts the girders on the panel edges;
+    # longer panels add full bays symmetrically about the centre.
+    assert Application._support_positions_from_length_and_span(4.0, 4.0) == [0.0, 4.0]
+    assert Application._support_positions_from_length_and_span(12.0, 4.0) == [0.0, 4.0, 8.0, 12.0]
     assert Application._support_positions_from_length_and_span(10.0, 4.0) == [1.0, 5.0, 9.0]
     assert Application._support_positions_from_length_and_span(3.0, 4.0) == []
     assert Application._bay_ranges_from_support_positions(10.0, [1.0, 5.0, 9.0]) == [
