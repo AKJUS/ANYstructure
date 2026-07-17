@@ -3866,10 +3866,16 @@ def _nodal_scalar_fields(model, stresses_by_element: dict[int, object]) -> dict[
         element = model.mesh.elements.get(element_id)
         if element is None:
             continue
-            
+
         is_beam = type(element).__name__ in {"BeamElement", "QuadraticBeamElement"}
+        if is_beam:
+            # Beam stresses are displayed on the member lines themselves.
+            # Averaging them into the shared shell nodes contaminates the
+            # plate/shell colour fields (an elastic beam peak can massively
+            # exceed the plastic shell stresses at the same node).
+            continue
         node_ids = element.node_ids
-        
+
         for field_name, (shell_key, beam_key) in field_mapping.items():
             key = beam_key if is_beam else shell_key
             if key is None or key not in stress:
@@ -7750,21 +7756,63 @@ def _nonlinear_shell_stresses_from_states(model, element_states: dict[int, objec
     return recovered
 
 
-def _runtime_display_stresses(model, displacements: np.ndarray, nonlinear_static_result: object | None) -> dict[int, object]:
+def _nonlinear_beam_stresses_from_states(model, element_states: dict[int, object] | None) -> dict[int, dict[str, float]]:
+    """Recover display stresses from committed beam fiber-section states.
+
+    Beam members run uniaxial fiber-section plasticity in material-nonlinear
+    solves (``cross_section['fiber_plasticity']``); the committed fiber
+    stresses are return-mapped and therefore respect the material curve,
+    unlike an elastic recovery from total displacements.
+    """
+
+    recovered: dict[int, dict[str, float]] = {}
+    if not element_states:
+        return recovered
+    for element_id, state in element_states.items():
+        if not isinstance(state, dict):
+            continue
+        fiber_stress = np.asarray(state.get("fiber_stress", ()), dtype=float).reshape(-1)
+        if fiber_stress.size == 0 or not np.all(np.isfinite(fiber_stress)):
+            continue
+        element = model.mesh.get_element(int(element_id))
+        if element is None or element.__class__.__name__ not in {"BeamElement", "QuadraticBeamElement"}:
+            continue
+        peak = float(np.max(np.abs(fiber_stress)))
+        axial = float(np.mean(fiber_stress))
+        recovered[int(element_id)] = {
+            "von_mises": peak,
+            "axial_stress": axial,
+            # Envelope split: the amount the extreme fiber exceeds the mean
+            # axial stress is the bending contribution.
+            "bending_stress_y": max(peak - abs(axial), 0.0),
+            "bending_stress_z": 0.0,
+            "shear_stress_y": 0.0,
+            "shear_stress_z": 0.0,
+            "torsional_stress": 0.0,
+        }
+    return recovered
+
+
+def _runtime_display_stresses(
+    model,
+    displacements: np.ndarray,
+    nonlinear_static_result: object | None,
+) -> tuple[dict[int, object], set[int]]:
+    """Return display stresses and the ids of plastic (state-based) elements."""
     elastic_stresses = (
         _backend_compute_stresses(model, displacements)
         if _backend_compute_stresses is not None
         else {}
     )
-    nonlinear_shell_stresses = _nonlinear_shell_stresses_from_states(
-        model,
-        getattr(nonlinear_static_result, "element_states", None),
-    )
-    if not nonlinear_shell_stresses:
-        return elastic_stresses
+    element_states = getattr(nonlinear_static_result, "element_states", None)
+    nonlinear_shell_stresses = _nonlinear_shell_stresses_from_states(model, element_states)
+    nonlinear_beam_stresses = _nonlinear_beam_stresses_from_states(model, element_states)
+    if not nonlinear_shell_stresses and not nonlinear_beam_stresses:
+        return elastic_stresses, set()
     merged = dict(elastic_stresses)
     merged.update(nonlinear_shell_stresses)
-    return merged
+    merged.update(nonlinear_beam_stresses)
+    return merged, set(nonlinear_shell_stresses) | set(nonlinear_beam_stresses)
 
 
 def _max_translation(model, displacements: np.ndarray) -> float:
@@ -7828,13 +7876,18 @@ def apply_mode_shape_imperfections(generated_geometry: dict, config: Lightweight
     if not mode_factors or _full_backend is None:
         return generated_geometry
 
-    max_mode = max(item["mode"] for item in mode_factors)
+    max_mode = max(int(item["mode"]) for item in mode_factors)
     temp_config = dataclasses.replace(config, num_buckling_modes=max(int(config.num_buckling_modes), max_mode))
-    
+
     result = run_production_fem(geometry, temp_config, precomputed_generated_geometry=generated_geometry)
-    
+
     if not result.buckling_modes:
-        raise RuntimeError("Buckling analysis failed to extract mode shapes. Check boundary conditions and loads.")
+        raise RuntimeError(
+            "The buckling analysis returned no mode shapes for this load state. "
+            "Linear buckling needs membrane compression from the applied loads "
+            "(axial force, in-plane stresses or pressure); check the run "
+            "diagnostics for the buckling solver status."
+        )
 
     perturbed_geometry = copy.deepcopy(generated_geometry)
     
@@ -8586,8 +8639,34 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         prestress_summary["buckling_max_load_factor"] = 0.0 if load_factor_range[1] is None else float(load_factor_range[1])
     prestress_summary["buckling_allow_dense_fallback"] = 1.0 if bool(config.buckling_allow_dense_fallback) else 0.0
     stress_percentile = min(max(float(config.stress_percentile), 0.0), 100.0)
-    runtime_stresses_by_element = _runtime_display_stresses(analysis_model, displacements, nonlinear_static_result)
-    stress_stats = _stress_statistics_from_stresses(runtime_stresses_by_element, stress_percentile)
+    runtime_stresses_by_element, plastic_element_ids = _runtime_display_stresses(
+        analysis_model, displacements, nonlinear_static_result
+    )
+    if plastic_element_ids:
+        # Committed elastoplastic states (shell layers and beam fiber
+        # sections) respect the material curve; any remaining elements only
+        # have elastic recovery and must not dominate the reported stresses.
+        stress_stats = _stress_statistics_from_stresses(
+            {eid: s for eid, s in runtime_stresses_by_element.items() if eid in plastic_element_ids},
+            stress_percentile,
+        )
+        elastic_member_stats = _stress_statistics_from_stresses(
+            {eid: s for eid, s in runtime_stresses_by_element.items() if eid not in plastic_element_ids},
+            stress_percentile,
+        )
+        prestress_summary["elastic_member_peak_von_mises_pa"] = float(elastic_member_stats["max"])
+        diagnostics.append(
+            "Material-nonlinear stresses are recovered from the committed elastoplastic states "
+            "(shell layers and beam fiber sections) and respect the material curve."
+        )
+        if elastic_member_stats["max"] > 0.0:
+            diagnostics.append(
+                "Some members carry only elastic stress recovery; their peak von Mises "
+                f"{elastic_member_stats['max'] / 1.0e6:.0f} MPa is a fictitious elastic value "
+                "and is reported separately from the statistics."
+            )
+    else:
+        stress_stats = _stress_statistics_from_stresses(runtime_stresses_by_element, stress_percentile)
     visualization = _visualization_from_full_result(
         generated_geometry,
         analysis_model,
@@ -8626,6 +8705,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         stress_p95_pa=float(stress_stats["percentile"]),
         displacement_max_m=_max_translation(analysis_model, displacements),
         buckling_factors=buckling_factors,
+        # Raw eigenmode objects (mode_number/load_factor/mode_shape) so the
+        # mode-shape imperfection workflow can perturb the mesh.
+        buckling_modes=list(getattr(buckling_result, "modes", []) or []),
         diagnostics=tuple(diagnostics),
         mesh_info={
             "nodes": int(model.mesh.num_nodes),

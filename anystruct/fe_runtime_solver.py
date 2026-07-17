@@ -1296,6 +1296,18 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
 
     geometry = runtime_geometry_summary(snapshot, options)
     diagnostics = list(snapshot.diagnostics)
+    if precomputed_generated_geometry is not None:
+        diagnostics.append(
+            "Using the generated custom imperfection mesh (mode shapes set to mesh) for this run."
+        )
+    imperfection_active = precomputed_generated_geometry is not None or bool(options.imperfection_enabled)
+    if imperfection_active and str(options.analysis_type).strip().lower() == "linear eigenvalue":
+        diagnostics.append(
+            "NOTE: linear eigenvalue buckling of an imperfect geometry does not include the "
+            "imperfection knockdown - eigenvalues of the deformed shape can even increase. "
+            "Use a nonlinear runtime path (nonlinear static / nonlinear stability / capacity "
+            "workflow) to capture imperfection sensitivity."
+        )
     pressure_side = _normalise_pressure_side(options.pressure_direction)
     custom_load_entries = _runtime_custom_load_entries(options.custom_loads_json)
     listed_pressure = sum(
@@ -10138,9 +10150,11 @@ class RuntimeFEMWindow:
                 self.solver_queue.put(msg)
 
             try:
-                precomputed = None
-                if getattr(options, "imperfection_enabled", False):
-                    precomputed = getattr(self, "_imperfection_mesh", None)
+                # A custom mode-shape imperfection mesh ("Set to mesh") is used
+                # whenever it exists. The imperfection checkbox only controls
+                # the analytic standard shape applied by the solver itself, so
+                # gating on it silently discarded the perturbed mesh.
+                precomputed = getattr(self, "_imperfection_mesh", None)
                 self.solver_queue.put((run_runtime_fem(self.snapshot, options, status_callback=status_cb,
                                                        imported_fem_model=self.imported_fem_model,
                                                        precomputed_generated_geometry=precomputed), None))

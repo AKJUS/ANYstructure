@@ -229,6 +229,134 @@ def test_run_runtime_fem_returns_backend_status_and_visualization_payload():
     assert result.buckling_factors == tuple(sorted(result.buckling_factors))
 
 
+def test_production_result_carries_buckling_modes_for_imperfections():
+    if fe_solver._full_backend is None:
+        pytest.skip("production FE backend unavailable")
+
+    snapshot = fe_runtime_solver.active_line_snapshot(fe_runtime_solver.example_runtime_app("cylinder"))
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="coarse",
+        pressure_pa=200_000.0,
+        axial_force_n=500_000_000.0,
+        include_end_lids=True,
+        num_buckling_modes=3,
+        imperfection_mode_shapes_json='[{"mode": 1, "factor": 1.0}, {"mode": 3, "factor": 1.0}]',
+    )
+    geometry = fe_runtime_solver.runtime_geometry_summary(snapshot, options)
+    config = fe_runtime_solver._solver_config_from_options(options)
+    generated = fe_solver.build_generated_geometry(geometry, config)
+
+    result = fe_solver.run_production_fem(geometry, config, precomputed_generated_geometry=generated)
+    assert result.status == "ok"
+    # The raw eigenmodes must ride along on the result so "Set to mesh" can
+    # perturb the mesh; previously the field stayed empty and the workflow
+    # always failed with "failed to extract mode shapes".
+    assert result.buckling_modes
+    assert [mode.mode_number for mode in result.buckling_modes][:1] == [1]
+
+    perturbed = fe_solver.apply_mode_shape_imperfections(generated, config, geometry)
+    base_nodes = {int(n["id"]): tuple(n["coords"]) for n in generated["nodes"]}
+    max_offset = max(
+        math.dist(tuple(node["coords"]), base_nodes[int(node["id"])])
+        for node in perturbed.get("nodes", [])
+        if int(node["id"]) in base_nodes
+    )
+    assert max_offset > 1.0e-9
+
+
+def test_runtime_run_uses_mode_shape_imperfection_mesh():
+    if fe_solver._full_backend is None:
+        pytest.skip("production FE backend unavailable")
+
+    snapshot = fe_runtime_solver.active_line_snapshot(fe_runtime_solver.example_runtime_app("cylinder"))
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="coarse",
+        pressure_pa=200_000.0,
+        axial_force_n=500_000_000.0,
+        include_end_lids=True,
+        num_buckling_modes=3,
+        imperfection_mode_shapes_json='[{"mode": 3, "factor": 100.0}]',
+    )
+    geometry = fe_runtime_solver.runtime_geometry_summary(snapshot, options)
+    config = fe_runtime_solver._solver_config_from_options(options)
+    generated = fe_solver.build_generated_geometry(geometry, config)
+    perturbed = fe_solver.apply_mode_shape_imperfections(generated, config, geometry)
+
+    pristine = fe_runtime_solver.run_runtime_fem(snapshot, options)
+    imperfect = fe_runtime_solver.run_runtime_fem(
+        snapshot, options, precomputed_generated_geometry=perturbed
+    )
+
+    # The perturbed geometry must actually reach the solver: the buckling
+    # factors change and the run reports the imperfection mesh usage.
+    assert tuple(pristine.buckling_factors) != tuple(imperfect.buckling_factors)
+    assert any("imperfection mesh" in item for item in imperfect.diagnostics)
+    assert not any("imperfection mesh" in item for item in pristine.diagnostics)
+    # Linear eigenvalue analysis of an imperfect geometry cannot show the
+    # imperfection knockdown; the run must carry the caveat.
+    assert any("does not include the imperfection knockdown" in item for item in imperfect.diagnostics)
+    assert not any("imperfection knockdown" in item for item in pristine.diagnostics)
+
+    # The popup run worker hands the stored mesh over unconditionally; the
+    # standard-imperfection checkbox must not gate the mode-shape mesh.
+    source = Path(fe_runtime_solver.__file__).read_text(encoding="utf-8")
+    worker_block = source[
+        source.index("def worker() -> None:"):
+        source.index("self.solver_thread = threading.Thread(target=worker, daemon=True)")
+    ]
+    assert 'precomputed = getattr(self, "_imperfection_mesh", None)' in worker_block
+    assert 'if getattr(options, "imperfection_enabled", False):' not in worker_block
+
+
+def test_material_nonlinear_display_stresses_respect_material_curve():
+    if fe_solver._full_backend is None:
+        pytest.skip("production FE backend unavailable")
+
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="coarse",
+        pressure_pa=3_000_000.0,
+        num_buckling_modes=1,
+        analysis_type="geom. + material nonlinear static",
+        runtime_solver="nonlinear static",
+        material_model="DNV-RP-C208 steel",
+        nonlinear_max_load_factor=1.0,
+        nonlinear_steps=6,
+    )
+    result = fe_runtime_solver.run_runtime_fem(snapshot, options)
+    assert result.status == "ok"
+    prestress = result.summary.get("prestress_summary", {}) or {}
+    assert float(prestress.get("nonlinear_static_max_plastic_strain", 0.0) or 0.0) > 0.0
+
+    # Reported stresses come from the committed elastoplastic states — shell
+    # layers AND beam fiber sections — so every displayed value respects the
+    # material curve.
+    reported = dict(result.stress_percentiles)
+    assert 0.0 < reported["max"] < 500.0e6
+    assert 0.0 < reported["p95"] <= reported["max"]
+    assert any("committed elastoplastic states" in item for item in result.diagnostics)
+    # All members are covered by plastic states: no fictitious elastic peak.
+    assert float(prestress.get("elastic_member_peak_von_mises_pa", 1.0)) == 0.0
+
+    # The shell colour fields must not be contaminated by elastic beam values
+    # averaged into shared nodes.
+    skin_values = [
+        float((surface.get("field_values") or {}).get("von_mises_pa", 0.0))
+        for surface in (result.visualization.get("skin_shell_surfaces") or ())
+    ]
+    assert skin_values
+    assert max(skin_values) < 500.0e6
+
+    # Beam member display stresses come from the return-mapped fiber states
+    # and are limited by the material curve as well.
+    beam_values = [
+        float(line.get("von_mises", 0.0))
+        for line in (result.visualization.get("member_lines") or ())
+    ]
+    assert beam_values
+    assert max(beam_values) < 500.0e6
+
+
 def test_runtime_fem_state_save_load_round_trip(tmp_path):
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
     options = fe_runtime_solver.RuntimeFEMOptions(
