@@ -170,10 +170,15 @@ class LightweightFEMConfig:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
+    # Component edge loads: {"fx","fy","fz" [N/m], "mx","my","mz" [Nm/m]}
+    # entered on global axes with no implicit sign conventions.  The whole-edge
+    # payload maps edge keys (x0/x1/y0/y1, lower/upper, all) to component sets.
+    edge_load_components_json: str = ""
     custom_loads_json: str = "[]"
     custom_pressure_patches_json: str = "[]"
     custom_edge_segments_json: str = "[]"
     custom_selected_edge_load_n_per_m: float = 0.0
+    custom_selected_edge_load_components_json: str = ""
     local_refinement_enabled: bool = False
     local_refinement_patches_json: str = "[]"
     local_refinement_fine_factor: float = 0.3
@@ -1456,13 +1461,19 @@ def _member_positions(total_length: float, spacing: float, fallback_midpoint: bo
     return tuple(positions)
 
 
-def _centered_member_positions(total_length: float, spacing: float, fallback_midpoint: bool = True) -> tuple[float, ...]:
+def _centered_member_positions(
+    total_length: float,
+    spacing: float,
+    fallback_midpoint: bool = True,
+    include_ends: bool = False,
+) -> tuple[float, ...]:
     """Return member stations with any cut length shared symmetrically."""
 
     return _representation_geometry.centered_member_positions(
         total_length,
         spacing,
         fallback_midpoint=fallback_midpoint,
+        include_ends=include_ends,
     )
 
 
@@ -2196,7 +2207,7 @@ def _member_shell_length_cap(geometry: dict, config: LightweightFEMConfig, thick
         web_height = _member_section_dimension(data, "web_height")
         flange_width = _member_section_dimension(data, "flange_width")
         if web_height > 0.0:
-            candidates.append(5.0 * web_height / max(_minimum_member_web_depth_segments(config), 1))
+            candidates.append(5.0 * web_height / max(_minimum_member_web_depth_segments(config, web_height), 1))
         if _member_flanges_as_shells(config) and flange_width > 0.0:
             candidates.append(2.5 * flange_width)
 
@@ -2336,17 +2347,28 @@ def _intersection_height_levels(
     return levels
 
 
-def _minimum_member_web_depth_segments(config: LightweightFEMConfig) -> int:
-    if not _member_flanges_as_shells(config):
+def _minimum_member_web_depth_segments(config: LightweightFEMConfig, web_height: float = 0.0) -> int:
+    """Shell rows over a member web depth when webs are meshed as shells.
+
+    Follows the selected mesh fidelity for every webs-as-shells member model
+    (not only "all shell"), and honours an explicit mesh-size override so the
+    web element height tracks the requested size.
+    """
+
+    if not _member_webs_as_shells(config):
         return 1
-    return max(1, _fidelity_refinement(config.mesh_fidelity))
+    segments = max(1, _fidelity_refinement(config.mesh_fidelity))
+    mesh_size = _requested_mesh_size(config)
+    if web_height > 0.0 and mesh_size > 0.0:
+        segments = max(segments, int(math.ceil(web_height / mesh_size - 1.0e-9)))
+    return segments
 
 
 def _member_web_section_depth_levels(section: dict[str, float], config: LightweightFEMConfig) -> list[float]:
     web_height = _member_section_dimension(section, "web_height")
     if web_height <= 0.0:
         return []
-    return _member_web_depth_levels(web_height, _minimum_member_web_depth_segments(config))
+    return _member_web_depth_levels(web_height, _minimum_member_web_depth_segments(config, web_height))
 
 
 def _member_web_depth_levels(own_height: float, min_segments: int = 1, *endpoint_levels: list[float]) -> list[float]:
@@ -2416,6 +2438,16 @@ def _flat_shell_edge_node_ids(
     return {key: sorted(set(value)) for key, value in edge_nodes.items()}
 
 
+def _member_side_sign(geometry: dict) -> float:
+    """+1 places members on the default side, -1 on the opposite side.
+
+    Follows the main-application "Opposite side" checkbox: flat-panel members
+    extrude to negative z instead of positive z, cylinder members outward
+    instead of inward.
+    """
+    return -1.0 if bool(geometry.get("members_opposite_side")) else 1.0
+
+
 def _add_flat_member_shell_model(
         nodes: list[dict[str, object]],
         shells: list[dict[str, object]],
@@ -2432,6 +2464,7 @@ def _add_flat_member_shell_model(
         direction: str,
         config: LightweightFEMConfig,
         intersection_heights: dict[float, list[float]] | None = None,
+        side_sign: float = 1.0,
 ) -> tuple[int, int]:
     web_height = _member_section_dimension(section, "web_height")
     web_thickness = _member_section_dimension(section, "web_thickness")
@@ -2440,6 +2473,7 @@ def _add_flat_member_shell_model(
     if web_height <= 0.0 or web_thickness <= 0.0:
         return element_id, beam_id
 
+    side = 1.0 if float(side_sign) >= 0.0 else -1.0
     flange_section = _flange_beam_section(section, web_thickness)
     if direction == "x":
         col = _index_of_break(y_breaks, position)
@@ -2452,7 +2486,7 @@ def _add_flat_member_shell_model(
             right_levels = _intersection_height_levels(intersection_heights, x1, web_height)
             z_levels = _member_web_depth_levels(
                 web_height,
-                _minimum_member_web_depth_segments(config),
+                _minimum_member_web_depth_segments(config, web_height),
                 left_levels,
                 right_levels,
             )
@@ -2460,7 +2494,7 @@ def _add_flat_member_shell_model(
             def web_node(x: float, base_node: int, z: float) -> int:
                 if abs(float(z)) <= 1.0e-12:
                     return base_node
-                return _add_cached_node(nodes, node_cache, (x, position, float(z)))
+                return _add_cached_node(nodes, node_cache, (x, position, side * float(z)))
 
             for lower, upper in zip(z_levels[:-1], z_levels[1:]):
                 lower0 = web_node(x0, base0, lower)
@@ -2474,10 +2508,10 @@ def _add_flat_member_shell_model(
                 beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
                 beam_id += 1
             elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-                left0 = _add_cached_node(nodes, node_cache, (x0, position - 0.5 * flange_width, web_height))
-                left1 = _add_cached_node(nodes, node_cache, (x1, position - 0.5 * flange_width, web_height))
-                right0 = _add_cached_node(nodes, node_cache, (x0, position + 0.5 * flange_width, web_height))
-                right1 = _add_cached_node(nodes, node_cache, (x1, position + 0.5 * flange_width, web_height))
+                left0 = _add_cached_node(nodes, node_cache, (x0, position - 0.5 * flange_width, side * web_height))
+                left1 = _add_cached_node(nodes, node_cache, (x1, position - 0.5 * flange_width, side * web_height))
+                right0 = _add_cached_node(nodes, node_cache, (x0, position + 0.5 * flange_width, side * web_height))
+                right1 = _add_cached_node(nodes, node_cache, (x1, position + 0.5 * flange_width, side * web_height))
                 element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
                 element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
         return element_id, beam_id
@@ -2492,7 +2526,7 @@ def _add_flat_member_shell_model(
         upper_levels = _intersection_height_levels(intersection_heights, y1, web_height)
         z_levels = _member_web_depth_levels(
             web_height,
-            _minimum_member_web_depth_segments(config),
+            _minimum_member_web_depth_segments(config, web_height),
             lower_levels,
             upper_levels,
         )
@@ -2500,7 +2534,7 @@ def _add_flat_member_shell_model(
         def web_node(y: float, base_node: int, z: float) -> int:
             if abs(float(z)) <= 1.0e-12:
                 return base_node
-            return _add_cached_node(nodes, node_cache, (position, y, float(z)))
+            return _add_cached_node(nodes, node_cache, (position, y, side * float(z)))
 
         for lower, upper in zip(z_levels[:-1], z_levels[1:]):
             lower0 = web_node(y0, base0, lower)
@@ -2514,10 +2548,10 @@ def _add_flat_member_shell_model(
             beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
             beam_id += 1
         elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-            left0 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y0, web_height))
-            left1 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y1, web_height))
-            right0 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y0, web_height))
-            right1 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y1, web_height))
+            left0 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y0, side * web_height))
+            left1 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y1, side * web_height))
+            right0 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y0, side * web_height))
+            right1 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y1, side * web_height))
             element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
             element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
     return element_id, beam_id
@@ -2662,8 +2696,6 @@ def _cylinder_lid_boundary_supports(
         config: LightweightFEMConfig,
 ) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
-    if mode in {"free", "none", "nullspace", "nullspace projection"}:
-        return []
     if mode in {"clamped", "fixed", "fixed ends"}:
         return [
             {
@@ -2672,13 +2704,21 @@ def _cylinder_lid_boundary_supports(
                 "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
         ]
-    return [
-        {
-            "name": "rigid_body_anchor",
-            "node_ids": sorted(set(int(node) for node in lower_center_nodes)),
-            "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
-        }
-    ]
+    if mode in {"anchored", "anchor", "rigid body anchor"}:
+        # Explicit opt-in: ground the lower lid reference so displacements are
+        # measured from a fixed bottom end.
+        return [
+            {
+                "name": "rigid_body_anchor",
+                "node_ids": sorted(set(int(node) for node in lower_center_nodes)),
+                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+            }
+        ]
+    # auto/free/nullspace: no lid supports.  Balanced free-free cylinders are
+    # carried by the automatic rigid-body nullspace projection, preserving the
+    # verified symmetric membrane solution: a balanced axial force must give
+    # uz = sigma*L/(2E) at each end, not sigma*L/E from an anchored bottom.
+    return []
 
 
 def _custom_cylinder_supports(lower_ring: list[int], upper_ring: list[int], config: LightweightFEMConfig) -> list[dict[str, object]]:
@@ -2758,6 +2798,7 @@ def _add_cylinder_member_shell_model(
         config: LightweightFEMConfig,
         intersection_heights: dict[float, list[float]] | None = None,
         arc_breaks: list[float] | None = None,
+        side_sign: float = 1.0,
 ) -> tuple[int, int]:
     web_height = _member_section_dimension(section, "web_height")
     web_thickness = _member_section_dimension(section, "web_thickness")
@@ -2766,6 +2807,11 @@ def _add_cylinder_member_shell_model(
     if web_height <= 0.0 or web_thickness <= 0.0:
         return element_id, beam_id
     flange_section = _flange_beam_section(section, web_thickness)
+    # +1 extrudes member webs inward (default), -1 outward (opposite side).
+    side = 1.0 if float(side_sign) >= 0.0 else -1.0
+
+    def member_radius(base_radius: float, depth: float) -> float:
+        return max(float(base_radius) - side * float(depth), 1.0e-6)
 
     def theta_at_col(col_index: int) -> float:
         if arc_breaks and len(arc_breaks) >= 2:
@@ -2787,7 +2833,7 @@ def _add_cylinder_member_shell_model(
             end_levels = _intersection_height_levels(intersection_heights, z1, web_height)
             depth_levels = _member_web_depth_levels(
                 web_height,
-                _minimum_member_web_depth_segments(config),
+                _minimum_member_web_depth_segments(config, web_height),
                 start_levels,
                 end_levels,
             )
@@ -2796,7 +2842,7 @@ def _add_cylinder_member_shell_model(
                 if abs(float(depth)) <= 1.0e-12:
                     return base_node
                 current_radius = radius_at_z(z)
-                return _add_cached_node(nodes, node_cache, _cylinder_point(max(current_radius - float(depth), 1.0e-6), theta, z))
+                return _add_cached_node(nodes, node_cache, _cylinder_point(member_radius(current_radius, depth), theta, z))
 
             for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
                 outer0 = web_node(z0, base0, outer_depth)
@@ -2810,8 +2856,8 @@ def _add_cylinder_member_shell_model(
                 beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
                 beam_id += 1
             elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-                inner_r0 = max(radius_at_z(z0) - web_height, 1.0e-6)
-                inner_r1 = max(radius_at_z(z1) - web_height, 1.0e-6)
+                inner_r0 = member_radius(radius_at_z(z0), web_height)
+                inner_r1 = member_radius(radius_at_z(z1), web_height)
                 dtheta0 = 0.5 * flange_width / inner_r0 if inner_r0 > 0.0 else 0.0
                 dtheta1 = 0.5 * flange_width / inner_r1 if inner_r1 > 0.0 else 0.0
                 left0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_r0, theta - dtheta0, z0))
@@ -2825,7 +2871,7 @@ def _add_cylinder_member_shell_model(
     row = int(index)
     z = float(z_breaks[row])
     current_radius = radius_at_z(z)
-    inner_radius = max(current_radius - web_height, 1.0e-6)
+    inner_radius = member_radius(current_radius, web_height)
     for col in range(cols):
         theta0 = theta_at_col(col)
         theta1 = theta_at_col(col + 1)
@@ -2835,7 +2881,7 @@ def _add_cylinder_member_shell_model(
         end_levels = _intersection_height_levels(intersection_heights, float((col + 1) % max(cols, 1)), web_height)
         depth_levels = _member_web_depth_levels(
             web_height,
-            _minimum_member_web_depth_segments(config),
+            _minimum_member_web_depth_segments(config, web_height),
             start_levels,
             end_levels,
         )
@@ -2843,7 +2889,7 @@ def _add_cylinder_member_shell_model(
         def web_node(theta: float, base_node: int, depth: float) -> int:
             if abs(float(depth)) <= 1.0e-12:
                 return base_node
-            return _add_cached_node(nodes, node_cache, _cylinder_point(max(current_radius - float(depth), 1.0e-6), theta, z))
+            return _add_cached_node(nodes, node_cache, _cylinder_point(member_radius(current_radius, depth), theta, z))
 
         for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
             outer0 = web_node(theta0, base0, outer_depth)
@@ -2895,13 +2941,16 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     member_shell_cap = _member_shell_length_cap(geometry, config, thickness)
     if member_shell_cap > 0.0:
         member_spacing_cap = min([value for value in (member_spacing_cap, member_shell_cap) if value > 0.0], default=member_shell_cap)
+    # Members bound their bays: stations are symmetric about the panel centre
+    # and sit on the panel edges when the length is an exact multiple, so the
+    # generated model matches the calculated span/spacing exactly.
     stiffener_positions = (
-        _centered_member_positions(width, stiffener_spacing, fallback_midpoint=True)
+        _centered_member_positions(width, stiffener_spacing, fallback_midpoint=True, include_ends=True)
         if config.include_stiffeners and geometry.get("has_stiffener")
         else ()
     )
     girder_positions = (
-        _centered_member_positions(length, girder_spacing, fallback_midpoint=True)
+        _centered_member_positions(length, girder_spacing, fallback_midpoint=True, include_ends=True)
         if config.include_girders and geometry.get("has_girder")
         else ()
     )
@@ -3078,6 +3127,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     beams = []
     beam_id = 20_001
     node_cache = _node_cache_from_nodes(nodes)
+    member_side = _member_side_sign(geometry)
     stiffener_sections: dict[float, dict[str, float]] = {}
     girder_sections: dict[float, dict[str, float]] = {}
     for stiffener_y in stiffener_positions:
@@ -3086,7 +3136,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             thickness,
             width,
             0.08,
-            config.stiffener_eccentricity_m,
+            member_side * config.stiffener_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3096,7 +3146,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             thickness,
             length,
             0.10,
-            config.girder_eccentricity_m,
+            member_side * config.girder_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3128,6 +3178,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 "x",
                 config,
                 intersection_heights=stiffener_web_intersections,
+                side_sign=member_side,
             )
             continue
         row_range = range(0, rows - 2, 2) if _wants_b3(config) else range(rows - 1)
@@ -3167,6 +3218,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 "y",
                 config,
                 intersection_heights=girder_web_intersections,
+                side_sign=member_side,
             )
             continue
         col_range = range(0, cols - 2, 2) if _wants_b3(config) else range(cols - 1)
@@ -3445,7 +3497,11 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     girder_positions = []
     if config.include_girders and geometry.get("has_girder"):
         if girder_spacing > 1.0e-9:
-            girder_positions = list(_centered_member_positions(length, girder_spacing, fallback_midpoint=True))
+            # Ring frames/girders bound the axial bays: symmetric about the
+            # shell mid-height, on the shell ends when L is a multiple.
+            girder_positions = list(
+                _centered_member_positions(length, girder_spacing, fallback_midpoint=True, include_ends=True)
+            )
         else:
             girder_positions = [length / 2.0]
     axial_mandatory_breaks = (
@@ -3516,6 +3572,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     beams = []
     beam_id = 20_001
     node_cache = _node_cache_from_nodes(nodes)
+    member_side = _member_side_sign(geometry)
     stiffener_columns: list[int] = []
     stiffener_sections: dict[int, dict[str, float]] = {}
     if config.include_stiffeners and geometry.get("has_stiffener"):
@@ -3524,7 +3581,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             thickness,
             radius,
             0.08,
-            config.stiffener_eccentricity_m,
+            member_side * config.stiffener_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3546,7 +3603,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             thickness,
             radius,
             0.12,
-            config.girder_eccentricity_m,
+            member_side * config.girder_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3582,6 +3639,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     config,
                     intersection_heights=stiffener_web_intersections,
                     arc_breaks=arc_breaks,
+                    side_sign=member_side,
                 )
                 continue
             row_range = range(0, axial_div - 1, 2) if _wants_b3(config) else range(axial_div)
@@ -3623,6 +3681,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     config,
                     intersection_heights=girder_web_intersections,
                     arc_breaks=arc_breaks,
+                    side_sign=member_side,
                 )
                 continue
             col_range = range(0, cols, 2) if _wants_b3(config) else range(cols)
@@ -3842,10 +3901,16 @@ def _nodal_scalar_fields(model, stresses_by_element: dict[int, object]) -> dict[
         element = model.mesh.elements.get(element_id)
         if element is None:
             continue
-            
+
         is_beam = type(element).__name__ in {"BeamElement", "QuadraticBeamElement"}
+        if is_beam:
+            # Beam stresses are displayed on the member lines themselves.
+            # Averaging them into the shared shell nodes contaminates the
+            # plate/shell colour fields (an elastic beam peak can massively
+            # exceed the plastic shell stresses at the same node).
+            continue
         node_ids = element.node_ids
-        
+
         for field_name, (shell_key, beam_key) in field_mapping.items():
             key = beam_key if is_beam else shell_key
             if key is None or key not in stress:
@@ -5320,6 +5385,82 @@ def _nonlinear_layer_count(value: object) -> int:
     return min(supported, key=lambda item: abs(item - requested))
 
 
+_MATERIAL_MODEL_C208_CHOICES = {"dnv rp c208 steel", "dnv c208 steel", "dnv rp c208", "rp c208 steel"}
+
+
+def _auto_set_parameter_notes(config: LightweightFEMConfig) -> list[str]:
+    """Explicit 'Auto-set:' diagnostics for parameters the run overrides.
+
+    Whenever the solver silently promotes or coerces a user input (material
+    model, solution control, kinematics, layer count, runtime path), the run
+    diagnostics must state what was set and why.
+    """
+    notes: list[str] = []
+    analysis_choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
+    material_choice = _normalized_choice(config.material_model, "linear elastic")
+    material_dropdown_is_linear = material_choice not in _MATERIAL_MODEL_C208_CHOICES
+
+    if _wants_material_nonlinear_analysis(config) and material_dropdown_is_linear:
+        if bool(config.post_buckling_enabled):
+            reason = "post-buckling continuation always runs with steel plasticity"
+        else:
+            reason = "the analysis type requests material nonlinearity"
+        notes.append(
+            "Auto-set: material model 'linear elastic' -> 'DNV-RP-C208 steel' (grade "
+            + str(config.steel_grade) + ") because " + reason + "."
+        )
+    if (
+            bool(config.collision_enabled)
+            and bool(config.collision_material_nonlinear_enabled)
+            and material_dropdown_is_linear
+            and not _wants_material_nonlinear_analysis(config)
+    ):
+        notes.append(
+            "Auto-set: DNV-RP-C208 hardening curve (grade " + str(config.steel_grade)
+            + ") applied for the material-nonlinear collision transient although the material dropdown is 'linear elastic'."
+        )
+
+    if _wants_static_nonlinear_analysis(config):
+        control_choice = _normalized_choice(config.nonlinear_solution_control, "newton force control")
+        effective_control = _nonlinear_solution_control(config)
+        if effective_control == "arc length" and control_choice not in {
+            "arc", "arc length", "arc-length", "arc length continuation", "crisfield arc length",
+        }:
+            notes.append(
+                "Auto-set: nonlinear solution control '" + str(config.nonlinear_solution_control)
+                + "' -> 'arc length' because post-buckling continuation must pass the limit point."
+            )
+        kinematics_choice = _normalized_kinematics(config.nonlinear_static_kinematics)
+        effective_kinematics = _effective_nonlinear_static_kinematics(config)
+        if effective_kinematics != kinematics_choice:
+            if _wants_capacity_workflow(config):
+                reason = "the ANYintelligent capacity workflow solves with Von Karman kinematics"
+            elif _wants_tangent_stability_analysis(config):
+                reason = "tangent stability solves with Von Karman kinematics"
+            else:
+                reason = "arc-length control solves with Von Karman kinematics"
+            notes.append(
+                "Auto-set: kinematics 'corotational' -> 'Von Karman' because " + reason + "."
+            )
+        if analysis_choice == "linear eigenvalue" and not bool(config.post_buckling_enabled):
+            runtime_choice = _normalized_choice(config.runtime_solver, "stepwise")
+            if runtime_choice == "nonlinear static":
+                notes.append(
+                    "Auto-set: analysis runs as a nonlinear static solve because the runtime path is 'nonlinear static' "
+                    "although the analysis dropdown is 'linear eigenvalue'."
+                )
+
+    if _wants_material_nonlinear_analysis(config):
+        requested_layers = _positive_int(config.nonlinear_layers, 5)
+        effective_layers = _nonlinear_layer_count(config.nonlinear_layers)
+        if effective_layers != requested_layers:
+            notes.append(
+                "Auto-set: shell integration layers " + str(requested_layers) + " -> "
+                + str(effective_layers) + " (supported counts are 3, 5, 7, 9, 11)."
+            )
+    return notes
+
+
 def _nonlinear_curve_payload(config: LightweightFEMConfig, geometry: dict) -> tuple[object | None, dict[str, float | str]]:
     if _backend_curve_from_properties is None:
         return None, {}
@@ -5470,6 +5611,56 @@ def _apply_runtime_imperfection(model, generated_geometry: dict, geometry: dict,
         metadata["max_offset_m"] = float(records[-1].get("max_offset", 0.0) or 0.0)
     metadata["status"] = "applied"
     return metadata
+
+
+def runtime_imperfection_preview_offsets(
+    generated_geometry: dict,
+    config: LightweightFEMConfig,
+    geometry: dict,
+) -> dict[int, tuple[float, float, float]]:
+    """Nodal offsets the standard runtime imperfection would apply, without solving.
+
+    Builds the backend FE model from the generated geometry and runs the exact
+    imperfection path used by the solver, then returns the coordinate deltas per
+    node so the mesh preview can display what the analysis will actually use.
+    """
+
+    if _full_backend is None or not hasattr(_full_backend, "apply_imperfection"):
+        return {}
+    if not bool(config.imperfection_enabled):
+        return {}
+    backend_config = _full_backend.AnyStructureFEMConfig(
+        pressure_pa=0.0,
+        load_scale=1.0,
+        num_buckling_modes=1,
+        add_inplane_edge_loads=False,
+        auto_idealize_member_plates_as_beams=not _member_webs_as_shells(config),
+        exclude_idealized_member_plates=not _member_webs_as_shells(config),
+        require_idealized_member_beams=False,
+        elastic_modulus=float(config.elastic_modulus_pa),
+        poisson_ratio=float(config.poisson_ratio),
+        yield_stress=float(config.yield_stress_pa),
+    )
+    try:
+        model = _full_backend.build_fe_model_from_generated_geometry(generated_geometry, backend_config)
+    except Exception:
+        return {}
+    original = {
+        int(node_id): np.asarray(node.coords(), dtype=float).copy()
+        for node_id, node in model.mesh.nodes.items()
+    }
+    metadata = _apply_runtime_imperfection(model, generated_geometry, geometry, config)
+    if metadata.get("status") != "applied":
+        return {}
+    offsets: dict[int, tuple[float, float, float]] = {}
+    for node_id, before in original.items():
+        node = model.mesh.get_node(node_id)
+        if node is None:
+            continue
+        delta = np.asarray(node.coords(), dtype=float) - before
+        if float(np.max(np.abs(delta))) > 1.0e-15:
+            offsets[node_id] = (float(delta[0]), float(delta[1]), float(delta[2]))
+    return offsets
 
 
 def _element_centroid(model, element_id: int) -> np.ndarray | None:
@@ -7262,12 +7453,60 @@ def _line_node_weights(nodes: list[object], axis: int, closed_length: float = 0.
     return weights
 
 
-def _apply_weighted_edge_load(load_case, weights: dict[int, float], force_per_length: np.ndarray) -> None:
+def _apply_weighted_edge_load(load_case, weights: dict[int, float], force_per_length: np.ndarray,
+                              moment_per_length: np.ndarray | None = None) -> None:
     if not weights:
         return
     vector = np.asarray(force_per_length, dtype=float)
+    moment = None if moment_per_length is None else np.asarray(moment_per_length, dtype=float)
     for node_id, weight in weights.items():
-        load_case.add_nodal_load(int(node_id), forces=vector * float(weight))
+        load_case.add_nodal_load(
+            int(node_id),
+            forces=vector * float(weight),
+            moments=None if moment is None else moment * float(weight),
+        )
+
+
+def _edge_load_components(payload: object) -> tuple[np.ndarray, np.ndarray] | None:
+    """Parse {fx..mz} per-length components into (forces, moments) on global axes.
+
+    Forces are N/m and moments Nm/m; returns None when the payload holds no
+    non-zero component so callers can fall back to the legacy scalar loads.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:
+        forces = np.array([float(payload.get(key, 0.0) or 0.0) for key in ("fx", "fy", "fz")], dtype=float)
+        moments = np.array([float(payload.get(key, 0.0) or 0.0) for key in ("mx", "my", "mz")], dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if not np.any(np.abs(forces) > 0.0) and not np.any(np.abs(moments) > 0.0):
+        return None
+    return forces, moments
+
+
+def _edge_load_component_specs(config: LightweightFEMConfig) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Whole-edge component loads keyed by edge (x0/x1/y0/y1, lower/upper, all)."""
+    try:
+        raw = json.loads(config.edge_load_components_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    specs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for edge_key, payload in raw.items():
+        components = _edge_load_components(payload)
+        if components is not None:
+            specs[str(edge_key).strip().lower()] = components
+    return specs
+
+
+def _selected_edge_load_config_components(config: LightweightFEMConfig) -> tuple[np.ndarray, np.ndarray] | None:
+    try:
+        payload = json.loads(config.custom_selected_edge_load_components_json or "null")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return _edge_load_components(payload)
 
 
 def _custom_pressure_patch_count(config: LightweightFEMConfig) -> int:
@@ -7372,33 +7611,46 @@ def _add_custom_selected_edge_loads(model, load_case, nodes: list, generated_geo
     if generated_geometry.get("plot_type") != "flat":
         return
     edge_entries = _custom_edge_load_entries(config)
+    load_groups: list[tuple[np.ndarray, np.ndarray | None, list[dict[str, float | str]]]] = []
     if edge_entries:
-        load_groups: list[tuple[float, list[dict[str, float | str]]]] = []
         for entry in edge_entries:
-            line_load = float(entry.get("line_load_n_per_m", 0.0) or 0.0)
-            if abs(line_load) <= 0.0:
-                continue
             raw_edges = entry.get("edges", [])
             if not isinstance(raw_edges, list):
                 continue
             edge_config = LightweightFEMConfig(custom_edge_segments_json=json.dumps(raw_edges))
-            load_groups.append((line_load, _custom_edge_segments(edge_config)))
+            segments = _custom_edge_segments(edge_config)
+            components = _edge_load_components(entry.get("components"))
+            if components is not None:
+                # fx..mz per unit length, entered on global axes.
+                load_groups.append((components[0], components[1], segments))
+                continue
+            line_load = float(entry.get("line_load_n_per_m", 0.0) or 0.0)
+            if abs(line_load) <= 0.0:
+                continue
+            # Legacy scalar: direction implied by the segment orientation.
+            load_groups.append((np.array([line_load]), None, segments))
     else:
-        line_load = float(config.custom_selected_edge_load_n_per_m or 0.0)
-        if abs(line_load) <= 0.0:
-            return
-        load_groups = [(line_load, _custom_edge_segments(config))]
+        components = _selected_edge_load_config_components(config)
+        if components is not None:
+            load_groups = [(components[0], components[1], _custom_edge_segments(config))]
+        else:
+            line_load = float(config.custom_selected_edge_load_n_per_m or 0.0)
+            if abs(line_load) <= 0.0:
+                return
+            load_groups = [(np.array([line_load]), None, _custom_edge_segments(config))]
 
-    for line_load, segments in load_groups:
+    for forces, moments, segments in load_groups:
         if not segments:
             continue
         for segment in segments:
             segment_nodes, weight_axis, direction = _flat_segment_nodes(nodes, segment, tol)
-            _apply_weighted_edge_load(
-                load_case,
-                _line_node_weights(segment_nodes, weight_axis),
-                direction * line_load,
-            )
+            weights = _line_node_weights(segment_nodes, weight_axis)
+            if moments is None:
+                # Legacy scalar entry: the single value acts along the implied
+                # in-plane direction normal to the segment.
+                _apply_weighted_edge_load(load_case, weights, direction * float(forces[0]))
+            else:
+                _apply_weighted_edge_load(load_case, weights, forces, moments)
 
 
 def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: LightweightFEMConfig) -> None:
@@ -7410,6 +7662,14 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
         return
     coords = np.asarray([node.coords() for node in nodes], dtype=float)
     tol = max(float(np.ptp(coords[:, 0]) + np.ptp(coords[:, 1]) + np.ptp(coords[:, 2])) * 1.0e-9, 1.0e-9)
+    component_specs = _edge_load_component_specs(config)
+
+    def _apply_component_specs(edge_key: str, weights: dict[int, float]) -> None:
+        for spec_key in ("all", edge_key):
+            spec = component_specs.get(spec_key)
+            if spec is not None:
+                _apply_weighted_edge_load(load_case, weights, spec[0], spec[1])
+
     if generated_geometry.get("plot_type") == "cylinder":
         lower_ids = set(int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", []))
         upper_ids = set(int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", []))
@@ -7417,8 +7677,12 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
         upper = [node for node in nodes if int(node.id) in upper_ids]
         radius = _positive(generated_geometry.get("radius_m", 0.0), 0.0)
         circumference = 2.0 * math.pi * radius if radius > 0.0 else 0.0
-        _apply_weighted_edge_load(load_case, _line_node_weights(lower, 0, circumference), np.array([0.0, 0.0, -float(config.cylinder_lower_edge_load_n_per_m)]))
-        _apply_weighted_edge_load(load_case, _line_node_weights(upper, 0, circumference), np.array([0.0, 0.0, float(config.cylinder_upper_edge_load_n_per_m)]))
+        lower_weights = _line_node_weights(lower, 0, circumference)
+        upper_weights = _line_node_weights(upper, 0, circumference)
+        _apply_weighted_edge_load(load_case, lower_weights, np.array([0.0, 0.0, -float(config.cylinder_lower_edge_load_n_per_m)]))
+        _apply_weighted_edge_load(load_case, upper_weights, np.array([0.0, 0.0, float(config.cylinder_upper_edge_load_n_per_m)]))
+        _apply_component_specs("lower", lower_weights)
+        _apply_component_specs("upper", upper_weights)
         return
     xmin = float(np.min(coords[:, 0]))
     xmax = float(np.max(coords[:, 0]))
@@ -7428,10 +7692,18 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
     x1_nodes = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
     y0_nodes = [node for node in nodes if abs(float(node.y) - ymin) <= tol]
     y1_nodes = [node for node in nodes if abs(float(node.y) - ymax) <= tol]
-    _apply_weighted_edge_load(load_case, _line_node_weights(x0_nodes, 1), np.array([-float(config.plate_edge_x0_load_n_per_m), 0.0, 0.0]))
-    _apply_weighted_edge_load(load_case, _line_node_weights(x1_nodes, 1), np.array([float(config.plate_edge_x1_load_n_per_m), 0.0, 0.0]))
-    _apply_weighted_edge_load(load_case, _line_node_weights(y0_nodes, 0), np.array([0.0, -float(config.plate_edge_y0_load_n_per_m), 0.0]))
-    _apply_weighted_edge_load(load_case, _line_node_weights(y1_nodes, 0), np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
+    x0_weights = _line_node_weights(x0_nodes, 1)
+    x1_weights = _line_node_weights(x1_nodes, 1)
+    y0_weights = _line_node_weights(y0_nodes, 0)
+    y1_weights = _line_node_weights(y1_nodes, 0)
+    _apply_weighted_edge_load(load_case, x0_weights, np.array([-float(config.plate_edge_x0_load_n_per_m), 0.0, 0.0]))
+    _apply_weighted_edge_load(load_case, x1_weights, np.array([float(config.plate_edge_x1_load_n_per_m), 0.0, 0.0]))
+    _apply_weighted_edge_load(load_case, y0_weights, np.array([0.0, -float(config.plate_edge_y0_load_n_per_m), 0.0]))
+    _apply_weighted_edge_load(load_case, y1_weights, np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
+    _apply_component_specs("x0", x0_weights)
+    _apply_component_specs("x1", x1_weights)
+    _apply_component_specs("y0", y0_weights)
+    _apply_component_specs("y1", y1_weights)
     _add_custom_selected_edge_loads(model, load_case, nodes, generated_geometry, config, tol)
 
 
@@ -7676,21 +7948,63 @@ def _nonlinear_shell_stresses_from_states(model, element_states: dict[int, objec
     return recovered
 
 
-def _runtime_display_stresses(model, displacements: np.ndarray, nonlinear_static_result: object | None) -> dict[int, object]:
+def _nonlinear_beam_stresses_from_states(model, element_states: dict[int, object] | None) -> dict[int, dict[str, float]]:
+    """Recover display stresses from committed beam fiber-section states.
+
+    Beam members run uniaxial fiber-section plasticity in material-nonlinear
+    solves (``cross_section['fiber_plasticity']``); the committed fiber
+    stresses are return-mapped and therefore respect the material curve,
+    unlike an elastic recovery from total displacements.
+    """
+
+    recovered: dict[int, dict[str, float]] = {}
+    if not element_states:
+        return recovered
+    for element_id, state in element_states.items():
+        if not isinstance(state, dict):
+            continue
+        fiber_stress = np.asarray(state.get("fiber_stress", ()), dtype=float).reshape(-1)
+        if fiber_stress.size == 0 or not np.all(np.isfinite(fiber_stress)):
+            continue
+        element = model.mesh.get_element(int(element_id))
+        if element is None or element.__class__.__name__ not in {"BeamElement", "QuadraticBeamElement"}:
+            continue
+        peak = float(np.max(np.abs(fiber_stress)))
+        axial = float(np.mean(fiber_stress))
+        recovered[int(element_id)] = {
+            "von_mises": peak,
+            "axial_stress": axial,
+            # Envelope split: the amount the extreme fiber exceeds the mean
+            # axial stress is the bending contribution.
+            "bending_stress_y": max(peak - abs(axial), 0.0),
+            "bending_stress_z": 0.0,
+            "shear_stress_y": 0.0,
+            "shear_stress_z": 0.0,
+            "torsional_stress": 0.0,
+        }
+    return recovered
+
+
+def _runtime_display_stresses(
+    model,
+    displacements: np.ndarray,
+    nonlinear_static_result: object | None,
+) -> tuple[dict[int, object], set[int]]:
+    """Return display stresses and the ids of plastic (state-based) elements."""
     elastic_stresses = (
         _backend_compute_stresses(model, displacements)
         if _backend_compute_stresses is not None
         else {}
     )
-    nonlinear_shell_stresses = _nonlinear_shell_stresses_from_states(
-        model,
-        getattr(nonlinear_static_result, "element_states", None),
-    )
-    if not nonlinear_shell_stresses:
-        return elastic_stresses
+    element_states = getattr(nonlinear_static_result, "element_states", None)
+    nonlinear_shell_stresses = _nonlinear_shell_stresses_from_states(model, element_states)
+    nonlinear_beam_stresses = _nonlinear_beam_stresses_from_states(model, element_states)
+    if not nonlinear_shell_stresses and not nonlinear_beam_stresses:
+        return elastic_stresses, set()
     merged = dict(elastic_stresses)
     merged.update(nonlinear_shell_stresses)
-    return merged
+    merged.update(nonlinear_beam_stresses)
+    return merged, set(nonlinear_shell_stresses) | set(nonlinear_beam_stresses)
 
 
 def _max_translation(model, displacements: np.ndarray) -> float:
@@ -7754,13 +8068,18 @@ def apply_mode_shape_imperfections(generated_geometry: dict, config: Lightweight
     if not mode_factors or _full_backend is None:
         return generated_geometry
 
-    max_mode = max(item["mode"] for item in mode_factors)
+    max_mode = max(int(item["mode"]) for item in mode_factors)
     temp_config = dataclasses.replace(config, num_buckling_modes=max(int(config.num_buckling_modes), max_mode))
-    
+
     result = run_production_fem(geometry, temp_config, precomputed_generated_geometry=generated_geometry)
-    
+
     if not result.buckling_modes:
-        raise RuntimeError("Buckling analysis failed to extract mode shapes. Check boundary conditions and loads.")
+        raise RuntimeError(
+            "The buckling analysis returned no mode shapes for this load state. "
+            "Linear buckling needs membrane compression from the applied loads "
+            "(axial force, in-plane stresses or pressure); check the run "
+            "diagnostics for the buckling solver status."
+        )
 
     perturbed_geometry = copy.deepcopy(generated_geometry)
     
@@ -7962,7 +8281,22 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if (not config.custom_load_bc_enabled) and geometry.get("geometry") != "cylinder":
-        diagnostics.append("Applied flat-panel edge supports from line properties, defaulting to simply supported edges when unspecified.")
+        _support_boundary_map = _boundary_constraint_map(config)
+        if _support_boundary_map:
+            diagnostics.append(
+                "Applied per-edge DOF constraints from the Boundary Conditions tab ("
+                + str(len(_support_boundary_map)) + " edge spec(s)); automatic edge supports are bypassed."
+            )
+        elif bool(getattr(config, "boundary_auto_supports", True)):
+            diagnostics.append(
+                "Auto-set: no edge DOF is constrained, so automatic well-posed edge supports were applied "
+                "(from line properties, defaulting to simply supported edges when unspecified)."
+            )
+        else:
+            diagnostics.append(
+                "No edge constraints and automatic supports are off: the boundary is free "
+                "(nullspace projection or balanced loads must carry the rigid-body modes)."
+            )
     if include_imported_loads and config.top_bottom_moment_nm:
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
     if include_imported_loads and abs(float(config.axial_force_n or 0.0)) > 0.0:
@@ -7976,6 +8310,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     elif _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
         diagnostics.append(f"Generated {elem_type} shell elements with shared midside nodes.")
+    if bool(geometry.get("members_opposite_side")):
+        diagnostics.append(
+            "Members are placed on the opposite side (main-application 'Opposite side' setting): "
+            "flat-panel members extrude to negative z, cylinder members outward."
+        )
     if _member_webs_as_shells(config):
         if _member_flanges_as_shells(config):
             diagnostics.append("Member modelling: plate, web and flange parts are generated as shell elements.")
@@ -8017,6 +8356,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             + str(material_properties.get("thickness_class", ""))
             + " for nonlinear static shell plasticity."
         )
+    diagnostics.extend(_auto_set_parameter_notes(config))
     if config.imperfection_enabled:
         diagnostics.append("Geometric imperfection input is enabled; offsets are applied as stress-free reference geometry.")
     if _custom_pressure_uses_selected_patches(config):
@@ -8024,8 +8364,13 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     if (
             (_custom_edge_load_entries(config) and _custom_edge_segments(config))
             or (abs(float(config.custom_selected_edge_load_n_per_m or 0.0)) > 0.0 and _custom_edge_segments(config))
+            or (_selected_edge_load_config_components(config) is not None and _custom_edge_segments(config))
     ):
         diagnostics.append("Custom selected edge segments receive an additional line load.")
+    if config.custom_load_bc_enabled and _edge_load_component_specs(config):
+        diagnostics.append(
+            "Whole-edge component loads (fx/fy/fz in N/m, mx/my/mz in Nm/m on global axes) are applied to the named edges."
+        )
     if config.custom_time_domain_enabled:
         diagnostics.append("Custom time-domain pressure response is enabled and solved with the linear Newmark pressure-patch solver.")
     if _invalid_corotational_static_fracture(config):
@@ -8512,8 +8857,34 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         prestress_summary["buckling_max_load_factor"] = 0.0 if load_factor_range[1] is None else float(load_factor_range[1])
     prestress_summary["buckling_allow_dense_fallback"] = 1.0 if bool(config.buckling_allow_dense_fallback) else 0.0
     stress_percentile = min(max(float(config.stress_percentile), 0.0), 100.0)
-    runtime_stresses_by_element = _runtime_display_stresses(analysis_model, displacements, nonlinear_static_result)
-    stress_stats = _stress_statistics_from_stresses(runtime_stresses_by_element, stress_percentile)
+    runtime_stresses_by_element, plastic_element_ids = _runtime_display_stresses(
+        analysis_model, displacements, nonlinear_static_result
+    )
+    if plastic_element_ids:
+        # Committed elastoplastic states (shell layers and beam fiber
+        # sections) respect the material curve; any remaining elements only
+        # have elastic recovery and must not dominate the reported stresses.
+        stress_stats = _stress_statistics_from_stresses(
+            {eid: s for eid, s in runtime_stresses_by_element.items() if eid in plastic_element_ids},
+            stress_percentile,
+        )
+        elastic_member_stats = _stress_statistics_from_stresses(
+            {eid: s for eid, s in runtime_stresses_by_element.items() if eid not in plastic_element_ids},
+            stress_percentile,
+        )
+        prestress_summary["elastic_member_peak_von_mises_pa"] = float(elastic_member_stats["max"])
+        diagnostics.append(
+            "Material-nonlinear stresses are recovered from the committed elastoplastic states "
+            "(shell layers and beam fiber sections) and respect the material curve."
+        )
+        if elastic_member_stats["max"] > 0.0:
+            diagnostics.append(
+                "Some members carry only elastic stress recovery; their peak von Mises "
+                f"{elastic_member_stats['max'] / 1.0e6:.0f} MPa is a fictitious elastic value "
+                "and is reported separately from the statistics."
+            )
+    else:
+        stress_stats = _stress_statistics_from_stresses(runtime_stresses_by_element, stress_percentile)
     visualization = _visualization_from_full_result(
         generated_geometry,
         analysis_model,
@@ -8552,6 +8923,9 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
         stress_p95_pa=float(stress_stats["percentile"]),
         displacement_max_m=_max_translation(analysis_model, displacements),
         buckling_factors=buckling_factors,
+        # Raw eigenmode objects (mode_number/load_factor/mode_shape) so the
+        # mode-shape imperfection workflow can perturb the mesh.
+        buckling_modes=list(getattr(buckling_result, "modes", []) or []),
         diagnostics=tuple(diagnostics),
         mesh_info={
             "nodes": int(model.mesh.num_nodes),

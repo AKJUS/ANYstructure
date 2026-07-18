@@ -458,6 +458,7 @@ def _positions_from_length_and_spacing(length: float, spacing: float, include_en
         spacing,
         fallback_midpoint=True,
         max_count=max_count,
+        include_ends=include_ends,
     ))
 
 
@@ -492,13 +493,18 @@ def _ring_positions_without_heavy_frame_overlap(
 
 
 def _support_positions_from_length_and_span(length: float, span: float, max_count: int = 80) -> list[float]:
-    """Return centered girder/support stations while preserving the bay span."""
+    """Return centered girder/support stations while preserving the bay span.
+
+    When the total length is an exact multiple of the span, the girders bound
+    the bays and sit on the panel edges.
+    """
 
     return list(representation_geometry.centered_member_positions(
         length,
         span,
         fallback_midpoint=False,
         max_count=max_count,
+        include_ends=True,
     ))
 
 
@@ -2550,6 +2556,7 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
                     spacing,
                     fallback_midpoint=True,
                     max_count=72,
+                    include_ends=True,
                 )
             ]
         else:
@@ -2575,7 +2582,7 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
             except Exception:
                 frame_spacing = 0.0
         frame_positions = [length / 2.0] if frame_spacing <= EPS else _positions_from_length_and_spacing(
-            length, frame_spacing, include_ends=False, max_count=40
+            length, frame_spacing, include_ends=True, max_count=40
         )
 
     if getattr(cyl_obj, "RingStfObj", None) is not None:
@@ -2589,7 +2596,7 @@ def _add_cylinder_structure(ctx: IfcContext, app: Any, cyl_obj: Any, active_line
                 ring_spacing = _normalise_length_to_m(app._new_shell_dist_rings.get(), 0.0)
             except Exception:
                 ring_spacing = 0.0
-        ring_positions = _positions_from_length_and_spacing(length, ring_spacing, include_ends=False, max_count=80)
+        ring_positions = _positions_from_length_and_spacing(length, ring_spacing, include_ends=True, max_count=80)
         ring_positions = _ring_positions_without_heavy_frame_overlap(
             ring_positions,
             frame_positions,

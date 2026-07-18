@@ -74,6 +74,19 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 as tkinter_3d_canvas
 
 
+def _round_calculated(value, decimals: int = 3):
+    """Round a value the app calculated before showing it in an input field.
+
+    Conversions (stress <-> force, unit changes) produce long float tails that
+    clutter the entries.  Only calculated values pass through here -- text the
+    user types is never rounded, so higher manual precision is always allowed.
+    """
+    try:
+        return round(float(value), decimals)
+    except (TypeError, ValueError):
+        return value
+
+
 @dataclass(frozen=True)
 class NewStructureProperties:
     """Resolved structure data needed to add or update one active line."""
@@ -380,6 +393,7 @@ class Application():
         self._prop_3d_frame = None
         self._prop_3d_toolbar = None
         self._prop_3d_axes = None
+        self._prop_3d_tk3d_canvas = None
         self._prop_3d_export_mesh = None
         self._prop_3d_shell_export_mesh = None
         self._prop_3d_default_view = (22, -55)
@@ -1191,7 +1205,7 @@ class Application():
         self._information_gui_lab_chk_structure = [
             ttk.Label(self._tab_information, text='Label color code', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Show COG/COB', font=self._text_size["Text 9"]),
-            ttk.Label(self._tab_information, text='Check to see avaliable shortcuts', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Check to see available shortcuts', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Beam prop.', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Plate thk.', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Pressure', font=self._text_size["Text 9"]),
@@ -1488,10 +1502,10 @@ class Application():
         self._lab_shell_en_cap_pressure = ttk.Label(self._tab_prop, text='End cap pressure is',
                                                     font=self._text_size['Text 8'],
                                                     )
-        self._lab_shell_fab_stf = ttk.Label(self._tab_prop, text='Fabrictaion method ring stiffener.:',
+        self._lab_shell_fab_stf = ttk.Label(self._tab_prop, text='Fabrication method ring stiffener:',
                                             font=self._text_size['Text 8'],
                                             )
-        self._lab_shell_fab_frame = ttk.Label(self._tab_prop, text='Fabrictaion method ring gird.:',
+        self._lab_shell_fab_frame = ttk.Label(self._tab_prop, text='Fabrication method ring girder:',
                                               font=self._text_size['Text 8'],
                                               )
 
@@ -3516,23 +3530,23 @@ class Application():
                                   self._new_shell_Qsd.get(), self._new_shell_Q2sd.get()]
                         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
                             stresses=None, forces=forces, **conical_converter_kwargs)
-                        self._new_shell_sasd.set(sasd)
-                        self._new_shell_smsd.set(smsd)
-                        self._new_shell_tTsd.set(abs(tTsd))
-                        self._new_shell_tQsd.set(tQsd)
-                        self._new_shell_shsd.set(shsd)
+                        self._new_shell_sasd.set(_round_calculated(sasd))
+                        self._new_shell_smsd.set(_round_calculated(smsd))
+                        self._new_shell_tTsd.set(_round_calculated(abs(tTsd)))
+                        self._new_shell_tQsd.set(_round_calculated(tQsd))
+                        self._new_shell_shsd.set(_round_calculated(shsd))
                     else:
                         stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(),
                                     abs(self._new_shell_tTsd.get()), self._new_shell_tQsd.get(),
                                     self._new_shell_shsd.get()]
                         Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = hlp.helper_cylinder_stress_to_force_to_stress(
                             stresses=stresses, **conical_converter_kwargs)[:6]
-                        self._new_shell_Nsd.set(Nsd)
-                        self._new_shell_Msd.set(M1sd)
-                        self._new_shell_M2sd.set(M2sd)
-                        self._new_shell_Tsd.set(Tsd)
-                        self._new_shell_Qsd.set(Q1sd)
-                        self._new_shell_Q2sd.set(Q2sd)
+                        self._new_shell_Nsd.set(_round_calculated(Nsd))
+                        self._new_shell_Msd.set(_round_calculated(M1sd))
+                        self._new_shell_M2sd.set(_round_calculated(M2sd))
+                        self._new_shell_Tsd.set(_round_calculated(Tsd))
+                        self._new_shell_Qsd.set(_round_calculated(Q1sd))
+                        self._new_shell_Q2sd.set(_round_calculated(Q2sd))
                 elif self._new_shell_stress_or_force.get() == 1:
                     forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(), \
                               self._new_shell_Tsd.get(), self._new_shell_Qsd.get()]
@@ -3541,10 +3555,10 @@ class Application():
                         shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
                         hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
                         tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
-                    self._new_shell_sasd.set(sasd)
-                    self._new_shell_smsd.set(smsd)
-                    self._new_shell_tTsd.set(abs(tTsd))
-                    self._new_shell_tQsd.set(tQsd)
+                    self._new_shell_sasd.set(_round_calculated(sasd))
+                    self._new_shell_smsd.set(_round_calculated(smsd))
+                    self._new_shell_tTsd.set(_round_calculated(abs(tTsd)))
+                    self._new_shell_tQsd.set(_round_calculated(tQsd))
                     # self._new_shell_shsd.set(0)
                 else:
                     stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(), abs(self._new_shell_tTsd.get()),
@@ -3555,10 +3569,10 @@ class Application():
                         shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
                         hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
                         tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
-                    self._new_shell_Nsd.set(Nsd)
-                    self._new_shell_Msd.set(Msd)
-                    self._new_shell_Tsd.set(Tsd)
-                    self._new_shell_Qsd.set(Qsd)
+                    self._new_shell_Nsd.set(_round_calculated(Nsd))
+                    self._new_shell_Msd.set(_round_calculated(Msd))
+                    self._new_shell_Tsd.set(_round_calculated(Tsd))
+                    self._new_shell_Qsd.set(_round_calculated(Qsd))
 
         self._current_calculation_domain = self._new_calculation_domain.get()
         self._sync_simplified_domain_selection()
@@ -3589,14 +3603,14 @@ class Application():
         elif info_type == 'flat':
             long_text = 'Information on stresses:\n' \
                         ' \n' \
-                        'Uniform or linear variable stresses is assumed.\n' \
-                        'The stresses included in the check is acial memebrane stresses.\n' \
+                        'Uniform or linearly varying stresses are assumed.\n' \
+                        'The stresses included in the check are axial membrane stresses.\n' \
                         'Shear stresses are set to positive.\n' \
-                        'Bending stresses are included included by lateral pressure and need not be included.\n' \
+                        'Bending stresses from lateral pressure are accounted for internally and need not be included.\n' \
                         'Compression stress is taken as POSITIVE.\n' \
-                        'The memebrane acial stress in transverse direction that is due to girder bending\n' \
+                        'The membrane axial stress in the transverse direction that is due to girder bending\n' \
                         'needs to be included in the check according to method 1.\n' \
-                        'Lateral pressure outer overpressure is taken as positive.\n' \
+                        'Lateral outer overpressure is taken as positive.\n' \
                         '   \n'
         else:
             long_text = 'Also see the "Help tab".'
@@ -8365,6 +8379,7 @@ class Application():
         self._prop_3d_frame = None
         self._prop_3d_toolbar = None
         self._prop_3d_axes = None
+        self._prop_3d_tk3d_canvas = None
         self._prop_3d_default_view = (22, -55)
         self._fea_tk3d_canvas = None
         self._fea_tk3d_panel_records = {}
@@ -8443,6 +8458,298 @@ class Application():
             except Exception:
                 pass
         self._prop_3d_resize_after_id = self._parent.after(80, self._resize_prop_3d_figure)
+
+    def _embed_prop_3d(self, fig, ax, default_view=(22, -55)):
+        """Embed the 3D property preview; pure-Tk 3D by default, Matplotlib fallback."""
+        try:
+            self._embed_prop_3d_tk3d(ax, default_view=default_view)
+        except Exception:
+            self.clear_prop_3d()
+            self._embed_prop_3d_figure(fig, ax, default_view=default_view)
+
+    @staticmethod
+    def _prop_3d_face_fill(color, alpha):
+        """Tk fill colour + stipple for one recorded preview face."""
+        try:
+            fill = matplotlib.colors.to_hex(color if color else 'lightgrey')
+        except Exception:
+            fill = '#d1d5db'
+        alpha = float(alpha if alpha is not None else 1.0)
+        if alpha >= 0.94:
+            stipple = ''
+        elif alpha >= 0.6:
+            stipple = 'gray75'
+        elif alpha >= 0.4:
+            stipple = 'gray50'
+        else:
+            stipple = 'gray25'
+        return fill, stipple
+
+    def _embed_prop_3d_tk3d(self, ax, default_view=(22, -55)):
+        """Embed the property preview on the pure-Tk 3D canvas.
+
+        Draws the same solids that are recorded for IFC export and preserves
+        the Matplotlib text: title, axis names and the SELECTED line, with the
+        measured axis ruler providing the dimensions.
+        """
+        mesh = getattr(ax, '_anystruct_export_mesh', None)
+        if not mesh or not mesh.get('faces'):
+            raise ValueError('no recorded 3D preview mesh')
+
+        self._prop_3d_axes = None
+        self._prop_3d_export_mesh = mesh
+        self._prop_3d_shell_export_mesh = getattr(ax, '_anystruct_shell_export_mesh', None)
+        self._prop_3d_default_view = default_view
+
+        try:
+            self._prop_canvas.delete('all')
+        except Exception:
+            pass
+
+        place = self._get_prop_3d_bottom_place()
+        background = self._style.lookup('TFrame', 'background')
+        self._prop_3d_frame = tk.Frame(self._main_fr, background=background, bd=0, highlightthickness=0)
+        self._prop_3d_frame.place(**place)
+        tk.Misc.lift(self._prop_3d_frame)
+
+        toolbar_row = tk.Frame(self._prop_3d_frame, background=background, bd=0, highlightthickness=0)
+        toolbar_row.pack(side=tk.TOP, fill=tk.X)
+
+        header = tk.Frame(toolbar_row, background=background, bd=0, highlightthickness=0)
+        header.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(header, text='SELECTED: ' + str(self._active_line), foreground='red',
+                  font=self._text_size['Text 8 bold']).pack(side=tk.LEFT, padx=(4, 10))
+        title_text = str(ax.get_title() or '3D preview')
+        ttk.Label(header, text=title_text, font=self._text_size['Text 8 bold']).pack(side=tk.LEFT, padx=(0, 10))
+        axis_names = ' | '.join(part for part in (
+            f'x: {ax.get_xlabel()}' if ax.get_xlabel() else '',
+            f'y: {ax.get_ylabel()}' if ax.get_ylabel() else '',
+            f'z: {ax.get_zlabel()}' if ax.get_zlabel() else '',
+        ) if part)
+        if axis_names:
+            ttk.Label(header, text=axis_names, font=self._text_size['Text 8']).pack(side=tk.LEFT)
+
+        tk3d = tkinter_3d_canvas.Tkinter3DCanvas(self._prop_3d_frame, bg='white')
+        self._prop_3d_tk3d_canvas = tk3d
+        self._prop_3d_canvas_widget = tk3d.canvas
+
+        view_row = tk.Frame(toolbar_row, background=background, bd=0, highlightthickness=0)
+        view_row.pack(side=tk.RIGHT)
+        ttk.Button(view_row, text='Iso', width=4, command=tk3d.set_iso_view).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Top', width=4, command=tk3d.set_top_view).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Side', width=5, command=tk3d.set_side_view).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='End', width=4, command=tk3d.set_front_view).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Fit', width=4,
+                   command=lambda: tk3d.fit_to_scene(padding=1.18)).pack(side=tk.LEFT)
+        ttk.Checkbutton(view_row, text='Opposite side', variable=self._new_prop_3d_opposite_side,
+                        command=self.update_frame).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(view_row, text='Solid export', width=10,
+                   command=self.export_prop_3d_ifc_model).pack(side=tk.LEFT)
+        ttk.Button(view_row, text='Shell export', width=11,
+                   command=self.export_prop_3d_ifc_shell_model).pack(side=tk.LEFT)
+
+        tk3d.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        tk3d.set_axis_ruler(True)
+        tk3d.set_mesh_lines(True)
+
+        items = list(getattr(ax, '_anystruct_tk3d_items', ()) or ())
+        original_request_redraw = tk3d._request_redraw
+        tk3d._request_redraw = lambda: None
+        try:
+            if items:
+                self._populate_prop_3d_tk3d_native(tk3d, items)
+            else:
+                self._populate_prop_3d_tk3d_faces(tk3d, mesh)
+        finally:
+            tk3d._request_redraw = original_request_redraw
+        tk3d._invalidate_geometry_cache()
+        tk3d.set_iso_view()
+        tk3d.after_idle(lambda: tk3d.fit_to_scene(padding=1.18))
+
+    def _populate_prop_3d_tk3d_native(self, tk3d, items):
+        """Draw the preview with the canvas's native primitives.
+
+        Follows the stiffened cylinder/plate examples in
+        ``tkinter_3d_canvas_thickness_v6``: the plating is coloured by plate
+        thickness with a thickness legend, and cylinder members are coloured by
+        their own web/flange thicknesses through the same legend.
+        """
+        thickness_mm_values = sorted({
+            round(float(value) * 1000.0, 2)
+            for item in items
+            for value in (
+                item.get('thickness_m'),
+                item.get('web_thickness_m'),
+                item.get('flange_thickness_m'),
+            )
+            if value is not None and float(value) > 0.0
+        })
+        if thickness_mm_values:
+            tk3d.set_thickness_legend(thickness_mm_values, unit='mm', title='Thickness')
+
+        def thickness_fill(value_m, fallback):
+            value_mm = float(value_m or 0.0) * 1000.0
+            if thickness_mm_values and value_mm > 0.0:
+                return tk3d.thickness_color(value_mm)
+            return fallback
+
+        for item in items:
+            kind = item.get('kind')
+            if kind == 'flat_plate':
+                tk3d.add_rectangular_plate(
+                    x_start=float(item['x0']), x_end=float(item['x1']),
+                    y_start=float(item['y0']), y_end=float(item['y1']),
+                    z=0.0,
+                    color=thickness_fill(item.get('thickness_m'), '#d8e2ea'),
+                    outline='#708090',
+                )
+            elif kind == 'flat_member':
+                fill = thickness_fill(
+                    item.get('web_thickness_m'),
+                    '#a0a0ff' if item.get('orientation') == 'x' else '#ffa0a0',
+                )
+                outline = '#404080' if item.get('orientation') == 'x' else '#804040'
+                if item.get('orientation') == 'x':
+                    tk3d.add_flat_stiffener(
+                        x_start=float(item['start']), x_end=float(item['end']),
+                        y=float(item['station']), z_base=float(item['z_base']),
+                        hw=float(item['hw']), b=float(item['flange_w']),
+                        color=fill, outline=outline,
+                    )
+                else:
+                    tk3d.add_flat_girder(
+                        x=float(item['station']),
+                        y_start=float(item['start']), y_end=float(item['end']),
+                        z_base=float(item['z_base']),
+                        ghw=float(item['hw']), gb=float(item['flange_w']),
+                        color=fill, outline=outline,
+                    )
+            elif kind == 'cylinder_shell':
+                length = float(item['length'])
+                if item.get('is_panel'):
+                    self._add_prop_3d_tk3d_sector_shell(
+                        tk3d, item, thickness_fill(item.get('thickness_m'), '#d8e2ea'))
+                else:
+                    tk3d.add_cylinder(
+                        radius=float(item['radius']),
+                        radius_top=None if item.get('radius_top') is None else float(item['radius_top']),
+                        height=length,
+                        center=tkinter_3d_canvas.Point3D(0.0, 0.0, 0.5 * length),
+                        color='#d8e2ea',
+                        outline='#708090',
+                        segments=48,
+                        height_segments=24,
+                        capped=False,
+                        opacity=0.38,
+                        show_backfaces=True,
+                        plate_thickness=[float(item.get('thickness_m') or 0.0) * 1000.0],
+                        thickness_unit='mm',
+                        show_thickness_legend=False,
+                    )
+            elif kind == 'cylinder_long':
+                length = float(item['length'])
+                tk3d.add_longitudinal_stiffener(
+                    radius=float(item['radius']),
+                    height=length,
+                    angle=float(item['angle']),
+                    web_height=float(item['web_h']),
+                    web_thickness=float(item.get('web_thickness_m') or 0.01),
+                    flange_width=float(item.get('flange_w') or 0.0),
+                    flange_thickness=float(item.get('flange_thickness_m') or 0.0),
+                    color='#a0a0ff',
+                    outline='#404080',
+                    segments=4,
+                    height_segments=16,
+                    inside=float(item.get('side_sign', 1.0)) < 0.0,
+                    z_offset=0.5 * length,
+                )
+            elif kind == 'cylinder_ring':
+                if item.get('is_panel'):
+                    self._add_prop_3d_tk3d_sector_ring(tk3d, item, thickness_fill(
+                        item.get('web_thickness_m'),
+                        '#d62728' if item.get('is_frame') else '#ffa0a0'))
+                else:
+                    tk3d.add_ring_stiffener(
+                        radius=float(item['radius']),
+                        z_position=float(item['z']),
+                        web_height=float(item['web_h']),
+                        web_thickness=float(item.get('web_thickness_m') or 0.01),
+                        flange_width=float(item.get('flange_w') or 0.0),
+                        flange_thickness=float(item.get('flange_thickness_m') or 0.0),
+                        color='#d62728' if item.get('is_frame') else '#ffa0a0',
+                        outline='#804040',
+                        segments=48,
+                        inside=float(item.get('side_sign', 1.0)) < 0.0,
+                    )
+
+    @staticmethod
+    def _add_prop_3d_tk3d_sector_shell(tk3d, item, fill, segments=30, height_segments=12):
+        """Curved-panel (sector) shell drawn as thickness-coloured quads."""
+        radius = float(item['radius'])
+        radius_top = float(item['radius_top']) if item.get('radius_top') is not None else radius
+        length = float(item['length'])
+        theta_start = float(item['theta_start'])
+        theta_end = float(item['theta_end'])
+        for j in range(height_segments):
+            z0 = length * j / height_segments
+            z1 = length * (j + 1) / height_segments
+            r0 = radius + (radius_top - radius) * (z0 / length if length > 0 else 0.0)
+            r1 = radius + (radius_top - radius) * (z1 / length if length > 0 else 0.0)
+            for i in range(segments):
+                a0 = theta_start + (theta_end - theta_start) * i / segments
+                a1 = theta_start + (theta_end - theta_start) * (i + 1) / segments
+                tk3d.add_polygon(
+                    [
+                        tkinter_3d_canvas.Point3D(r0 * math.cos(a0), r0 * math.sin(a0), z0),
+                        tkinter_3d_canvas.Point3D(r0 * math.cos(a1), r0 * math.sin(a1), z0),
+                        tkinter_3d_canvas.Point3D(r1 * math.cos(a1), r1 * math.sin(a1), z1),
+                        tkinter_3d_canvas.Point3D(r1 * math.cos(a0), r1 * math.sin(a0), z1),
+                    ],
+                    color=fill,
+                    outline='#708090',
+                    stipple='gray50',
+                    layer=5,
+                )
+
+    @staticmethod
+    def _add_prop_3d_tk3d_sector_ring(tk3d, item, fill, segments=30):
+        """Curved-panel (sector) ring web drawn as an annular quad strip."""
+        radius = float(item['radius'])
+        z_position = float(item['z'])
+        side_sign = float(item.get('side_sign', 1.0))
+        tip_radius = radius + side_sign * float(item['web_h'])
+        theta_start = float(item['theta_start'])
+        theta_end = float(item['theta_end'])
+        for i in range(segments):
+            a0 = theta_start + (theta_end - theta_start) * i / segments
+            a1 = theta_start + (theta_end - theta_start) * (i + 1) / segments
+            tk3d.add_polygon(
+                [
+                    tkinter_3d_canvas.Point3D(radius * math.cos(a0), radius * math.sin(a0), z_position),
+                    tkinter_3d_canvas.Point3D(radius * math.cos(a1), radius * math.sin(a1), z_position),
+                    tkinter_3d_canvas.Point3D(tip_radius * math.cos(a1), tip_radius * math.sin(a1), z_position),
+                    tkinter_3d_canvas.Point3D(tip_radius * math.cos(a0), tip_radius * math.sin(a0), z_position),
+                ],
+                color=fill,
+                outline='#804040',
+                layer=12,
+            )
+
+    def _populate_prop_3d_tk3d_faces(self, tk3d, mesh):
+        """Fallback: draw the recorded export-mesh faces directly."""
+        vertices = mesh.get('vertices', [])
+        face_colors = mesh.get('face_colors', [])
+        for index, face in enumerate(mesh.get('faces', [])):
+            points = [
+                tkinter_3d_canvas.Point3D(*vertices[vertex_index - 1])
+                for vertex_index in face
+                if 0 < vertex_index <= len(vertices)
+            ]
+            if len(points) < 3:
+                continue
+            color, alpha = face_colors[index] if index < len(face_colors) else (None, 1.0)
+            fill, stipple = self._prop_3d_face_fill(color, alpha)
+            tk3d.add_polygon(points, color=fill, outline='#4b5563', width=1, stipple=stipple)
 
     def _embed_prop_3d_figure(self, fig, ax, default_view=(22, -55)):
         """Embed a Matplotlib 3D figure with navigation tools.
@@ -9039,7 +9346,16 @@ class Application():
             export_mesh['max_edge_length'] = candidate if current in [None, 0] else min(float(current), candidate)
 
     @staticmethod
-    def _append_faces_to_prop_3d_export_mesh(ax, face_vertices, shell_model=False):
+    def _record_prop_3d_tk3d_item(ax, **item):
+        """Record one native Tk-3D primitive for the property preview replay."""
+        items = getattr(ax, '_anystruct_tk3d_items', None)
+        if items is None:
+            items = []
+            ax._anystruct_tk3d_items = items
+        items.append(item)
+
+    @staticmethod
+    def _append_faces_to_prop_3d_export_mesh(ax, face_vertices, shell_model=False, color=None, alpha=1.0):
         mesh = getattr(ax, '_anystruct_shell_export_mesh' if shell_model else '_anystruct_export_mesh', None)
         if mesh is None:
             return
@@ -9047,9 +9363,11 @@ class Application():
             start_index = len(mesh['vertices']) + 1
             mesh['vertices'].extend([(float(x), float(y), float(z)) for x, y, z in face])
             mesh['faces'].append(list(range(start_index, start_index + len(face))))
+            mesh.setdefault('face_colors', []).append((color, float(alpha)))
 
     @staticmethod
-    def _append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=False):
+    def _append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=False,
+                                                    color=None, alpha=1.0):
         mesh = getattr(ax, '_anystruct_shell_export_mesh' if shell_model else '_anystruct_export_mesh', None)
         if mesh is None:
             return
@@ -9070,6 +9388,7 @@ class Application():
                 start_index = len(mesh['vertices']) + 1
                 mesh['vertices'].extend([(float(x), float(y), float(z)) for x, y, z in face])
                 mesh['faces'].append(list(range(start_index, start_index + 4)))
+                mesh.setdefault('face_colors', []).append((color, float(alpha)))
 
     @staticmethod
     def _append_flat_plate_shell_grid_to_prop_3d_export_mesh(ax, x_breaks, y_breaks, z_value=0.0):
@@ -9262,7 +9581,7 @@ class Application():
         except Exception:
             pass
         ax.add_collection3d(poly)
-        Application._append_faces_to_prop_3d_export_mesh(ax, vertices)
+        Application._append_faces_to_prop_3d_export_mesh(ax, vertices, color=facecolor, alpha=alpha)
         return poly
 
     @staticmethod
@@ -9513,6 +9832,7 @@ class Application():
             spacing,
             fallback_midpoint=True,
             max_count=max_count,
+            include_ends=include_ends,
         ))
 
     @staticmethod
@@ -9522,13 +9842,15 @@ class Application():
         ``Panel length, Lp`` is the total repeated model length, while
         ``Stiffener/plate length`` is the bay between girder supports.  If Lp is
         not an exact multiple of the bay length, the full bays are centered so
-        the cut length is shared symmetrically at both ends.
+        the cut length is shared symmetrically at both ends; when Lp is an
+        exact multiple the girders bound the bays and sit on the panel edges.
         """
         return list(representation_geometry.centered_member_positions(
             length,
             span,
             fallback_midpoint=False,
             max_count=max_count,
+            include_ends=True,
         ))
 
     @staticmethod
@@ -9643,6 +9965,12 @@ class Application():
                 x1 = min(x1, x_limits[1])
             if x1 <= x0:
                 return
+            self._record_prop_3d_tk3d_item(
+                ax, kind='flat_member', orientation='x', start=x0, end=x1, station=y_center,
+                z_base=plate_thk if side_sign >= 0 else 0.0,
+                hw=web_h if side_sign >= 0 else -web_h,
+                flange_w=fl_w if (fl_w > 0.0 and fl_t > 0.0) else 0.0,
+                web_thickness_m=web_t, flange_thickness_m=fl_t)
             self._add_box_3d(ax, x0, x1, y_center - web_t / 2.0, y_center + web_t / 2.0,
                              web_z[0], web_z[1], facecolor=facecolor_web, alpha=1.0)
             self._append_faces_to_prop_3d_export_mesh(ax, [[
@@ -9669,6 +9997,12 @@ class Application():
                 y1 = min(y1, y_limits[1])
             if y1 <= y0:
                 return
+            self._record_prop_3d_tk3d_item(
+                ax, kind='flat_member', orientation='y', start=y0, end=y1, station=x_center,
+                z_base=plate_thk if side_sign >= 0 else 0.0,
+                hw=web_h if side_sign >= 0 else -web_h,
+                flange_w=fl_w if (fl_w > 0.0 and fl_t > 0.0) else 0.0,
+                web_thickness_m=web_t, flange_thickness_m=fl_t)
             self._add_box_3d(ax, x_center - web_t / 2.0, x_center + web_t / 2.0, y0, y1,
                              web_z[0], web_z[1], facecolor=facecolor_web, alpha=1.0)
             self._append_faces_to_prop_3d_export_mesh(ax, [[
@@ -10086,6 +10420,8 @@ class Application():
 
             self._add_box_3d(ax, 0.0, width, 0.0, length, 0.0, plate_thk,
                              facecolor='lightgrey', alpha=0.55)
+            self._record_prop_3d_tk3d_item(
+                ax, kind='flat_plate', x0=0.0, x1=width, y0=0.0, y1=length, thickness_m=plate_thk)
 
             # Girder supports at each stiffener span station across Lp.
             for x_pos in girder_xs:
@@ -10145,6 +10481,8 @@ class Application():
 
             self._add_box_3d(ax, 0.0, width, 0.0, length, 0.0, plate_thk,
                              facecolor='lightgrey', alpha=0.55)
+            self._record_prop_3d_tk3d_item(
+                ax, kind='flat_plate', x0=0.0, x1=width, y0=0.0, y1=length, thickness_m=plate_thk)
 
             if stiffener is not None:
                 dims = self._get_section_3d_dimensions(stiffener)
@@ -10196,7 +10534,7 @@ class Application():
 
         if not embed:
             return fig, ax, (22, -55)
-        self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
+        self._embed_prop_3d(fig, ax, default_view=(22, -55))
         return fig, ax, (22, -55)
 
     def _add_cylinder_longitudinal_stiffener_3d(self, ax, radius, length, angle, dims, side_sign=1.0):
@@ -10208,6 +10546,10 @@ class Application():
         if web_h <= 0.0:
             return
         self._update_prop_3d_export_mesh_size(ax, dims)
+        self._record_prop_3d_tk3d_item(
+            ax, kind='cylinder_long', radius=radius, length=length, angle=angle,
+            web_h=web_h, web_thickness_m=web_t, flange_w=fl_w, flange_thickness_m=fl_t,
+            side_sign=side_sign)
 
         z = np.linspace(0.0, length, 16)
         r = np.linspace(radius, radius + side_sign * web_h, 3)
@@ -10216,7 +10558,7 @@ class Application():
         y_grid = r_grid * np.sin(angle)
         ax.plot_surface(x_grid, y_grid, z_grid, alpha=0.82, linewidth=0.2,
                         edgecolor='black', color='silver')
-        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, color='silver', alpha=0.82)
         self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
 
         if fl_w > 0.0 and fl_t > 0.0 and radius > 0.0:
@@ -10229,7 +10571,7 @@ class Application():
             y_grid = r_outer * np.sin(theta_grid)
             ax.plot_surface(x_grid, y_grid, z_grid,
                             alpha=0.82, linewidth=0.2, edgecolor='black', color='darkgrey')
-            self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+            self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, color='darkgrey', alpha=0.82)
             x_grid = flange_radius * np.cos(theta_grid)
             y_grid = flange_radius * np.sin(theta_grid)
             self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
@@ -10259,6 +10601,12 @@ class Application():
             return
         self._update_prop_3d_export_mesh_size(ax, dims)
         theta_start, theta_end = theta_range if theta_range is not None else (0.0, 2.0 * math.pi)
+        self._record_prop_3d_tk3d_item(
+            ax, kind='cylinder_ring', radius=radius, z=float(z_pos),
+            web_h=web_h, web_thickness_m=web_t, flange_w=fl_w, flange_thickness_m=fl_t,
+            is_frame=bool(is_frame), theta_start=theta_start, theta_end=theta_end,
+            is_panel=bool(abs((theta_end - theta_start) - 2.0 * math.pi) > 1.0e-6),
+            side_sign=side_sign)
         theta = np.linspace(theta_start, theta_end, 64)
         rr = np.linspace(radius, radius + side_sign * web_h, 3)
         theta_grid, rr_grid = np.meshgrid(theta, rr)
@@ -10267,7 +10615,8 @@ class Application():
                         alpha=0.86, linewidth=0.15, edgecolor='black',
                         color='dimgray' if is_frame else 'silver')
         self._append_grid_surface_to_prop_3d_export_mesh(
-            ax, rr_grid * np.cos(theta_grid), rr_grid * np.sin(theta_grid), z_grid)
+            ax, rr_grid * np.cos(theta_grid), rr_grid * np.sin(theta_grid), z_grid,
+            color='dimgray' if is_frame else 'silver', alpha=0.86)
         self._append_grid_surface_to_prop_3d_export_mesh(
             ax, rr_grid * np.cos(theta_grid), rr_grid * np.sin(theta_grid), z_grid, shell_model=True)
 
@@ -10287,7 +10636,9 @@ class Application():
             ax.plot_surface(x_grid, y_grid, z_grid,
                             alpha=0.82, linewidth=0.15, edgecolor='black',
                             color='black' if is_frame else 'darkgrey')
-            self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+            self._append_grid_surface_to_prop_3d_export_mesh(
+                ax, x_grid, y_grid, z_grid,
+                color='black' if is_frame else 'darkgrey', alpha=0.82)
             shell_radius = radius + side_sign * web_h
             self._append_grid_surface_to_prop_3d_export_mesh(
                 ax, shell_radius * np.cos(theta_grid), shell_radius * np.sin(theta_grid), z_grid,
@@ -10325,8 +10676,15 @@ class Application():
         self._init_prop_3d_export_mesh(ax, 'cylinder_preview')
         ax.plot_surface(x_grid, y_grid, z_grid, alpha=0.30, linewidth=0.12,
                         edgecolor='grey', color='lightgrey')
-        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid)
+        self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, color='lightgrey', alpha=0.30)
         self._append_grid_surface_to_prop_3d_export_mesh(ax, x_grid, y_grid, z_grid, shell_model=True)
+        self._record_prop_3d_tk3d_item(
+            ax, kind='cylinder_shell',
+            radius=float(cone_r1) if is_conical_preview else radius,
+            radius_top=float(cone_r2) if is_conical_preview else None,
+            length=length, thickness_m=thk,
+            theta_start=theta_start, theta_end=theta_end,
+            is_panel=is_panel_preview)
 
         if thk > 0 and radius > thk:
             for zz, end_radius in [(0.0, float(cone_r1) if is_conical_preview else radius),
@@ -10358,6 +10716,7 @@ class Application():
                         spacing,
                         fallback_midpoint=True,
                         max_count=24,
+                        include_ends=True,
                     )
                 ]
             else:
@@ -10391,8 +10750,10 @@ class Application():
             if girder_spacing <= 1e-9:
                 girder_positions = [length / 2.0]
             else:
+                # Ring frames bound the girder bays: measured symmetrically
+                # about mid-height, on the shell edges when L is a multiple.
                 girder_positions = self._positions_from_length_and_spacing(
-                    length, girder_spacing, include_ends=False, max_count=16
+                    length, girder_spacing, include_ends=True, max_count=16
                 )
 
         if cyl_obj.RingStfObj is not None:
@@ -10410,7 +10771,7 @@ class Application():
                 except Exception:
                     ring_spacing = 0.0
             ring_positions = self._positions_from_length_and_spacing(
-                length, ring_spacing, include_ends=False, max_count=30
+                length, ring_spacing, include_ends=True, max_count=30
             )
             ring_positions = self._ring_positions_without_heavy_frame_overlap(
                 ring_positions, girder_positions,
@@ -10457,7 +10818,7 @@ class Application():
 
         if not embed:
             return fig, ax, (22, -55)
-        self._embed_prop_3d_figure(fig, ax, default_view=(22, -55))
+        self._embed_prop_3d(fig, ax, default_view=(22, -55))
         return fig, ax, (22, -55)
 
     def draw_prop(self, event=None):
@@ -11258,21 +11619,21 @@ class Application():
         else:
             Nsd, Msd, Tsd, Qsd = result.derived_forces[:4]
         if self._new_shell_stress_or_force.get() == 1:
-            self._new_shell_sasd.set(sasd)
-            self._new_shell_smsd.set(smsd)
-            self._new_shell_tTsd.set(tTsd)
-            self._new_shell_tQsd.set(tQsd)
+            self._new_shell_sasd.set(_round_calculated(sasd))
+            self._new_shell_smsd.set(_round_calculated(smsd))
+            self._new_shell_tTsd.set(_round_calculated(tTsd))
+            self._new_shell_tQsd.set(_round_calculated(tQsd))
             if result.geometry == 9:
-                self._new_shell_M2sd.set(M2sd)
-                self._new_shell_Q2sd.set(Q2sd)
+                self._new_shell_M2sd.set(_round_calculated(M2sd))
+                self._new_shell_Q2sd.set(_round_calculated(Q2sd))
         else:
-            self._new_shell_Nsd.set(Nsd)
-            self._new_shell_Msd.set(Msd)
-            self._new_shell_Tsd.set(Tsd)
-            self._new_shell_Qsd.set(Qsd)
+            self._new_shell_Nsd.set(_round_calculated(Nsd))
+            self._new_shell_Msd.set(_round_calculated(Msd))
+            self._new_shell_Tsd.set(_round_calculated(Tsd))
+            self._new_shell_Qsd.set(_round_calculated(Qsd))
             if result.geometry == 9:
-                self._new_shell_M2sd.set(M2sd)
-                self._new_shell_Q2sd.set(Q2sd)
+                self._new_shell_M2sd.set(_round_calculated(M2sd))
+                self._new_shell_Q2sd.set(_round_calculated(Q2sd))
 
         cylinder_obj = self._create_cylinder_structure_from_property_result(result)
 
@@ -11859,11 +12220,14 @@ class Application():
                     self._new_field_len.set(round(properties['span'][0] * 1000, 5))
                     self._new_plate_thk.set(round(properties['plate_thk'][0] * 1000, 5))
                     self._new_plate_kpp.set(properties['plate_kpp'][0])
-                    self._new_sigma_y1.set(round(properties['sigma_y1'][0], 1))
-                    self._new_sigma_y2.set(round(properties['sigma_y2'][0], 1))
-                    self._new_sigma_x1.set(round(properties['sigma_x1'][0], 1))
-                    self._new_sigma_x2.set(round(properties['sigma_x2'][0], 1))
-                    self._new_tauxy.set(round(properties['tau_xy'][0], 1))
+                    # Round only float dust (5 decimals): these are the user's
+                    # stored values, so their typed precision must survive the
+                    # select -> edit -> add-properties round trip.
+                    self._new_sigma_y1.set(round(properties['sigma_y1'][0], 5))
+                    self._new_sigma_y2.set(round(properties['sigma_y2'][0], 5))
+                    self._new_sigma_x1.set(round(properties['sigma_x1'][0], 5))
+                    self._new_sigma_x2.set(round(properties['sigma_x2'][0], 5))
+                    self._new_tauxy.set(round(properties['tau_xy'][0], 5))
                     self._new_stucture_type.set(properties['structure_type'][0])
                     # try:
                     #     self._new_pressure_side.set(properties['press_side'][0])
@@ -12521,12 +12885,12 @@ class Application():
                     cone_alpha=cone_alpha,
                     shell_lenght_l=cone_length,
                 )[:6]
-                self._new_shell_Nsd.set(Nsd)
-                self._new_shell_Msd.set(M1sd)
-                self._new_shell_M2sd.set(M2sd)
-                self._new_shell_Tsd.set(Tsd)
-                self._new_shell_Qsd.set(Q1sd)
-                self._new_shell_Q2sd.set(Q2sd)
+                self._new_shell_Nsd.set(_round_calculated(Nsd))
+                self._new_shell_Msd.set(_round_calculated(M1sd))
+                self._new_shell_M2sd.set(_round_calculated(M2sd))
+                self._new_shell_Tsd.set(_round_calculated(Tsd))
+                self._new_shell_Qsd.set(_round_calculated(Q1sd))
+                self._new_shell_Q2sd.set(_round_calculated(Q2sd))
                 return
 
             Nsd, Msd, Tsd, Qsd, _ = hlp.helper_cylinder_stress_to_force_to_stress(
@@ -12541,10 +12905,10 @@ class Application():
                 tf=self._new_stf_fl_t.get(),
                 CylinderAndCurvedPlate=CylinderAndCurvedPlate,
             )
-            self._new_shell_Nsd.set(Nsd)
-            self._new_shell_Msd.set(Msd)
-            self._new_shell_Tsd.set(Tsd)
-            self._new_shell_Qsd.set(Qsd)
+            self._new_shell_Nsd.set(_round_calculated(Nsd))
+            self._new_shell_Msd.set(_round_calculated(Msd))
+            self._new_shell_Tsd.set(_round_calculated(Tsd))
+            self._new_shell_Qsd.set(_round_calculated(Qsd))
         except Exception:
             # Keep selection robust.  If a partially defined cylinder cannot be
             # converted, the stored stress values are still shown correctly.
@@ -12997,12 +13361,12 @@ class Application():
         Plot the COG and COB development.
         '''
         if self._weight_logger['new structure']['time'] == []:
-            tk.messagebox.showinfo('New functionality ver. 3.3', 'If you are using and existing model,'
+            tk.messagebox.showinfo('New functionality ver. 3.3', 'If you are using an existing model,'
                                                                  ' weights have not been'
                                                                  ' recorded in previous versions.\n'
                                                                  'Press "Add structure properties to line....." button to add a '
                                                                  'blank datapoint.\n'
-                                                                 'Other data will then be avaliable.\n\n'
+                                                                 'Other data will then be available.\n\n'
                                                                  'If you are making a new model add some structure properties.')
             return
         import matplotlib.dates as mdate
@@ -13356,14 +13720,14 @@ class Application():
         :param returned_stress_and_km:
         :return:
         '''
-        self._new_sigma_y1.set(returned_stress_and_km[0])
-        self._new_sigma_y2.set(returned_stress_and_km[1])
-        self._new_sigma_x1.set(returned_stress_and_km[2])
-        self._new_sigma_x2.set(returned_stress_and_km[3])
-        self._new_tauxy.set(returned_stress_and_km[4])
+        self._new_sigma_y1.set(_round_calculated(returned_stress_and_km[0]))
+        self._new_sigma_y2.set(_round_calculated(returned_stress_and_km[1]))
+        self._new_sigma_x1.set(_round_calculated(returned_stress_and_km[2]))
+        self._new_sigma_x2.set(_round_calculated(returned_stress_and_km[3]))
+        self._new_tauxy.set(_round_calculated(returned_stress_and_km[4]))
         self._new_stf_km1.set(returned_stress_and_km[5])
-        self._new_stf_km1.set(returned_stress_and_km[6])
-        self._new_stf_km1.set(returned_stress_and_km[7])
+        self._new_stf_km2.set(returned_stress_and_km[6])
+        self._new_stf_km3.set(returned_stress_and_km[7])
         self._new_plate_kpp.set(returned_stress_and_km[8])
         self._new_stf_kps.set(returned_stress_and_km[9])
         self._new_stucture_type.set(returned_stress_and_km[10], )
