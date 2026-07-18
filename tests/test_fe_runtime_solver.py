@@ -357,6 +357,108 @@ def test_material_nonlinear_display_stresses_respect_material_curve():
     assert max(beam_values) < 500.0e6
 
 
+def test_fiber_section_grid_is_profile_shaped_for_t_sections():
+    if fe_solver._full_backend is None:
+        pytest.skip("production FE backend unavailable")
+
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="coarse",
+        material_model="DNV-RP-C208 steel",
+        analysis_type="geom. + material nonlinear static",
+    )
+    geometry = fe_runtime_solver.runtime_geometry_summary(snapshot, options)
+    config = fe_runtime_solver._solver_config_from_options(options)
+    generated = fe_solver.build_generated_geometry(geometry, config)
+
+    backend = fe_solver.full_backend_api()
+    model = backend.build_fe_model_from_generated_geometry(
+        generated,
+        backend.AnyStructureFEMConfig(pressure_pa=0.0, num_buckling_modes=1),
+    )
+    curve, props = fe_solver._nonlinear_curve_payload(config, geometry)
+    fe_solver._apply_material_curve_to_model(model, curve, props)
+
+    beam = next(
+        element
+        for element in model.mesh.elements.values()
+        if element.__class__.__name__ == "BeamElement"
+    )
+    # The physical profile dimensions survive the generated-geometry handoff
+    # into the backend element cross-section.
+    for key in ("web_height", "web_thickness", "flange_width", "flange_thickness"):
+        assert float(beam.cross_section.get(key) or 0.0) > 0.0
+
+    material = model.get_material(beam.material_name)
+    fiber_config = beam._fiber_plasticity_config(material)
+    assert fiber_config is not None
+    y, z, w = beam._fiber_section_grid(fiber_config)
+
+    # The shaped layout reproduces the section constants exactly and is
+    # centred on the centroid.
+    assert float(np.sum(w)) == pytest.approx(beam._A)
+    assert float(np.sum(w * z * z)) == pytest.approx(beam._Iy)
+    assert float(np.sum(w * y * y)) == pytest.approx(beam._Iz)
+    assert float(np.sum(w * z)) / float(np.sum(w)) == pytest.approx(0.0, abs=1.0e-9)
+    assert float(np.sum(w * y)) / float(np.sum(w)) == pytest.approx(0.0, abs=1.0e-9)
+
+    # A T-profile concentrates the flange on one side of the centroid: the
+    # fiber layout must be skewed toward the flange, unlike the legacy
+    # moment-matched rectangle grid whose third moment is exactly zero.
+    radius = math.sqrt(beam._Iy / beam._A)
+    skewness = float(np.sum(w * z**3)) / (beam._A * radius**3)
+    assert abs(skewness) > 0.2
+    extent_high = float(np.max(z))
+    extent_low = float(-np.min(z))
+    assert abs(extent_high - extent_low) / max(extent_high, extent_low) > 0.15
+
+
+def test_member_shell_material_nonlinear_display_respects_material_curve():
+    if fe_solver._full_backend is None:
+        pytest.skip("production FE backend unavailable")
+
+    snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        mesh_fidelity="coarse",
+        member_model="webs as shells, flanges as beams",
+        pressure_pa=3_000_000.0,
+        num_buckling_modes=1,
+        analysis_type="geom. + material nonlinear static",
+        runtime_solver="nonlinear static",
+        material_model="DNV-RP-C208 steel",
+        nonlinear_max_load_factor=1.0,
+        nonlinear_steps=6,
+    )
+    result = fe_runtime_solver.run_runtime_fem(snapshot, options)
+    assert result.status == "ok"
+    prestress = result.summary.get("prestress_summary", {}) or {}
+    assert float(prestress.get("nonlinear_static_max_plastic_strain", 0.0) or 0.0) > 0.0
+
+    reported = dict(result.stress_percentiles)
+    assert 0.0 < reported["max"] < 500.0e6
+    assert any("committed elastoplastic states" in item for item in result.diagnostics)
+    assert float(prestress.get("elastic_member_peak_von_mises_pa", 1.0)) == 0.0
+
+    # Member webs are shells in this model: their displayed stresses come
+    # from the committed layer states and respect the material curve.
+    web_values = [
+        float((surface.get("field_values") or {}).get("von_mises_pa", 0.0))
+        for surface in (result.visualization.get("shell_surfaces") or ())
+        if str(surface.get("role", "skin") or "skin").lower() not in {"", "skin"}
+    ]
+    assert web_values
+    assert 0.0 < max(web_values) < 500.0e6
+
+    # The flange beams recover their display stresses from the return-mapped
+    # fiber states.
+    beam_values = [
+        float(line.get("von_mises", 0.0))
+        for line in (result.visualization.get("member_lines") or ())
+    ]
+    assert beam_values
+    assert max(beam_values) < 500.0e6
+
+
 def test_runtime_fem_state_save_load_round_trip(tmp_path):
     snapshot = fe_runtime_solver.active_line_snapshot(_FakeApp())
     options = fe_runtime_solver.RuntimeFEMOptions(
@@ -1417,7 +1519,10 @@ def test_flat_automatic_nullspace_keeps_physical_edge_pressure_supports():
     assert result.status == "ok"
     assert result.prestress_summary["constraint_mode"] == "nullspace"
     assert result.prestress_summary["nullspace_projection"] == pytest.approx(1.0)
-    assert "Applied flat-panel edge supports from line properties, defaulting to simply supported edges when unspecified." in result.diagnostics
+    assert (
+        "Auto-set: no edge DOF is constrained, so automatic well-posed edge supports were applied "
+        "(from line properties, defaulting to simply supported edges when unspecified)."
+    ) in result.diagnostics
 
 
 def test_flat_automatic_supports_use_imported_line_property_pattern():
@@ -1809,7 +1914,9 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "boundary_condition=str(self.boundary_condition.get())" in source
     assert "beam_element_order=str(self.beam_element_order.get())" in source
     assert "member_model=str(self.member_model.get())" in source
-    assert "elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9" in source
+    # Tk variable reads go through the defensive _tk_var_float helper so an
+    # empty entry never raises TclError from DoubleVar.get().
+    assert "elastic_modulus_pa=max(_tk_var_float(self.elastic_modulus_gpa, 210.0), 1.0e-9) * 1.0e9" in source
     assert "self.progress_bar.start(12)" in source
     assert "threading.Thread(target=worker, daemon=True)" in source
     assert "self.window.after(100, self._poll_solver_result)" in source
@@ -1840,7 +1947,7 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
     assert "draw_overlay=True" in source
     assert "custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get())" in source
     assert "bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get())" in source
-    assert "custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0)" in source
+    assert "custom_pressure_pa=_tk_var_float(self.custom_pressure_pa, 0.0)" in source
     assert "custom_loads_json=str(self.custom_loads_json.get())" in source
     assert "self._add_entry_row(time_domain, 2, \"custom_pressure_pa\"" not in source
     assert "ttk.Button(view_actions, text=\"ISO\", command=lambda: self._set_runtime_3d_view(\"iso\"))" in source
@@ -1868,9 +1975,35 @@ def test_runtime_fem_popup_wires_preview_canvas_in_upper_right():
         / "anystructure_fem_mode.py"
     ).read_text(encoding="utf-8")
     assert "plate_edge_x0_support=str(self.plate_edge_x0_support.get())" in source
-    assert "cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0)" in source
+    assert "cylinder_upper_edge_load_n_per_m=_tk_var_float(self.cylinder_upper_edge_load_n_per_m, 0.0)" in source
     assert "\"nullspace_projection\"" in source
     assert "horizontal_span" not in source
+    # Loads are entered as separate fx/fy/fz/mx/my/mz components for both the
+    # selected edges and the whole-edge/top-bottom loads; the whole-edge grid
+    # is edited per edge through radio buttons like the boundary conditions.
+    assert "self._build_load_component_grid(selection_loads, 1, \"selected_edge_load_components\"" in source
+    assert "whole_edge_loads = ttk.LabelFrame(custom_loads, text=\"Whole edge / top-bottom loads\")" in source
+    assert "self._build_load_component_grid(whole_edge_loads, 1, \"edge_load_components\"" in source
+    assert "variable=self.edge_load_edge_choice,\n                            command=self._on_edge_load_edge_change" in source
+    assert "edge_load_components_json=self._collect_edge_load_components_json()" in source
+    assert "custom_selected_edge_load_components_json=self._selected_edge_load_components_json()" in source
+    # The single scalar inputs are gone from the loads tab.
+    assert "\"Selected edges [N/m]\"" not in source
+    assert "\"Plate x0 / x1 [N/m]\"" not in source
+    assert "\"Cyl. lower / upper [N/m]\"" not in source
+    # Run start reflects solver auto-set values back into the controls before
+    # collecting the options, and surfaces the changes in the run status.
+    assert "auto_set_notes = self._reflect_effective_run_inputs()" in source
+    assert source.index("auto_set_notes = self._reflect_effective_run_inputs()") < source.index(
+        "options = self._options()\n        self._active_run_options = options")
+    assert "self.material_model.set(\"DNV-RP-C208 steel\")" in source
+    assert "self.nonlinear_solution_control.set(\"arc length\")" in source
+    assert "self._run_status_history.append(\"Auto-set at run start: \" + note)" in source
+    # The solver-side diagnostics carry the same transparency.
+    solver_source = (
+        Path(__file__).resolve().parents[1] / "anystruct" / "fe_solver.py"
+    ).read_text(encoding="utf-8")
+    assert "diagnostics.extend(_auto_set_parameter_notes(config))" in solver_source
 
 
 def test_tkinter_3d_canvas_supports_plate_front_back_colours():
@@ -2683,6 +2816,204 @@ def test_custom_selected_internal_edge_load_adds_mesh_breaks_and_resultant():
     assert result.status == "ok"
     assert result.load_resultant["force_n"][1] == pytest.approx(250.0)
     assert any("selected edge segments" in item.lower() for item in result.diagnostics)
+
+
+def test_whole_edge_component_loads_apply_global_forces_and_moments():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=False,
+        plate_edge_x0_support="fixed",
+        edge_load_components_json=json.dumps({
+            "x1": {"fx": 800.0, "fz": -300.0},
+            "y1": {"my": 50.0},
+        }),
+    )
+
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert result.status == "ok"
+    # x1 edge (length 1.0): fx/fz applied per metre on global axes with no
+    # implicit outward sign convention.
+    assert result.load_resultant["force_n"][0] == pytest.approx(800.0)
+    assert result.load_resultant["force_n"][1] == pytest.approx(0.0)
+    assert result.load_resultant["force_n"][2] == pytest.approx(-300.0)
+    # Moment resultant about the origin: r x F of the x1 edge forces at
+    # x=2.0, y-centroid 0.5 gives (-150, 600, -400); the distributed my on
+    # the y1 edge (length 2.0) adds 100 as pure nodal moments.
+    assert result.load_resultant["moment_nm"][0] == pytest.approx(-150.0)
+    assert result.load_resultant["moment_nm"][1] == pytest.approx(700.0)
+    assert result.load_resultant["moment_nm"][2] == pytest.approx(-400.0)
+    assert any("whole-edge component loads" in item.lower() for item in result.diagnostics)
+
+
+def test_selected_edge_component_loads_apply_global_forces_and_moments():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    segment = {"varying_axis": "a", "fixed_coordinate": 0.5,
+               "start_coordinate": 0.5, "end_coordinate": 1.5}
+    entry_config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=False,
+        plate_edge_x0_support="fixed",
+        custom_loads_json=json.dumps([
+            {"type": "edge", "components": {"fy": 250.0, "mz": 40.0}, "edges": [segment]}
+        ]),
+    )
+
+    result = fe_solver.run_production_fem(geometry, entry_config)
+
+    assert result.status == "ok"
+    # Segment length 1.0 at x-centroid 1.0: fy resultant 250 and Mz about the
+    # origin 250 (r x F) + 40 (distributed nodal mz).
+    assert result.load_resultant["force_n"][1] == pytest.approx(250.0)
+    assert result.load_resultant["moment_nm"][2] == pytest.approx(290.0)
+
+    # Without saved entries the staged component grid flows through the
+    # config-level payload and the same segments JSON.
+    fallback_config = fe_solver.LightweightFEMConfig(
+        custom_load_bc_enabled=True,
+        custom_use_nullspace_projection=False,
+        plate_edge_x0_support="fixed",
+        custom_selected_edge_load_components_json=json.dumps({"fz": -120.0}),
+        custom_edge_segments_json=json.dumps([segment]),
+    )
+
+    fallback_result = fe_solver.run_production_fem(geometry, fallback_config)
+
+    assert fallback_result.status == "ok"
+    assert fallback_result.load_resultant["force_n"][2] == pytest.approx(-120.0)
+    assert any("selected edge segments" in item.lower() for item in fallback_result.diagnostics)
+
+
+def test_runtime_options_pass_edge_load_component_payloads_to_solver_config():
+    options = fe_runtime_solver.RuntimeFEMOptions(
+        edge_load_components_json='{"x0": {"fy": 10.0}}',
+        custom_selected_edge_load_components_json='{"fz": -5.0, "mx": 2.0}',
+    )
+
+    config = fe_runtime_solver._solver_config_from_options(options)
+
+    assert config.edge_load_components_json == '{"x0": {"fy": 10.0}}'
+    assert config.custom_selected_edge_load_components_json == '{"fz": -5.0, "mx": 2.0}'
+
+
+def test_auto_set_parameter_notes_report_solver_overrides():
+    # A plain linear run auto-sets nothing.
+    assert fe_solver._auto_set_parameter_notes(fe_solver.LightweightFEMConfig()) == []
+
+    # Material-nonlinear analysis promotes the linear-elastic dropdown.
+    notes = fe_solver._auto_set_parameter_notes(fe_solver.LightweightFEMConfig(
+        analysis_type="geom. + material nonlinear static",
+        material_model="linear elastic",
+    ))
+    assert any("material model 'linear elastic' -> 'DNV-RP-C208 steel'" in note for note in notes)
+    assert any("the analysis type requests material nonlinearity" in note for note in notes)
+
+    # Post-buckling promotes both the material model and the solution control.
+    notes = fe_solver._auto_set_parameter_notes(fe_solver.LightweightFEMConfig(
+        post_buckling_enabled=True,
+        material_model="linear elastic",
+        nonlinear_solution_control="newton force control",
+    ))
+    assert any("post-buckling continuation always runs with steel plasticity" in note for note in notes)
+    assert any("-> 'arc length'" in note for note in notes)
+
+    # Arc length forces Von Karman kinematics over a corotational choice.
+    notes = fe_solver._auto_set_parameter_notes(fe_solver.LightweightFEMConfig(
+        analysis_type="geometric nonlinear static",
+        nonlinear_solution_control="arc length",
+        nonlinear_static_kinematics="corotational",
+    ))
+    assert any("kinematics 'corotational' -> 'Von Karman'" in note for note in notes)
+
+    # Unsupported layer counts snap to the nearest supported value.
+    notes = fe_solver._auto_set_parameter_notes(fe_solver.LightweightFEMConfig(
+        analysis_type="geom. + material nonlinear static",
+        material_model="DNV-RP-C208 steel",
+        nonlinear_layers=6,
+    ))
+    assert any("shell integration layers 6 -> 5" in note for note in notes)
+
+    # Selecting the curve explicitly is not an override.
+    notes = fe_solver._auto_set_parameter_notes(fe_solver.LightweightFEMConfig(
+        analysis_type="geom. + material nonlinear static",
+        material_model="DNV-RP-C208 steel",
+    ))
+    assert not any("material model" in note for note in notes)
+
+
+def test_material_nonlinear_run_reports_auto_set_material_model():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        pressure_pa=100_000.0,
+        analysis_type="geom. + material nonlinear static",
+        material_model="linear elastic",
+        nonlinear_steps=3,
+        num_buckling_modes=1,
+    )
+
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert result.status == "ok"
+    assert any(
+        "Auto-set: material model 'linear elastic' -> 'DNV-RP-C208 steel'" in item
+        for item in result.diagnostics
+    )
+    assert any("Using DNV-RP-C208 material curve" in item for item in result.diagnostics)
+
+
+def test_linear_run_reports_no_auto_set_and_no_plasticity_claims():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.0,
+        "thickness_m": 0.012,
+        "has_stiffener": False,
+        "has_girder": False,
+    }
+    config = fe_solver.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        pressure_pa=100_000.0,
+        num_buckling_modes=1,
+    )
+
+    result = fe_solver.run_production_fem(geometry, config)
+
+    assert result.status == "ok"
+    assert result.stress_max_pa > 0.0
+    # No parameter overrides happen in a plain linear run.
+    assert not any("Auto-set: material model" in item for item in result.diagnostics)
+    assert not any("Auto-set: nonlinear solution control" in item for item in result.diagnostics)
+    assert not any("Auto-set: kinematics" in item for item in result.diagnostics)
+    assert not any("elastoplastic" in item.lower() for item in result.diagnostics)
+    assert not any("material curve" in item.lower() for item in result.diagnostics)
+    # The automatic support fallback is itself stated explicitly as auto-set.
+    assert any(
+        "Auto-set: no edge DOF is constrained, so automatic well-posed edge supports were applied" in item
+        for item in result.diagnostics
+    )
 
 
 def test_saved_custom_load_entries_add_panel_and_edge_breaks_to_mesh():

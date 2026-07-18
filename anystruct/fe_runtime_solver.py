@@ -196,10 +196,15 @@ class RuntimeFEMOptions:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
+    # Component edge loads on global axes: fx/fy/fz [N/m], mx/my/mz [Nm/m].
+    # The whole-edge payload maps edge keys (x0/x1/y0/y1, lower/upper, all)
+    # to component dicts; the selected payload is a single component dict.
+    edge_load_components_json: str = ""
     custom_loads_json: str = ""
     custom_pressure_patches_json: str = ""
     custom_edge_segments_json: str = ""
     custom_selected_edge_load_n_per_m: float = 0.0
+    custom_selected_edge_load_components_json: str = ""
     local_refinement_enabled: bool = False
     local_refinement_patches_json: str = "[]"
     local_refinement_fine_factor: float = 0.3
@@ -325,6 +330,28 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _tk_var_float(variable: Any, default: float = 0.0) -> float:
+    """Read a tk numeric variable defensively.
+
+    ``DoubleVar.get()`` raises ``TclError`` when its entry widget is empty,
+    before any float conversion can apply a default.
+    """
+
+    try:
+        return _safe_float(variable.get(), default)
+    except Exception:
+        return float(default)
+
+
+def _tk_var_int(variable: Any, default: int = 0) -> int:
+    """Read a tk integer variable defensively (empty entries raise in get())."""
+
+    try:
+        return _safe_int(variable.get(), default)
+    except Exception:
+        return int(default)
 
 
 RUNTIME_FEM_STATE_FORMAT = "anystructure-runtime-fem-state-v1"
@@ -1187,10 +1214,12 @@ def _solver_config_from_options(options: RuntimeFEMOptions):
         plate_edge_y1_load_n_per_m=options.plate_edge_y1_load_n_per_m,
         cylinder_lower_edge_load_n_per_m=options.cylinder_lower_edge_load_n_per_m,
         cylinder_upper_edge_load_n_per_m=options.cylinder_upper_edge_load_n_per_m,
+        edge_load_components_json=str(options.edge_load_components_json),
         custom_loads_json=options.custom_loads_json,
         custom_pressure_patches_json=options.custom_pressure_patches_json,
         custom_edge_segments_json=options.custom_edge_segments_json,
         custom_selected_edge_load_n_per_m=options.custom_selected_edge_load_n_per_m,
+        custom_selected_edge_load_components_json=str(options.custom_selected_edge_load_components_json),
         local_refinement_enabled=bool(options.local_refinement_enabled),
         local_refinement_patches_json=str(options.local_refinement_patches_json),
         local_refinement_fine_factor=float(options.local_refinement_fine_factor),
@@ -1422,6 +1451,8 @@ def run_runtime_fem(snapshot: RuntimeFEMLineSnapshot, options: RuntimeFEMOptions
         "custom_pressure_patches_json": str(options.custom_pressure_patches_json),
         "custom_edge_segments_json": str(options.custom_edge_segments_json),
         "custom_selected_edge_load_n_per_m": float(options.custom_selected_edge_load_n_per_m),
+        "custom_selected_edge_load_components_json": str(options.custom_selected_edge_load_components_json),
+        "edge_load_components_json": str(options.edge_load_components_json),
         "custom_pressure_patch_count": len(custom_patches),
         "custom_pressure_patch_area_m2": sum(
             max(0.0, patch["max_a"] - patch["min_a"])
@@ -4505,6 +4536,27 @@ FEM_OPTION_INFO: dict[str, dict[str, str]] = {
         "output": "Loads are distributed around the end ring and included in load resultant, stresses and buckling prestress.",
         "caution": "For axial compression, choose signs so the loads act toward the cylinder mid-height.",
     },
+    "selected_edge_load_components": {
+        "title": "Selected-Edge Load Components",
+        "purpose": "Applies distributed loads to the right-clicked edge segments as separate fx/fy/fz forces in N/m and mx/my/mz moments in Nm/m.",
+        "use": "Enter the components on the global axes, select edge segments in the 3D view and press Add load. A component left at 0 applies nothing; there are no implicit directions or sign conventions.",
+        "output": "Each added entry appears in the loads-to-run list and is distributed to the segment nodes, included in the load resultant, stresses and buckling prestress.",
+        "caution": "Values are per metre of edge length. Moments load the rotational shell DOFs directly, so use them for genuine edge torques rather than force couples.",
+    },
+    "edge_load_components": {
+        "title": "Whole-Edge Load Components",
+        "purpose": "Applies distributed loads to the whole edge picked above as separate fx/fy/fz forces in N/m and mx/my/mz moments in Nm/m.",
+        "use": "Pick an edge (or All) with the radio buttons, then enter the components on the global axes. Each edge remembers its own values when you switch, like the per-edge boundary conditions.",
+        "output": "Loads are distributed along the full edge or end ring and included in the load resultant, stresses and buckling prestress.",
+        "caution": "Components are entered on global axes with no outward-positive convention, unlike the legacy scalar edge loads. The All choice loads every boundary edge with the same global components.",
+    },
+    "edge_load_edge_select": {
+        "title": "Edge Selection For Whole-Edge Loads",
+        "purpose": "Chooses which plate edge or cylinder end the component grid below edits.",
+        "use": "x0/x1 are the low/high x edges and y0/y1 the low/high y edges; cylinders offer bottom and top rings. All applies one component set to every boundary edge.",
+        "output": "Switching edges stores the grid into the per-edge load set included in the run.",
+        "caution": "Check each edge before running: a non-zero grid left on a previously edited edge stays active even though it is not currently displayed.",
+    },
 }
 
 FEM_OPTION_INFO.update({
@@ -4835,6 +4887,142 @@ FEM_OPTION_INFO.update({
     },
 })
 
+FEM_OPTION_INFO.update({
+    "ignore_girder_length": {
+        "title": "Ignore Girder Length",
+        "purpose": "Models a single stiffener bay instead of the full girder length LG.",
+        "use": "When off (default), the panel width follows the girder length so several stiffeners and girder bays are meshed. Turn it on to analyse one stiffener spacing only, matching the classic single-bay idealization.",
+        "output": "Changes the generated panel width, stiffener count and girder stations shown in the mesh preview and used by the solver.",
+        "caution": "A single bay cannot capture girder bending or multi-bay interaction; keep it off when girder response matters.",
+    },
+    "member_model": {
+        "title": "Member Model",
+        "purpose": "Chooses how stiffeners and girders are idealized in the FE model.",
+        "use": "'plates as shell, girders as beams' uses beam elements for all members. 'webs as shells, flanges as beams' meshes member webs with shell elements and keeps flanges as beams. 'all shell' meshes webs and flanges as shells.",
+        "output": "Changes mesh size, member stress recovery (beam fiber sections vs shell layers) and the surfaces shown in the 3D result view.",
+        "caution": "Shell-web models are heavier to solve; beam models cannot show local web buckling or web plasticity distribution.",
+    },
+    "acceleration_y_m_s2": {
+        "title": "Acceleration X / Y / Z",
+        "purpose": "Body-load acceleration field in the global x, y and z directions (m/s^2).",
+        "use": "Each nonzero component applies a consistent inertial body load over the structure and added masses; see the Accel X info for details.",
+        "output": "Adds distributed nodal forces; reported in the load resultant and reaction summary.",
+        "caution": "Accelerations act on structural mass, so density and added masses must be realistic.",
+    },
+    "acceleration_z_m_s2": {
+        "title": "Acceleration X / Y / Z",
+        "purpose": "Body-load acceleration field in the global x, y and z directions (m/s^2).",
+        "use": "Each nonzero component applies a consistent inertial body load over the structure and added masses; set Z to -9.81 for a 1 g gravity check.",
+        "output": "Adds distributed nodal forces; reported in the load resultant and reaction summary.",
+        "caution": "Accelerations act on structural mass, so density and added masses must be realistic.",
+    },
+    "torsional_moment_nm": {
+        "title": "Torsional Moment",
+        "purpose": "Applies a torsional moment about the cylinder axis in Nm.",
+        "use": "The moment is distributed as tangential edge loads on the cylinder end rings, twisting the shell about its axis.",
+        "output": "Shown in diagnostics and included in the load resultant, stresses and buckling prestress.",
+        "caution": "Only meaningful for cylinder geometries; flat panels ignore it.",
+    },
+    "shear_force_n": {
+        "title": "Shear Force",
+        "purpose": "Applies a transverse shear force in N across the cylinder section.",
+        "use": "The force is distributed over the end ring as a transverse load, giving beam-like shear of the whole cylinder.",
+        "output": "Shown in diagnostics and included in the load resultant, stresses and buckling prestress.",
+        "caution": "Only meaningful for cylinder geometries; flat panels ignore it.",
+    },
+    "fracture_enabled": {
+        "title": "Strain-Triggered Erosion",
+        "purpose": "Deletes shell elements whose plastic strain exceeds the threshold during nonlinear solves.",
+        "use": "Enable together with a material-nonlinear analysis to trace tearing/penetration-style failures. The thresholds below control when and how much material may be removed.",
+        "output": "Deleted elements vanish from the result view; diagnostics report the deleted count and the load level at first erosion.",
+        "caution": "Erosion is mesh-dependent and needs Von Karman kinematics; use it for capacity trends, not as a certified fracture model.",
+    },
+    "fracture_strain_threshold": {
+        "title": "Plastic Strain Threshold",
+        "purpose": "Equivalent plastic strain at which a shell element is considered failed.",
+        "use": "Typical shipbuilding steel values are 0.1-0.2 depending on mesh size; smaller meshes tolerate larger thresholds.",
+        "output": "Elements above the threshold are eroded (deleted or softened) during the nonlinear solve.",
+        "caution": "The threshold is mesh-size dependent. Calibrate against tests or rules before drawing conclusions.",
+    },
+    "fracture_residual_stiffness": {
+        "title": "Residual Stiffness Fraction",
+        "purpose": "Stiffness kept by an eroded element instead of full deletion.",
+        "use": "0 removes failed elements completely; a small value such as 0.01 keeps a numerical remnant that stabilizes the solve.",
+        "output": "Affects post-failure equilibrium and how abruptly load is shed from eroded regions.",
+        "caution": "Large residual fractions understate damage; keep the value small.",
+    },
+    "fracture_max_deleted": {
+        "title": "Max Deleted Fraction",
+        "purpose": "Upper bound on the fraction of shell elements that may erode.",
+        "use": "The solve stops eroding (and reports it) once this fraction is reached, preventing runaway element deletion.",
+        "output": "Diagnostics state whether the limit was hit.",
+        "caution": "If the limit is reached the remaining capacity is not a converged physical answer; inspect the state.",
+    },
+    "fracture_min_load_factor": {
+        "title": "Min Load Factor Before Erosion",
+        "purpose": "Load factor below which no element is allowed to erode.",
+        "use": "Protects the early load steps from spurious erosion while contact and plasticity develop.",
+        "output": "Erosion only starts above this load factor.",
+        "caution": "Setting it too high can suppress genuine early failure.",
+    },
+    "show_plate": {
+        "title": "Show Plate Surface",
+        "purpose": "Toggles the plate/skin shell surfaces in the 3D result view.",
+        "use": "Turn off to inspect stiffeners, girders and member webs hidden behind the plating.",
+        "output": "Visualization only; results are unchanged.",
+        "caution": "Hidden surfaces are still part of the solution and the reported statistics.",
+    },
+    "show_stiffeners": {
+        "title": "Show Stiffeners",
+        "purpose": "Toggles stiffener members in the 3D result view.",
+        "use": "Turn off to declutter the view when only plate response matters.",
+        "output": "Visualization only; results are unchanged.",
+        "caution": "Hidden members are still part of the solution and the reported statistics.",
+    },
+    "show_girders": {
+        "title": "Show Girders / Frames",
+        "purpose": "Toggles girder and ring-frame members in the 3D result view.",
+        "use": "Turn off to declutter the view when only plate or stiffener response matters.",
+        "output": "Visualization only; results are unchanged.",
+        "caution": "Hidden members are still part of the solution and the reported statistics.",
+    },
+    "show_mesh_lines": {
+        "title": "Show Mesh Lines",
+        "purpose": "Draws element edges on the shaded result surfaces.",
+        "use": "Useful for judging mesh density and element quality directly in the result view.",
+        "output": "Visualization only.",
+        "caution": "On fine meshes the lines can dominate visually; turn them off for stress contour reading.",
+    },
+    "show_axis_ruler": {
+        "title": "Show Axis Ruler",
+        "purpose": "Displays the coordinate axes and dimension ruler in the 3D view.",
+        "use": "Keep on to read off global directions (matches the fx/fy/fz load axes and BC DOF axes).",
+        "output": "Visualization only.",
+        "caution": "None.",
+    },
+    "plate_alpha": {
+        "title": "Plate Alpha",
+        "purpose": "Opacity of the plate/skin surfaces in the 3D view (0 transparent, 1 opaque).",
+        "use": "Lower it to see members through the plating without hiding the plate entirely.",
+        "output": "Visualization only.",
+        "caution": "Very low values can make the stress colours hard to judge.",
+    },
+    "member_alpha": {
+        "title": "Member Alpha",
+        "purpose": "Opacity of stiffener/girder members in the 3D view (0 transparent, 1 opaque).",
+        "use": "Lower it to emphasise the plate response, raise it to inspect member stresses.",
+        "output": "Visualization only.",
+        "caution": "Very low values can make the stress colours hard to judge.",
+    },
+    "colormap": {
+        "title": "Colormap",
+        "purpose": "Colour scale used for the stress/displacement contours.",
+        "use": "Pick any matplotlib colormap name; viridis and turbo are good defaults for stress plots.",
+        "output": "Visualization only; the underlying values and limits are unchanged.",
+        "caution": "Diverging maps can suggest a false zero point for quantities that are strictly positive.",
+    },
+})
+
 
 class RuntimeFEMWindow:
     """Popup window for the experimental full-geometry FEM runtime solver."""
@@ -4980,6 +5168,20 @@ class RuntimeFEMWindow:
         self.custom_pressure_patches_json = tk.StringVar(value="[]")
         self.custom_edge_segments_json = tk.StringVar(value="[]")
         self.custom_selected_edge_load_n_per_m = tk.DoubleVar(value=0.0)
+        # Component load grids (fx/fy/fz [N/m], mx/my/mz [Nm/m], global axes).
+        # The whole-edge grid is edited one named edge at a time, mirroring the
+        # per-edge boundary-condition grid: the staging vars show the edge
+        # picked by the radio and are persisted into _edge_load_specs.
+        self._load_dof_names = ("fx", "fy", "fz", "mx", "my", "mz")
+        self._load_dof_labels = {
+            "fx": "Fx [N/m]", "fy": "Fy [N/m]", "fz": "Fz [N/m]",
+            "mx": "Mx [Nm/m]", "my": "My [Nm/m]", "mz": "Mz [Nm/m]",
+        }
+        self.selected_edge_load_components = {dof: tk.DoubleVar(value=0.0) for dof in self._load_dof_names}
+        self.edge_load_components = {dof: tk.DoubleVar(value=0.0) for dof in self._load_dof_names}
+        self._edge_load_specs: dict[str, dict[str, float]] = {}
+        self.edge_load_edge_choice = tk.StringVar(value="all")
+        self._edge_load_active_edge = "all"
         self.local_refinement_enabled = tk.BooleanVar(value=False)
         self.local_refinement_patches_json = tk.StringVar(value="[]")
         self.local_refinement_fine_factor = tk.DoubleVar(value=0.3)
@@ -5555,6 +5757,69 @@ class RuntimeFEMWindow:
             if dofs:
                 payload[edge_key] = dofs
         return json.dumps(payload)
+
+    def _build_load_component_grid(self, parent: Any, start_row: int, info_key: str, label: str,
+                                   component_vars: dict) -> None:
+        """Fx/Fy/Fz [N/m] and Mx/My/Mz [Nm/m] entries on global axes.
+
+        Compact two-row layout (forces above moments) so the loads-to-run list
+        below keeps its space; a component left at 0 applies no load.
+        """
+        header = ttk.Frame(parent)
+        header.grid(row=start_row, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(2, 0))
+        self._info_button(header, info_key).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(header, text=label).pack(side=tk.LEFT)
+        grid = ttk.Frame(parent)
+        grid.grid(row=start_row + 1, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(0, 2))
+        for row_offset, dofs in enumerate((("fx", "fy", "fz"), ("mx", "my", "mz"))):
+            for col_offset, dof in enumerate(dofs):
+                ttk.Label(grid, text=self._load_dof_labels[dof]).grid(
+                    row=row_offset, column=2 * col_offset, sticky=tk.W,
+                    padx=(0 if col_offset == 0 else 10, 4), pady=1)
+                ttk.Entry(grid, textvariable=component_vars[dof], width=10).grid(
+                    row=row_offset, column=2 * col_offset + 1, sticky=tk.W, pady=1)
+
+    def _load_component_values(self, component_vars: dict) -> dict[str, float]:
+        """Collect the non-zero fx..mz values of a component grid."""
+        values: dict[str, float] = {}
+        for dof in self._load_dof_names:
+            value = _tk_var_float(component_vars[dof], 0.0)
+            if abs(value) > 0.0:
+                values[dof] = float(value)
+        return values
+
+    def _selected_edge_load_components_json(self) -> str:
+        values = self._load_component_values(self.selected_edge_load_components)
+        return json.dumps(values) if values else ""
+
+    def _persist_edge_load_edge(self, edge_key: str) -> None:
+        """Store the current component grid into the per-edge spec for edge_key."""
+        values = self._load_component_values(self.edge_load_components)
+        if values:
+            self._edge_load_specs[edge_key] = values
+        else:
+            self._edge_load_specs.pop(edge_key, None)
+
+    def _load_edge_load_edge(self, edge_key: str) -> None:
+        """Load the stored component spec for edge_key into the grid (0 if none)."""
+        spec = self._edge_load_specs.get(edge_key, {})
+        for dof in self._load_dof_names:
+            self.edge_load_components[dof].set(float(spec.get(dof, 0.0)))
+
+    def _on_edge_load_edge_change(self) -> None:
+        """Radio callback: persist the edge just left, load the newly picked one."""
+        previous = getattr(self, "_edge_load_active_edge", "all")
+        current = str(self.edge_load_edge_choice.get())
+        if previous != current:
+            self._persist_edge_load_edge(previous)
+            self._load_edge_load_edge(current)
+            self._edge_load_active_edge = current
+
+    def _collect_edge_load_components_json(self) -> str:
+        """JSON of the per-edge component loads: {edge: {fx..mz}} for loaded edges."""
+        self._persist_edge_load_edge(str(self.edge_load_edge_choice.get()))
+        payload = {edge_key: dict(spec) for edge_key, spec in self._edge_load_specs.items() if spec}
+        return json.dumps(payload) if payload else ""
 
     @staticmethod
     def _configure_option_grid(parent: Any) -> None:
@@ -6224,25 +6489,34 @@ class RuntimeFEMWindow:
         selection_loads.grid(row=3, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 8))
         self._configure_option_grid(selection_loads)
         self._add_entry_row(selection_loads, 0, "custom_pressure_pa", "Pressure [Pa]", self.custom_pressure_pa)
-        self._add_entry_row(selection_loads, 1, "custom_selected_edge_load", "Selected edges [N/m]", self.custom_selected_edge_load_n_per_m)
+        self._build_load_component_grid(selection_loads, 1, "selected_edge_load_components",
+                                        "Selected-edge load components (global axes):",
+                                        self.selected_edge_load_components)
         self.custom_load_area_var = tk.StringVar(value="Selected Area: 0.000 m2")
-        ttk.Label(selection_loads, textvariable=self.custom_load_area_var).grid(row=2, column=0, sticky=tk.W, padx=8, pady=4)
+        ttk.Label(selection_loads, textvariable=self.custom_load_area_var).grid(row=3, column=0, sticky=tk.W, padx=8, pady=4)
         self._custom_load_selection_button = ttk.Button(selection_loads, text="Start selection", command=self._toggle_custom_load_selection)
-        self._custom_load_selection_button.grid(row=2, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(selection_loads, text="Select All", command=self._custom_load_select_all).grid(row=2, column=2, sticky=tk.EW, padx=(0, 4), pady=4)
-        ttk.Button(selection_loads, text="Clear", command=self._custom_load_clear_all).grid(row=2, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+        self._custom_load_selection_button.grid(row=3, column=1, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection_loads, text="Select All", command=self._custom_load_select_all).grid(row=3, column=2, sticky=tk.EW, padx=(0, 4), pady=4)
+        ttk.Button(selection_loads, text="Clear", command=self._custom_load_clear_all).grid(row=3, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
         split_actions_loads = ttk.Frame(selection_loads)
-        split_actions_loads.grid(row=3, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=4)
+        split_actions_loads.grid(row=4, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=4)
         ttk.Button(split_actions_loads, text="Split A (Z/X)", command=lambda: self._custom_load_split_field("a")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
         ttk.Button(split_actions_loads, text="Split B (Arc/Y)", command=lambda: self._custom_load_split_field("b")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
         selection_loads.columnconfigure(3, weight=1)
-        
-        self._add_entry_row(custom_loads, 4, "plate_edge_loads", "Plate x0 / x1 [N/m]", self.plate_edge_x0_load_n_per_m)
-        ttk.Entry(custom_loads, textvariable=self.plate_edge_x1_load_n_per_m, width=12).grid(row=4, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom_loads, 5, "plate_edge_loads", "Plate y0 / y1 [N/m]", self.plate_edge_y0_load_n_per_m)
-        ttk.Entry(custom_loads, textvariable=self.plate_edge_y1_load_n_per_m, width=12).grid(row=5, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
-        self._add_entry_row(custom_loads, 6, "cylinder_edge_loads", "Cyl. lower / upper [N/m]", self.cylinder_lower_edge_load_n_per_m)
-        ttk.Entry(custom_loads, textvariable=self.cylinder_upper_edge_load_n_per_m, width=12).grid(row=6, column=3, sticky=tk.EW, padx=(0, 8), pady=4)
+
+        whole_edge_loads = ttk.LabelFrame(custom_loads, text="Whole edge / top-bottom loads")
+        whole_edge_loads.grid(row=4, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(0, 8))
+        self._configure_option_grid(whole_edge_loads)
+        edge_pick_loads = ttk.Frame(whole_edge_loads)
+        edge_pick_loads.grid(row=0, column=0, columnspan=4, sticky=tk.EW, padx=8, pady=(4, 0))
+        self._info_button(edge_pick_loads, "edge_load_edge_select").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(edge_pick_loads, text="Apply to edge:").pack(side=tk.LEFT, padx=(0, 6))
+        for key, label in self._boundary_edge_options():
+            ttk.Radiobutton(edge_pick_loads, text=label, value=key, variable=self.edge_load_edge_choice,
+                            command=self._on_edge_load_edge_change).pack(side=tk.LEFT, padx=(0, 6))
+        self._build_load_component_grid(whole_edge_loads, 1, "edge_load_components",
+                                        "Edge load components (global axes):",
+                                        self.edge_load_components)
         custom_loads.columnconfigure(3, weight=1)
 
         load_list = ttk.LabelFrame(tab_loads, text="Loads to run")
@@ -6252,15 +6526,18 @@ class RuntimeFEMWindow:
         ttk.Button(actions_loads, text="Add load", command=self._add_custom_load_from_selection).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(actions_loads, text="Delete load", command=self._delete_selected_custom_load).pack(side=tk.LEFT)
         columns = ("type", "value", "selection", "notes")
-        self._custom_load_tree = ttk.Treeview(load_list, columns=columns, show="headings", height=9, selectmode="browse")
+        # Modest minimum height: the component grids above take a few extra
+        # rows, and the list grows with the window (fill/expand) anyway.
+        self._custom_load_tree = ttk.Treeview(load_list, columns=columns, show="headings", height=7, selectmode="browse")
         self._custom_load_tree.heading("type", text="Type")
         self._custom_load_tree.heading("value", text="Value")
         self._custom_load_tree.heading("selection", text="Selection")
         self._custom_load_tree.heading("notes", text="Boundary / notes")
         self._custom_load_tree.column("type", width=88, stretch=False, anchor=tk.W)
-        self._custom_load_tree.column("value", width=110, stretch=False, anchor=tk.W)
-        self._custom_load_tree.column("selection", width=180, stretch=True, anchor=tk.W)
-        self._custom_load_tree.column("notes", width=240, stretch=True, anchor=tk.W)
+        # Wide enough for component summaries such as "fy 1000 N/m; mz 50 Nm/m".
+        self._custom_load_tree.column("value", width=170, stretch=False, anchor=tk.W)
+        self._custom_load_tree.column("selection", width=160, stretch=True, anchor=tk.W)
+        self._custom_load_tree.column("notes", width=200, stretch=True, anchor=tk.W)
         self._custom_load_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=(0, 8))
         self._custom_load_tree_scrollbar = ttk.Scrollbar(load_list, orient=tk.VERTICAL, command=self._custom_load_tree.yview)
         self._custom_load_tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=(0, 8))
@@ -6982,7 +7259,7 @@ class RuntimeFEMWindow:
         nodes: dict[int, Any],
     ) -> float:
         """Display multiplier for imperfection offsets; 0 in the entry = auto."""
-        requested = _safe_float(self.imperfection_preview_scale.get(), 0.0)
+        requested = _tk_var_float(self.imperfection_preview_scale, 0.0)
         if requested > 0.0:
             return requested
         max_offset = max(
@@ -7504,8 +7781,8 @@ class RuntimeFEMWindow:
 
             self._write_status(f"Captured {len(labels)} frames. Playing at high speed.", keep_run_results=True)
 
-            speed = max(_safe_float(self.animation_speed_multiplier.get(), 1.0), 0.05)
-            interval = max(int(round(max(_safe_int(self.animation_interval_ms.get(), 80), 20) / speed)), 5)
+            speed = max(_tk_var_float(self.animation_speed_multiplier, 1.0), 0.05)
+            interval = max(int(round(max(_tk_var_int(self.animation_interval_ms, 80), 20) / speed)), 5)
             fps = 1000 // interval
             self._animation_running = True
             self.result_canvas.play_animation(fps=fps)
@@ -7541,8 +7818,8 @@ class RuntimeFEMWindow:
         self._animation_index = (self._animation_index + 1) % len(labels)
         self._sync_color_limit_controls(force=True)
         self._refresh_figure(preserve_view=True)
-        speed = max(_safe_float(self.animation_speed_multiplier.get(), 1.0), 0.05)
-        interval = max(int(round(max(_safe_int(self.animation_interval_ms.get(), 80), 20) / speed)), 5)
+        speed = max(_tk_var_float(self.animation_speed_multiplier, 1.0), 0.05)
+        interval = max(int(round(max(_tk_var_int(self.animation_interval_ms, 80), 20) / speed)), 5)
         self._animation_after_id = self.window.after(interval, self._advance_animation_frame)
 
     def _get_shell_normal(self, p: np.ndarray, is_cylinder: bool) -> np.ndarray:
@@ -8072,11 +8349,11 @@ class RuntimeFEMWindow:
         return {
             "rigid_sphere": {
                 "position": (
-                    _safe_float(self.collision_start_x_m.get(), 0.0),
-                    _safe_float(self.collision_start_y_m.get(), 0.0),
-                    _safe_float(self.collision_start_z_m.get(), 1.0),
+                    _tk_var_float(self.collision_start_x_m, 0.0),
+                    _tk_var_float(self.collision_start_y_m, 0.0),
+                    _tk_var_float(self.collision_start_z_m, 1.0),
                 ),
-                "radius": max(_safe_float(self.collision_radius_m.get(), 0.25), 1.0e-9),
+                "radius": max(_tk_var_float(self.collision_radius_m, 0.25), 1.0e-9),
                 "visible": True,
             }
         }
@@ -8085,7 +8362,7 @@ class RuntimeFEMWindow:
         result = self.current_result
         geometry = result.summary
         display_mode = self._selected_display_mode()
-        deformation_scale = max(_safe_float(self.deformation_scale.get(), 0.0), 0.0)
+        deformation_scale = max(_tk_var_float(self.deformation_scale, 0.0), 0.0)
         component = self._selected_component()
         plate_alpha = _crisp_canvas_alpha(self.plate_alpha_vis.get(), 1.0)
         member_alpha = _crisp_canvas_alpha(self.member_alpha_vis.get(), 1.0)
@@ -8643,7 +8920,7 @@ class RuntimeFEMWindow:
             self.current_result.summary,
             self.show_stiffener_vis.get() if getattr(self, "show_stiffener_vis", None) is not None else True,
             self.show_girder_vis.get() if getattr(self, "show_girder_vis", None) is not None else True,
-            include_members=_safe_float(self.member_alpha_vis.get(), 1.0) > 0.0,
+            include_members=_tk_var_float(self.member_alpha_vis, 1.0) > 0.0,
         )
         return _finite_value_range(values)
 
@@ -8664,8 +8941,8 @@ class RuntimeFEMWindow:
             for scale in (self.color_min_scale, self.color_max_scale):
                 if scale is not None:
                     scale.configure(from_=data_min, to=data_max)
-            self.color_min_slider.set(_safe_float(self.color_min_vis.get(), data_min))
-            self.color_max_slider.set(_safe_float(self.color_max_vis.get(), data_max))
+            self.color_min_slider.set(_tk_var_float(self.color_min_vis, data_min))
+            self.color_max_slider.set(_tk_var_float(self.color_max_vis, data_max))
         finally:
             self._color_limit_syncing = False
 
@@ -8725,8 +9002,8 @@ class RuntimeFEMWindow:
         self._refresh_figure(preserve_view=True)
 
     def _sync_selected_probe_from_entries(self) -> None:
-        node_id = _safe_int(self.probe_node_id.get(), -1)
-        element_id = _safe_int(self.probe_element_id.get(), -1)
+        node_id = _tk_var_int(self.probe_node_id, -1)
+        element_id = _tk_var_int(self.probe_element_id, -1)
         self._selected_probe_node_id = node_id if node_id >= 0 else None
         self._selected_probe_element_id = element_id if element_id >= 0 else None
 
@@ -8984,7 +9261,7 @@ class RuntimeFEMWindow:
                     self.snapshot,
                     None if show_base_geometry else self.current_result,
                     self._selected_display_mode(),
-                    max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
+                    max(_tk_var_float(self.deformation_scale, 0.0), 0.0),
                     show_plate=self.show_plate_vis.get(),
                     show_stiffeners=self.show_stiffener_vis.get(),
                     show_girders=self.show_girder_vis.get(),
@@ -9209,6 +9486,39 @@ class RuntimeFEMWindow:
             self._load_boundary_edge(str(self.boundary_edge_choice.get()))
         except Exception:
             pass
+        # Per-edge component loads and the selected-edge component grid also
+        # live outside the plain tk variables.
+        try:
+            raw_edge_loads = json.loads(options.edge_load_components_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_edge_loads = {}
+        edge_load_specs: dict[str, dict[str, float]] = {}
+        for edge_key, payload in (raw_edge_loads or {}).items():
+            if not isinstance(payload, dict):
+                continue
+            spec = {
+                dof: _safe_float(payload.get(dof), 0.0)
+                for dof in self._load_dof_names
+                if abs(_safe_float(payload.get(dof), 0.0)) > 0.0
+            }
+            if spec:
+                edge_load_specs[str(edge_key)] = spec
+        self._edge_load_specs = edge_load_specs
+        try:
+            self._load_edge_load_edge(str(self.edge_load_edge_choice.get()))
+        except Exception:
+            pass
+        try:
+            raw_selected = json.loads(options.custom_selected_edge_load_components_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_selected = {}
+        if not isinstance(raw_selected, dict):
+            raw_selected = {}
+        for dof in self._load_dof_names:
+            try:
+                self.selected_edge_load_components[dof].set(_safe_float(raw_selected.get(dof), 0.0))
+            except Exception:
+                continue
         try:
             self._sync_mode_shapes_from_json()
         except Exception:
@@ -9235,21 +9545,21 @@ class RuntimeFEMWindow:
     def _options(self) -> RuntimeFEMOptions:
         return RuntimeFEMOptions(
             mesh_fidelity=str(self.mesh_fidelity.get()),
-            pressure_pa=_safe_float(self.pressure_pa.get()),
-            load_scale=_safe_float(self.load_scale.get(), 1.0),
+            pressure_pa=_tk_var_float(self.pressure_pa),
+            load_scale=_tk_var_float(self.load_scale, 1.0),
             include_stiffeners=bool(self.include_stiffeners.get()),
             include_girders=bool(self.include_girders.get()),
             ignore_girder_length=bool(self.ignore_girder_length.get()),
             include_end_lids=bool(self.include_end_lids.get()),
-            num_buckling_modes=max(_safe_int(self.num_buckling_modes.get(), 5), 1),
-            mesh_size_m=max(_safe_float(self.mesh_size_m.get(), 0.0), 0.0),
-            top_bottom_moment_nm=_safe_float(self.top_bottom_moment_nm.get(), 0.0),
-            torsional_moment_nm=_safe_float(self.torsional_moment_nm.get(), 0.0),
-            shear_force_n=_safe_float(self.shear_force_n.get(), 0.0),
-            acceleration_x_m_s2=_safe_float(self.acceleration_x_m_s2.get(), 0.0),
-            acceleration_y_m_s2=_safe_float(self.acceleration_y_m_s2.get(), 0.0),
-            acceleration_z_m_s2=_safe_float(self.acceleration_z_m_s2.get(), 0.0),
-            added_mass_kg=_safe_float(self.added_mass_kg.get(), 0.0),
+            num_buckling_modes=max(_tk_var_int(self.num_buckling_modes, 5), 1),
+            mesh_size_m=max(_tk_var_float(self.mesh_size_m, 0.0), 0.0),
+            top_bottom_moment_nm=_tk_var_float(self.top_bottom_moment_nm, 0.0),
+            torsional_moment_nm=_tk_var_float(self.torsional_moment_nm, 0.0),
+            shear_force_n=_tk_var_float(self.shear_force_n, 0.0),
+            acceleration_x_m_s2=_tk_var_float(self.acceleration_x_m_s2, 0.0),
+            acceleration_y_m_s2=_tk_var_float(self.acceleration_y_m_s2, 0.0),
+            acceleration_z_m_s2=_tk_var_float(self.acceleration_z_m_s2, 0.0),
+            added_mass_kg=_tk_var_float(self.added_mass_kg, 0.0),
             added_mass_location=str(self.added_mass_location.get() or "none"),
             boundary_condition=str(self.boundary_condition.get()),
             boundary_constraint_json=self._collect_boundary_constraint_json(),
@@ -9261,105 +9571,107 @@ class RuntimeFEMWindow:
             analysis_type=str(self.analysis_type.get()),
             buckling_analysis_type=str(self.buckling_analysis_type.get()),
             pressure_direction=_normalise_pressure_side(self.pressure_direction.get()),
-            axial_force_n=_safe_float(self.axial_force_n.get(), 0.0),
-            enforced_displacement_x_m=_safe_float(self.enforced_displacement_x_m.get(), 0.0),
-            enforced_displacement_y_m=_safe_float(self.enforced_displacement_y_m.get(), 0.0),
-            enforced_displacement_z_m=_safe_float(self.enforced_displacement_z_m.get(), 0.0),
-            stiffener_eccentricity_m=_safe_float(self.stiffener_eccentricity_m.get(), 0.0),
-            girder_eccentricity_m=_safe_float(self.girder_eccentricity_m.get(), 0.0),
+            axial_force_n=_tk_var_float(self.axial_force_n, 0.0),
+            enforced_displacement_x_m=_tk_var_float(self.enforced_displacement_x_m, 0.0),
+            enforced_displacement_y_m=_tk_var_float(self.enforced_displacement_y_m, 0.0),
+            enforced_displacement_z_m=_tk_var_float(self.enforced_displacement_z_m, 0.0),
+            stiffener_eccentricity_m=_tk_var_float(self.stiffener_eccentricity_m, 0.0),
+            girder_eccentricity_m=_tk_var_float(self.girder_eccentricity_m, 0.0),
             member_orientation=str(self.member_orientation.get()),
             solver_type=str(self.solver_type.get()),
-            stress_percentile=min(max(_safe_float(self.stress_percentile.get(), 95.0), 0.0), 100.0),
-            elastic_modulus_pa=max(_safe_float(self.elastic_modulus_gpa.get(), 210.0), 1.0e-9) * 1.0e9,
-            poisson_ratio=min(max(_safe_float(self.poisson_ratio.get(), 0.3), 0.0), 0.49),
-            yield_stress_pa=max(_safe_float(self.yield_stress_mpa.get(), 355.0), 0.0) * 1.0e6,
+            stress_percentile=min(max(_tk_var_float(self.stress_percentile, 95.0), 0.0), 100.0),
+            elastic_modulus_pa=max(_tk_var_float(self.elastic_modulus_gpa, 210.0), 1.0e-9) * 1.0e9,
+            poisson_ratio=min(max(_tk_var_float(self.poisson_ratio, 0.3), 0.0), 0.49),
+            yield_stress_pa=max(_tk_var_float(self.yield_stress_mpa, 355.0), 0.0) * 1.0e6,
             material_model=str(self.material_model.get()),
             steel_grade=str(self.steel_grade.get()),
             steel_thickness_class=str(self.steel_thickness_class.get()),
-            nonlinear_max_load_factor=max(_safe_float(self.nonlinear_max_load_factor.get(), 3.0), 1.0e-9),
-            nonlinear_steps=max(_safe_int(self.nonlinear_steps.get(), 12), 1),
-            nonlinear_max_iterations=max(_safe_int(self.nonlinear_max_iterations.get(), 25), 1),
-            nonlinear_tolerance=max(_safe_float(self.nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
+            nonlinear_max_load_factor=max(_tk_var_float(self.nonlinear_max_load_factor, 3.0), 1.0e-9),
+            nonlinear_steps=max(_tk_var_int(self.nonlinear_steps, 12), 1),
+            nonlinear_max_iterations=max(_tk_var_int(self.nonlinear_max_iterations, 25), 1),
+            nonlinear_tolerance=max(_tk_var_float(self.nonlinear_tolerance, 1.0e-6), 1.0e-12),
             nonlinear_layers=_nearest_nonlinear_layer_count(self.nonlinear_layers.get()),
             nonlinear_solution_control=str(self.nonlinear_solution_control.get()),
             post_buckling_enabled=bool(self.post_buckling_enabled.get()),
             post_buckling_stop_load_fraction=float(self.post_buckling_stop_load_fraction.get()),
             post_buckling_max_displacement_m=float(self.post_buckling_max_displacement_m.get()),
             nonlinear_convergence_profile=str(self.nonlinear_convergence_profile.get()),
-            nonlinear_assembly_threads=max(_safe_int(self.nonlinear_assembly_threads.get(), 0), 0),
+            nonlinear_assembly_threads=max(_tk_var_int(self.nonlinear_assembly_threads, 0), 0),
             nonlinear_static_kinematics=_normalise_kinematics(self.nonlinear_static_kinematics.get()),
             beam_consistent_mass_enabled=bool(self.beam_consistent_mass_enabled.get()),
-            deformation_scale=max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
+            deformation_scale=max(_tk_var_float(self.deformation_scale, 0.0), 0.0),
             custom_load_bc_enabled=bool(self.custom_load_bc_enabled.get()),
             custom_loads_add_to_imported=bool(self.custom_loads_add_to_imported.get()),
             custom_use_nullspace_projection=(
                         bool(self.custom_use_nullspace_projection.get()) and not bool(self.collision_enabled.get())),
-            custom_pressure_pa=_safe_float(self.custom_pressure_pa.get(), 0.0),
+            custom_pressure_pa=_tk_var_float(self.custom_pressure_pa, 0.0),
             plate_edge_x0_support=str(self.plate_edge_x0_support.get()),
             plate_edge_x1_support=str(self.plate_edge_x1_support.get()),
             plate_edge_y0_support=str(self.plate_edge_y0_support.get()),
             plate_edge_y1_support=str(self.plate_edge_y1_support.get()),
             cylinder_lower_support=str(self.cylinder_lower_support.get()),
             cylinder_upper_support=str(self.cylinder_upper_support.get()),
-            plate_edge_x0_load_n_per_m=_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0),
-            plate_edge_x1_load_n_per_m=_safe_float(self.plate_edge_x1_load_n_per_m.get(), 0.0),
-            plate_edge_y0_load_n_per_m=_safe_float(self.plate_edge_y0_load_n_per_m.get(), 0.0),
-            plate_edge_y1_load_n_per_m=_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0),
-            cylinder_lower_edge_load_n_per_m=_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0),
-            cylinder_upper_edge_load_n_per_m=_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0),
+            plate_edge_x0_load_n_per_m=_tk_var_float(self.plate_edge_x0_load_n_per_m, 0.0),
+            plate_edge_x1_load_n_per_m=_tk_var_float(self.plate_edge_x1_load_n_per_m, 0.0),
+            plate_edge_y0_load_n_per_m=_tk_var_float(self.plate_edge_y0_load_n_per_m, 0.0),
+            plate_edge_y1_load_n_per_m=_tk_var_float(self.plate_edge_y1_load_n_per_m, 0.0),
+            cylinder_lower_edge_load_n_per_m=_tk_var_float(self.cylinder_lower_edge_load_n_per_m, 0.0),
+            cylinder_upper_edge_load_n_per_m=_tk_var_float(self.cylinder_upper_edge_load_n_per_m, 0.0),
+            edge_load_components_json=self._collect_edge_load_components_json(),
             custom_loads_json=str(self.custom_loads_json.get()),
             custom_bc_segments_json=str(self.custom_bc_segments_json.get()),
             thickness_regions_json=str(self.thickness_regions_json.get()),
             custom_pressure_patches_json=str(self.custom_pressure_patches_json.get()),
             custom_edge_segments_json=str(self.custom_edge_segments_json.get()),
-            custom_selected_edge_load_n_per_m=_safe_float(self.custom_selected_edge_load_n_per_m.get(), 0.0),
+            custom_selected_edge_load_n_per_m=_tk_var_float(self.custom_selected_edge_load_n_per_m, 0.0),
+            custom_selected_edge_load_components_json=self._selected_edge_load_components_json(),
             local_refinement_enabled=bool(self.local_refinement_enabled.get()),
             local_refinement_patches_json=str(self.local_refinement_patches_json.get()),
-            local_refinement_fine_factor=_safe_float(self.local_refinement_fine_factor.get(), 0.3),
-            local_refinement_fine_size_m=max(_safe_float(self.local_refinement_fine_size_m.get(), 0.0), 0.0),
-            local_refinement_extent_m=max(_safe_float(self.local_refinement_extent_m.get(), 0.0), 0.0),
+            local_refinement_fine_factor=_tk_var_float(self.local_refinement_fine_factor, 0.3),
+            local_refinement_fine_size_m=max(_tk_var_float(self.local_refinement_fine_size_m, 0.0), 0.0),
+            local_refinement_extent_m=max(_tk_var_float(self.local_refinement_extent_m, 0.0), 0.0),
             local_refinement_zone_factor=1.0,
-            local_refinement_growth_factor=max(_safe_float(self.local_refinement_growth_factor.get(), 1.35), 1.01),
+            local_refinement_growth_factor=max(_tk_var_float(self.local_refinement_growth_factor, 1.35), 1.01),
             point_refinement_enabled=bool(self.point_refinement_enabled.get()),
-            point_refinement_x_m=max(_safe_float(self.point_refinement_x_m.get(), 0.0), 0.0),
-            point_refinement_y_m=max(_safe_float(self.point_refinement_y_m.get(), 0.0), 0.0),
-            point_refinement_fine_factor=_safe_float(self.point_refinement_fine_factor.get(), 0.3),
-            point_refinement_fine_size_m=max(_safe_float(self.point_refinement_fine_size_m.get(), 0.0), 0.0),
-            point_refinement_extent_m=max(_safe_float(self.point_refinement_extent_m.get(), 0.25), 0.0),
-            point_refinement_growth_factor=max(_safe_float(self.point_refinement_growth_factor.get(), 1.35), 1.01),
+            point_refinement_x_m=max(_tk_var_float(self.point_refinement_x_m, 0.0), 0.0),
+            point_refinement_y_m=max(_tk_var_float(self.point_refinement_y_m, 0.0), 0.0),
+            point_refinement_fine_factor=_tk_var_float(self.point_refinement_fine_factor, 0.3),
+            point_refinement_fine_size_m=max(_tk_var_float(self.point_refinement_fine_size_m, 0.0), 0.0),
+            point_refinement_extent_m=max(_tk_var_float(self.point_refinement_extent_m, 0.25), 0.0),
+            point_refinement_growth_factor=max(_tk_var_float(self.point_refinement_growth_factor, 1.35), 1.01),
             custom_time_domain_enabled=bool(self.custom_time_domain_enabled.get()),
-            custom_time_domain_duration_s=max(_safe_float(self.custom_time_domain_duration_s.get(), 0.01), 0.0),
-            custom_time_domain_total_time_s=max(_safe_float(self.custom_time_domain_total_time_s.get(), 0.05), 0.0),
-            custom_time_domain_dt_s=max(_safe_float(self.custom_time_domain_dt_s.get(), 0.0005), 1.0e-9),
-            custom_time_domain_result_interval_s=max(_safe_float(self.custom_time_domain_result_interval_s.get(), 0.0),
+            custom_time_domain_duration_s=max(_tk_var_float(self.custom_time_domain_duration_s, 0.01), 0.0),
+            custom_time_domain_total_time_s=max(_tk_var_float(self.custom_time_domain_total_time_s, 0.05), 0.0),
+            custom_time_domain_dt_s=max(_tk_var_float(self.custom_time_domain_dt_s, 0.0005), 1.0e-9),
+            custom_time_domain_result_interval_s=max(_tk_var_float(self.custom_time_domain_result_interval_s, 0.0),
                                                      0.0),
             custom_time_domain_include_static_load=bool(self.custom_time_domain_include_static_load.get()),
             imperfection_enabled=bool(self.imperfection_enabled.get()),
             imperfection_shape=str(self.imperfection_shape.get()),
-            imperfection_amplitude_m=max(_safe_float(self.imperfection_amplitude_m.get(), 0.0), 0.0),
-            imperfection_wave_a=max(_safe_int(self.imperfection_wave_a.get(), 1), 1),
-            imperfection_wave_b=max(_safe_int(self.imperfection_wave_b.get(), 1), 1),
+            imperfection_amplitude_m=max(_tk_var_float(self.imperfection_amplitude_m, 0.0), 0.0),
+            imperfection_wave_a=max(_tk_var_int(self.imperfection_wave_a, 1), 1),
+            imperfection_wave_b=max(_tk_var_int(self.imperfection_wave_b, 1), 1),
             imperfection_mode_shapes_json=str(self.imperfection_mode_shapes_json.get()),
             runtime_solver=str(self.runtime_solver.get()),
             allow_unbalanced_free_free=bool(self.allow_unbalanced_free_free.get()),
-            buckling_shift_load_factor=max(_safe_float(self.buckling_shift_load_factor.get(), 0.0), 0.0),
-            buckling_min_load_factor=max(_safe_float(self.buckling_min_load_factor.get(), 0.0), 0.0),
-            buckling_max_load_factor=max(_safe_float(self.buckling_max_load_factor.get(), 0.0), 0.0),
-            buckling_repeated_tolerance=max(_safe_float(self.buckling_repeated_tolerance.get(), 1.0e-3), 0.0),
+            buckling_shift_load_factor=max(_tk_var_float(self.buckling_shift_load_factor, 0.0), 0.0),
+            buckling_min_load_factor=max(_tk_var_float(self.buckling_min_load_factor, 0.0), 0.0),
+            buckling_max_load_factor=max(_tk_var_float(self.buckling_max_load_factor, 0.0), 0.0),
+            buckling_repeated_tolerance=max(_tk_var_float(self.buckling_repeated_tolerance, 1.0e-3), 0.0),
             buckling_allow_dense_fallback=bool(self.buckling_allow_dense_fallback.get()),
             recovery_history_mode=str(self.recovery_history_mode.get()),
-            recovery_threads=max(_safe_int(self.recovery_threads.get(), 0), 0),
-            memory_limit_mb=max(_safe_float(self.memory_limit_mb.get(), 0.0), 0.0),
-            capacity_buckling_mode_number=max(_safe_int(self.capacity_buckling_mode_number.get(), 1), 1),
+            recovery_threads=max(_tk_var_int(self.recovery_threads, 0), 0),
+            memory_limit_mb=max(_tk_var_float(self.memory_limit_mb, 0.0), 0.0),
+            capacity_buckling_mode_number=max(_tk_var_int(self.capacity_buckling_mode_number, 1), 1),
             capacity_mesh_min_elements_per_half_wave=max(
-                _safe_int(self.capacity_mesh_min_elements_per_half_wave.get(), 4), 1),
+                _tk_var_int(self.capacity_mesh_min_elements_per_half_wave, 4), 1),
             fracture_enabled=bool(self.fracture_enabled.get()),
-            fracture_strain_threshold=max(_safe_float(self.fracture_strain_threshold.get(), 0.02), 1.0e-12),
+            fracture_strain_threshold=max(_tk_var_float(self.fracture_strain_threshold, 0.02), 1.0e-12),
             fracture_residual_stiffness_fraction=min(
-                max(_safe_float(self.fracture_residual_stiffness_fraction.get(), 1.0e-6), 0.0), 1.0),
-            fracture_max_deleted_fraction=min(max(_safe_float(self.fracture_max_deleted_fraction.get(), 0.25), 1.0e-9),
+                max(_tk_var_float(self.fracture_residual_stiffness_fraction, 1.0e-6), 0.0), 1.0),
+            fracture_max_deleted_fraction=min(max(_tk_var_float(self.fracture_max_deleted_fraction, 0.25), 1.0e-9),
                                               1.0),
-            fracture_min_load_factor=max(_safe_float(self.fracture_min_load_factor.get(), 0.0), 0.0),
+            fracture_min_load_factor=max(_tk_var_float(self.fracture_min_load_factor, 0.0), 0.0),
             collision_enabled=bool(self.collision_enabled.get()),
             collision_include_static_load=bool(self.collision_include_static_load.get()),
             collision_damage_enabled=bool(self.collision_damage_enabled.get()),
@@ -9367,56 +9679,56 @@ class RuntimeFEMWindow:
             collision_nonlinear_kinematics=_normalise_kinematics(self.collision_nonlinear_kinematics.get()),
             collision_beam_contact_enabled=bool(self.collision_beam_contact_enabled.get()),
             collision_adaptive_mesh_enabled=bool(self.collision_adaptive_mesh_enabled.get()),
-            collision_adaptive_fine_factor=_safe_float(self.collision_adaptive_fine_factor.get(), 0.3),
-            collision_adaptive_fine_size_m=_safe_float(self.collision_adaptive_fine_size_m.get(), 0.0),
-            collision_adaptive_extent_m=max(_safe_float(self.collision_adaptive_extent_m.get(), 0.0), 0.0),
-            collision_adaptive_growth_factor=max(_safe_float(self.collision_adaptive_growth_factor.get(), 1.35), 1.01),
+            collision_adaptive_fine_factor=_tk_var_float(self.collision_adaptive_fine_factor, 0.3),
+            collision_adaptive_fine_size_m=_tk_var_float(self.collision_adaptive_fine_size_m, 0.0),
+            collision_adaptive_extent_m=max(_tk_var_float(self.collision_adaptive_extent_m, 0.0), 0.0),
+            collision_adaptive_growth_factor=max(_tk_var_float(self.collision_adaptive_growth_factor, 1.35), 1.01),
             detail_transition_style=str(self.detail_transition_style.get() or "graded grid"),
-            collision_adaptive_zone_factor=_safe_float(self.collision_adaptive_zone_factor.get(), 2.5),
-            collision_nonlinear_max_iterations=max(_safe_int(self.collision_nonlinear_max_iterations.get(), 20), 1),
-            collision_nonlinear_tolerance=max(_safe_float(self.collision_nonlinear_tolerance.get(), 1.0e-6), 1.0e-12),
-            collision_nonlinear_cutbacks=max(_safe_int(self.collision_nonlinear_cutbacks.get(), 8), 0),
-            collision_plastic_damage_threshold=max(_safe_float(self.collision_plastic_damage_threshold.get(), 0.01),
+            collision_adaptive_zone_factor=_tk_var_float(self.collision_adaptive_zone_factor, 2.5),
+            collision_nonlinear_max_iterations=max(_tk_var_int(self.collision_nonlinear_max_iterations, 20), 1),
+            collision_nonlinear_tolerance=max(_tk_var_float(self.collision_nonlinear_tolerance, 1.0e-6), 1.0e-12),
+            collision_nonlinear_cutbacks=max(_tk_var_int(self.collision_nonlinear_cutbacks, 8), 0),
+            collision_plastic_damage_threshold=max(_tk_var_float(self.collision_plastic_damage_threshold, 0.01),
                                                    1.0e-12),
             collision_damage_criterion=str(self.collision_damage_criterion.get()),
-            collision_mass_kg=max(_safe_float(self.collision_mass_kg.get(), 1000.0), 1.0e-9),
-            collision_radius_m=max(_safe_float(self.collision_radius_m.get(), 0.25), 1.0e-9),
-            collision_start_x_m=_safe_float(self.collision_start_x_m.get(), 0.0),
-            collision_start_y_m=_safe_float(self.collision_start_y_m.get(), 0.0),
-            collision_start_z_m=_safe_float(self.collision_start_z_m.get(), 1.0),
-            collision_vector_x=_safe_float(self.collision_vector_x.get(), 0.0),
-            collision_vector_y=_safe_float(self.collision_vector_y.get(), 0.0),
-            collision_vector_z=_safe_float(self.collision_vector_z.get(), -1.0),
-            collision_speed_mps=max(_safe_float(self.collision_speed_mps.get(), 5.0), 0.0),
+            collision_mass_kg=max(_tk_var_float(self.collision_mass_kg, 1000.0), 1.0e-9),
+            collision_radius_m=max(_tk_var_float(self.collision_radius_m, 0.25), 1.0e-9),
+            collision_start_x_m=_tk_var_float(self.collision_start_x_m, 0.0),
+            collision_start_y_m=_tk_var_float(self.collision_start_y_m, 0.0),
+            collision_start_z_m=_tk_var_float(self.collision_start_z_m, 1.0),
+            collision_vector_x=_tk_var_float(self.collision_vector_x, 0.0),
+            collision_vector_y=_tk_var_float(self.collision_vector_y, 0.0),
+            collision_vector_z=_tk_var_float(self.collision_vector_z, -1.0),
+            collision_speed_mps=max(_tk_var_float(self.collision_speed_mps, 5.0), 0.0),
             collision_time_mode=str(self.collision_time_mode.get()),
-            collision_auto_steps_per_radius=max(_safe_float(self.collision_auto_steps_per_radius.get(), 20.0), 2.0),
-            collision_auto_post_contact_radii=max(_safe_float(self.collision_auto_post_contact_radii.get(), 6.0), 0.0),
-            collision_bounce_back_time_s=max(_safe_float(self.collision_bounce_back_time_s.get(), 0.01), 0.0),
-            collision_total_time_s=max(_safe_float(self.collision_total_time_s.get(), 0.05), 1.0e-9),
-            collision_dt_s=max(_safe_float(self.collision_dt_s.get(), 0.0005), 1.0e-9),
-            collision_result_interval_s=max(_safe_float(self.collision_result_interval_s.get(), 0.0), 0.0),
-            collision_penalty_stiffness_n_per_m=max(_safe_float(self.collision_penalty_stiffness_n_per_m.get(), 0.0),
+            collision_auto_steps_per_radius=max(_tk_var_float(self.collision_auto_steps_per_radius, 20.0), 2.0),
+            collision_auto_post_contact_radii=max(_tk_var_float(self.collision_auto_post_contact_radii, 6.0), 0.0),
+            collision_bounce_back_time_s=max(_tk_var_float(self.collision_bounce_back_time_s, 0.01), 0.0),
+            collision_total_time_s=max(_tk_var_float(self.collision_total_time_s, 0.05), 1.0e-9),
+            collision_dt_s=max(_tk_var_float(self.collision_dt_s, 0.0005), 1.0e-9),
+            collision_result_interval_s=max(_tk_var_float(self.collision_result_interval_s, 0.0), 0.0),
+            collision_penalty_stiffness_n_per_m=max(_tk_var_float(self.collision_penalty_stiffness_n_per_m, 0.0),
                                                     0.0),
             collision_auto_precondition=bool(self.collision_auto_precondition.get()),
-            collision_contact_damping=max(_safe_float(self.collision_contact_damping.get(), 0.0), 0.0),
-            collision_max_iterations=max(_safe_int(self.collision_max_iterations.get(), 25), 1),
-            collision_penetration_tolerance_m=max(_safe_float(self.collision_penetration_tolerance_m.get(), 1.0e-8),
+            collision_contact_damping=max(_tk_var_float(self.collision_contact_damping, 0.0), 0.0),
+            collision_max_iterations=max(_tk_var_int(self.collision_max_iterations, 25), 1),
+            collision_penetration_tolerance_m=max(_tk_var_float(self.collision_penetration_tolerance_m, 1.0e-8),
                                                   1.0e-12),
-            collision_force_tolerance_n=max(_safe_float(self.collision_force_tolerance_n.get(), 1.0e-6), 1.0e-12),
+            collision_force_tolerance_n=max(_tk_var_float(self.collision_force_tolerance_n, 1.0e-6), 1.0e-12),
             collision_target_penetration_fraction=max(
-                _safe_float(self.collision_target_penetration_fraction.get(), 0.01), 1.0e-9),
-            collision_max_event_substeps=max(_safe_int(self.collision_max_event_substeps.get(), 16), 1),
+                _tk_var_float(self.collision_target_penetration_fraction, 0.01), 1.0e-9),
+            collision_max_event_substeps=max(_tk_var_int(self.collision_max_event_substeps, 16), 1),
             collision_contact_surface=str(self.collision_contact_surface.get()),
             collision_damage_mode=str(self.collision_damage_mode.get()),
             collision_damage_capacity_basis=str(self.collision_damage_capacity_basis.get()),
-            collision_damage_user_capacity_pa=max(_safe_float(self.collision_damage_user_capacity_mpa.get(), 0.0),
+            collision_damage_user_capacity_pa=max(_tk_var_float(self.collision_damage_user_capacity_mpa, 0.0),
                                                   0.0) * 1.0e6,
-            collision_damage_softening_start=max(_safe_float(self.collision_damage_softening_start.get(), 0.6), 0.0),
-            collision_damage_delete_at=max(_safe_float(self.collision_damage_delete_at.get(), 1.0), 1.0e-9),
+            collision_damage_softening_start=max(_tk_var_float(self.collision_damage_softening_start, 0.6), 0.0),
+            collision_damage_delete_at=max(_tk_var_float(self.collision_damage_delete_at, 1.0), 1.0e-9),
             collision_damage_min_contact_area_m2=max(
-                _safe_float(self.collision_damage_min_contact_area_m2.get(), 1.0e-6), 1.0e-12),
+                _tk_var_float(self.collision_damage_min_contact_area_m2, 1.0e-6), 1.0e-12),
             collision_damage_max_deleted_fraction=min(
-                max(_safe_float(self.collision_damage_max_deleted_fraction.get(), 0.25), 1.0e-9), 1.0),
+                max(_tk_var_float(self.collision_damage_max_deleted_fraction, 0.25), 1.0e-9), 1.0),
             collision_damage_neighbor_smoothing=bool(self.collision_damage_neighbor_smoothing.get()),
         )
 
@@ -9452,7 +9764,12 @@ class RuntimeFEMWindow:
             variables.append(var)
         for var in self.boundary_dof_value.values():
             variables.append(var)
-            
+        variables.append(self.edge_load_edge_choice)
+        for var in self.edge_load_components.values():
+            variables.append(var)
+        for var in self.selected_edge_load_components.values():
+            variables.append(var)
+
         for variable in variables:
             trace_id = variable.trace_add("write", lambda *_args: self._refresh_custom_load_list())
             self._custom_load_trace_ids.append((variable, trace_id))
@@ -9491,38 +9808,40 @@ class RuntimeFEMWindow:
                 parts.append(f"{edge_name}=[{dof_str}]")
             supports = "; ".join(parts)
 
+        # Whole-edge loads: fx..mz component sets per edge, with the legacy
+        # scalar values shown only when non-zero (loaded from older states).
+        edge_load_parts = []
+        try:
+            component_specs = json.loads(self._collect_edge_load_components_json() or "{}")
+        except Exception:
+            component_specs = {}
+        for edge_key, spec in (component_specs or {}).items():
+            if isinstance(spec, dict) and spec:
+                dof_text = ",".join(f"{dof}={_safe_float(value, 0.0):g}" for dof, value in spec.items())
+                edge_load_parts.append(f"{edge_key}=[{dof_text}]")
         if self.snapshot.is_cylinder:
-            edge_loads = (
-                    "lower "
-                    + f"{_safe_float(self.cylinder_lower_edge_load_n_per_m.get(), 0.0):g}"
-                    + ", upper "
-                    + f"{_safe_float(self.cylinder_upper_edge_load_n_per_m.get(), 0.0):g}"
-                    + " N/m"
-            )
+            legacy = (("lower", self.cylinder_lower_edge_load_n_per_m),
+                      ("upper", self.cylinder_upper_edge_load_n_per_m))
         else:
-            edge_loads = (
-                    "x0 "
-                    + f"{_safe_float(self.plate_edge_x0_load_n_per_m.get(), 0.0):g}"
-                    + ", x1 "
-                    + f"{_safe_float(self.plate_edge_x1_load_n_per_m.get(), 0.0):g}"
-                    + ", y0 "
-                    + f"{_safe_float(self.plate_edge_y0_load_n_per_m.get(), 0.0):g}"
-                    + ", y1 "
-                    + f"{_safe_float(self.plate_edge_y1_load_n_per_m.get(), 0.0):g}"
-                    + " N/m"
-            )
+            legacy = (("x0", self.plate_edge_x0_load_n_per_m), ("x1", self.plate_edge_x1_load_n_per_m),
+                      ("y0", self.plate_edge_y0_load_n_per_m), ("y1", self.plate_edge_y1_load_n_per_m))
+        for name, variable in legacy:
+            value = _tk_var_float(variable)
+            if abs(value) > 0.0:
+                edge_load_parts.append(f"{name} {value:g} N/m (legacy)")
+        edge_loads = ", ".join(edge_load_parts) if edge_load_parts else "no edge loads"
         time_domain = "time off"
         if bool(self.custom_time_domain_enabled.get()):
             time_domain = (
                     "time dt="
-                    + f"{_safe_float(self.custom_time_domain_dt_s.get(), 0.0):g}"
+                    + f"{_tk_var_float(self.custom_time_domain_dt_s):g}"
                     + " s, duration="
-                    + f"{_safe_float(self.custom_time_domain_duration_s.get(), 0.0):g}"
+                    + f"{_tk_var_float(self.custom_time_domain_duration_s):g}"
                     + " s, total="
-                    + f"{_safe_float(self.custom_time_domain_total_time_s.get(), 0.0):g}"
+                    + f"{_tk_var_float(self.custom_time_domain_total_time_s):g}"
                     + " s"
             )
-            interval = _safe_float(self.custom_time_domain_result_interval_s.get(), 0.0)
+            interval = _tk_var_float(self.custom_time_domain_result_interval_s)
             if interval > 0.0:
                 time_domain += ", result interval=" + f"{interval:g}" + " s"
             if bool(self.custom_time_domain_include_static_load.get()):
@@ -9556,6 +9875,16 @@ class RuntimeFEMWindow:
     def _custom_load_entry_value_text(entry: dict[str, Any]) -> str:
         if str(entry.get("type", "")).lower() in {"pressure", "panel_pressure"}:
             return f"{_safe_float(entry.get('pressure_pa'), 0.0):g} Pa"
+        components = entry.get("components")
+        if isinstance(components, dict) and components:
+            parts = []
+            for key in ("fx", "fy", "fz", "mx", "my", "mz"):
+                value = _safe_float(components.get(key), 0.0)
+                if abs(value) > 0.0:
+                    unit = "N/m" if key.startswith("f") else "Nm/m"
+                    parts.append(f"{key} {value:g} {unit}")
+            if parts:
+                return "; ".join(parts)
         return f"{_safe_float(entry.get('line_load_n_per_m'), 0.0):g} N/m"
 
     def _refresh_custom_load_list(self) -> None:
@@ -9719,8 +10048,8 @@ class RuntimeFEMWindow:
                     del p["axis_a_origin"]
                 selected_patches.append(p)
         selected_edges = self._selected_custom_load_edges()
-        pressure = _safe_float(self.custom_pressure_pa.get(), 0.0)
-        line_load = _safe_float(self.custom_selected_edge_load_n_per_m.get(), 0.0)
+        pressure = _tk_var_float(self.custom_pressure_pa, 0.0)
+        components = self._load_component_values(self.selected_edge_load_components)
         added = 0
         if selected_patches and abs(pressure) > 0.0:
             self._custom_load_entries.append({
@@ -9729,16 +10058,17 @@ class RuntimeFEMWindow:
                 "patches": selected_patches,
             })
             added += 1
-        if selected_edges and abs(line_load) > 0.0:
+        if selected_edges and components:
             self._custom_load_entries.append({
                 "type": "edge",
-                "line_load_n_per_m": float(line_load),
+                "components": components,
                 "edges": selected_edges,
             })
             added += 1
         if added == 0:
             self._write_status(
-                "Select at least one panel with non-zero pressure or right-click at least one edge with non-zero edge load before adding.",
+                "Select at least one panel with non-zero pressure or right-click at least one edge "
+                "with a non-zero fx-mz load component before adding.",
                 keep_run_results=True,
             )
             return
@@ -9831,7 +10161,7 @@ class RuntimeFEMWindow:
             ))
 
     def _set_thickness_region_from_selection(self, whole: bool = False) -> None:
-        thickness = _safe_float(self.geometry_thickness_m.get(), 0.0)
+        thickness = _tk_var_float(self.geometry_thickness_m, 0.0)
         if thickness <= 0.0:
             self._write_status("Enter a positive plate thickness [m] before assigning it.", keep_run_results=True)
             return
@@ -9954,7 +10284,7 @@ class RuntimeFEMWindow:
 
     def _add_division_plane(self) -> None:
         axis = str(self.division_plane_axis.get() or "x")
-        coordinate = _safe_float(self.division_plane_coord_m.get(), 0.0)
+        coordinate = _tk_var_float(self.division_plane_coord_m, 0.0)
         cuts, error = self._division_plane_param_cuts(axis, coordinate)
         if error:
             self._write_status(error, keep_run_results=True)
@@ -10088,9 +10418,9 @@ class RuntimeFEMWindow:
             return False
         direction = np.array(
             [
-                _safe_float(self.collision_vector_x.get(), 0.0),
-                _safe_float(self.collision_vector_y.get(), 0.0),
-                _safe_float(self.collision_vector_z.get(), 0.0),
+                _tk_var_float(self.collision_vector_x, 0.0),
+                _tk_var_float(self.collision_vector_y, 0.0),
+                _tk_var_float(self.collision_vector_z, 0.0),
             ],
             dtype=float,
         )
@@ -10098,8 +10428,8 @@ class RuntimeFEMWindow:
             messagebox.showerror("Collision setup", "Sphere travel vector must be non-zero.")
             return False
         if str(self.collision_time_mode.get()).strip().lower() == "manual" and (
-                _safe_float(self.collision_dt_s.get(), 0.0) <= 0.0
-                or _safe_float(self.collision_total_time_s.get(), 0.0) <= 0.0
+                _tk_var_float(self.collision_dt_s, 0.0) <= 0.0
+                or _tk_var_float(self.collision_total_time_s, 0.0) <= 0.0
         ):
             messagebox.showerror("Collision setup", "Collision total time and time step must be positive.")
             return False
@@ -10119,6 +10449,43 @@ class RuntimeFEMWindow:
             return False
         return True
 
+    def _reflect_effective_run_inputs(self) -> list[str]:
+        """Push solver auto-set values back into the controls at run start.
+
+        The solver promotes some inputs (material model, solution control,
+        kinematics, layer count) depending on the analysis; the controls must
+        show what the run actually uses.  Returns human-readable change notes.
+        """
+        changes: list[str] = []
+        config = _solver_config_from_options(self._options())
+        material_choice = str(self.material_model.get() or "linear elastic")
+        if (
+                fe_solver._wants_material_nonlinear_analysis(config)
+                and material_choice.strip().lower() != "dnv-rp-c208 steel"
+        ):
+            self.material_model.set("DNV-RP-C208 steel")
+            changes.append("Material model set to 'DNV-RP-C208 steel' (material-nonlinear run).")
+        if fe_solver._wants_static_nonlinear_analysis(config):
+            if (
+                    fe_solver._nonlinear_solution_control(config) == "arc length"
+                    and str(self.nonlinear_solution_control.get()).strip().lower() != "arc length"
+            ):
+                self.nonlinear_solution_control.set("arc length")
+                changes.append("Nonlinear control set to 'arc length' (post-buckling continuation).")
+            effective_kinematics = fe_solver._effective_nonlinear_static_kinematics(config)
+            if effective_kinematics != _normalise_kinematics(self.nonlinear_static_kinematics.get()):
+                self.nonlinear_static_kinematics.set(_kinematics_label(effective_kinematics))
+                changes.append("Kinematics set to '" + _kinematics_label(effective_kinematics) + "'.")
+        if fe_solver._wants_material_nonlinear_analysis(config):
+            requested_layers = max(_tk_var_int(self.nonlinear_layers, 5), 1)
+            effective_layers = _nearest_nonlinear_layer_count(requested_layers)
+            if effective_layers != requested_layers:
+                self.nonlinear_layers.set(effective_layers)
+                changes.append(
+                    "Shell integration layers set to " + str(effective_layers) + " (supported: 3, 5, 7, 9, 11)."
+                )
+        return changes
+
     def run(self) -> None:
         """Prepare/run the runtime FEM request and render Matplotlib results."""
 
@@ -10133,6 +10500,7 @@ class RuntimeFEMWindow:
         if not self._collision_inputs_are_valid():
             return
 
+        auto_set_notes = self._reflect_effective_run_inputs()
         options = self._options()
         self._active_run_options = options
         self._set_solver_running(True)
@@ -10140,6 +10508,8 @@ class RuntimeFEMWindow:
         self._last_run_result_status_text = ""
         self._live_collision_sphere_visualization = {}
         self._run_status_history = ["The result plot will update when the solver finishes.", ""]
+        for note in auto_set_notes:
+            self._run_status_history.append("Auto-set at run start: " + note)
         self._write_status(self._format_run_status_text(options, self._run_status_history))
         self._live_graph_reset(self._live_graph_kind_for_options(options))
 
@@ -10642,7 +11012,7 @@ class RuntimeFEMWindow:
             self.current_result.summary,
             self.current_result,
             visualization,
-            max(_safe_float(self.deformation_scale.get(), 0.0), 0.0),
+            max(_tk_var_float(self.deformation_scale, 0.0), 0.0),
         )
         surfaces = list(visualization.get("skin_shell_surfaces") or ()) + list(
             visualization.get("shell_surfaces") or ())

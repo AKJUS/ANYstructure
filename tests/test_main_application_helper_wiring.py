@@ -111,13 +111,49 @@ def test_conical_shell_uses_single_domain_and_existing_force_stress_toggle():
     assert "Unstiffened conical shell (Stress input)" not in source
     assert "_new_shell_M1sd" not in source
     assert "self._new_shell_Msd.get()" in cylinder_sync_block
-    assert "self._new_shell_Msd.set(M1sd)" in cylinder_sync_block
+    # Calculated conversions are rounded before being shown in the entries.
+    assert "self._new_shell_Msd.set(_round_calculated(M1sd))" in cylinder_sync_block
     assert "conical=True" in conical_branch
     assert "_new_shell_stress_or_force.set" not in conical_branch
     assert "helper_cylinder_stress_to_force_to_stress(" in cylinder_sync_block
-    assert "self._new_shell_M2sd.set(M2sd)" in cylinder_sync_block
-    assert "self._new_shell_Q2sd.set(Q2sd)" in cylinder_sync_block
+    assert "self._new_shell_M2sd.set(_round_calculated(M2sd))" in cylinder_sync_block
+    assert "self._new_shell_Q2sd.set(_round_calculated(Q2sd))" in cylinder_sync_block
     assert "if 'Need to check column buckling' not in results.keys() and value is None:" in source
+
+
+def test_calculated_gui_values_are_rounded_and_km_fields_wired():
+    main_source = Path(__file__).resolve().parents[1] / "anystruct" / "main_application.py"
+    source = main_source.read_text(encoding="utf-8")
+
+    # Calculated stress/force conversions are rounded (3 decimals) before they
+    # are written into the entries; user-typed values are never rounded.
+    assert "def _round_calculated(value, decimals: int = 3):" in source
+    assert "self._new_shell_sasd.set(_round_calculated(sasd))" in source
+    assert "self._new_shell_Nsd.set(_round_calculated(Nsd))" in source
+    assert "self._new_shell_Qsd.set(_round_calculated(Qsd))" in source
+
+    # The stress-estimation window handler stores km2/km3 into their own
+    # fields (a copy-paste bug wrote all three km values into km1).
+    assert "self._new_stf_km2.set(returned_stress_and_km[6])" in source
+    assert "self._new_stf_km3.set(returned_stress_and_km[7])" in source
+    assert source.count("self._new_stf_km1.set(returned_stress_and_km") == 1
+
+    # Stored plate stresses keep the user's precision on line selection.
+    assert "self._new_sigma_y1.set(round(properties['sigma_y1'][0], 5))" in source
+    assert "round(properties['sigma_y1'][0], 1)" not in source
+
+    # User-facing label fixes.
+    assert "Fabrication method ring stiffener:" in source
+    assert "Fabrication method ring girder:" in source
+    assert "Fabrictaion" not in source
+    assert "avaliable" not in source
+    assert "memebrane" not in source
+
+    from anystruct.main_application import _round_calculated
+
+    assert _round_calculated(523.5359969639133) == 523.536
+    assert _round_calculated(-0.2) == -0.2
+    assert _round_calculated("not a number") == "not a number"
 
 
 def test_release_package_metadata_uses_current_markdown_readme():

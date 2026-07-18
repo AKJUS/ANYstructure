@@ -209,6 +209,12 @@ def _cross_section(item: Any) -> Dict[str, float]:
         ("c_y", ("c_y", "cy", "fiber_distance_y")),
         ("c_z", ("c_z", "cz", "fiber_distance_z")),
         ("torsion_modulus", ("torsion_modulus", "Wt", "torsional_section_modulus")),
+        # Physical profile dimensions: the fiber-section plasticity model uses
+        # them to build a profile-true web/flange fiber layout.
+        ("web_height", ("web_height", "web_h", "hw")),
+        ("web_thickness", ("web_thickness", "web_thk", "tw")),
+        ("flange_width", ("flange_width", "flange_w", "bf")),
+        ("flange_thickness", ("flange_thickness", "flange_thk", "tf")),
     ):
         value = _value(source, *aliases, default=None)
         if value is not None and float(value) > 0.0:

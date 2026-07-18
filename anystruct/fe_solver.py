@@ -170,10 +170,15 @@ class LightweightFEMConfig:
     plate_edge_y1_load_n_per_m: float = 0.0
     cylinder_lower_edge_load_n_per_m: float = 0.0
     cylinder_upper_edge_load_n_per_m: float = 0.0
+    # Component edge loads: {"fx","fy","fz" [N/m], "mx","my","mz" [Nm/m]}
+    # entered on global axes with no implicit sign conventions.  The whole-edge
+    # payload maps edge keys (x0/x1/y0/y1, lower/upper, all) to component sets.
+    edge_load_components_json: str = ""
     custom_loads_json: str = "[]"
     custom_pressure_patches_json: str = "[]"
     custom_edge_segments_json: str = "[]"
     custom_selected_edge_load_n_per_m: float = 0.0
+    custom_selected_edge_load_components_json: str = ""
     local_refinement_enabled: bool = False
     local_refinement_patches_json: str = "[]"
     local_refinement_fine_factor: float = 0.3
@@ -5350,6 +5355,82 @@ def _nonlinear_layer_count(value: object) -> int:
     return min(supported, key=lambda item: abs(item - requested))
 
 
+_MATERIAL_MODEL_C208_CHOICES = {"dnv rp c208 steel", "dnv c208 steel", "dnv rp c208", "rp c208 steel"}
+
+
+def _auto_set_parameter_notes(config: LightweightFEMConfig) -> list[str]:
+    """Explicit 'Auto-set:' diagnostics for parameters the run overrides.
+
+    Whenever the solver silently promotes or coerces a user input (material
+    model, solution control, kinematics, layer count, runtime path), the run
+    diagnostics must state what was set and why.
+    """
+    notes: list[str] = []
+    analysis_choice = _normalized_choice(config.analysis_type, "linear eigenvalue")
+    material_choice = _normalized_choice(config.material_model, "linear elastic")
+    material_dropdown_is_linear = material_choice not in _MATERIAL_MODEL_C208_CHOICES
+
+    if _wants_material_nonlinear_analysis(config) and material_dropdown_is_linear:
+        if bool(config.post_buckling_enabled):
+            reason = "post-buckling continuation always runs with steel plasticity"
+        else:
+            reason = "the analysis type requests material nonlinearity"
+        notes.append(
+            "Auto-set: material model 'linear elastic' -> 'DNV-RP-C208 steel' (grade "
+            + str(config.steel_grade) + ") because " + reason + "."
+        )
+    if (
+            bool(config.collision_enabled)
+            and bool(config.collision_material_nonlinear_enabled)
+            and material_dropdown_is_linear
+            and not _wants_material_nonlinear_analysis(config)
+    ):
+        notes.append(
+            "Auto-set: DNV-RP-C208 hardening curve (grade " + str(config.steel_grade)
+            + ") applied for the material-nonlinear collision transient although the material dropdown is 'linear elastic'."
+        )
+
+    if _wants_static_nonlinear_analysis(config):
+        control_choice = _normalized_choice(config.nonlinear_solution_control, "newton force control")
+        effective_control = _nonlinear_solution_control(config)
+        if effective_control == "arc length" and control_choice not in {
+            "arc", "arc length", "arc-length", "arc length continuation", "crisfield arc length",
+        }:
+            notes.append(
+                "Auto-set: nonlinear solution control '" + str(config.nonlinear_solution_control)
+                + "' -> 'arc length' because post-buckling continuation must pass the limit point."
+            )
+        kinematics_choice = _normalized_kinematics(config.nonlinear_static_kinematics)
+        effective_kinematics = _effective_nonlinear_static_kinematics(config)
+        if effective_kinematics != kinematics_choice:
+            if _wants_capacity_workflow(config):
+                reason = "the ANYintelligent capacity workflow solves with Von Karman kinematics"
+            elif _wants_tangent_stability_analysis(config):
+                reason = "tangent stability solves with Von Karman kinematics"
+            else:
+                reason = "arc-length control solves with Von Karman kinematics"
+            notes.append(
+                "Auto-set: kinematics 'corotational' -> 'Von Karman' because " + reason + "."
+            )
+        if analysis_choice == "linear eigenvalue" and not bool(config.post_buckling_enabled):
+            runtime_choice = _normalized_choice(config.runtime_solver, "stepwise")
+            if runtime_choice == "nonlinear static":
+                notes.append(
+                    "Auto-set: analysis runs as a nonlinear static solve because the runtime path is 'nonlinear static' "
+                    "although the analysis dropdown is 'linear eigenvalue'."
+                )
+
+    if _wants_material_nonlinear_analysis(config):
+        requested_layers = _positive_int(config.nonlinear_layers, 5)
+        effective_layers = _nonlinear_layer_count(config.nonlinear_layers)
+        if effective_layers != requested_layers:
+            notes.append(
+                "Auto-set: shell integration layers " + str(requested_layers) + " -> "
+                + str(effective_layers) + " (supported counts are 3, 5, 7, 9, 11)."
+            )
+    return notes
+
+
 def _nonlinear_curve_payload(config: LightweightFEMConfig, geometry: dict) -> tuple[object | None, dict[str, float | str]]:
     if _backend_curve_from_properties is None:
         return None, {}
@@ -7342,12 +7423,60 @@ def _line_node_weights(nodes: list[object], axis: int, closed_length: float = 0.
     return weights
 
 
-def _apply_weighted_edge_load(load_case, weights: dict[int, float], force_per_length: np.ndarray) -> None:
+def _apply_weighted_edge_load(load_case, weights: dict[int, float], force_per_length: np.ndarray,
+                              moment_per_length: np.ndarray | None = None) -> None:
     if not weights:
         return
     vector = np.asarray(force_per_length, dtype=float)
+    moment = None if moment_per_length is None else np.asarray(moment_per_length, dtype=float)
     for node_id, weight in weights.items():
-        load_case.add_nodal_load(int(node_id), forces=vector * float(weight))
+        load_case.add_nodal_load(
+            int(node_id),
+            forces=vector * float(weight),
+            moments=None if moment is None else moment * float(weight),
+        )
+
+
+def _edge_load_components(payload: object) -> tuple[np.ndarray, np.ndarray] | None:
+    """Parse {fx..mz} per-length components into (forces, moments) on global axes.
+
+    Forces are N/m and moments Nm/m; returns None when the payload holds no
+    non-zero component so callers can fall back to the legacy scalar loads.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:
+        forces = np.array([float(payload.get(key, 0.0) or 0.0) for key in ("fx", "fy", "fz")], dtype=float)
+        moments = np.array([float(payload.get(key, 0.0) or 0.0) for key in ("mx", "my", "mz")], dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if not np.any(np.abs(forces) > 0.0) and not np.any(np.abs(moments) > 0.0):
+        return None
+    return forces, moments
+
+
+def _edge_load_component_specs(config: LightweightFEMConfig) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Whole-edge component loads keyed by edge (x0/x1/y0/y1, lower/upper, all)."""
+    try:
+        raw = json.loads(config.edge_load_components_json or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    specs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for edge_key, payload in raw.items():
+        components = _edge_load_components(payload)
+        if components is not None:
+            specs[str(edge_key).strip().lower()] = components
+    return specs
+
+
+def _selected_edge_load_config_components(config: LightweightFEMConfig) -> tuple[np.ndarray, np.ndarray] | None:
+    try:
+        payload = json.loads(config.custom_selected_edge_load_components_json or "null")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return _edge_load_components(payload)
 
 
 def _custom_pressure_patch_count(config: LightweightFEMConfig) -> int:
@@ -7452,33 +7581,46 @@ def _add_custom_selected_edge_loads(model, load_case, nodes: list, generated_geo
     if generated_geometry.get("plot_type") != "flat":
         return
     edge_entries = _custom_edge_load_entries(config)
+    load_groups: list[tuple[np.ndarray, np.ndarray | None, list[dict[str, float | str]]]] = []
     if edge_entries:
-        load_groups: list[tuple[float, list[dict[str, float | str]]]] = []
         for entry in edge_entries:
-            line_load = float(entry.get("line_load_n_per_m", 0.0) or 0.0)
-            if abs(line_load) <= 0.0:
-                continue
             raw_edges = entry.get("edges", [])
             if not isinstance(raw_edges, list):
                 continue
             edge_config = LightweightFEMConfig(custom_edge_segments_json=json.dumps(raw_edges))
-            load_groups.append((line_load, _custom_edge_segments(edge_config)))
+            segments = _custom_edge_segments(edge_config)
+            components = _edge_load_components(entry.get("components"))
+            if components is not None:
+                # fx..mz per unit length, entered on global axes.
+                load_groups.append((components[0], components[1], segments))
+                continue
+            line_load = float(entry.get("line_load_n_per_m", 0.0) or 0.0)
+            if abs(line_load) <= 0.0:
+                continue
+            # Legacy scalar: direction implied by the segment orientation.
+            load_groups.append((np.array([line_load]), None, segments))
     else:
-        line_load = float(config.custom_selected_edge_load_n_per_m or 0.0)
-        if abs(line_load) <= 0.0:
-            return
-        load_groups = [(line_load, _custom_edge_segments(config))]
+        components = _selected_edge_load_config_components(config)
+        if components is not None:
+            load_groups = [(components[0], components[1], _custom_edge_segments(config))]
+        else:
+            line_load = float(config.custom_selected_edge_load_n_per_m or 0.0)
+            if abs(line_load) <= 0.0:
+                return
+            load_groups = [(np.array([line_load]), None, _custom_edge_segments(config))]
 
-    for line_load, segments in load_groups:
+    for forces, moments, segments in load_groups:
         if not segments:
             continue
         for segment in segments:
             segment_nodes, weight_axis, direction = _flat_segment_nodes(nodes, segment, tol)
-            _apply_weighted_edge_load(
-                load_case,
-                _line_node_weights(segment_nodes, weight_axis),
-                direction * line_load,
-            )
+            weights = _line_node_weights(segment_nodes, weight_axis)
+            if moments is None:
+                # Legacy scalar entry: the single value acts along the implied
+                # in-plane direction normal to the segment.
+                _apply_weighted_edge_load(load_case, weights, direction * float(forces[0]))
+            else:
+                _apply_weighted_edge_load(load_case, weights, forces, moments)
 
 
 def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: LightweightFEMConfig) -> None:
@@ -7490,6 +7632,14 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
         return
     coords = np.asarray([node.coords() for node in nodes], dtype=float)
     tol = max(float(np.ptp(coords[:, 0]) + np.ptp(coords[:, 1]) + np.ptp(coords[:, 2])) * 1.0e-9, 1.0e-9)
+    component_specs = _edge_load_component_specs(config)
+
+    def _apply_component_specs(edge_key: str, weights: dict[int, float]) -> None:
+        for spec_key in ("all", edge_key):
+            spec = component_specs.get(spec_key)
+            if spec is not None:
+                _apply_weighted_edge_load(load_case, weights, spec[0], spec[1])
+
     if generated_geometry.get("plot_type") == "cylinder":
         lower_ids = set(int(node_id) for node_id in generated_geometry.get("bottom_ring_node_ids", []))
         upper_ids = set(int(node_id) for node_id in generated_geometry.get("top_ring_node_ids", []))
@@ -7497,8 +7647,12 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
         upper = [node for node in nodes if int(node.id) in upper_ids]
         radius = _positive(generated_geometry.get("radius_m", 0.0), 0.0)
         circumference = 2.0 * math.pi * radius if radius > 0.0 else 0.0
-        _apply_weighted_edge_load(load_case, _line_node_weights(lower, 0, circumference), np.array([0.0, 0.0, -float(config.cylinder_lower_edge_load_n_per_m)]))
-        _apply_weighted_edge_load(load_case, _line_node_weights(upper, 0, circumference), np.array([0.0, 0.0, float(config.cylinder_upper_edge_load_n_per_m)]))
+        lower_weights = _line_node_weights(lower, 0, circumference)
+        upper_weights = _line_node_weights(upper, 0, circumference)
+        _apply_weighted_edge_load(load_case, lower_weights, np.array([0.0, 0.0, -float(config.cylinder_lower_edge_load_n_per_m)]))
+        _apply_weighted_edge_load(load_case, upper_weights, np.array([0.0, 0.0, float(config.cylinder_upper_edge_load_n_per_m)]))
+        _apply_component_specs("lower", lower_weights)
+        _apply_component_specs("upper", upper_weights)
         return
     xmin = float(np.min(coords[:, 0]))
     xmax = float(np.max(coords[:, 0]))
@@ -7508,10 +7662,18 @@ def _add_custom_edge_loads(model, load_case, generated_geometry: dict, config: L
     x1_nodes = [node for node in nodes if abs(float(node.x) - xmax) <= tol]
     y0_nodes = [node for node in nodes if abs(float(node.y) - ymin) <= tol]
     y1_nodes = [node for node in nodes if abs(float(node.y) - ymax) <= tol]
-    _apply_weighted_edge_load(load_case, _line_node_weights(x0_nodes, 1), np.array([-float(config.plate_edge_x0_load_n_per_m), 0.0, 0.0]))
-    _apply_weighted_edge_load(load_case, _line_node_weights(x1_nodes, 1), np.array([float(config.plate_edge_x1_load_n_per_m), 0.0, 0.0]))
-    _apply_weighted_edge_load(load_case, _line_node_weights(y0_nodes, 0), np.array([0.0, -float(config.plate_edge_y0_load_n_per_m), 0.0]))
-    _apply_weighted_edge_load(load_case, _line_node_weights(y1_nodes, 0), np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
+    x0_weights = _line_node_weights(x0_nodes, 1)
+    x1_weights = _line_node_weights(x1_nodes, 1)
+    y0_weights = _line_node_weights(y0_nodes, 0)
+    y1_weights = _line_node_weights(y1_nodes, 0)
+    _apply_weighted_edge_load(load_case, x0_weights, np.array([-float(config.plate_edge_x0_load_n_per_m), 0.0, 0.0]))
+    _apply_weighted_edge_load(load_case, x1_weights, np.array([float(config.plate_edge_x1_load_n_per_m), 0.0, 0.0]))
+    _apply_weighted_edge_load(load_case, y0_weights, np.array([0.0, -float(config.plate_edge_y0_load_n_per_m), 0.0]))
+    _apply_weighted_edge_load(load_case, y1_weights, np.array([0.0, float(config.plate_edge_y1_load_n_per_m), 0.0]))
+    _apply_component_specs("x0", x0_weights)
+    _apply_component_specs("x1", x1_weights)
+    _apply_component_specs("y0", y0_weights)
+    _apply_component_specs("y1", y1_weights)
     _add_custom_selected_edge_loads(model, load_case, nodes, generated_geometry, config, tol)
 
 
@@ -8089,7 +8251,22 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     if config.include_end_lids and geometry.get("geometry") == "cylinder":
         diagnostics.append("Applied stress-free rigid top/bottom lid diaphragms at cylinder ends.")
     if (not config.custom_load_bc_enabled) and geometry.get("geometry") != "cylinder":
-        diagnostics.append("Applied flat-panel edge supports from line properties, defaulting to simply supported edges when unspecified.")
+        _support_boundary_map = _boundary_constraint_map(config)
+        if _support_boundary_map:
+            diagnostics.append(
+                "Applied per-edge DOF constraints from the Boundary Conditions tab ("
+                + str(len(_support_boundary_map)) + " edge spec(s)); automatic edge supports are bypassed."
+            )
+        elif bool(getattr(config, "boundary_auto_supports", True)):
+            diagnostics.append(
+                "Auto-set: no edge DOF is constrained, so automatic well-posed edge supports were applied "
+                "(from line properties, defaulting to simply supported edges when unspecified)."
+            )
+        else:
+            diagnostics.append(
+                "No edge constraints and automatic supports are off: the boundary is free "
+                "(nullspace projection or balanced loads must carry the rigid-body modes)."
+            )
     if include_imported_loads and config.top_bottom_moment_nm:
         diagnostics.append("Applied top/bottom shell bending moment: " + str(round(float(config.top_bottom_moment_nm), 3)) + " Nm.")
     if include_imported_loads and abs(float(config.axial_force_n or 0.0)) > 0.0:
@@ -8144,6 +8321,7 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
             + str(material_properties.get("thickness_class", ""))
             + " for nonlinear static shell plasticity."
         )
+    diagnostics.extend(_auto_set_parameter_notes(config))
     if config.imperfection_enabled:
         diagnostics.append("Geometric imperfection input is enabled; offsets are applied as stress-free reference geometry.")
     if _custom_pressure_uses_selected_patches(config):
@@ -8151,8 +8329,13 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     if (
             (_custom_edge_load_entries(config) and _custom_edge_segments(config))
             or (abs(float(config.custom_selected_edge_load_n_per_m or 0.0)) > 0.0 and _custom_edge_segments(config))
+            or (_selected_edge_load_config_components(config) is not None and _custom_edge_segments(config))
     ):
         diagnostics.append("Custom selected edge segments receive an additional line load.")
+    if config.custom_load_bc_enabled and _edge_load_component_specs(config):
+        diagnostics.append(
+            "Whole-edge component loads (fx/fy/fz in N/m, mx/my/mz in Nm/m on global axes) are applied to the named edges."
+        )
     if config.custom_time_domain_enabled:
         diagnostics.append("Custom time-domain pressure response is enabled and solved with the linear Newmark pressure-patch solver.")
     if _invalid_corotational_static_fracture(config):

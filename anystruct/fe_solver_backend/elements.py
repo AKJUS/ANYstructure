@@ -1860,17 +1860,70 @@ class BeamElement(Element):
         return FiberSectionPlasticityConfig(config.num_y, config.num_z, curve)
 
     def _fiber_section_grid(self, config: FiberSectionPlasticityConfig) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        key = ("fiber_grid", int(config.num_y), int(config.num_z), float(self._A), float(self._Iy), float(self._Iz))
+        cross = self.cross_section if isinstance(getattr(self, "cross_section", None), dict) else {}
+        web_height = float(cross.get("web_height") or 0.0)
+        web_thickness = float(cross.get("web_thickness") or 0.0)
+        flange_width = float(cross.get("flange_width") or 0.0)
+        flange_thickness = float(cross.get("flange_thickness") or 0.0)
+        shaped = (
+            web_height > 0.0
+            and web_thickness > 0.0
+            and flange_width > 0.0
+            and flange_thickness > 0.0
+        )
+        key = (
+            "fiber_grid",
+            int(config.num_y),
+            int(config.num_z),
+            float(self._A),
+            float(self._Iy),
+            float(self._Iz),
+            round(web_height, 12),
+            round(web_thickness, 12),
+            round(flange_width, 12),
+            round(flange_thickness, 12),
+        )
         cache = getattr(self, "_fiber_grid_cache", None)
         if cache is not None and cache.get("key") == key:
             return cache["y"], cache["z"], cache["weights"]
 
-        raw_y = np.linspace(-1.0, 1.0, int(config.num_y)) if config.num_y > 1 else np.zeros(1)
-        raw_z = np.linspace(-1.0, 1.0, int(config.num_z)) if config.num_z > 1 else np.zeros(1)
-        yy, zz = np.meshgrid(raw_y, raw_z, indexing="ij")
-        y = yy.reshape(-1)
-        z = zz.reshape(-1)
-        weights = np.full(y.size, float(self._A) / max(y.size, 1), dtype=float)
+        if shaped:
+            # Profile-true fiber layout: web and flange strips follow the real
+            # T/L section geometry so the plastification order (flange tips vs
+            # web) is captured.  The coordinates and weights are afterwards
+            # recentred and rescaled to reproduce the section constants
+            # A/Iy/Iz exactly, keeping the elastic response identical to the
+            # section-property idealization.  Flanges are laid out symmetric
+            # in y also for L profiles (the section constants carry no product
+            # of inertia).
+            n_web = max(int(config.num_z), 3)
+            n_flange = max(int(config.num_y), 3)
+            web_z = (np.arange(n_web, dtype=float) + 0.5) * (web_height / n_web)
+            y_parts = [np.zeros(n_web)]
+            z_parts = [web_z]
+            weight_parts = [np.full(n_web, web_height * web_thickness / n_web)]
+            flange_y = (np.arange(n_flange, dtype=float) + 0.5) * (flange_width / n_flange) - 0.5 * flange_width
+            for z_level in (web_height + 0.25 * flange_thickness, web_height + 0.75 * flange_thickness):
+                y_parts.append(flange_y.copy())
+                z_parts.append(np.full(n_flange, z_level))
+                weight_parts.append(np.full(n_flange, flange_width * flange_thickness / (2 * n_flange)))
+            y = np.concatenate(y_parts)
+            z = np.concatenate(z_parts)
+            weights = np.concatenate(weight_parts)
+            total = float(np.sum(weights))
+            if total > _SMALL and self._A > 0.0:
+                weights *= float(self._A) / total
+            area = float(np.sum(weights))
+            if area > _SMALL:
+                y = y - float(np.sum(weights * y)) / area
+                z = z - float(np.sum(weights * z)) / area
+        else:
+            raw_y = np.linspace(-1.0, 1.0, int(config.num_y)) if config.num_y > 1 else np.zeros(1)
+            raw_z = np.linspace(-1.0, 1.0, int(config.num_z)) if config.num_z > 1 else np.zeros(1)
+            yy, zz = np.meshgrid(raw_y, raw_z, indexing="ij")
+            y = yy.reshape(-1)
+            z = zz.reshape(-1)
+            weights = np.full(y.size, float(self._A) / max(y.size, 1), dtype=float)
 
         denom_y = float(np.sum(weights * y * y))
         denom_z = float(np.sum(weights * z * z))

@@ -74,6 +74,19 @@ except ModuleNotFoundError:
     import ANYstructure.anystruct.tkinter_3d_canvas_thickness_v6 as tkinter_3d_canvas
 
 
+def _round_calculated(value, decimals: int = 3):
+    """Round a value the app calculated before showing it in an input field.
+
+    Conversions (stress <-> force, unit changes) produce long float tails that
+    clutter the entries.  Only calculated values pass through here -- text the
+    user types is never rounded, so higher manual precision is always allowed.
+    """
+    try:
+        return round(float(value), decimals)
+    except (TypeError, ValueError):
+        return value
+
+
 @dataclass(frozen=True)
 class NewStructureProperties:
     """Resolved structure data needed to add or update one active line."""
@@ -1192,7 +1205,7 @@ class Application():
         self._information_gui_lab_chk_structure = [
             ttk.Label(self._tab_information, text='Label color code', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Show COG/COB', font=self._text_size["Text 9"]),
-            ttk.Label(self._tab_information, text='Check to see avaliable shortcuts', font=self._text_size["Text 9"]),
+            ttk.Label(self._tab_information, text='Check to see available shortcuts', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Beam prop.', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Plate thk.', font=self._text_size["Text 9"]),
             ttk.Label(self._tab_information, text='Pressure', font=self._text_size["Text 9"]),
@@ -1489,10 +1502,10 @@ class Application():
         self._lab_shell_en_cap_pressure = ttk.Label(self._tab_prop, text='End cap pressure is',
                                                     font=self._text_size['Text 8'],
                                                     )
-        self._lab_shell_fab_stf = ttk.Label(self._tab_prop, text='Fabrictaion method ring stiffener.:',
+        self._lab_shell_fab_stf = ttk.Label(self._tab_prop, text='Fabrication method ring stiffener:',
                                             font=self._text_size['Text 8'],
                                             )
-        self._lab_shell_fab_frame = ttk.Label(self._tab_prop, text='Fabrictaion method ring gird.:',
+        self._lab_shell_fab_frame = ttk.Label(self._tab_prop, text='Fabrication method ring girder:',
                                               font=self._text_size['Text 8'],
                                               )
 
@@ -3517,23 +3530,23 @@ class Application():
                                   self._new_shell_Qsd.get(), self._new_shell_Q2sd.get()]
                         sasd, smsd, tTsd, tQsd, shsd = hlp.helper_cylinder_stress_to_force_to_stress(
                             stresses=None, forces=forces, **conical_converter_kwargs)
-                        self._new_shell_sasd.set(sasd)
-                        self._new_shell_smsd.set(smsd)
-                        self._new_shell_tTsd.set(abs(tTsd))
-                        self._new_shell_tQsd.set(tQsd)
-                        self._new_shell_shsd.set(shsd)
+                        self._new_shell_sasd.set(_round_calculated(sasd))
+                        self._new_shell_smsd.set(_round_calculated(smsd))
+                        self._new_shell_tTsd.set(_round_calculated(abs(tTsd)))
+                        self._new_shell_tQsd.set(_round_calculated(tQsd))
+                        self._new_shell_shsd.set(_round_calculated(shsd))
                     else:
                         stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(),
                                     abs(self._new_shell_tTsd.get()), self._new_shell_tQsd.get(),
                                     self._new_shell_shsd.get()]
                         Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = hlp.helper_cylinder_stress_to_force_to_stress(
                             stresses=stresses, **conical_converter_kwargs)[:6]
-                        self._new_shell_Nsd.set(Nsd)
-                        self._new_shell_Msd.set(M1sd)
-                        self._new_shell_M2sd.set(M2sd)
-                        self._new_shell_Tsd.set(Tsd)
-                        self._new_shell_Qsd.set(Q1sd)
-                        self._new_shell_Q2sd.set(Q2sd)
+                        self._new_shell_Nsd.set(_round_calculated(Nsd))
+                        self._new_shell_Msd.set(_round_calculated(M1sd))
+                        self._new_shell_M2sd.set(_round_calculated(M2sd))
+                        self._new_shell_Tsd.set(_round_calculated(Tsd))
+                        self._new_shell_Qsd.set(_round_calculated(Q1sd))
+                        self._new_shell_Q2sd.set(_round_calculated(Q2sd))
                 elif self._new_shell_stress_or_force.get() == 1:
                     forces = [self._new_shell_Nsd.get(), self._new_shell_Msd.get(), \
                               self._new_shell_Tsd.get(), self._new_shell_Qsd.get()]
@@ -3542,10 +3555,10 @@ class Application():
                         shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
                         hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
                         tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
-                    self._new_shell_sasd.set(sasd)
-                    self._new_shell_smsd.set(smsd)
-                    self._new_shell_tTsd.set(abs(tTsd))
-                    self._new_shell_tQsd.set(tQsd)
+                    self._new_shell_sasd.set(_round_calculated(sasd))
+                    self._new_shell_smsd.set(_round_calculated(smsd))
+                    self._new_shell_tTsd.set(_round_calculated(abs(tTsd)))
+                    self._new_shell_tQsd.set(_round_calculated(tQsd))
                     # self._new_shell_shsd.set(0)
                 else:
                     stresses = [self._new_shell_sasd.get(), self._new_shell_smsd.get(), abs(self._new_shell_tTsd.get()),
@@ -3556,10 +3569,10 @@ class Application():
                         shell_radius=self._new_shell_radius.get(), shell_spacing=self._new_stf_spacing.get(),
                         hw=self._new_stf_web_h.get(), tw=self._new_stf_web_t.get(), b=self._new_stf_fl_w.get(),
                         tf=self._new_stf_fl_t.get(), CylinderAndCurvedPlate=CylinderAndCurvedPlate)
-                    self._new_shell_Nsd.set(Nsd)
-                    self._new_shell_Msd.set(Msd)
-                    self._new_shell_Tsd.set(Tsd)
-                    self._new_shell_Qsd.set(Qsd)
+                    self._new_shell_Nsd.set(_round_calculated(Nsd))
+                    self._new_shell_Msd.set(_round_calculated(Msd))
+                    self._new_shell_Tsd.set(_round_calculated(Tsd))
+                    self._new_shell_Qsd.set(_round_calculated(Qsd))
 
         self._current_calculation_domain = self._new_calculation_domain.get()
         self._sync_simplified_domain_selection()
@@ -3590,14 +3603,14 @@ class Application():
         elif info_type == 'flat':
             long_text = 'Information on stresses:\n' \
                         ' \n' \
-                        'Uniform or linear variable stresses is assumed.\n' \
-                        'The stresses included in the check is acial memebrane stresses.\n' \
+                        'Uniform or linearly varying stresses are assumed.\n' \
+                        'The stresses included in the check are axial membrane stresses.\n' \
                         'Shear stresses are set to positive.\n' \
-                        'Bending stresses are included included by lateral pressure and need not be included.\n' \
+                        'Bending stresses from lateral pressure are accounted for internally and need not be included.\n' \
                         'Compression stress is taken as POSITIVE.\n' \
-                        'The memebrane acial stress in transverse direction that is due to girder bending\n' \
+                        'The membrane axial stress in the transverse direction that is due to girder bending\n' \
                         'needs to be included in the check according to method 1.\n' \
-                        'Lateral pressure outer overpressure is taken as positive.\n' \
+                        'Lateral outer overpressure is taken as positive.\n' \
                         '   \n'
         else:
             long_text = 'Also see the "Help tab".'
@@ -11606,21 +11619,21 @@ class Application():
         else:
             Nsd, Msd, Tsd, Qsd = result.derived_forces[:4]
         if self._new_shell_stress_or_force.get() == 1:
-            self._new_shell_sasd.set(sasd)
-            self._new_shell_smsd.set(smsd)
-            self._new_shell_tTsd.set(tTsd)
-            self._new_shell_tQsd.set(tQsd)
+            self._new_shell_sasd.set(_round_calculated(sasd))
+            self._new_shell_smsd.set(_round_calculated(smsd))
+            self._new_shell_tTsd.set(_round_calculated(tTsd))
+            self._new_shell_tQsd.set(_round_calculated(tQsd))
             if result.geometry == 9:
-                self._new_shell_M2sd.set(M2sd)
-                self._new_shell_Q2sd.set(Q2sd)
+                self._new_shell_M2sd.set(_round_calculated(M2sd))
+                self._new_shell_Q2sd.set(_round_calculated(Q2sd))
         else:
-            self._new_shell_Nsd.set(Nsd)
-            self._new_shell_Msd.set(Msd)
-            self._new_shell_Tsd.set(Tsd)
-            self._new_shell_Qsd.set(Qsd)
+            self._new_shell_Nsd.set(_round_calculated(Nsd))
+            self._new_shell_Msd.set(_round_calculated(Msd))
+            self._new_shell_Tsd.set(_round_calculated(Tsd))
+            self._new_shell_Qsd.set(_round_calculated(Qsd))
             if result.geometry == 9:
-                self._new_shell_M2sd.set(M2sd)
-                self._new_shell_Q2sd.set(Q2sd)
+                self._new_shell_M2sd.set(_round_calculated(M2sd))
+                self._new_shell_Q2sd.set(_round_calculated(Q2sd))
 
         cylinder_obj = self._create_cylinder_structure_from_property_result(result)
 
@@ -12207,11 +12220,14 @@ class Application():
                     self._new_field_len.set(round(properties['span'][0] * 1000, 5))
                     self._new_plate_thk.set(round(properties['plate_thk'][0] * 1000, 5))
                     self._new_plate_kpp.set(properties['plate_kpp'][0])
-                    self._new_sigma_y1.set(round(properties['sigma_y1'][0], 1))
-                    self._new_sigma_y2.set(round(properties['sigma_y2'][0], 1))
-                    self._new_sigma_x1.set(round(properties['sigma_x1'][0], 1))
-                    self._new_sigma_x2.set(round(properties['sigma_x2'][0], 1))
-                    self._new_tauxy.set(round(properties['tau_xy'][0], 1))
+                    # Round only float dust (5 decimals): these are the user's
+                    # stored values, so their typed precision must survive the
+                    # select -> edit -> add-properties round trip.
+                    self._new_sigma_y1.set(round(properties['sigma_y1'][0], 5))
+                    self._new_sigma_y2.set(round(properties['sigma_y2'][0], 5))
+                    self._new_sigma_x1.set(round(properties['sigma_x1'][0], 5))
+                    self._new_sigma_x2.set(round(properties['sigma_x2'][0], 5))
+                    self._new_tauxy.set(round(properties['tau_xy'][0], 5))
                     self._new_stucture_type.set(properties['structure_type'][0])
                     # try:
                     #     self._new_pressure_side.set(properties['press_side'][0])
@@ -12869,12 +12885,12 @@ class Application():
                     cone_alpha=cone_alpha,
                     shell_lenght_l=cone_length,
                 )[:6]
-                self._new_shell_Nsd.set(Nsd)
-                self._new_shell_Msd.set(M1sd)
-                self._new_shell_M2sd.set(M2sd)
-                self._new_shell_Tsd.set(Tsd)
-                self._new_shell_Qsd.set(Q1sd)
-                self._new_shell_Q2sd.set(Q2sd)
+                self._new_shell_Nsd.set(_round_calculated(Nsd))
+                self._new_shell_Msd.set(_round_calculated(M1sd))
+                self._new_shell_M2sd.set(_round_calculated(M2sd))
+                self._new_shell_Tsd.set(_round_calculated(Tsd))
+                self._new_shell_Qsd.set(_round_calculated(Q1sd))
+                self._new_shell_Q2sd.set(_round_calculated(Q2sd))
                 return
 
             Nsd, Msd, Tsd, Qsd, _ = hlp.helper_cylinder_stress_to_force_to_stress(
@@ -12889,10 +12905,10 @@ class Application():
                 tf=self._new_stf_fl_t.get(),
                 CylinderAndCurvedPlate=CylinderAndCurvedPlate,
             )
-            self._new_shell_Nsd.set(Nsd)
-            self._new_shell_Msd.set(Msd)
-            self._new_shell_Tsd.set(Tsd)
-            self._new_shell_Qsd.set(Qsd)
+            self._new_shell_Nsd.set(_round_calculated(Nsd))
+            self._new_shell_Msd.set(_round_calculated(Msd))
+            self._new_shell_Tsd.set(_round_calculated(Tsd))
+            self._new_shell_Qsd.set(_round_calculated(Qsd))
         except Exception:
             # Keep selection robust.  If a partially defined cylinder cannot be
             # converted, the stored stress values are still shown correctly.
@@ -13345,12 +13361,12 @@ class Application():
         Plot the COG and COB development.
         '''
         if self._weight_logger['new structure']['time'] == []:
-            tk.messagebox.showinfo('New functionality ver. 3.3', 'If you are using and existing model,'
+            tk.messagebox.showinfo('New functionality ver. 3.3', 'If you are using an existing model,'
                                                                  ' weights have not been'
                                                                  ' recorded in previous versions.\n'
                                                                  'Press "Add structure properties to line....." button to add a '
                                                                  'blank datapoint.\n'
-                                                                 'Other data will then be avaliable.\n\n'
+                                                                 'Other data will then be available.\n\n'
                                                                  'If you are making a new model add some structure properties.')
             return
         import matplotlib.dates as mdate
@@ -13704,14 +13720,14 @@ class Application():
         :param returned_stress_and_km:
         :return:
         '''
-        self._new_sigma_y1.set(returned_stress_and_km[0])
-        self._new_sigma_y2.set(returned_stress_and_km[1])
-        self._new_sigma_x1.set(returned_stress_and_km[2])
-        self._new_sigma_x2.set(returned_stress_and_km[3])
-        self._new_tauxy.set(returned_stress_and_km[4])
+        self._new_sigma_y1.set(_round_calculated(returned_stress_and_km[0]))
+        self._new_sigma_y2.set(_round_calculated(returned_stress_and_km[1]))
+        self._new_sigma_x1.set(_round_calculated(returned_stress_and_km[2]))
+        self._new_sigma_x2.set(_round_calculated(returned_stress_and_km[3]))
+        self._new_tauxy.set(_round_calculated(returned_stress_and_km[4]))
         self._new_stf_km1.set(returned_stress_and_km[5])
-        self._new_stf_km1.set(returned_stress_and_km[6])
-        self._new_stf_km1.set(returned_stress_and_km[7])
+        self._new_stf_km2.set(returned_stress_and_km[6])
+        self._new_stf_km3.set(returned_stress_and_km[7])
         self._new_plate_kpp.set(returned_stress_and_km[8])
         self._new_stf_kps.set(returned_stress_and_km[9])
         self._new_stucture_type.set(returned_stress_and_km[10], )
