@@ -2684,6 +2684,146 @@ def test_flat_member_shell_boundary_conditions_include_generated_edge_shell_node
         assert edge_shell_nodes <= support_nodes
 
 
+def _member_shell_node_ids(generated: dict) -> set[int]:
+    return {
+        int(node_id)
+        for shell in generated["shells"]
+        if str(shell.get("role", "")).endswith(("_web", "_flange"))
+        for node_id in shell["node_ids"]
+    }
+
+
+def test_members_opposite_side_flips_flat_member_geometry():
+    geometry = {
+        "geometry": "flat panel",
+        "length_m": 2.0,
+        "width_m": 1.5,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": 0.5,
+        "girder_spacing_m": 1.0,
+        "stiffener_section": {
+            "web_height": 0.2, "web_thickness": 0.01,
+            "flange_width": 0.08, "flange_thickness": 0.012,
+        },
+        "girder_section": {
+            "web_height": 0.3, "web_thickness": 0.012,
+            "flange_width": 0.12, "flange_thickness": 0.014,
+        },
+    }
+    config = fe_solver.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        member_model="webs as shells, flanges as beams",
+        stiffener_eccentricity_m=0.05,
+    )
+
+    default = fe_solver.build_generated_geometry(geometry, config)
+    flipped = fe_solver.build_generated_geometry(
+        {**geometry, "members_opposite_side": True}, config
+    )
+
+    for generated, expected_sign in ((default, 1.0), (flipped, -1.0)):
+        node_by_id = {int(node["id"]): node for node in generated["nodes"]}
+        member_z = [
+            float(node_by_id[node_id]["coords"][2])
+            for node_id in _member_shell_node_ids(generated)
+            if abs(float(node_by_id[node_id]["coords"][2])) > 1.0e-9
+        ]
+        assert member_z, "member webs must have off-plane nodes"
+        assert all(z * expected_sign > 0.0 for z in member_z)
+
+    # Beam-mode eccentricity flips with the side as well.
+    beam_config = fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", stiffener_eccentricity_m=0.05)
+    default_beams = fe_solver.build_generated_geometry(geometry, beam_config)
+    flipped_beams = fe_solver.build_generated_geometry(
+        {**geometry, "members_opposite_side": True}, beam_config
+    )
+    default_ecc = {
+        float((beam.get("section") or {}).get("eccentricity_m", 0.0))
+        for beam in default_beams["beams"] if beam.get("role") == "stiffener"
+    }
+    flipped_ecc = {
+        float((beam.get("section") or {}).get("eccentricity_m", 0.0))
+        for beam in flipped_beams["beams"] if beam.get("role") == "stiffener"
+    }
+    assert default_ecc == {0.05}
+    assert flipped_ecc == {-0.05}
+
+
+def test_members_opposite_side_flips_cylinder_member_geometry():
+    geometry = {
+        "geometry": "cylinder",
+        "radius_m": 1.0,
+        "length_m": 2.0,
+        "thickness_m": 0.012,
+        "has_stiffener": True,
+        "has_girder": True,
+        "stiffener_spacing_m": math.pi / 2.0,
+        "girder_spacing_m": 1.0,
+        "stiffener_section": {
+            "web_height": 0.2, "web_thickness": 0.01,
+            "flange_width": 0.08, "flange_thickness": 0.012,
+        },
+        "girder_section": {
+            "web_height": 0.35, "web_thickness": 0.012,
+            "flange_width": 0.12, "flange_thickness": 0.014,
+        },
+    }
+    config = fe_solver.LightweightFEMConfig(
+        mesh_fidelity="coarse",
+        member_model="webs as shells, flanges as beams",
+        include_end_lids=False,
+    )
+
+    default = fe_solver.build_generated_geometry(geometry, config)
+    flipped = fe_solver.build_generated_geometry(
+        {**geometry, "members_opposite_side": True}, config
+    )
+
+    for generated, inward in ((default, True), (flipped, False)):
+        node_by_id = {int(node["id"]): node for node in generated["nodes"]}
+        member_radii = [
+            math.hypot(float(node_by_id[node_id]["coords"][0]), float(node_by_id[node_id]["coords"][1]))
+            for node_id in _member_shell_node_ids(generated)
+        ]
+        off_shell = [radius for radius in member_radii if abs(radius - 1.0) > 1.0e-6]
+        assert off_shell, "member webs must extend off the shell surface"
+        if inward:
+            assert all(radius < 1.0 for radius in off_shell)
+        else:
+            assert all(radius > 1.0 for radius in off_shell)
+
+
+class _FakeAppFlatMembersOppositeSide(_FakeAppFlatMembers):
+    _new_prop_3d_opposite_side = _SimpleVar(True)
+
+
+def test_snapshot_and_summary_transfer_main_app_opposite_side_setting():
+    default_snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembers())
+    assert default_snapshot.members_opposite_side is False
+    assert fe_runtime_solver.runtime_geometry_summary(default_snapshot)["members_opposite_side"] is False
+
+    flipped_snapshot = fe_runtime_solver.active_line_snapshot(_FakeAppFlatMembersOppositeSide())
+    assert flipped_snapshot.members_opposite_side is True
+    summary = fe_runtime_solver.runtime_geometry_summary(flipped_snapshot)
+    assert summary["members_opposite_side"] is True
+
+    # The generated FE mesh follows the flag end to end.
+    generated = fe_solver.build_generated_geometry(
+        summary,
+        fe_solver.LightweightFEMConfig(mesh_fidelity="coarse", member_model="webs as shells, flanges as beams"),
+    )
+    node_by_id = {int(node["id"]): node for node in generated["nodes"]}
+    member_z = [
+        float(node_by_id[node_id]["coords"][2])
+        for node_id in _member_shell_node_ids(generated)
+        if abs(float(node_by_id[node_id]["coords"][2])) > 1.0e-9
+    ]
+    assert member_z
+    assert all(z < 0.0 for z in member_z)
+
+
 def test_cylinder_member_shell_boundary_conditions_cover_generated_end_shell_nodes():
     geometry = {
         "geometry": "cylinder",
@@ -3410,9 +3550,10 @@ def test_cylinder_end_lids_are_stress_free_rigid_diaphragms():
     assert len(lidded_generated["nodes"]) == len(open_generated["nodes"]) + 2
     assert len(lidded_generated["rigid_lids"]) == 2
     bottom_lid, top_lid = lidded_generated["rigid_lids"]
-    assert len(lidded_generated["supports"]) == 1
-    assert lidded_generated["supports"][0]["name"] == "rigid_body_anchor"
-    assert lidded_generated["supports"][0]["node_ids"] == [bottom_lid["center_node_id"]]
+    # Auto boundary adds no lid anchor: balanced free-free cylinders solve via
+    # the automatic rigid-body nullspace projection, keeping the symmetric
+    # membrane solution (a bottom anchor would double the reported uz peak).
+    assert lidded_generated["supports"] == []
 
     backend = fe_solver.full_backend_api()
     backend_config = backend.AnyStructureFEMConfig(pressure_pa=1000.0, require_idealized_member_beams=False)
@@ -3430,10 +3571,12 @@ def test_cylinder_end_lids_are_stress_free_rigid_diaphragms():
     assert not ({element.element_id for element in lid_elements} & set(load_case.pressure_loads))
     assert sum(len(element.get_mpc_constraints(model.mesh)) for element in lid_elements) > 0
     assert solver_info["convergence_info"]["status"] == "converged"
-    assert solver_info["constraint_method"] == "transformation_fixed_plus_mpc"
-    assert solver_info["constraint_info"]["num_fixed_dofs"] == 6
-    assert displacements[model.mesh.get_node(top_lid["center_node_id"]).dofs[2]] != 0.0
-    assert displacements[model.mesh.get_node(bottom_lid["center_node_id"]).dofs[2]] == 0.0
+    assert solver_info["constraint_method"] == "transformation_fixed_plus_mpc_nullspace"
+    assert solver_info["constraint_info"]["num_fixed_dofs"] == 0
+    uz_bottom = float(displacements[model.mesh.get_node(bottom_lid["center_node_id"]).dofs[2]])
+    uz_top = float(displacements[model.mesh.get_node(top_lid["center_node_id"]).dofs[2]])
+    assert uz_top != 0.0
+    assert uz_bottom == pytest.approx(-uz_top, rel=1.0e-6)
 
 
 def test_runtime_solver_records_new_analysis_material_and_load_options():

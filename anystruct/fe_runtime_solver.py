@@ -117,6 +117,9 @@ class RuntimeFEMLineSnapshot:
     shear_force_n: float = 0.0
     domain: str = ""
     is_cylinder: bool = False
+    # Mirrors the main-application "Opposite side" checkbox: members are
+    # placed on the negative plate normal / cylinder outside when True.
+    members_opposite_side: bool = False
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -404,6 +407,7 @@ def runtime_fem_state_to_dict(
             "top_bottom_moment_nm": _safe_float(snapshot.top_bottom_moment_nm),
             "torsional_moment_nm": _safe_float(snapshot.torsional_moment_nm),
             "shear_force_n": _safe_float(snapshot.shear_force_n),
+            "members_opposite_side": bool(getattr(snapshot, "members_opposite_side", False)),
         }
     if result is not None:
         state["result"] = {
@@ -914,6 +918,14 @@ def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
         pressure = structure_pressure
     axial_force_n, top_bottom_moment_nm, torsional_moment_nm, shear_force_n = _runtime_line_load_defaults(app, cylinder_obj)
 
+    # The main-application "Opposite side" checkbox flips the member side in
+    # the 3D preview and CAD export; the FE geometry must follow it too.
+    members_opposite_side = False
+    try:
+        members_opposite_side = bool(app._new_prop_3d_opposite_side.get())
+    except Exception:
+        members_opposite_side = False
+
     return RuntimeFEMLineSnapshot(
         line_name=active_line,
         line_points=line_dict[active_line],
@@ -925,6 +937,7 @@ def active_line_snapshot(app: Any) -> RuntimeFEMLineSnapshot:
         shear_force_n=shear_force_n,
         domain=domain,
         is_cylinder=cylinder_obj is not None,
+        members_opposite_side=members_opposite_side,
         diagnostics=tuple(diagnostics),
     )
 
@@ -965,6 +978,7 @@ def _flat_geometry_summary(snapshot: RuntimeFEMLineSnapshot, ignore_girder_lengt
         "stiffener_section": _member_section(stiffener),
         "girder_section": _member_section(girder),
         "plate_edge_supports": _plate_edge_supports_from_line_properties(plate),
+        "members_opposite_side": bool(getattr(snapshot, "members_opposite_side", False)),
     }
 
 
@@ -1006,6 +1020,7 @@ def _cylinder_geometry_summary(snapshot: RuntimeFEMLineSnapshot) -> dict[str, An
         "girder_spacing_m": _safe_float(_read_attr_or_call(cyl_obj, "length_between_girders", default=None), 0.0),
         "stiffener_section": _member_section(stiffener),
         "girder_section": _member_section(girder),
+        "members_opposite_side": bool(getattr(snapshot, "members_opposite_side", False)),
     }
 
 
@@ -2971,6 +2986,7 @@ def format_runtime_fem_result(result: RuntimeFEMRunResult) -> str:
         "Shell element: " + str(summary.get("shell_element_order", "")),
         "Beam element: " + str(summary.get("beam_element_order", "")),
         "Member model: " + str(summary.get("member_model", "")),
+        "Member side: " + ("opposite (main-app setting)" if summary.get("members_opposite_side") else "default"),
         "Boundary condition: " + str(summary.get("boundary_condition", "")),
         "Symmetry: " + str(summary.get("symmetry_mode", "")),
         "Analysis type: " + str(summary.get("analysis_type", "")),

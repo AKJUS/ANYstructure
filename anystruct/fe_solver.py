@@ -2438,6 +2438,16 @@ def _flat_shell_edge_node_ids(
     return {key: sorted(set(value)) for key, value in edge_nodes.items()}
 
 
+def _member_side_sign(geometry: dict) -> float:
+    """+1 places members on the default side, -1 on the opposite side.
+
+    Follows the main-application "Opposite side" checkbox: flat-panel members
+    extrude to negative z instead of positive z, cylinder members outward
+    instead of inward.
+    """
+    return -1.0 if bool(geometry.get("members_opposite_side")) else 1.0
+
+
 def _add_flat_member_shell_model(
         nodes: list[dict[str, object]],
         shells: list[dict[str, object]],
@@ -2454,6 +2464,7 @@ def _add_flat_member_shell_model(
         direction: str,
         config: LightweightFEMConfig,
         intersection_heights: dict[float, list[float]] | None = None,
+        side_sign: float = 1.0,
 ) -> tuple[int, int]:
     web_height = _member_section_dimension(section, "web_height")
     web_thickness = _member_section_dimension(section, "web_thickness")
@@ -2462,6 +2473,7 @@ def _add_flat_member_shell_model(
     if web_height <= 0.0 or web_thickness <= 0.0:
         return element_id, beam_id
 
+    side = 1.0 if float(side_sign) >= 0.0 else -1.0
     flange_section = _flange_beam_section(section, web_thickness)
     if direction == "x":
         col = _index_of_break(y_breaks, position)
@@ -2482,7 +2494,7 @@ def _add_flat_member_shell_model(
             def web_node(x: float, base_node: int, z: float) -> int:
                 if abs(float(z)) <= 1.0e-12:
                     return base_node
-                return _add_cached_node(nodes, node_cache, (x, position, float(z)))
+                return _add_cached_node(nodes, node_cache, (x, position, side * float(z)))
 
             for lower, upper in zip(z_levels[:-1], z_levels[1:]):
                 lower0 = web_node(x0, base0, lower)
@@ -2496,10 +2508,10 @@ def _add_flat_member_shell_model(
                 beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
                 beam_id += 1
             elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-                left0 = _add_cached_node(nodes, node_cache, (x0, position - 0.5 * flange_width, web_height))
-                left1 = _add_cached_node(nodes, node_cache, (x1, position - 0.5 * flange_width, web_height))
-                right0 = _add_cached_node(nodes, node_cache, (x0, position + 0.5 * flange_width, web_height))
-                right1 = _add_cached_node(nodes, node_cache, (x1, position + 0.5 * flange_width, web_height))
+                left0 = _add_cached_node(nodes, node_cache, (x0, position - 0.5 * flange_width, side * web_height))
+                left1 = _add_cached_node(nodes, node_cache, (x1, position - 0.5 * flange_width, side * web_height))
+                right0 = _add_cached_node(nodes, node_cache, (x0, position + 0.5 * flange_width, side * web_height))
+                right1 = _add_cached_node(nodes, node_cache, (x1, position + 0.5 * flange_width, side * web_height))
                 element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
                 element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
         return element_id, beam_id
@@ -2522,7 +2534,7 @@ def _add_flat_member_shell_model(
         def web_node(y: float, base_node: int, z: float) -> int:
             if abs(float(z)) <= 1.0e-12:
                 return base_node
-            return _add_cached_node(nodes, node_cache, (position, y, float(z)))
+            return _add_cached_node(nodes, node_cache, (position, y, side * float(z)))
 
         for lower, upper in zip(z_levels[:-1], z_levels[1:]):
             lower0 = web_node(y0, base0, lower)
@@ -2536,10 +2548,10 @@ def _add_flat_member_shell_model(
             beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
             beam_id += 1
         elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-            left0 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y0, web_height))
-            left1 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y1, web_height))
-            right0 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y0, web_height))
-            right1 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y1, web_height))
+            left0 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y0, side * web_height))
+            left1 = _add_cached_node(nodes, node_cache, (position - 0.5 * flange_width, y1, side * web_height))
+            right0 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y0, side * web_height))
+            right1 = _add_cached_node(nodes, node_cache, (position + 0.5 * flange_width, y1, side * web_height))
             element_id = _append_member_shell(shells, element_id, [left0, left1, top1, top0], flange_thickness, role + "_flange")
             element_id = _append_member_shell(shells, element_id, [top0, top1, right1, right0], flange_thickness, role + "_flange")
     return element_id, beam_id
@@ -2684,8 +2696,6 @@ def _cylinder_lid_boundary_supports(
         config: LightweightFEMConfig,
 ) -> list[dict[str, object]]:
     mode = _normalized_choice(config.boundary_condition)
-    if mode in {"free", "none", "nullspace", "nullspace projection"}:
-        return []
     if mode in {"clamped", "fixed", "fixed ends"}:
         return [
             {
@@ -2694,13 +2704,21 @@ def _cylinder_lid_boundary_supports(
                 "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
         ]
-    return [
-        {
-            "name": "rigid_body_anchor",
-            "node_ids": sorted(set(int(node) for node in lower_center_nodes)),
-            "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
-        }
-    ]
+    if mode in {"anchored", "anchor", "rigid body anchor"}:
+        # Explicit opt-in: ground the lower lid reference so displacements are
+        # measured from a fixed bottom end.
+        return [
+            {
+                "name": "rigid_body_anchor",
+                "node_ids": sorted(set(int(node) for node in lower_center_nodes)),
+                "constraints": {"ux": 0.0, "uy": 0.0, "uz": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+            }
+        ]
+    # auto/free/nullspace: no lid supports.  Balanced free-free cylinders are
+    # carried by the automatic rigid-body nullspace projection, preserving the
+    # verified symmetric membrane solution: a balanced axial force must give
+    # uz = sigma*L/(2E) at each end, not sigma*L/E from an anchored bottom.
+    return []
 
 
 def _custom_cylinder_supports(lower_ring: list[int], upper_ring: list[int], config: LightweightFEMConfig) -> list[dict[str, object]]:
@@ -2780,6 +2798,7 @@ def _add_cylinder_member_shell_model(
         config: LightweightFEMConfig,
         intersection_heights: dict[float, list[float]] | None = None,
         arc_breaks: list[float] | None = None,
+        side_sign: float = 1.0,
 ) -> tuple[int, int]:
     web_height = _member_section_dimension(section, "web_height")
     web_thickness = _member_section_dimension(section, "web_thickness")
@@ -2788,6 +2807,11 @@ def _add_cylinder_member_shell_model(
     if web_height <= 0.0 or web_thickness <= 0.0:
         return element_id, beam_id
     flange_section = _flange_beam_section(section, web_thickness)
+    # +1 extrudes member webs inward (default), -1 outward (opposite side).
+    side = 1.0 if float(side_sign) >= 0.0 else -1.0
+
+    def member_radius(base_radius: float, depth: float) -> float:
+        return max(float(base_radius) - side * float(depth), 1.0e-6)
 
     def theta_at_col(col_index: int) -> float:
         if arc_breaks and len(arc_breaks) >= 2:
@@ -2818,7 +2842,7 @@ def _add_cylinder_member_shell_model(
                 if abs(float(depth)) <= 1.0e-12:
                     return base_node
                 current_radius = radius_at_z(z)
-                return _add_cached_node(nodes, node_cache, _cylinder_point(max(current_radius - float(depth), 1.0e-6), theta, z))
+                return _add_cached_node(nodes, node_cache, _cylinder_point(member_radius(current_radius, depth), theta, z))
 
             for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
                 outer0 = web_node(z0, base0, outer_depth)
@@ -2832,8 +2856,8 @@ def _add_cylinder_member_shell_model(
                 beams.append({"id": beam_id, "node_ids": [top0, top1], "section": flange_section, "role": role + "_flange", "material": "steel"})
                 beam_id += 1
             elif _member_flanges_as_shells(config) and flange_width > 0.0 and flange_thickness > 0.0:
-                inner_r0 = max(radius_at_z(z0) - web_height, 1.0e-6)
-                inner_r1 = max(radius_at_z(z1) - web_height, 1.0e-6)
+                inner_r0 = member_radius(radius_at_z(z0), web_height)
+                inner_r1 = member_radius(radius_at_z(z1), web_height)
                 dtheta0 = 0.5 * flange_width / inner_r0 if inner_r0 > 0.0 else 0.0
                 dtheta1 = 0.5 * flange_width / inner_r1 if inner_r1 > 0.0 else 0.0
                 left0 = _add_cached_node(nodes, node_cache, _cylinder_point(inner_r0, theta - dtheta0, z0))
@@ -2847,7 +2871,7 @@ def _add_cylinder_member_shell_model(
     row = int(index)
     z = float(z_breaks[row])
     current_radius = radius_at_z(z)
-    inner_radius = max(current_radius - web_height, 1.0e-6)
+    inner_radius = member_radius(current_radius, web_height)
     for col in range(cols):
         theta0 = theta_at_col(col)
         theta1 = theta_at_col(col + 1)
@@ -2865,7 +2889,7 @@ def _add_cylinder_member_shell_model(
         def web_node(theta: float, base_node: int, depth: float) -> int:
             if abs(float(depth)) <= 1.0e-12:
                 return base_node
-            return _add_cached_node(nodes, node_cache, _cylinder_point(max(current_radius - float(depth), 1.0e-6), theta, z))
+            return _add_cached_node(nodes, node_cache, _cylinder_point(member_radius(current_radius, depth), theta, z))
 
         for outer_depth, inner_depth in zip(depth_levels[:-1], depth_levels[1:]):
             outer0 = web_node(theta0, base0, outer_depth)
@@ -3103,6 +3127,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
     beams = []
     beam_id = 20_001
     node_cache = _node_cache_from_nodes(nodes)
+    member_side = _member_side_sign(geometry)
     stiffener_sections: dict[float, dict[str, float]] = {}
     girder_sections: dict[float, dict[str, float]] = {}
     for stiffener_y in stiffener_positions:
@@ -3111,7 +3136,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             thickness,
             width,
             0.08,
-            config.stiffener_eccentricity_m,
+            member_side * config.stiffener_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3121,7 +3146,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
             thickness,
             length,
             0.10,
-            config.girder_eccentricity_m,
+            member_side * config.girder_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3153,6 +3178,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 "x",
                 config,
                 intersection_heights=stiffener_web_intersections,
+                side_sign=member_side,
             )
             continue
         row_range = range(0, rows - 2, 2) if _wants_b3(config) else range(rows - 1)
@@ -3192,6 +3218,7 @@ def _flat_generated_geometry(geometry: dict, config: LightweightFEMConfig) -> di
                 "y",
                 config,
                 intersection_heights=girder_web_intersections,
+                side_sign=member_side,
             )
             continue
         col_range = range(0, cols - 2, 2) if _wants_b3(config) else range(cols - 1)
@@ -3545,6 +3572,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
     beams = []
     beam_id = 20_001
     node_cache = _node_cache_from_nodes(nodes)
+    member_side = _member_side_sign(geometry)
     stiffener_columns: list[int] = []
     stiffener_sections: dict[int, dict[str, float]] = {}
     if config.include_stiffeners and geometry.get("has_stiffener"):
@@ -3553,7 +3581,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             thickness,
             radius,
             0.08,
-            config.stiffener_eccentricity_m,
+            member_side * config.stiffener_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3575,7 +3603,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
             thickness,
             radius,
             0.12,
-            config.girder_eccentricity_m,
+            member_side * config.girder_eccentricity_m,
             orientation,
             config.beam_consistent_mass_enabled,
         )
@@ -3611,6 +3639,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     config,
                     intersection_heights=stiffener_web_intersections,
                     arc_breaks=arc_breaks,
+                    side_sign=member_side,
                 )
                 continue
             row_range = range(0, axial_div - 1, 2) if _wants_b3(config) else range(axial_div)
@@ -3652,6 +3681,7 @@ def _cylinder_generated_geometry(geometry: dict, config: LightweightFEMConfig) -
                     config,
                     intersection_heights=girder_web_intersections,
                     arc_breaks=arc_breaks,
+                    side_sign=member_side,
                 )
                 continue
             col_range = range(0, cols, 2) if _wants_b3(config) else range(cols)
@@ -8280,6 +8310,11 @@ def run_production_fem(geometry: dict, config: LightweightFEMConfig, status_call
     elif _wants_s8(config):
         elem_type = "S8R" if "s8r" in config.shell_element_order.lower() else "S8"
         diagnostics.append(f"Generated {elem_type} shell elements with shared midside nodes.")
+    if bool(geometry.get("members_opposite_side")):
+        diagnostics.append(
+            "Members are placed on the opposite side (main-application 'Opposite side' setting): "
+            "flat-panel members extrude to negative z, cylinder members outward."
+        )
     if _member_webs_as_shells(config):
         if _member_flanges_as_shells(config):
             diagnostics.append("Member modelling: plate, web and flange parts are generated as shell elements.")
