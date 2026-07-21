@@ -284,7 +284,13 @@ def test_fea_result_buckling_mode_has_import_canvas_and_pressure_free_controls()
     assert "def import_fea_buckling_files(self, inp_path, frd_path=None, forced_geometry_type=None):" in source
     assert "fe_plate_fields.create_fea_buckling_session(" in source
     assert "SESAM FEM/SIF" in source
-    assert "has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists" in source
+    assert "has_result_source = bool(frd_path) or input_lower.endswith('.sif')" in source
+    # SESAM .FEM is geometry only: never imported for buckling, routed to FE-solver.
+    assert "def _launch_fe_solver_with_fem_geometry(self, inp_path):" in source
+    assert "self._launch_fe_solver_with_fem_geometry(inp_path)" in source
+    assert "self._launch_fe_solver_with_fem_geometry(input_text)" in source
+    assert "\"Launch FE-solver?\"" in source
+    assert "imported_fem_model=model, imported_path=inp_path" in source
     assert "ml_algo=getattr(self, '_ML_buckling', None)" in source
     assert "messagebox.showwarning('FEA buckling method warning'" in source
     assert "def _draw_fea_buckling_canvas(self):" in source

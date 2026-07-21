@@ -2344,6 +2344,50 @@ class Application():
         except Exception as e:
             messagebox.showerror("FEM Import Error", f"An error occurred while importing FEM:\n{e}")
 
+    def _launch_fe_solver_with_fem_geometry(self, inp_path):
+        """Route an imported SESAM .FEM (geometry only) to the FE-solver GUI.
+
+        SESAM .FEM files carry mesh geometry but no stress results, so they
+        cannot be used for FEA-result buckling. Only .SIF (and, once supported,
+        .SIN) files contain stresses. When the geometry parses sufficiently,
+        offer to launch the FE-GUI with it so the user can solve for stresses.
+        """
+        from anystruct.api import import_sesam_fem_model
+        try:
+            import_result = import_sesam_fem_model(inp_path)
+        except Exception as err:
+            messagebox.showerror("FEM Import Error", f"An error occurred while importing FEM:\n{err}")
+            return
+        model = None if import_result is None else import_result.model
+        mesh = getattr(model, 'mesh', None)
+        parsed_ok = (
+            model is not None
+            and mesh is not None
+            and getattr(mesh, 'num_nodes', 0) > 0
+            and getattr(mesh, 'num_elements', 0) > 0
+        )
+        if not parsed_ok:
+            messagebox.showerror(
+                "FEM Import Error",
+                "The SESAM .FEM geometry could not be parsed sufficiently to build a model.\n\n"
+                "Note: .FEM files contain geometry only. Buckling results require a .SIF "
+                "result file (.SIN results are not yet supported)."
+            )
+            return
+        launch = messagebox.askyesno(
+            "Launch FE-solver?",
+            "SESAM .FEM files contain geometry only, not stresses, so they cannot be used "
+            "directly for FEA buckling results.\n\n"
+            f"The geometry was parsed successfully ({mesh.num_nodes} nodes, "
+            f"{mesh.num_elements} elements).\n\n"
+            "Launch the FE-GUI (FE-solver) with this imported geometry?",
+            parent=self._parent,
+        )
+        if not launch:
+            return
+        from anystruct.fe_runtime_solver import open_runtime_fem_window
+        open_runtime_fem_window(self._parent, self, imported_fem_model=model, imported_path=inp_path)
+
     def open_fea_buckling_files(self):
         """Ask for FE model/result files and import them into FEA-result buckling mode."""
         inp_path = filedialog.askopenfilename(
@@ -2351,13 +2395,20 @@ class Application():
             filetypes=(
                 ('Supported FE model/result', '*.inp *.FEM *.fem *.SIF *.sif'),
                 ('CalculiX input', '*.inp'),
-                ('SESAM FEM/SIF', '*.FEM *.fem *.SIF *.sif'),
+                ('SESAM SIF (results)', '*.SIF *.sif'),
+                ('SESAM FEM (geometry -> FE-solver)', '*.FEM *.fem'),
                 ('All files', '*.*'),
             ),
         )
         if not inp_path:
             return
-        if str(inp_path).lower().endswith('.sif'):
+        lower = str(inp_path).lower()
+        if lower.endswith('.fem'):
+            # SESAM .FEM carries geometry only (no stresses); it is not imported
+            # for buckling. Offer to launch the FE-solver with the geometry.
+            self._launch_fe_solver_with_fem_geometry(inp_path)
+            return
+        if lower.endswith('.sif'):
             self.import_fea_buckling_files(inp_path, None)
             return
         frd_path = filedialog.askopenfilename(
@@ -2526,12 +2577,13 @@ class Application():
         """Load FEA files and prepare clickable buckling panels."""
         input_text = str(inp_path)
         input_lower = input_text.lower()
-        paired_sif_exists = False
         if input_lower.endswith('.fem'):
-            base_path, _extension = os.path.splitext(input_text)
-            paired_sif_exists = os.path.exists(base_path + '.SIF') or os.path.exists(base_path + '.sif')
-        has_result_source = bool(frd_path) or input_lower.endswith('.sif') or paired_sif_exists
-        
+            # SESAM .FEM carries geometry only (no stresses) and must never be
+            # imported for buckling results; route it to the FE-solver instead.
+            self._launch_fe_solver_with_fem_geometry(input_text)
+            return
+        has_result_source = bool(frd_path) or input_lower.endswith('.sif')
+
         geometry_type = forced_geometry_type or "auto"
         if geometry_type == "auto":
             try:

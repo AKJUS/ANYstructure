@@ -230,6 +230,74 @@ def test_cylinder_detection_requires_angular_coverage() -> None:
     assert fe_plate_fields.is_cylindrical_shell_model(_flat_stiffened_panel_model()) is False
 
 
+def _coarse_skin_only_cylinder(circumferential_divisions: int) -> FeShellModel:
+    """Full closed cylinder skin meshed with few circumferential elements."""
+
+    nodes = {}
+    elements = {}
+    node_id = 1
+    element_id = 1
+    radius = 1.0
+    length = 4.0
+    axial_divisions = 8
+
+    skin_grid = {}
+    for axial_index in range(axial_divisions + 1):
+        z = length * axial_index / axial_divisions
+        for angular_index in range(circumferential_divisions):
+            angle = 2.0 * math.pi * angular_index / circumferential_divisions
+            skin_grid[(axial_index, angular_index)] = node_id
+            nodes[node_id] = (radius * math.cos(angle), radius * math.sin(angle), z)
+            node_id += 1
+
+    for axial_index in range(axial_divisions):
+        for angular_index in range(circumferential_divisions):
+            next_angle = (angular_index + 1) % circumferential_divisions
+            elements[element_id] = ShellElement(
+                element_id=element_id,
+                node_ids=(
+                    skin_grid[(axial_index, angular_index)],
+                    skin_grid[(axial_index, next_angle)],
+                    skin_grid[(axial_index + 1, next_angle)],
+                    skin_grid[(axial_index + 1, angular_index)],
+                ),
+                element_type="S4",
+                elset="SKIN",
+            )
+            element_id += 1
+
+    return FeShellModel(
+        nodes=nodes,
+        shell_elements=elements,
+        elsets={"ALL": tuple(sorted(elements)), "SKIN": tuple(sorted(elements))},
+        shell_sections=(ShellSection(elset="ALL", material="S355", thickness_m=0.01),),
+    )
+
+
+def test_cylinder_detection_is_mesh_resolution_independent() -> None:
+    # Regression: a full cylinder meshed with fewer circumferential elements
+    # than the old fixed bin count (72) was mis-detected as a flat plate, so
+    # SESAM/CalculiX cylinders imported as flat panels. Coverage is now the
+    # angular range spanned by the skin, independent of mesh resolution.
+    for circumferential_divisions in (12, 20, 32, 48):
+        model = _coarse_skin_only_cylinder(circumferential_divisions)
+        assert fe_plate_fields.is_cylindrical_shell_model(model) is True, (
+            f"cylinder with {circumferential_divisions} circumferential elements "
+            "should be detected as cylindrical"
+        )
+
+
+_REF_CYLINDER_SIF = Path(__file__).resolve().parents[1] / "ref_Cases" / "allQuadLinear_cylinder_multiple_LCs.SIF"
+
+
+@pytest.mark.skipif(not _REF_CYLINDER_SIF.exists(), reason="reference cylinder SIF not available")
+def test_reference_cylinder_sif_is_detected_as_cylinder() -> None:
+    # The exact user-reported file: a coarse-mesh SESAM cylinder that used to
+    # slip through detection and import as flat plates.
+    model = fe_plate_fields.read_fea_shell_model(str(_REF_CYLINDER_SIF))
+    assert fe_plate_fields.is_cylindrical_shell_model(model) is True
+
+
 def test_extracts_orthogonal_cylinder_bays() -> None:
     model = _orthogonally_stiffened_cylinder()
     geometry = detect_cylinder_geometry(model)

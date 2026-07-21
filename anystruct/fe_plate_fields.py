@@ -4358,16 +4358,26 @@ def _element_angular_span(
 def _cylinder_skin_angular_coverage_rad(
     model: FeShellModel,
     geometry: CylinderGeometry,
-    *,
-    bins: int = 72,
 ) -> float:
+    """Return the angular range (rad) the skin subtends about the cylinder axis.
+
+    Coverage is measured as ``2*pi`` minus the largest empty angular gap
+    between consecutive skin-element centroids.  This is independent of the
+    circumferential mesh resolution: a full cylinder wraps all the way around
+    (only the one-element gap between neighbours remains), whereas a flat or
+    shallow patch clusters in a narrow arc and leaves one large gap.  A
+    bin-count metric instead under-reports coverage for coarse meshes, because
+    a full cylinder meshed with fewer circumferential elements than bins can
+    never fill every bin.
+    """
+
     axis = _normalise(geometry.axis_direction)
     reference = (0.0, 0.0, 1.0) if abs(axis[2]) < 0.9 else (1.0, 0.0, 0.0)
     plane_u = _normalise(_cross(axis, reference))
     if _length(plane_u) <= 1.0e-12:
         return 0.0
     plane_v = _normalise(_cross(axis, plane_u))
-    occupied: set[int] = set()
+    angles: list[float] = []
     for element_id in geometry.skin_element_ids:
         element = model.shell_elements.get(element_id)
         if element is None:
@@ -4376,9 +4386,17 @@ def _cylinder_skin_angular_coverage_rad(
         radial = _radial_vector(centroid, geometry.axis_origin, axis)
         if _length(radial) <= 1.0e-12:
             continue
-        angle = math.atan2(_dot(radial, plane_v), _dot(radial, plane_u))
-        occupied.add(int((angle + math.pi) / (2.0 * math.pi) * bins) % bins)
-    return len(occupied) * 2.0 * math.pi / bins
+        angles.append(math.atan2(_dot(radial, plane_v), _dot(radial, plane_u)))
+    if len(angles) < 2:
+        return 0.0
+    angles.sort()
+    largest_gap = max(
+        (second - first)
+        for first, second in zip(angles, angles[1:])
+    )
+    # Close the circle: the wrap-around gap from the last angle back to the first.
+    largest_gap = max(largest_gap, angles[0] + 2.0 * math.pi - angles[-1])
+    return max(0.0, 2.0 * math.pi - largest_gap)
 
 
 def detect_cylinder_geometry(
